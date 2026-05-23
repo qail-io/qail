@@ -157,12 +157,15 @@ pub(super) async fn execute_qdrant_cmd(
                 qdrant_request_filter_cages(&upsert_filter_cages, &update_policy_filter_cages);
 
             if auth.tenant_id.is_some()
-                || qdrant_upsert_filter_cages_have_payload_conditions(&request_filter_cages)?
+                || qdrant_upsert_filter_cages_have_enforceable_conditions(&request_filter_cages)?
                 || !create_policy_filter_cages.is_empty()
                 || !update_policy_filter_cages.is_empty()
             {
+                let with_vectors = qdrant_upsert_filter_cages_need_vectors(&request_filter_cages)?
+                    || qdrant_upsert_filter_cages_need_vectors(&create_policy_filter_cages)?
+                    || qdrant_upsert_filter_cages_need_vectors(&update_policy_filter_cages)?;
                 let existing = conn
-                    .get_points(collection, std::slice::from_ref(&point.id), false)
+                    .get_points(collection, std::slice::from_ref(&point.id), with_vectors)
                     .await
                     .map_err(|e| qdrant_err(e, "get_points"))?;
                 if let Some(tenant_id) = auth.tenant_id.as_deref() {
@@ -176,7 +179,7 @@ pub(super) async fn execute_qdrant_cmd(
 
                 if existing.is_empty() {
                     enforce_qdrant_upsert_outgoing_filters(
-                        &point.payload,
+                        &point,
                         &request_filter_cages,
                         &create_policy_filter_cages,
                         &update_policy_filter_cages,
@@ -185,21 +188,26 @@ pub(super) async fn execute_qdrant_cmd(
                     )?;
                 } else {
                     for existing_point in &existing {
-                        enforce_qdrant_upsert_payload_filters(
-                            &existing_point.payload,
+                        let existing_view = QdrantUpsertPointView {
+                            id: &existing_point.id,
+                            vector: existing_point.vector.as_deref(),
+                            payload: &existing_point.payload,
+                        };
+                        enforce_qdrant_upsert_point_filters(
+                            existing_view,
                             &request_filter_cages,
                             collection,
                             "existing",
                         )?;
-                        enforce_qdrant_upsert_payload_filters(
-                            &existing_point.payload,
+                        enforce_qdrant_upsert_point_filters(
+                            existing_view,
                             &update_policy_filter_cages,
                             collection,
                             "update_policy",
                         )?;
                     }
                     enforce_qdrant_upsert_outgoing_filters(
-                        &point.payload,
+                        &point,
                         &request_filter_cages,
                         &create_policy_filter_cages,
                         &update_policy_filter_cages,
@@ -585,6 +593,20 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QdrantUpsertFilterTarget<'a> {
+    Id,
+    Vector,
+    Payload(&'a str),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QdrantUpsertPointView<'a> {
+    id: &'a qail_qdrant::PointId,
+    vector: Option<&'a [f32]>,
+    payload: &'a qail_qdrant::Payload,
+}
+
 fn point_id_from_value(value: &qail_core::ast::Value) -> Option<qail_qdrant::PointId> {
     use qail_core::ast::Value;
     match value {
@@ -673,9 +695,9 @@ fn qdrant_request_filter_cages(
     request_filters
 }
 
-fn qdrant_upsert_filter_payload_field(
+fn qdrant_upsert_filter_target(
     condition: &qail_core::ast::Condition,
-) -> Result<Option<&str>, ApiError> {
+) -> Result<QdrantUpsertFilterTarget<'_>, ApiError> {
     use qail_core::ast::Expr;
 
     let raw = match &condition.left {
@@ -693,18 +715,33 @@ fn qdrant_upsert_filter_payload_field(
             "Qdrant upsert filter cannot be safely enforced for an empty payload field",
         ));
     }
-    if matches!(field, "id" | "vector") {
-        return Ok(None);
+    if field == "id" {
+        return Ok(QdrantUpsertFilterTarget::Id);
     }
-    Ok(Some(field))
+    if field == "vector" {
+        return Ok(QdrantUpsertFilterTarget::Vector);
+    }
+    Ok(QdrantUpsertFilterTarget::Payload(field))
 }
 
-fn qdrant_upsert_filter_cages_have_payload_conditions(
+fn qdrant_upsert_filter_cages_have_enforceable_conditions(
     cages: &[qail_core::ast::Cage],
 ) -> Result<bool, ApiError> {
     for cage in cages {
         for condition in &cage.conditions {
-            if qdrant_upsert_filter_payload_field(condition)?.is_some() {
+            qdrant_upsert_filter_target(condition)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn qdrant_upsert_filter_cages_need_vectors(
+    cages: &[qail_core::ast::Cage],
+) -> Result<bool, ApiError> {
+    for cage in cages {
+        for condition in &cage.conditions {
+            if qdrant_upsert_filter_target(condition)? == QdrantUpsertFilterTarget::Vector {
                 return Ok(true);
             }
         }
@@ -742,15 +779,35 @@ fn validate_qdrant_upsert_filter_cages(cages: &[qail_core::ast::Cage]) -> Result
 
     for cage in cages {
         for condition in &cage.conditions {
-            if qdrant_upsert_filter_payload_field(condition)?.is_none() {
-                continue;
-            }
             if condition.op != Operator::Eq {
                 return Err(ApiError::forbidden(
                     "Qdrant upsert filters support only equality conditions",
                 ));
             }
-            validate_qdrant_upsert_filter_value(&condition.value)?;
+            match qdrant_upsert_filter_target(condition)? {
+                QdrantUpsertFilterTarget::Id => {
+                    if point_id_from_value(&condition.value).is_none() {
+                        return Err(ApiError::forbidden(
+                            "Qdrant upsert id filters support only integer, string, or UUID equality values",
+                        ));
+                    }
+                }
+                QdrantUpsertFilterTarget::Vector => {
+                    let Some(vector) = vector_from_value(&condition.value) else {
+                        return Err(ApiError::forbidden(
+                            "Qdrant upsert vector filters support only vector equality values",
+                        ));
+                    };
+                    if vector.is_empty() {
+                        return Err(ApiError::forbidden(
+                            "Qdrant upsert vector filters must not be empty",
+                        ));
+                    }
+                }
+                QdrantUpsertFilterTarget::Payload(_) => {
+                    validate_qdrant_upsert_filter_value(&condition.value)?;
+                }
+            }
         }
     }
     Ok(())
@@ -805,33 +862,75 @@ fn ast_value_matches_qdrant_payload(
     Ok(matches)
 }
 
-fn qdrant_payload_matches_filter_condition(
+fn qdrant_point_id_matches_filter_value(
+    id: &qail_qdrant::PointId,
     payload: &qail_qdrant::Payload,
+    expected: &qail_core::ast::Value,
+) -> Result<bool, ApiError> {
+    if let Some(original_id) = payload.get(ORIGINAL_POINT_ID_PAYLOAD_KEY) {
+        return ast_value_matches_qdrant_payload(expected, original_id);
+    }
+    Ok(point_id_from_value(expected).is_some_and(|expected_id| expected_id == *id))
+}
+
+fn qdrant_vector_matches_filter_value(
+    actual: Option<&[f32]>,
+    expected: &qail_core::ast::Value,
+) -> Result<bool, ApiError> {
+    let Some(expected) = vector_from_value(expected) else {
+        return Err(ApiError::forbidden(
+            "Qdrant upsert vector filters support only vector equality values",
+        ));
+    };
+    let Some(actual) = actual else {
+        return Ok(false);
+    };
+    if actual.len() != expected.len() {
+        return Ok(false);
+    }
+    Ok(actual
+        .iter()
+        .zip(expected)
+        .all(|(actual, expected)| (*actual - expected).abs() <= f32::EPSILON))
+}
+
+fn qdrant_point_matches_filter_condition(
+    point: QdrantUpsertPointView<'_>,
     condition: &qail_core::ast::Condition,
 ) -> Result<Option<bool>, ApiError> {
     use qail_core::ast::Operator;
 
-    let Some(field) = qdrant_upsert_filter_payload_field(condition)? else {
-        return Ok(None);
-    };
     if condition.op != Operator::Eq {
         return Err(ApiError::forbidden(
             "Qdrant upsert filters support only equality conditions",
         ));
     }
-    validate_qdrant_upsert_filter_value(&condition.value)?;
 
-    let Some(actual) = payload.get(field) else {
-        return Ok(Some(false));
-    };
-    Ok(Some(ast_value_matches_qdrant_payload(
-        &condition.value,
-        actual,
-    )?))
+    match qdrant_upsert_filter_target(condition)? {
+        QdrantUpsertFilterTarget::Id => Ok(Some(qdrant_point_id_matches_filter_value(
+            point.id,
+            point.payload,
+            &condition.value,
+        )?)),
+        QdrantUpsertFilterTarget::Vector => Ok(Some(qdrant_vector_matches_filter_value(
+            point.vector,
+            &condition.value,
+        )?)),
+        QdrantUpsertFilterTarget::Payload(field) => {
+            validate_qdrant_upsert_filter_value(&condition.value)?;
+            let Some(actual) = point.payload.get(field) else {
+                return Ok(Some(false));
+            };
+            Ok(Some(ast_value_matches_qdrant_payload(
+                &condition.value,
+                actual,
+            )?))
+        }
+    }
 }
 
-fn qdrant_payload_matches_filter_cages(
-    payload: &qail_qdrant::Payload,
+fn qdrant_point_matches_filter_cages(
+    point: QdrantUpsertPointView<'_>,
     cages: &[qail_core::ast::Cage],
 ) -> Result<bool, ApiError> {
     use qail_core::ast::LogicalOp;
@@ -843,7 +942,7 @@ fn qdrant_payload_matches_filter_cages(
         match cage.logical_op {
             LogicalOp::And => {
                 for condition in &cage.conditions {
-                    if qdrant_payload_matches_filter_condition(payload, condition)?
+                    if qdrant_point_matches_filter_condition(point, condition)?
                         .is_some_and(|matches| !matches)
                     {
                         return Ok(false);
@@ -852,8 +951,7 @@ fn qdrant_payload_matches_filter_cages(
             }
             LogicalOp::Or => {
                 for condition in &cage.conditions {
-                    if let Some(matches) =
-                        qdrant_payload_matches_filter_condition(payload, condition)?
+                    if let Some(matches) = qdrant_point_matches_filter_condition(point, condition)?
                     {
                         has_or_condition = true;
                         if matches {
@@ -868,6 +966,43 @@ fn qdrant_payload_matches_filter_cages(
     Ok(!has_or_condition || any_or_condition_matches)
 }
 
+#[cfg(test)]
+fn qdrant_payload_matches_filter_cages(
+    payload: &qail_qdrant::Payload,
+    cages: &[qail_core::ast::Cage],
+) -> Result<bool, ApiError> {
+    let fallback_id = qail_qdrant::PointId::Num(0);
+    qdrant_point_matches_filter_cages(
+        QdrantUpsertPointView {
+            id: &fallback_id,
+            vector: None,
+            payload,
+        },
+        cages,
+    )
+}
+
+fn enforce_qdrant_upsert_point_filters(
+    point: QdrantUpsertPointView<'_>,
+    cages: &[qail_core::ast::Cage],
+    collection: &str,
+    context: &str,
+) -> Result<(), ApiError> {
+    if qdrant_point_matches_filter_cages(point, cages)? {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        collection = %collection,
+        context = %context,
+        "Qdrant upsert rejected by point filter enforcement"
+    );
+    Err(ApiError::forbidden(
+        "Qdrant upsert violates policy filter constraints",
+    ))
+}
+
+#[cfg(test)]
 fn enforce_qdrant_upsert_payload_filters(
     payload: &qail_qdrant::Payload,
     cages: &[qail_core::ast::Cage],
@@ -889,24 +1024,29 @@ fn enforce_qdrant_upsert_payload_filters(
 }
 
 fn enforce_qdrant_upsert_outgoing_filters(
-    payload: &qail_qdrant::Payload,
+    point: &qail_qdrant::Point,
     upsert_filter_cages: &[qail_core::ast::Cage],
     create_policy_filter_cages: &[qail_core::ast::Cage],
     update_policy_filter_cages: &[qail_core::ast::Cage],
     collection: &str,
     is_create: bool,
 ) -> Result<(), ApiError> {
-    enforce_qdrant_upsert_payload_filters(payload, upsert_filter_cages, collection, "outgoing")?;
+    let point = QdrantUpsertPointView {
+        id: &point.id,
+        vector: Some(&point.vector),
+        payload: &point.payload,
+    };
+    enforce_qdrant_upsert_point_filters(point, upsert_filter_cages, collection, "outgoing")?;
     if is_create {
-        enforce_qdrant_upsert_payload_filters(
-            payload,
+        enforce_qdrant_upsert_point_filters(
+            point,
             create_policy_filter_cages,
             collection,
             "create_policy",
         )
     } else {
-        enforce_qdrant_upsert_payload_filters(
-            payload,
+        enforce_qdrant_upsert_point_filters(
+            point,
             update_policy_filter_cages,
             collection,
             "update_policy_outgoing",
@@ -987,10 +1127,14 @@ mod tests {
     };
 
     fn cond(name: &str, value: &str) -> Condition {
+        value_cond(name, Value::String(value.to_string()))
+    }
+
+    fn value_cond(name: &str, value: Value) -> Condition {
         Condition {
             left: Expr::Named(name.to_string()),
             op: Operator::Eq,
-            value: Value::String(value.to_string()),
+            value,
             is_array_unnest: false,
         }
     }
@@ -1311,6 +1455,11 @@ mod tests {
             "region".to_string(),
             qail_qdrant::PayloadValue::String("east".to_string()),
         );
+        let point = qail_qdrant::Point {
+            id: qail_qdrant::PointId::Num(7),
+            vector: vec![0.1, 0.2],
+            payload,
+        };
         let upsert_filters = vec![Cage {
             kind: CageKind::Filter,
             conditions: vec![cond("region", "west")],
@@ -1318,9 +1467,74 @@ mod tests {
         }];
 
         let err = enforce_qdrant_upsert_outgoing_filters(
-            &payload,
+            &point,
             &upsert_filters,
             &[],
+            &[],
+            "embeddings",
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_upsert_create_rejects_outgoing_id_that_violates_request_filter() {
+        let point = qail_qdrant::Point::new_num(8, vec![0.1, 0.2]);
+        let upsert_filters = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![value_cond("id", Value::Int(7))],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = enforce_qdrant_upsert_outgoing_filters(
+            &point,
+            &upsert_filters,
+            &[],
+            &[],
+            "embeddings",
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_upsert_id_filter_honors_tenant_original_point_id() {
+        let mut point = qail_qdrant::Point::new_num(7, vec![0.1, 0.2]);
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a");
+        let upsert_filters = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![value_cond("id", Value::Int(7))],
+            logical_op: LogicalOp::And,
+        }];
+
+        enforce_qdrant_upsert_outgoing_filters(
+            &point,
+            &upsert_filters,
+            &[],
+            &[],
+            "embeddings",
+            true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn qdrant_upsert_create_rejects_outgoing_vector_that_violates_policy_filter() {
+        let point = qail_qdrant::Point::new_num(7, vec![0.9, 0.8]);
+        let create_policy_filters = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![value_cond("vector", Value::Vector(vec![0.1, 0.2]))],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = enforce_qdrant_upsert_outgoing_filters(
+            &point,
+            &[],
+            &create_policy_filters,
             &[],
             "embeddings",
             true,
@@ -1337,6 +1551,11 @@ mod tests {
             "operator_id".to_string(),
             qail_qdrant::PayloadValue::String("operator-2".to_string()),
         );
+        let point = qail_qdrant::Point {
+            id: qail_qdrant::PointId::Num(7),
+            vector: vec![0.1, 0.2],
+            payload,
+        };
         let update_policy_filters = vec![Cage {
             kind: CageKind::Filter,
             conditions: vec![cond("operator_id", "operator-1")],
@@ -1344,7 +1563,7 @@ mod tests {
         }];
 
         let err = enforce_qdrant_upsert_outgoing_filters(
-            &payload,
+            &point,
             &[],
             &[],
             &update_policy_filters,
