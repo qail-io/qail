@@ -120,19 +120,12 @@ impl GrpcClient {
 
     /// Connect with auto-detection: uses TLS if scheme is `https`.
     pub async fn connect_url(url: &str) -> QdrantResult<Self> {
-        let uri: Uri = url
-            .parse()
-            .map_err(|e| QdrantError::Connection(format!("Invalid URL: {}", e)))?;
+        let endpoint = parse_connect_url(url)?;
 
-        let host = uri.host().unwrap_or("localhost");
-        let is_tls = uri.scheme_str() == Some("https");
-        let default_port = 6334;
-        let port = uri.port_u16().unwrap_or(default_port);
-
-        if is_tls {
-            Self::connect_tls(host, port).await
+        if endpoint.tls {
+            Self::connect_tls(&endpoint.host, endpoint.port).await
         } else {
-            Self::connect(host, port).await
+            Self::connect(&endpoint.host, endpoint.port).await
         }
     }
 
@@ -444,6 +437,41 @@ impl GrpcClient {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ConnectEndpoint {
+    host: String,
+    port: u16,
+    tls: bool,
+}
+
+fn parse_connect_url(url: &str) -> QdrantResult<ConnectEndpoint> {
+    let uri: Uri = url
+        .parse()
+        .map_err(|e| QdrantError::Connection(format!("Invalid URL: {}", e)))?;
+
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| QdrantError::Connection("URL scheme is required".to_string()))?;
+    let tls = match scheme {
+        "http" => false,
+        "https" => true,
+        other => {
+            return Err(QdrantError::Connection(format!(
+                "Unsupported Qdrant URL scheme: {}",
+                other
+            )));
+        }
+    };
+    let host = uri
+        .host()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| QdrantError::Connection("URL host is required".to_string()))?
+        .to_string();
+    let port = uri.port_u16().unwrap_or(6334);
+
+    Ok(ConnectEndpoint { host, port, tls })
+}
+
 /// Frame a protobuf message for gRPC transport.
 ///
 /// gRPC uses a 5-byte header:
@@ -538,6 +566,30 @@ mod tests {
     #[test]
     fn test_default_timeout() {
         assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_parse_connect_url_requires_http_scheme_and_host() {
+        assert_eq!(
+            parse_connect_url("http://localhost:6334").unwrap(),
+            ConnectEndpoint {
+                host: "localhost".to_string(),
+                port: 6334,
+                tls: false,
+            }
+        );
+        assert_eq!(
+            parse_connect_url("https://cloud.qdrant.io").unwrap(),
+            ConnectEndpoint {
+                host: "cloud.qdrant.io".to_string(),
+                port: 6334,
+                tls: true,
+            }
+        );
+
+        assert!(parse_connect_url("ftp://localhost:6334").is_err());
+        assert!(parse_connect_url("localhost:6334").is_err());
+        assert!(parse_connect_url("https:///collections").is_err());
     }
 
     #[test]
