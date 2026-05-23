@@ -17,7 +17,7 @@
 //!                | "drop" PATH ["confirm"]
 //! ```
 
-use super::policy::{PolicyTarget, RlsPolicy};
+use super::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use super::schema::{
     CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Grant, Index,
     IndexMethod, MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind,
@@ -1231,7 +1231,7 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
 ///
 /// Syntax:
 /// ```text
-/// policy NAME on TABLE for TARGET
+/// policy NAME on TABLE [for TARGET] [to ROLE] [restrictive|permissive]
 ///   using $$ EXPR $$
 ///   with_check $$ EXPR $$
 /// ```
@@ -1242,15 +1242,15 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<RlsPolicy, String> {
-    // Parse header: "policy NAME on TABLE for TARGET"
+    // Parse header: "policy NAME on TABLE [for TARGET] [to ROLE] [restrictive|permissive]"
     let rest = first_line
         .strip_prefix("policy ")
         .ok_or("Expected 'policy' prefix")?
         .trim();
     let parts: Vec<&str> = rest.split_whitespace().collect();
 
-    // Minimum: NAME on TABLE for TARGET  (4 tokens)
-    if parts.len() < 4 {
+    // Minimum: NAME on TABLE
+    if parts.len() < 3 {
         return Err(format!("Invalid policy: {}", first_line));
     }
 
@@ -1264,25 +1264,8 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
         .get(on_idx + 1)
         .ok_or_else(|| format!("policy missing table name: {}", first_line))?;
 
-    let for_idx = parts
-        .iter()
-        .position(|&p| p == "for")
-        .ok_or_else(|| format!("policy missing 'for' keyword: {}", first_line))?;
-    let target_str = parts
-        .get(for_idx + 1)
-        .ok_or_else(|| format!("policy missing target: {}", first_line))?;
-
-    let target = match target_str.to_lowercase().as_str() {
-        "all" => PolicyTarget::All,
-        "select" => PolicyTarget::Select,
-        "insert" => PolicyTarget::Insert,
-        "update" => PolicyTarget::Update,
-        "delete" => PolicyTarget::Delete,
-        _ => return Err(format!("Unknown policy target: {}", target_str)),
-    };
-
     let mut policy = RlsPolicy::create(name, *table);
-    policy.target = target;
+    parse_policy_clause_tokens(&parts[on_idx + 2..], &mut policy, first_line)?;
 
     // Consume indented continuation lines (using / with_check)
     while let Some(&next_line) = lines.peek() {
@@ -1299,7 +1282,10 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
         // Consume the peeked line before processing it
         lines.next();
 
-        if trimmed.starts_with("using ") || trimmed.starts_with("with_check ") {
+        if is_policy_header_clause(trimmed) {
+            let clause_parts: Vec<&str> = trimmed.split_whitespace().collect();
+            parse_policy_clause_tokens(&clause_parts, &mut policy, trimmed)?;
+        } else if trimmed.starts_with("using ") || trimmed.starts_with("with_check ") {
             let is_using = trimmed.starts_with("using ");
             let keyword = if is_using { "using " } else { "with_check " };
             let after_keyword = trimmed.strip_prefix(keyword).unwrap_or("").trim();
@@ -1319,6 +1305,69 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
     }
 
     Ok(policy)
+}
+
+fn is_policy_header_clause(trimmed: &str) -> bool {
+    let first = trimmed.split_whitespace().next().unwrap_or("");
+    matches!(
+        first.to_ascii_lowercase().as_str(),
+        "for" | "to" | "restrictive" | "permissive"
+    )
+}
+
+fn parse_policy_clause_tokens(
+    parts: &[&str],
+    policy: &mut RlsPolicy,
+    source: &str,
+) -> Result<(), String> {
+    let mut idx = 0;
+    while idx < parts.len() {
+        match parts[idx].to_ascii_lowercase().as_str() {
+            "for" => {
+                idx += 1;
+                let target_str = parts
+                    .get(idx)
+                    .ok_or_else(|| format!("policy missing target: {}", source))?;
+                policy.target = parse_policy_target(target_str)?;
+                idx += 1;
+            }
+            "to" => {
+                idx += 1;
+                let role = parts
+                    .get(idx)
+                    .ok_or_else(|| format!("policy missing role after 'to': {}", source))?;
+                policy.role = Some((*role).to_string());
+                idx += 1;
+            }
+            "restrictive" => {
+                policy.permissiveness = PolicyPermissiveness::Restrictive;
+                idx += 1;
+            }
+            "permissive" => {
+                policy.permissiveness = PolicyPermissiveness::Permissive;
+                idx += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "Unknown policy clause '{}': {}",
+                    parts[idx], source
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_policy_target(target_str: &str) -> Result<PolicyTarget, String> {
+    match target_str.to_lowercase().as_str() {
+        "all" => Ok(PolicyTarget::All),
+        "select" => Ok(PolicyTarget::Select),
+        "insert" => Ok(PolicyTarget::Insert),
+        "update" => Ok(PolicyTarget::Update),
+        "delete" => Ok(PolicyTarget::Delete),
+        _ => Err(format!("Unknown policy target: {}", target_str)),
+    }
 }
 
 /// Extract text between `$$` markers, consuming continuation lines if needed.
@@ -1969,6 +2018,64 @@ policy seo_comparisons_admin on seo_comparisons for all
             }
             other => panic!("expected fallback Expr::Named, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_policy_preserves_role_and_restrictive_from_roundtrip_header() {
+        let input = r#"
+table docs {
+  id uuid primary_key
+}
+
+policy docs_select on docs for select to app_user restrictive
+  using $$ owner_id = current_setting('app.current_user_id')::uuid $$
+"#;
+
+        let schema = parse_qail(input).expect("policy should parse");
+        let policy = schema.policies.first().expect("policy missing");
+
+        assert_eq!(policy.target, PolicyTarget::Select);
+        assert_eq!(policy.role.as_deref(), Some("app_user"));
+        assert_eq!(policy.permissiveness, PolicyPermissiveness::Restrictive);
+
+        let sql = crate::transpiler::policy::create_policy_sql(policy);
+        assert!(sql.contains("AS RESTRICTIVE"));
+        assert!(sql.contains("FOR SELECT"));
+        assert!(sql.contains("TO app_user"));
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        assert!(rendered.contains("policy docs_select on docs for select to app_user restrictive"));
+
+        let reparsed = parse_qail(&rendered).expect("rendered policy should parse");
+        let reparsed_policy = reparsed.policies.first().expect("reparsed policy missing");
+        assert_eq!(reparsed_policy.target, PolicyTarget::Select);
+        assert_eq!(reparsed_policy.role.as_deref(), Some("app_user"));
+        assert_eq!(
+            reparsed_policy.permissiveness,
+            PolicyPermissiveness::Restrictive
+        );
+    }
+
+    #[test]
+    fn test_parse_policy_preserves_split_line_role_and_permissiveness_clauses() {
+        let input = r#"
+table docs {
+  id uuid primary_key
+}
+
+policy docs_select on docs
+  for select
+  restrictive
+  to app_user
+  using $$ owner_id = current_setting('app.current_user_id')::uuid $$
+"#;
+
+        let schema = parse_qail(input).expect("policy should parse");
+        let policy = schema.policies.first().expect("policy missing");
+
+        assert_eq!(policy.target, PolicyTarget::Select);
+        assert_eq!(policy.role.as_deref(), Some("app_user"));
+        assert_eq!(policy.permissiveness, PolicyPermissiveness::Restrictive);
     }
 
     #[test]
