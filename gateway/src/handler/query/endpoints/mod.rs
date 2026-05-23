@@ -1,4 +1,4 @@
-use super::rules::{exact_cache_key, reject_dangerous_action};
+use super::rules::{auth_scoped_cache_key, reject_dangerous_action};
 use super::*;
 
 mod execution;

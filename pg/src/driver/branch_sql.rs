@@ -21,7 +21,10 @@ pub fn escape_literal(val: &str) -> String {
 
 /// SQL to set the branch context on a connection session.
 pub fn branch_context_sql(branch_name: &str) -> String {
-    format!("SET LOCAL app.branch_id = {};", escape_literal(branch_name))
+    format!(
+        "BEGIN; SET LOCAL app.branch_id = {};",
+        escape_literal(branch_name)
+    )
 }
 
 /// SQL to reset (clear) the branch context.
@@ -207,13 +210,13 @@ mod tests {
     #[test]
     fn test_branch_context_sql() {
         let sql = branch_context_sql("feature-auth");
-        assert_eq!(sql, "SET LOCAL app.branch_id = 'feature-auth';");
+        assert_eq!(sql, "BEGIN; SET LOCAL app.branch_id = 'feature-auth';");
     }
 
     #[test]
     fn test_branch_context_sql_escapes_quotes() {
         let sql = branch_context_sql("it's a branch");
-        assert_eq!(sql, "SET LOCAL app.branch_id = 'it''s a branch';");
+        assert_eq!(sql, "BEGIN; SET LOCAL app.branch_id = 'it''s a branch';");
     }
 
     #[test]

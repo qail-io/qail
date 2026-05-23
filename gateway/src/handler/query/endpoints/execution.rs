@@ -166,14 +166,10 @@ pub(super) async fn execute_qail_cmd(
     }
 
     let table = qail_table_name(&cmd.table);
-    let should_cache_query = matches!(cmd.action, Action::Get);
     let is_read_only = command_is_read_only_for_release(&cmd);
+    let should_cache_query = command_is_cacheable_query(&cmd);
 
-    let tenant = match &auth.tenant_id {
-        Some(t) => t.as_str(),
-        None => "_anon",
-    };
-    let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(&cmd));
+    let cache_key = auth_scoped_cache_key(auth, &cmd);
 
     if should_cache_query && let Some(cached) = state.cache.get(&cache_key) {
         tracing::debug!("Cache HIT for table '{}'", table);
@@ -317,6 +313,10 @@ fn command_is_read_only_for_release(cmd: &qail_core::ast::Qail) -> bool {
             .all(|(_, set_query)| command_is_read_only_for_release(set_query))
 }
 
+fn command_is_cacheable_query(cmd: &qail_core::ast::Qail) -> bool {
+    matches!(cmd.action, Action::Get) && command_is_read_only_for_release(cmd)
+}
+
 fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
     fn push_table(tables: &mut Vec<String>, table_ref: &str) {
         let table = qail_table_name(table_ref);
@@ -362,7 +362,9 @@ fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_tables_for_qail;
+    use super::{
+        cache_tables_for_qail, command_is_cacheable_query, command_is_read_only_for_release,
+    };
     use qail_core::ast::{Qail, SetOp};
 
     #[test]
@@ -382,5 +384,13 @@ mod tests {
             cache_tables_for_qail(&cmd),
             vec!["orders", "archived_orders"]
         );
+    }
+
+    #[test]
+    fn nested_mutating_cte_is_not_read_only_or_cacheable() {
+        let cmd = Qail::get("audit_view").with("audit_view", Qail::add("audit_log"));
+
+        assert!(!command_is_read_only_for_release(&cmd));
+        assert!(!command_is_cacheable_query(&cmd));
     }
 }

@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use hmac::{Hmac, Mac};
-use qail_core::ast::{Action, Constraint, Expr, Qail};
+use qail_core::ast::Qail;
 use qail_pg::PgDriver;
 use sha2::Sha256;
 use std::process::Command;
@@ -66,39 +66,26 @@ pub async fn ensure_migration_receipt_columns(driver: &mut PgDriver) -> Result<(
     ];
 
     for (name, ty) in columns {
-        let exists_cmd = Qail::get("information_schema.columns")
-            .column("1")
-            .where_eq("table_schema", "public")
-            .where_eq("table_name", "_qail_migrations")
-            .where_eq("column_name", *name)
-            .limit(1);
-        let rows = driver
-            .fetch_all(&exists_cmd)
+        driver
+            .execute_simple(&receipt_column_add_sql(name, ty))
             .await
-            .map_err(|e| anyhow!("Failed to check migration receipt column '{}': {}", name, e))?;
-        if !rows.is_empty() {
-            continue;
-        }
-
-        let alter_cmd = Qail {
-            action: Action::Mod,
-            table: "_qail_migrations".to_string(),
-            columns: vec![Expr::Def {
-                name: (*name).to_string(),
-                data_type: (*ty).to_string(),
-                constraints: vec![Constraint::Nullable],
-            }],
-            ..Default::default()
-        };
-        driver.execute(&alter_cmd).await.map_err(|e| {
-            anyhow!(
-                "Failed to ensure migration receipt column '{}': {}",
-                name,
-                e
-            )
-        })?;
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to ensure migration receipt column '{}': {}",
+                    name,
+                    e
+                )
+            })?;
     }
     Ok(())
+}
+
+fn receipt_column_add_sql(name: &str, ty: &str) -> String {
+    format!(
+        "ALTER TABLE public._qail_migrations ADD COLUMN IF NOT EXISTS \"{}\" {}",
+        name.replace('"', "\"\""),
+        ty
+    )
 }
 
 pub async fn write_migration_receipt(
@@ -299,7 +286,8 @@ pub fn runtime_git_sha() -> Option<String> {
 mod tests {
     use super::{
         MigrationReceipt, ReceiptSignatureStatus, StoredMigrationReceipt,
-        canonical_receipt_material, compute_receipt_hmac, verify_stored_receipt_signature,
+        canonical_receipt_material, compute_receipt_hmac, receipt_column_add_sql,
+        verify_stored_receipt_signature,
     };
 
     fn sample_receipt() -> MigrationReceipt {
@@ -348,6 +336,16 @@ mod tests {
         assert!(material.contains("version=001_add_users.up.qail"));
         assert!(material.contains("checksum=abc123"));
         assert!(material.contains("sql_up=CREATE TABLE users (id int);"));
+    }
+
+    #[test]
+    fn receipt_column_bootstrap_sql_is_idempotent_and_quoted() {
+        let sql = receipt_column_add_sql("receipt_sig", "text");
+        assert!(sql.contains("ADD COLUMN IF NOT EXISTS"));
+        assert!(sql.contains("\"receipt_sig\" text"));
+
+        let quoted = receipt_column_add_sql("receipt\"sig", "text");
+        assert!(quoted.contains("\"receipt\"\"sig\" text"));
     }
 
     #[test]

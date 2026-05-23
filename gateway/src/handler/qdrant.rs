@@ -158,9 +158,11 @@ pub(super) async fn execute_qdrant_cmd(
                 .policy_engine
                 .filter_cages_for_operation(auth, collection, crate::policy::OperationType::Update)
                 .map_err(|e| ApiError::with_code("POLICY_DENIED", e.to_string()))?;
+            let request_filter_cages =
+                qdrant_request_filter_cages(&upsert_filter_cages, &update_policy_filter_cages);
 
             if auth.tenant_id.is_some()
-                || qdrant_upsert_filter_cages_have_payload_conditions(&upsert_filter_cages)?
+                || qdrant_upsert_filter_cages_have_payload_conditions(&request_filter_cages)?
                 || !create_policy_filter_cages.is_empty()
                 || !update_policy_filter_cages.is_empty()
             {
@@ -178,17 +180,19 @@ pub(super) async fn execute_qdrant_cmd(
                 }
 
                 if existing.is_empty() {
-                    enforce_qdrant_upsert_payload_filters(
+                    enforce_qdrant_upsert_outgoing_filters(
                         &point.payload,
+                        &request_filter_cages,
                         &create_policy_filter_cages,
+                        &update_policy_filter_cages,
                         collection,
-                        "create_policy",
+                        true,
                     )?;
                 } else {
                     for existing_point in &existing {
                         enforce_qdrant_upsert_payload_filters(
                             &existing_point.payload,
-                            &upsert_filter_cages,
+                            &request_filter_cages,
                             collection,
                             "existing",
                         )?;
@@ -199,6 +203,14 @@ pub(super) async fn execute_qdrant_cmd(
                             "update_policy",
                         )?;
                     }
+                    enforce_qdrant_upsert_outgoing_filters(
+                        &point.payload,
+                        &request_filter_cages,
+                        &create_policy_filter_cages,
+                        &update_policy_filter_cages,
+                        collection,
+                        false,
+                    )?;
                 }
             }
             conn.upsert(collection, &[point], false)
@@ -595,6 +607,21 @@ fn qdrant_upsert_filter_cages(cmd: &qail_core::ast::Qail) -> Vec<qail_core::ast:
         .collect()
 }
 
+fn qdrant_request_filter_cages(
+    all_filter_cages: &[qail_core::ast::Cage],
+    update_policy_filter_cages: &[qail_core::ast::Cage],
+) -> Vec<qail_core::ast::Cage> {
+    all_filter_cages
+        .iter()
+        .filter(|cage| {
+            !update_policy_filter_cages
+                .iter()
+                .any(|policy_cage| policy_cage == *cage)
+        })
+        .cloned()
+        .collect()
+}
+
 fn qdrant_upsert_filter_payload_field(
     condition: &qail_core::ast::Condition,
 ) -> Result<Option<&str>, ApiError> {
@@ -810,6 +837,32 @@ fn enforce_qdrant_upsert_payload_filters(
     ))
 }
 
+fn enforce_qdrant_upsert_outgoing_filters(
+    payload: &qail_qdrant::Payload,
+    upsert_filter_cages: &[qail_core::ast::Cage],
+    create_policy_filter_cages: &[qail_core::ast::Cage],
+    update_policy_filter_cages: &[qail_core::ast::Cage],
+    collection: &str,
+    is_create: bool,
+) -> Result<(), ApiError> {
+    enforce_qdrant_upsert_payload_filters(payload, upsert_filter_cages, collection, "outgoing")?;
+    if is_create {
+        enforce_qdrant_upsert_payload_filters(
+            payload,
+            create_policy_filter_cages,
+            collection,
+            "create_policy",
+        )
+    } else {
+        enforce_qdrant_upsert_payload_filters(
+            payload,
+            update_policy_filter_cages,
+            collection,
+            "update_policy_outgoing",
+        )
+    }
+}
+
 /// Convert a Qdrant error into an ApiError.
 fn qdrant_err(e: qail_qdrant::QdrantError, op: &str) -> ApiError {
     tracing::error!("Qdrant {} error: {}", op, e);
@@ -870,10 +923,12 @@ fn payload_value_to_json(v: &qail_qdrant::PayloadValue) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_payload_filters, extract_upsert_point,
+        ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
+        enforce_qdrant_upsert_payload_filters, extract_upsert_point,
         prepare_tenant_scoped_qdrant_upsert_point, qdrant_payload_matches_filter_cages,
-        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
-        tenant_scoped_qdrant_point_id, verify_existing_qdrant_points_tenant_boundary,
+        qdrant_request_filter_cages, qdrant_upsert_filter_cages, scored_point_to_json,
+        split_filter_conditions, tenant_scoped_qdrant_point_id,
+        verify_existing_qdrant_points_tenant_boundary,
     };
     use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 
@@ -1098,6 +1153,77 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_upsert_create_rejects_outgoing_payload_that_violates_request_filter() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "region".to_string(),
+            qail_qdrant::PayloadValue::String("east".to_string()),
+        );
+        let upsert_filters = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("region", "west")],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = enforce_qdrant_upsert_outgoing_filters(
+            &payload,
+            &upsert_filters,
+            &[],
+            &[],
+            "embeddings",
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_upsert_update_rejects_outgoing_payload_that_violates_update_policy() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "operator_id".to_string(),
+            qail_qdrant::PayloadValue::String("operator-2".to_string()),
+        );
+        let update_policy_filters = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("operator_id", "operator-1")],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = enforce_qdrant_upsert_outgoing_filters(
+            &payload,
+            &[],
+            &[],
+            &update_policy_filters,
+            "embeddings",
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_request_filter_cages_exclude_policy_injected_update_filters() {
+        let user_filter = Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("region", "west")],
+            logical_op: LogicalOp::And,
+        };
+        let update_policy_filter = Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("operator_id", "operator-1")],
+            logical_op: LogicalOp::Or,
+        };
+        let all_filters = vec![user_filter.clone(), update_policy_filter.clone()];
+
+        let request_filters = qdrant_request_filter_cages(&all_filters, &[update_policy_filter]);
+
+        assert_eq!(request_filters, vec![user_filter]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::rules::exact_cache_key;
+use super::rules::{auth_scoped_cache_key, exact_cache_key};
 use super::{
     execute_query_binary, execute_query_export, is_query_allowed, reject_dangerous_action,
     reject_non_read_action,
@@ -137,6 +137,61 @@ fn cache_key_includes_filter_values() {
 }
 
 #[test]
+fn auth_scoped_cache_key_includes_role() {
+    let cmd = qail_core::ast::Qail::get("orders");
+    let mut operator = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: HashMap::new(),
+    };
+    let mut viewer = operator.clone();
+    viewer.role = "viewer".to_string();
+
+    assert_ne!(
+        auth_scoped_cache_key(&operator, &cmd),
+        auth_scoped_cache_key(&viewer, &cmd),
+        "query cache must not replay rows across role-specific policy/RLS contexts"
+    );
+
+    operator.role = "operator".to_string();
+    assert_eq!(
+        auth_scoped_cache_key(&operator, &cmd),
+        auth_scoped_cache_key(&operator, &cmd)
+    );
+}
+
+#[test]
+fn auth_scoped_cache_key_includes_claim_values() {
+    let cmd = qail_core::ast::Qail::get("orders");
+    let mut base_scope = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: HashMap::new(),
+    };
+    let mut narrowed_scope = base_scope.clone();
+    narrowed_scope
+        .claims
+        .insert("data_scope".to_string(), serde_json::json!("east"));
+
+    assert_ne!(
+        auth_scoped_cache_key(&base_scope, &cmd),
+        auth_scoped_cache_key(&narrowed_scope, &cmd),
+        "claim-scoped reads must not share cache entries with base-scope reads"
+    );
+
+    base_scope
+        .claims
+        .insert("data_scope".to_string(), serde_json::json!("west"));
+    assert_ne!(
+        auth_scoped_cache_key(&base_scope, &cmd),
+        auth_scoped_cache_key(&narrowed_scope, &cmd),
+        "claim values must be part of the read cache scope"
+    );
+}
+
+#[test]
 fn allow_list_disabled_allows_query() {
     let allow_list = QueryAllowList::new();
     let cmd = qail_core::ast::Qail::get("users");
@@ -185,6 +240,46 @@ fn query_complexity_with_joins() {
     assert_eq!(depth, 0);
     assert_eq!(filters, 2);
     assert_eq!(joins, 1);
+}
+
+#[test]
+fn query_complexity_counts_nested_cte_filters_and_joins() {
+    use qail_core::ast::JoinKind;
+
+    let nested = qail_core::ast::Qail::get("orders")
+        .join(
+            JoinKind::Left,
+            "customers",
+            "orders.customer_id",
+            "customers.id",
+        )
+        .eq("status", "active")
+        .eq("visible", true);
+    let cmd = qail_core::ast::Qail::get("recent_orders").with("recent_orders", nested);
+
+    let (depth, filters, joins) = super::query_complexity(&cmd);
+    assert_eq!(depth, 1);
+    assert_eq!(filters, 2);
+    assert_eq!(joins, 1);
+}
+
+#[test]
+fn query_complexity_counts_source_query_and_set_op_children() {
+    use qail_core::ast::SetOp;
+
+    let mut cmd = qail_core::ast::Qail::add("order_archive");
+    cmd.source_query = Some(Box::new(
+        qail_core::ast::Qail::get("orders").eq("status", "closed"),
+    ));
+    cmd.set_ops.push((
+        SetOp::UnionAll,
+        Box::new(qail_core::ast::Qail::get("legacy_orders").eq("archived", true)),
+    ));
+
+    let (depth, filters, joins) = super::query_complexity(&cmd);
+    assert_eq!(depth, 2);
+    assert_eq!(filters, 2);
+    assert_eq!(joins, 0);
 }
 
 #[test]

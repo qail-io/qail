@@ -104,6 +104,14 @@ impl PgDriver {
         self.execute(&cmd).await.map(|_| ())
     }
 
+    /// Execute trusted administrative SQL using PostgreSQL's simple-query protocol.
+    ///
+    /// This is intended for internal/bootstrap DDL that cannot yet be expressed
+    /// by the QAIL AST, such as idempotent catalog maintenance statements.
+    pub async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
+        self.connection.execute_simple(sql).await
+    }
+
     // ==================== RLS (MULTI-TENANT) ====================
 
     /// Set the RLS context for multi-tenant data isolation.

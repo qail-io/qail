@@ -88,16 +88,43 @@ fn read_query_action_allowed(action: Action) -> bool {
 pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usize) {
     use qail_core::ast::CageKind;
 
-    let depth = cmd.ctes.len() + cmd.set_ops.len() + usize::from(cmd.source_query.is_some());
-
-    let filter_count: usize = cmd
+    let mut depth = cmd.ctes.len() + cmd.set_ops.len() + usize::from(cmd.source_query.is_some());
+    let mut filter_count: usize = cmd
         .cages
         .iter()
         .filter(|c| matches!(c.kind, CageKind::Filter))
         .map(|c| c.conditions.len())
         .sum();
 
-    let join_count = cmd.joins.len();
+    let mut join_count = cmd.joins.len();
+
+    for cte in &cmd.ctes {
+        let (child_depth, child_filters, child_joins) = query_complexity(&cte.base_query);
+        depth += child_depth;
+        filter_count += child_filters;
+        join_count += child_joins;
+
+        if let Some(ref recursive_query) = cte.recursive_query {
+            let (child_depth, child_filters, child_joins) = query_complexity(recursive_query);
+            depth += child_depth;
+            filter_count += child_filters;
+            join_count += child_joins;
+        }
+    }
+
+    if let Some(ref source_query) = cmd.source_query {
+        let (child_depth, child_filters, child_joins) = query_complexity(source_query);
+        depth += child_depth;
+        filter_count += child_filters;
+        join_count += child_joins;
+    }
+
+    for (_, set_query) in &cmd.set_ops {
+        let (child_depth, child_filters, child_joins) = query_complexity(set_query);
+        depth += child_depth;
+        filter_count += child_filters;
+        join_count += child_joins;
+    }
 
     (depth, filter_count, join_count)
 }
@@ -111,6 +138,40 @@ pub(super) fn exact_cache_key(cmd: &qail_core::ast::Qail) -> String {
     let mut hasher = DefaultHasher::new();
     payload.hash(&mut hasher);
     format!("full:{:016x}", hasher.finish())
+}
+
+pub(super) fn auth_scoped_cache_key(
+    auth: &crate::auth::AuthContext,
+    cmd: &qail_core::ast::Qail,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
+    let mut hasher = DefaultHasher::new();
+    tenant.hash(&mut hasher);
+    auth.user_id.hash(&mut hasher);
+    auth.role.hash(&mut hasher);
+    auth.is_authenticated().hash(&mut hasher);
+    auth.is_denied().hash(&mut hasher);
+    auth.is_platform_admin().hash(&mut hasher);
+
+    let mut claims: Vec<_> = auth.claims.iter().collect();
+    claims.sort_by_key(|(left, _)| *left);
+    for (key, value) in claims {
+        key.hash(&mut hasher);
+        serde_json::to_string(value)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+    }
+
+    format!(
+        "qail:{}:{}:{:016x}:{}",
+        tenant,
+        auth.user_id,
+        hasher.finish(),
+        exact_cache_key(cmd)
+    )
 }
 
 /// Clamp the LIMIT on a Qail command to at most `max_rows`.
