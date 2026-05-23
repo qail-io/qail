@@ -371,3 +371,25 @@ fn test_parameterized_sql() {
     assert_eq!(result.named_params[0], "name");
     assert_eq!(result.named_params[1], "age");
 }
+
+#[test]
+fn test_parameterized_sql_ignores_param_markers_inside_literals() {
+    use crate::transpiler::ToSqlParameterized;
+
+    let cmd =
+        parse("get messages fields * where body = \":not_a_param\" and owner = :owner").unwrap();
+
+    let result = cmd.to_sql_parameterized();
+
+    assert!(
+        result.sql.contains("':not_a_param'"),
+        "SQL literal should remain intact: {}",
+        result.sql
+    );
+    assert!(
+        result.sql.contains("$1"),
+        "named param outside the literal should still be replaced: {}",
+        result.sql
+    );
+    assert_eq!(result.named_params, vec!["owner"]);
+}

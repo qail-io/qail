@@ -455,62 +455,222 @@ impl ToSqlParameterized for Qail {
         // Use the full ToSql implementation which handles CTEs, JOINs, etc.
         // Then post-process to extract named parameters for binding
         let full_sql = self.to_sql_with_dialect(dialect);
-
-        // and replace them with positional parameters ($1, $2, etc.)
-        let mut named_params: Vec<String> = Vec::new();
-        let mut seen_params: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut result = String::with_capacity(full_sql.len());
-        let mut chars = full_sql.chars().peekable();
-        let mut param_index = 1;
-
-        while let Some(c) = chars.next() {
-            if c == ':'
-                && let Some(&next) = chars.peek()
-            {
-                if next == ':' {
-                    result.push(':');
-                    if let Some(double_colon) = chars.next() {
-                        result.push(double_colon);
-                    }
-                    continue;
-                }
-                if next.is_ascii_alphabetic() || next == '_' {
-                    let mut param_name = String::new();
-                    while let Some(&ch) = chars.peek() {
-                        if ch.is_ascii_alphanumeric() || ch == '_' {
-                            if let Some(param_ch) = chars.next() {
-                                param_name.push(param_ch);
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let idx = if let Some(&existing) = seen_params.get(&param_name) {
-                        existing
-                    } else {
-                        let idx = param_index;
-                        seen_params.insert(param_name.clone(), idx);
-                        named_params.push(param_name);
-                        param_index += 1;
-                        idx
-                    };
-
-                    result.push('$');
-                    result.push_str(&idx.to_string());
-                    continue;
-                }
-            }
-            result.push(c);
-        }
+        let (sql, named_params) = replace_named_params_outside_sql_literals(&full_sql);
 
         TranspileResult {
-            sql: result,
+            sql,
             params: Vec::new(), // Positional params not used, named_params provides mapping
             named_params,
         }
     }
+}
+
+fn replace_named_params_outside_sql_literals(sql: &str) -> (String, Vec<String>) {
+    let mut named_params: Vec<String> = Vec::new();
+    let mut seen_params: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut result = String::with_capacity(sql.len());
+    let mut param_index = 1;
+    let mut i = 0;
+    let mut state = SqlScanState::Normal;
+
+    while i < sql.len() {
+        match &state {
+            SqlScanState::Normal => {
+                if sql[i..].starts_with("--") {
+                    result.push_str("--");
+                    i += 2;
+                    state = SqlScanState::LineComment;
+                    continue;
+                }
+                if sql[i..].starts_with("/*") {
+                    result.push_str("/*");
+                    i += 2;
+                    state = SqlScanState::BlockComment;
+                    continue;
+                }
+                if sql[i..].starts_with("::") {
+                    result.push_str("::");
+                    i += 2;
+                    continue;
+                }
+                if let Some(delimiter) = sql_dollar_quote_delimiter_at(sql, i) {
+                    result.push_str(&delimiter);
+                    i += delimiter.len();
+                    state = SqlScanState::DollarQuoted(delimiter);
+                    continue;
+                }
+
+                let Some((ch, next_i)) = next_sql_char(sql, i) else {
+                    break;
+                };
+                match ch {
+                    '\'' => {
+                        result.push(ch);
+                        i = next_i;
+                        state = SqlScanState::SingleQuoted;
+                    }
+                    '"' => {
+                        result.push(ch);
+                        i = next_i;
+                        state = SqlScanState::DoubleQuoted;
+                    }
+                    ':' => {
+                        let Some((next, mut cursor)) = next_sql_char(sql, next_i) else {
+                            result.push(ch);
+                            i = next_i;
+                            continue;
+                        };
+                        if is_named_param_start(next) {
+                            let mut param_name = String::new();
+                            param_name.push(next);
+                            while let Some((candidate, candidate_next)) = next_sql_char(sql, cursor)
+                            {
+                                if is_named_param_continue(candidate) {
+                                    param_name.push(candidate);
+                                    cursor = candidate_next;
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            let idx = if let Some(&existing) = seen_params.get(&param_name) {
+                                existing
+                            } else {
+                                let idx = param_index;
+                                seen_params.insert(param_name.clone(), idx);
+                                named_params.push(param_name);
+                                param_index += 1;
+                                idx
+                            };
+                            result.push('$');
+                            result.push_str(&idx.to_string());
+                            i = cursor;
+                        } else {
+                            result.push(ch);
+                            i = next_i;
+                        }
+                    }
+                    _ => {
+                        result.push(ch);
+                        i = next_i;
+                    }
+                }
+            }
+            SqlScanState::SingleQuoted => {
+                let Some((ch, next_i)) = next_sql_char(sql, i) else {
+                    break;
+                };
+                result.push(ch);
+                i = next_i;
+                if ch == '\'' {
+                    if sql[i..].starts_with('\'') {
+                        result.push('\'');
+                        i += 1;
+                    } else {
+                        state = SqlScanState::Normal;
+                    }
+                }
+            }
+            SqlScanState::DoubleQuoted => {
+                let Some((ch, next_i)) = next_sql_char(sql, i) else {
+                    break;
+                };
+                result.push(ch);
+                i = next_i;
+                if ch == '"' {
+                    if sql[i..].starts_with('"') {
+                        result.push('"');
+                        i += 1;
+                    } else {
+                        state = SqlScanState::Normal;
+                    }
+                }
+            }
+            SqlScanState::LineComment => {
+                let Some((ch, next_i)) = next_sql_char(sql, i) else {
+                    break;
+                };
+                result.push(ch);
+                i = next_i;
+                if ch == '\n' {
+                    state = SqlScanState::Normal;
+                }
+            }
+            SqlScanState::BlockComment => {
+                if sql[i..].starts_with("*/") {
+                    result.push_str("*/");
+                    i += 2;
+                    state = SqlScanState::Normal;
+                    continue;
+                }
+                let Some((ch, next_i)) = next_sql_char(sql, i) else {
+                    break;
+                };
+                result.push(ch);
+                i = next_i;
+            }
+            SqlScanState::DollarQuoted(delimiter) => {
+                if sql[i..].starts_with(delimiter) {
+                    result.push_str(delimiter);
+                    i += delimiter.len();
+                    state = SqlScanState::Normal;
+                    continue;
+                }
+                let Some((ch, next_i)) = next_sql_char(sql, i) else {
+                    break;
+                };
+                result.push(ch);
+                i = next_i;
+            }
+        }
+    }
+
+    (result, named_params)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SqlScanState {
+    Normal,
+    SingleQuoted,
+    DoubleQuoted,
+    LineComment,
+    BlockComment,
+    DollarQuoted(String),
+}
+
+fn next_sql_char(sql: &str, idx: usize) -> Option<(char, usize)> {
+    let ch = sql.get(idx..)?.chars().next()?;
+    Some((ch, idx + ch.len_utf8()))
+}
+
+fn is_named_param_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_named_param_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn sql_dollar_quote_delimiter_at(sql: &str, idx: usize) -> Option<String> {
+    if !sql.get(idx..)?.starts_with('$') {
+        return None;
+    }
+    let rest = sql.get(idx + 1..)?;
+    for (offset, ch) in rest.char_indices() {
+        if ch == '$' {
+            let tag = &rest[..offset];
+            if tag.is_empty()
+                || (is_named_param_start(tag.chars().next()?)
+                    && tag.chars().all(is_named_param_continue))
+            {
+                return Some(sql[idx..idx + offset + 2].to_string());
+            }
+            return None;
+        }
+        if !is_named_param_continue(ch) {
+            return None;
+        }
+    }
+    None
 }
