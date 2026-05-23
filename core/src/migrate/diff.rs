@@ -358,10 +358,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     constraints.push(Constraint::Default(def.clone()));
                 }
                 if let Some(ref fk) = col.foreign_key {
-                    constraints.push(Constraint::References(format!(
-                        "{}({})",
-                        fk.table, fk.column
-                    )));
+                    constraints.push(Constraint::References(foreign_key_to_sql(fk)));
                 }
                 if let Some(check) = &col.check {
                     let check_sql = check_expr_to_sql(&check.expr);
@@ -881,6 +878,47 @@ mod tests {
                 "REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             ),
             "add-column SQL should preserve FK reference, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn diff_new_table_preserves_foreign_key_actions() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let old = Schema::default();
+        let mut new = Schema::default();
+        new.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        new.add_table(
+            Table::new("orders").column(
+                Column::new("tenant_id", ColumnType::Int)
+                    .references("tenants", "id")
+                    .on_delete(FkAction::Cascade)
+                    .on_update(FkAction::Restrict),
+            ),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new table with FK should diff");
+        let make_cmd = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Make) && cmd.table == "orders")
+            .expect("orders create-table command should be present");
+
+        let Expr::Def { constraints, .. } = &make_cmd.columns[0] else {
+            panic!("expected tenant_id column definition");
+        };
+        assert!(constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                Constraint::References(target)
+                    if target == "tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT"
+            )
+        }));
+
+        let sql = make_cmd.to_sql();
+        assert!(
+            sql.contains("REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT"),
+            "create-table SQL should preserve FK action clauses, got: {sql}"
         );
     }
 
