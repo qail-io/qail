@@ -121,18 +121,19 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
         result.push('-');
     }
 
-    // Integer part
-    let int_digits = (weight + 1) as usize;
-    for (i, digit) in digits.iter().enumerate().take(int_digits.min(ndigits)) {
-        if i == 0 {
-            result.push_str(&digit.to_string());
-        } else {
-            result.push_str(&format!("{:04}", digit));
+    // Integer part. A negative weight means every stored base-10000 digit is
+    // fractional; do not cast it to usize or it wraps to a huge group count.
+    let int_digits = i32::from(weight) + 1;
+    if int_digits > 0 {
+        let int_digits = int_digits as usize;
+        for i in 0..int_digits {
+            let digit = digits.get(i).copied().unwrap_or(0);
+            if i == 0 {
+                result.push_str(&digit.to_string());
+            } else {
+                result.push_str(&format!("{:04}", digit));
+            }
         }
-    }
-    // Pad with zeros if weight > ndigits
-    for _ in ndigits..int_digits {
-        result.push_str("0000");
     }
 
     if result.is_empty() || result == "-" {
@@ -142,23 +143,24 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
     // Decimal part
     if dscale > 0 {
         result.push('.');
-        let start = int_digits;
-        let mut decimal_digits = 0;
-        for digit in digits.iter().skip(start) {
-            let s = format!("{:04}", digit);
-            for c in s.chars() {
-                if decimal_digits >= dscale {
-                    break;
-                }
-                result.push(c);
-                decimal_digits += 1;
+        let mut fractional = String::new();
+        if int_digits < 0 {
+            for _ in 0..(-int_digits) {
+                fractional.push_str("0000");
             }
         }
-        // Pad with zeros if needed
-        while decimal_digits < dscale {
-            result.push('0');
-            decimal_digits += 1;
+
+        let start = int_digits.max(0) as usize;
+        for digit in digits.iter().skip(start) {
+            fractional.push_str(&format!("{:04}", digit));
         }
+
+        if fractional.len() < dscale {
+            fractional.extend(std::iter::repeat_n('0', dscale - fractional.len()));
+        } else {
+            fractional.truncate(dscale);
+        }
+        result.push_str(&fractional);
     }
 
     Ok(Numeric(result))
@@ -191,5 +193,18 @@ mod tests {
     fn test_numeric_negative() {
         let n = Numeric::new("-999.99");
         assert_eq!(n.to_f64().unwrap(), -999.99);
+    }
+
+    #[test]
+    fn test_numeric_binary_decodes_negative_weight() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // ndigits
+        bytes.extend_from_slice(&(-2i16).to_be_bytes()); // weight
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // sign
+        bytes.extend_from_slice(&8u16.to_be_bytes()); // dscale
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // digit
+
+        let n = Numeric::from_pg(&bytes, oid::NUMERIC, 1).unwrap();
+        assert_eq!(n.as_str(), "0.00000001");
     }
 }
