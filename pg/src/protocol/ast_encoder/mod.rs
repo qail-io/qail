@@ -310,6 +310,44 @@ impl AstEncoder {
         Ok((sql, params))
     }
 
+    /// Encode DML shapes supported by the prepared-statement cache fast path.
+    ///
+    /// Returns `Ok(false)` when callers should use their existing fallback for
+    /// non-cacheable actions such as COPY/DDL/session commands.
+    #[inline]
+    pub(crate) fn encode_cacheable_cmd_sql_to(
+        cmd: &Qail,
+        sql_buf: &mut BytesMut,
+        params: &mut Vec<Option<Vec<u8>>>,
+    ) -> Result<bool, EncodeError> {
+        sql_buf.clear();
+        params.clear();
+
+        match cmd.action {
+            Action::Get | Action::With => {
+                dml::encode_select(cmd, sql_buf, params)?;
+            }
+            Action::Cnt => {
+                dml::encode_count(cmd, sql_buf, params)?;
+            }
+            Action::Add => {
+                dml::encode_insert(cmd, sql_buf, params)?;
+            }
+            Action::Set => {
+                dml::encode_update(cmd, sql_buf, params)?;
+            }
+            Action::Del => {
+                dml::encode_delete(cmd, sql_buf, params)?;
+            }
+            Action::Merge => {
+                dml::encode_merge(cmd, sql_buf, params)?;
+            }
+            _ => return Ok(false),
+        }
+
+        Ok(true)
+    }
+
     /// Encode AST into caller-provided SQL/params buffers (no SQL `String` allocation).
     ///
     /// This is useful for hot paths that need SQL bytes + params, but can defer
@@ -384,6 +422,56 @@ impl AstEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_encode_cacheable_cmd_sql_to_supports_count_and_merge() {
+        use qail_core::ast::{Expr, Operator};
+
+        let mut sql_buf = BytesMut::new();
+        let mut params = Vec::new();
+        let count_cmd = Qail {
+            action: Action::Cnt,
+            table: "orders".to_string(),
+            ..Default::default()
+        }
+        .filter("status", Operator::Eq, "paid");
+
+        assert!(
+            AstEncoder::encode_cacheable_cmd_sql_to(&count_cmd, &mut sql_buf, &mut params).unwrap()
+        );
+        let sql = String::from_utf8_lossy(&sql_buf);
+        assert!(sql.contains("SELECT COUNT(*) FROM orders"), "{sql}");
+        assert!(sql.contains("WHERE status = $1"), "{sql}");
+        assert_eq!(params, vec![Some(b"paid".to_vec())]);
+
+        let merge_cmd = Qail::merge_into("users")
+            .target_alias("u")
+            .using_table_as("staging_users", "s")
+            .merge_on_column("u.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+        assert!(
+            AstEncoder::encode_cacheable_cmd_sql_to(&merge_cmd, &mut sql_buf, &mut params).unwrap()
+        );
+        let sql = String::from_utf8_lossy(&sql_buf);
+        assert!(sql.contains("MERGE INTO users AS u"), "{sql}");
+        assert!(
+            sql.contains("WHEN MATCHED THEN UPDATE SET name = s.name"),
+            "{sql}"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_cacheable_cmd_sql_to_rejects_non_dml_fast_path() {
+        let mut sql_buf = BytesMut::from("stale");
+        let mut params = vec![Some(b"stale".to_vec())];
+        let cmd = Qail::make("users");
+
+        assert!(!AstEncoder::encode_cacheable_cmd_sql_to(&cmd, &mut sql_buf, &mut params).unwrap());
+        assert!(sql_buf.is_empty());
+        assert!(params.is_empty());
+    }
 
     #[test]
     fn test_encode_select() {

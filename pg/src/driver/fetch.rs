@@ -431,55 +431,25 @@ impl PgDriver {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        self.connection.sql_buf.clear();
-        self.connection.params_buf.clear();
-
-        // Encode SQL to reusable buffer
-        match cmd.action {
-            qail_core::ast::Action::Get | qail_core::ast::Action::With => {
-                crate::protocol::ast_encoder::dml::encode_select(
-                    cmd,
-                    &mut self.connection.sql_buf,
-                    &mut self.connection.params_buf,
-                )?;
-            }
-            qail_core::ast::Action::Add => {
-                crate::protocol::ast_encoder::dml::encode_insert(
-                    cmd,
-                    &mut self.connection.sql_buf,
-                    &mut self.connection.params_buf,
-                )?;
-            }
-            qail_core::ast::Action::Set => {
-                crate::protocol::ast_encoder::dml::encode_update(
-                    cmd,
-                    &mut self.connection.sql_buf,
-                    &mut self.connection.params_buf,
-                )?;
-            }
-            qail_core::ast::Action::Del => {
-                crate::protocol::ast_encoder::dml::encode_delete(
-                    cmd,
-                    &mut self.connection.sql_buf,
-                    &mut self.connection.params_buf,
-                )?;
-            }
-            _ => {
-                // Fallback for unsupported actions
-                let (sql, params) =
-                    AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
-                let raw_rows = self
-                    .connection
-                    .query_cached_with_result_format(&sql, &params, result_format.as_wire_code())
-                    .await?;
-                return Ok(raw_rows
-                    .into_iter()
-                    .map(|data| PgRow {
-                        columns: data,
-                        column_info: None,
-                    })
-                    .collect());
-            }
+        if !AstEncoder::encode_cacheable_cmd_sql_to(
+            cmd,
+            &mut self.connection.sql_buf,
+            &mut self.connection.params_buf,
+        )? {
+            // Fallback for unsupported actions
+            let (sql, params) =
+                AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+            let raw_rows = self
+                .connection
+                .query_cached_with_result_format(&sql, &params, result_format.as_wire_code())
+                .await?;
+            return Ok(raw_rows
+                .into_iter()
+                .map(|data| PgRow {
+                    columns: data,
+                    column_info: None,
+                })
+                .collect());
         }
 
         let mut hasher = DefaultHasher::new();
