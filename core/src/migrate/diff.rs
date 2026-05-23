@@ -228,6 +228,17 @@ fn index_signature(idx: &super::schema::Index) -> String {
     )
 }
 
+fn table_references_table(table: &super::schema::Table, target: &str) -> bool {
+    table.columns.iter().any(|col| {
+        col.foreign_key
+            .as_ref()
+            .is_some_and(|fk| fk.table == target)
+    }) || table
+        .multi_column_fks
+        .iter()
+        .any(|fk| fk.ref_table == target)
+}
+
 /// Validate that a schema pair is fully supported by state-based diff.
 ///
 /// Returns an error when object families outside table/index/hint coverage are present.
@@ -467,8 +478,6 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
     }
 
     // Detect dropped tables (only if not already handled by hints)
-    // Sort in REVERSE FK order: tables with FK dependencies are dropped FIRST
-    // (children before parents) to avoid "cannot drop because other objects depend" errors
     let mut dropped_tables: Vec<&String> = old
         .tables
         .keys()
@@ -479,18 +488,38 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
         })
         .collect();
 
-    // Sort: tables with MORE FK references come first (children before parents)
-    dropped_tables.sort_by_key(|name| {
-        std::cmp::Reverse(
-            old.tables
-                .get(*name)
-                .map(|t| {
-                    t.columns.iter().filter(|c| c.foreign_key.is_some()).count()
-                        + t.multi_column_fks.len()
-                })
-                .unwrap_or(0),
-        )
-    });
+    dropped_tables.sort();
+    let mut remaining = dropped_tables;
+    let mut dropped_tables = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let before = dropped_tables.len();
+        let remaining_names: Vec<String> = remaining.iter().map(|name| (*name).clone()).collect();
+        let mut next_remaining = Vec::new();
+
+        for name in remaining {
+            let has_dropped_dependent = remaining_names.iter().any(|other| {
+                other.as_str() != name.as_str()
+                    && old
+                        .tables
+                        .get(other)
+                        .is_some_and(|table| table_references_table(table, name))
+            });
+
+            if has_dropped_dependent {
+                next_remaining.push(name);
+            } else {
+                dropped_tables.push(name);
+            }
+        }
+
+        if dropped_tables.len() == before {
+            next_remaining.sort();
+            dropped_tables.extend(next_remaining);
+            break;
+        }
+
+        remaining = next_remaining;
+    }
 
     for name in dropped_tables {
         cmds.push(Qail {
@@ -1189,6 +1218,45 @@ mod tests {
         assert!(
             sql.contains("REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT"),
             "create-table SQL should preserve FK action clauses, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn diff_dropped_tables_orders_child_before_parent_by_incoming_fk_topology() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("root_a").column(Column::new("id", ColumnType::Int)));
+        old.add_table(Table::new("root_b").column(Column::new("id", ColumnType::Int)));
+        old.add_table(
+            Table::new("parent")
+                .column(Column::new("id", ColumnType::Int))
+                .column(Column::new("root_a_id", ColumnType::Int).references("root_a", "id"))
+                .column(Column::new("root_b_id", ColumnType::Int).references("root_b", "id")),
+        );
+        old.add_table(
+            Table::new("child")
+                .column(Column::new("id", ColumnType::Int))
+                .column(Column::new("parent_id", ColumnType::Int).references("parent", "id")),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("root_a").column(Column::new("id", ColumnType::Int)));
+        new.add_table(Table::new("root_b").column(Column::new("id", ColumnType::Int)));
+
+        let cmds = diff_schemas_checked(&old, &new).expect("dropped tables should diff");
+        let child_drop_idx = cmds
+            .iter()
+            .position(|cmd| matches!(cmd.action, Action::Drop) && cmd.table == "child")
+            .expect("child drop should be present");
+        let parent_drop_idx = cmds
+            .iter()
+            .position(|cmd| matches!(cmd.action, Action::Drop) && cmd.table == "parent")
+            .expect("parent drop should be present");
+
+        assert!(
+            child_drop_idx < parent_drop_idx,
+            "child table must be dropped before referenced parent table"
         );
     }
 
