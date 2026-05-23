@@ -154,13 +154,40 @@ fn split_expand_relations(
     let mut flat = Vec::new();
     let mut nested = Vec::new();
 
-    for relation in expand.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for raw_relation in expand.split(',') {
+        let relation = raw_relation.trim();
+        if relation.is_empty() {
+            return Err(ApiError::parse_error(
+                "Expand contains an empty relation".to_string(),
+            ));
+        }
+
         if let Some(nested_relation) = relation.strip_prefix("nested:") {
-            if !nested_relation.is_empty() && seen_nested.insert(nested_relation) {
+            let nested_relation = nested_relation.trim();
+            if nested_relation.is_empty() {
+                return Err(ApiError::parse_error(
+                    "Nested expand relation cannot be empty".to_string(),
+                ));
+            }
+            if !crate::rest::filters::is_safe_identifier(nested_relation) {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid nested expand relation '{}'",
+                    nested_relation
+                )));
+            }
+            if seen_nested.insert(nested_relation) {
                 nested.push(nested_relation);
             }
-        } else if seen_flat.insert(relation) {
-            flat.push(relation);
+        } else {
+            if !crate::rest::filters::is_safe_identifier(relation) {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid expand relation '{}'",
+                    relation
+                )));
+            }
+            if seen_flat.insert(relation) {
+                flat.push(relation);
+            }
         }
     }
 
@@ -1114,5 +1141,14 @@ mod tests {
 
         assert_eq!(flat, vec!["users"]);
         assert_eq!(nested, vec!["items", "payments"]);
+    }
+
+    #[test]
+    fn split_expand_relations_rejects_fail_open_inputs() {
+        assert!(split_expand_relations("", 3).is_err());
+        assert!(split_expand_relations("users,", 3).is_err());
+        assert!(split_expand_relations("nested:", 3).is_err());
+        assert!(split_expand_relations("users,bad-rel", 3).is_err());
+        assert!(split_expand_relations("nested:bad-rel", 3).is_err());
     }
 }
