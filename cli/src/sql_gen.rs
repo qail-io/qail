@@ -96,11 +96,16 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
         Action::Index => {
             if let Some(ref idx) = cmd.index_def {
                 let unique = if idx.unique { "UNIQUE " } else { "" };
+                let table = if idx.table.trim().is_empty() {
+                    cmd.table.as_str()
+                } else {
+                    idx.table.as_str()
+                };
                 return format!(
                     "CREATE {}INDEX {} ON {} ({})",
                     unique,
                     idx.name,
-                    cmd.table,
+                    table,
                     idx.columns.join(", ")
                 );
             }
@@ -238,4 +243,34 @@ pub fn generate_rollback_sql(cmd: &Qail) -> String {
 /// Generate DOWN SQL for a migration command.
 pub fn generate_down_sql(cmd: &Qail) -> String {
     generate_rollback_sql(cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qail_core::ast::IndexDef;
+
+    #[test]
+    fn index_sql_uses_index_def_table_when_command_table_is_empty() {
+        let cmd = Qail {
+            action: Action::Index,
+            table: String::new(),
+            index_def: Some(IndexDef {
+                name: "idx_users_email".to_string(),
+                table: "users".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                index_type: None,
+                where_clause: None,
+            }),
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert!(
+            sql.contains("ON users (email)"),
+            "index SQL should use IndexDef table, got: {sql}"
+        );
+    }
 }
