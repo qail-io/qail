@@ -99,6 +99,12 @@ enum OnConflictActionParam {
     Nothing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroRowConflictDisposition {
+    RejectAsConflict,
+    AcceptAsNoop,
+}
+
 fn upsert_update_assignments<'a>(
     obj: &'a serde_json::Map<String, Value>,
     conflict_cols: &[&str],
@@ -182,6 +188,38 @@ fn guard_upsert_conflict_update_tenant(
         Operator::Eq,
         QailValue::String(tenant_id.to_string()),
     )
+}
+
+fn zero_row_conflict_disposition(cmd: &qail_core::ast::Qail) -> Option<ZeroRowConflictDisposition> {
+    match cmd
+        .on_conflict
+        .as_ref()
+        .map(|on_conflict| &on_conflict.action)
+    {
+        Some(qail_core::ast::ConflictAction::DoUpdate { .. }) => {
+            Some(ZeroRowConflictDisposition::RejectAsConflict)
+        }
+        Some(qail_core::ast::ConflictAction::DoNothing) => {
+            Some(ZeroRowConflictDisposition::AcceptAsNoop)
+        }
+        None => None,
+    }
+}
+
+fn apply_create_probe_returning(
+    cmd: qail_core::ast::Qail,
+    table: &crate::schema::GatewayTable,
+) -> qail_core::ast::Qail {
+    if let Some(column) = table
+        .primary_key
+        .as_deref()
+        .or_else(|| table.columns.first().map(|column| column.name.as_str()))
+        .filter(|column| crate::rest::filters::is_safe_identifier(column))
+    {
+        cmd.returning([column])
+    } else {
+        cmd.returning_all()
+    }
 }
 
 fn build_upsert_old_row_lookup(
@@ -432,6 +470,7 @@ pub(crate) async fn create_handler(
         || mutation_params.returning.is_some();
     let mut classified_upsert_events: Vec<(OperationType, Option<Value>, Option<Value>)> =
         Vec::new();
+    let mut ignored_conflict_noops = 0usize;
 
     for obj in &normalized_objects {
         let mut cmd = qail_core::ast::Qail::add(&table_name);
@@ -509,6 +548,8 @@ pub(crate) async fn create_handler(
             has_create_triggers || classify_upsert_event,
         ) {
             cmd = apply_returning(cmd, Some("*")).map_err(ApiError::parse_error)?;
+        } else if mutation_params.returning.is_none() {
+            cmd = apply_create_probe_returning(cmd, table);
         } else {
             cmd = apply_returning(cmd, mutation_params.returning.as_deref())
                 .map_err(ApiError::parse_error)?;
@@ -546,6 +587,7 @@ pub(crate) async fn create_handler(
             state.optimize_qail_for_execution(old_cmd);
         }
         state.optimize_qail_for_execution(&mut cmd);
+        let zero_row_disposition = zero_row_conflict_disposition(&cmd);
 
         let old_data = if let Some(ref old_cmd) = old_cmd {
             let rows = match conn.fetch_all_uncached(old_cmd).await {
@@ -567,6 +609,26 @@ pub(crate) async fn create_handler(
                 return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
             }
         };
+
+        if rows.is_empty() {
+            match zero_row_disposition {
+                Some(ZeroRowConflictDisposition::AcceptAsNoop) => {
+                    ignored_conflict_noops += 1;
+                    continue;
+                }
+                Some(ZeroRowConflictDisposition::RejectAsConflict) => {
+                    let _ = conn.rollback_and_release().await;
+                    return Err(ApiError::with_code(
+                        "CONFLICT",
+                        "Create/upsert conflict did not affect a visible row",
+                    ));
+                }
+                None => {
+                    let _ = conn.rollback_and_release().await;
+                    return Err(ApiError::with_code("CONFLICT", "Create affected no rows"));
+                }
+            }
+        }
 
         if !rows.is_empty() {
             for row in &rows {
@@ -636,9 +698,16 @@ pub(crate) async fn create_handler(
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
 
-    // Prefer: return=minimal → 201 with no body
+    let response_status = if all_results.is_empty() && ignored_conflict_noops > 0 {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+
+    // Prefer: return=minimal → no response body. Ignore-duplicate no-ops use
+    // 200 so clients do not mistake them for new rows.
     if prefer.wants_minimal() {
-        return Ok((StatusCode::CREATED, Json(json!({}))));
+        return Ok((response_status, Json(json!({}))));
     }
 
     if is_batch {
@@ -652,7 +721,7 @@ pub(crate) async fn create_handler(
         };
         let count = response_results.len();
         Ok((
-            StatusCode::CREATED,
+            response_status,
             Json(json!({
                 "data": response_results,
                 "count": count,
@@ -666,26 +735,41 @@ pub(crate) async fn create_handler(
             )?
             .into_iter()
             .next()
-            .unwrap_or_else(|| json!({"created": true}))
+            .unwrap_or_else(|| json!({"created": false}))
         } else {
-            json!({"created": true})
+            json!({"created": !all_results.is_empty()})
         };
-        Ok((StatusCode::CREATED, Json(json!({ "data": data }))))
+        Ok((response_status, Json(json!({ "data": data }))))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        OnConflictActionParam, UpsertConflictMode, apply_on_conflict_update_or_noop,
-        branch_insert_overlay_key, build_upsert_old_row_lookup,
-        create_request_can_skip_required_validation, guard_upsert_conflict_update_tenant,
-        normalize_create_object_for_tenant, parse_explicit_on_conflict_columns,
-        parse_explicit_on_conflict_param, parse_on_conflict_action, pk_to_overlay_key,
-        resolve_prefer_conflict_column, upsert_update_assignments,
+        OnConflictActionParam, UpsertConflictMode, ZeroRowConflictDisposition,
+        apply_create_probe_returning, apply_on_conflict_update_or_noop, branch_insert_overlay_key,
+        build_upsert_old_row_lookup, create_request_can_skip_required_validation,
+        guard_upsert_conflict_update_tenant, normalize_create_object_for_tenant,
+        parse_explicit_on_conflict_columns, parse_explicit_on_conflict_param,
+        parse_on_conflict_action, pk_to_overlay_key, resolve_prefer_conflict_column,
+        upsert_update_assignments, zero_row_conflict_disposition,
     };
+    use crate::schema::{GatewayColumn, GatewayTable};
     use qail_core::ast::{CageKind, ConflictAction, Expr, Operator, Value as QailValue};
     use serde_json::{Map, Value, json};
+
+    fn test_column(name: &str, primary_key: bool) -> GatewayColumn {
+        GatewayColumn {
+            name: name.to_string(),
+            col_type: "text".to_string(),
+            pg_type: "text".to_string(),
+            nullable: false,
+            primary_key,
+            unique: false,
+            has_default: false,
+            foreign_key: None,
+        }
+    }
 
     #[test]
     fn normalize_create_object_injects_tenant_column() {
@@ -890,6 +974,42 @@ mod tests {
                     .iter()
                     .any(|condition| condition.left == Expr::Named("tenant_id".to_string()))
         }));
+    }
+
+    #[test]
+    fn zero_row_conflict_disposition_rejects_guarded_updates() {
+        let update = qail_core::ast::Qail::add("orders").on_conflict_update(
+            &["id"],
+            &[("status", Expr::Named("EXCLUDED.status".into()))],
+        );
+        let nothing = qail_core::ast::Qail::add("orders").on_conflict_nothing(&["id"]);
+        let plain = qail_core::ast::Qail::add("orders");
+
+        assert_eq!(
+            zero_row_conflict_disposition(&update),
+            Some(ZeroRowConflictDisposition::RejectAsConflict)
+        );
+        assert_eq!(
+            zero_row_conflict_disposition(&nothing),
+            Some(ZeroRowConflictDisposition::AcceptAsNoop)
+        );
+        assert_eq!(zero_row_conflict_disposition(&plain), None);
+    }
+
+    #[test]
+    fn create_probe_returning_uses_primary_key_sentinel() {
+        let table = GatewayTable {
+            name: "orders".to_string(),
+            columns: vec![test_column("id", true), test_column("status", false)],
+            primary_key: Some("id".to_string()),
+        };
+
+        let cmd = apply_create_probe_returning(qail_core::ast::Qail::add("orders"), &table);
+
+        assert!(matches!(
+            cmd.returning.as_deref(),
+            Some([Expr::Named(name)]) if name == "id"
+        ));
     }
 
     #[test]
