@@ -297,6 +297,11 @@ impl ApiError {
             | "DECODE_ERROR"
             | "UNSUPPORTED_ACTION"
             | "MISSING_VECTOR"
+            | "MISSING_VECTOR_SIZE"
+            | "MISSING_POINT_ID"
+            | "INVALID_POINT_ID"
+            | "INVALID_VECTOR"
+            | "INVALID_QDRANT_PAYLOAD"
             | "EXPORT_ONLY"
             | "AST_VALIDATION_FAILED" => StatusCode::BAD_REQUEST,
             "PAYLOAD_TOO_LARGE" | "BATCH_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,

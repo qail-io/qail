@@ -523,6 +523,12 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
             let field = match &cond.left {
                 Expr::Named(name) => name.as_str(),
                 Expr::Aliased { name, .. } => name.as_str(),
+                _ if is_payload_cage => {
+                    return Err(ApiError::bad_request(
+                        "INVALID_QDRANT_PAYLOAD",
+                        "Qdrant payload fields must be named",
+                    ));
+                }
                 _ => continue,
             };
 
@@ -545,9 +551,7 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
                 }
                 _ if is_payload_cage && field == ORIGINAL_POINT_ID_PAYLOAD_KEY => {}
                 _ if is_payload_cage => {
-                    if let Some(v) = payload_value_from_ast(&cond.value) {
-                        payload.insert(field.to_string(), v);
-                    }
+                    payload.insert(field.to_string(), payload_value_from_ast(&cond.value)?);
                 }
                 _ => {}
             }
@@ -609,25 +613,30 @@ fn vector_from_value(value: &qail_core::ast::Value) -> Option<Vec<f32>> {
     }
 }
 
-fn payload_value_from_ast(value: &qail_core::ast::Value) -> Option<qail_qdrant::PayloadValue> {
+fn payload_value_from_ast(
+    value: &qail_core::ast::Value,
+) -> Result<qail_qdrant::PayloadValue, ApiError> {
     use qail_core::ast::Value;
 
     match value {
-        Value::Null => Some(qail_qdrant::PayloadValue::Null),
-        Value::Bool(b) => Some(qail_qdrant::PayloadValue::Bool(*b)),
-        Value::Int(n) => Some(qail_qdrant::PayloadValue::Integer(*n)),
-        Value::Float(f) => Some(qail_qdrant::PayloadValue::Float(*f)),
-        Value::String(s) => Some(qail_qdrant::PayloadValue::String(s.clone())),
-        Value::Uuid(u) => Some(qail_qdrant::PayloadValue::String(u.to_string())),
-        Value::Json(s) => Some(qail_qdrant::PayloadValue::String(s.clone())),
+        Value::Null => Ok(qail_qdrant::PayloadValue::Null),
+        Value::Bool(b) => Ok(qail_qdrant::PayloadValue::Bool(*b)),
+        Value::Int(n) => Ok(qail_qdrant::PayloadValue::Integer(*n)),
+        Value::Float(f) => Ok(qail_qdrant::PayloadValue::Float(*f)),
+        Value::String(s) => Ok(qail_qdrant::PayloadValue::String(s.clone())),
+        Value::Uuid(u) => Ok(qail_qdrant::PayloadValue::String(u.to_string())),
+        Value::Json(s) => Ok(qail_qdrant::PayloadValue::String(s.clone())),
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(payload_value_from_ast(item)?);
             }
-            Some(qail_qdrant::PayloadValue::List(out))
+            Ok(qail_qdrant::PayloadValue::List(out))
         }
-        _ => None,
+        _ => Err(ApiError::bad_request(
+            "INVALID_QDRANT_PAYLOAD",
+            "Qdrant payload values support only null, bool, number, string, UUID, JSON string, and arrays",
+        )),
     }
 }
 
@@ -1184,6 +1193,17 @@ mod tests {
         let point = extract_upsert_point(&cmd).unwrap();
 
         assert!(!point.payload.contains_key(ORIGINAL_POINT_ID_PAYLOAD_KEY));
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_unsupported_payload_values() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value("blob", Value::Bytes(vec![1, 2, 3]));
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]

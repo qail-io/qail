@@ -162,6 +162,11 @@ fn error_code_bad_request_codes_are_400() {
         "DECODE_ERROR",
         "UNSUPPORTED_ACTION",
         "MISSING_VECTOR",
+        "MISSING_VECTOR_SIZE",
+        "MISSING_POINT_ID",
+        "INVALID_POINT_ID",
+        "INVALID_VECTOR",
+        "INVALID_QDRANT_PAYLOAD",
     ] {
         let err = ApiError::bad_request(code, "test");
         assert_eq!(
