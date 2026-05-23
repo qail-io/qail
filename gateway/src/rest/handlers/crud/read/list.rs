@@ -891,11 +891,23 @@ fn string_contains(value: &Value, pattern: &QailValue) -> bool {
     actual.contains(expected)
 }
 
+fn present_non_null_json(value: Option<&Value>) -> Option<&Value> {
+    value.filter(|value| !value.is_null())
+}
+
+fn qail_value_is_sql_null(value: &QailValue) -> bool {
+    matches!(value, QailValue::Null | QailValue::NullUuid)
+}
+
 fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailValue) -> bool {
     let value = row_field(row, column);
     match op {
         Operator::Eq => value.is_some_and(|value| qail_value_matches_json(expected, value)),
-        Operator::Ne => value.is_none_or(|value| !qail_value_matches_json(expected, value)),
+        Operator::Ne => {
+            !qail_value_is_sql_null(expected)
+                && present_non_null_json(value)
+                    .is_some_and(|value| !qail_value_matches_json(expected, value))
+        }
         Operator::IsNull => value.is_none_or(Value::is_null),
         Operator::IsNotNull => value.is_some_and(|value| !value.is_null()),
         Operator::In => match expected {
@@ -907,11 +919,14 @@ fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailVa
             _ => false,
         },
         Operator::NotIn => match expected {
-            QailValue::Array(items) => value.is_none_or(|value| {
-                !items
-                    .iter()
-                    .any(|item| qail_value_matches_json(item, value))
-            }),
+            QailValue::Array(items) => {
+                !items.iter().any(qail_value_is_sql_null)
+                    && present_non_null_json(value).is_some_and(|value| {
+                        !items
+                            .iter()
+                            .any(|item| qail_value_matches_json(item, value))
+                    })
+            }
             _ => false,
         },
         Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => value
@@ -927,8 +942,12 @@ fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailVa
         Operator::Contains => value.is_some_and(|value| string_contains(value, expected)),
         Operator::ILike => value.is_some_and(|value| string_like(value, expected, true)),
         Operator::Fuzzy => value.is_some_and(|value| string_fuzzy(value, expected)),
-        Operator::NotLike => value.is_none_or(|value| !string_like(value, expected, false)),
-        Operator::NotILike => value.is_none_or(|value| !string_like(value, expected, true)),
+        Operator::NotLike => {
+            present_non_null_json(value).is_some_and(|value| !string_like(value, expected, false))
+        }
+        Operator::NotILike => {
+            present_non_null_json(value).is_some_and(|value| !string_like(value, expected, true))
+        }
         _ => false,
     }
 }
@@ -1058,6 +1077,130 @@ mod tests {
             rows.is_empty(),
             "branch replay must treat '_' as a SQL LIKE wildcard"
         );
+    }
+
+    #[test]
+    fn branch_read_constraints_negative_filters_exclude_null_and_missing_rows() {
+        let filters = vec![(
+            "status".to_string(),
+            Operator::Ne,
+            QailValue::String("archived".to_string()),
+        )];
+        let mut rows = vec![
+            json!({"id": 1, "status": "open"}),
+            json!({"id": 2, "status": "archived"}),
+            json!({"id": 3, "status": null}),
+            json!({"id": 4}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                cursor: None,
+                sort: None,
+                default_sort_column: "id",
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![json!({"id": 1, "status": "open"})]);
+    }
+
+    #[test]
+    fn branch_read_constraints_not_in_excludes_null_missing_and_null_rhs() {
+        let mut rows = vec![
+            json!({"id": 1, "status": "open"}),
+            json!({"id": 2, "status": "archived"}),
+            json!({"id": 3, "status": null}),
+            json!({"id": 4}),
+        ];
+        let filters = vec![(
+            "status".to_string(),
+            Operator::NotIn,
+            QailValue::Array(vec![QailValue::String("archived".to_string())]),
+        )];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                cursor: None,
+                sort: None,
+                default_sort_column: "id",
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![json!({"id": 1, "status": "open"})]);
+
+        let mut rows = vec![json!({"id": 1, "status": "open"})];
+        let filters = vec![(
+            "status".to_string(),
+            Operator::NotIn,
+            QailValue::Array(vec![QailValue::Null]),
+        )];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                cursor: None,
+                sort: None,
+                default_sort_column: "id",
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .unwrap();
+
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn branch_read_constraints_not_like_excludes_null_and_missing_rows() {
+        let filters = vec![(
+            "name".to_string(),
+            Operator::NotLike,
+            QailValue::String("A%".to_string()),
+        )];
+        let mut rows = vec![
+            json!({"id": 1, "name": "Beta"}),
+            json!({"id": 2, "name": "Alice"}),
+            json!({"id": 3, "name": null}),
+            json!({"id": 4}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                cursor: None,
+                sort: None,
+                default_sort_column: "id",
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![json!({"id": 1, "name": "Beta"})]);
     }
 
     #[test]
