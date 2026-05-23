@@ -57,6 +57,12 @@ fn test_parse_filters_checked_rejects_invalid_filter_column() {
 }
 
 #[test]
+fn test_parse_filters_checked_rejects_invalid_percent_encoding() {
+    let err = parse_filters_checked("name.eq=%E0%A4%A").unwrap_err();
+    assert!(err.contains("Invalid percent-encoded filter value"));
+}
+
+#[test]
 fn test_parse_filters_checked_rejects_empty_in_lists() {
     let err = parse_filters_checked("status.in=").unwrap_err();
     assert!(err.contains("requires at least one value"));

@@ -220,9 +220,13 @@ fn parse_filters_impl(
             continue;
         }
 
-        let decoded_value = urlencoding::decode(value)
-            .unwrap_or(std::borrow::Cow::Borrowed(value))
-            .to_string();
+        let decoded_value = match urlencoding::decode(value) {
+            Ok(decoded) => decoded.to_string(),
+            Err(err) if fail_on_invalid_identifier => {
+                return Err(format!("Invalid percent-encoded filter value: {}", err));
+            }
+            Err(_) => value.to_string(),
+        };
 
         let qail_value = if !key_has_operator {
             if let Some((value_op, value_val)) = parse_value_style_operator(&decoded_value) {
