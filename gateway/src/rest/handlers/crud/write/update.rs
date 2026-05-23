@@ -15,20 +15,22 @@ fn reject_tenant_column_update(
 }
 
 fn build_branch_update_overlay_row(
+    base_row: Option<Value>,
     obj: &serde_json::Map<String, Value>,
     pk_column: &str,
     row_id: &str,
     tenant_column: &str,
     tenant_id: Option<&str>,
 ) -> Value {
-    let mut overlay_obj = obj.clone();
-    overlay_obj
-        .entry(pk_column.to_string())
-        .or_insert_with(|| Value::String(row_id.to_string()));
+    let mut overlay_obj = base_row
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    for (key, value) in obj {
+        overlay_obj.insert(key.clone(), value.clone());
+    }
+    overlay_obj.insert(pk_column.to_string(), Value::String(row_id.to_string()));
     if let Some(tid) = tenant_id {
-        overlay_obj
-            .entry(tenant_column.to_string())
-            .or_insert_with(|| Value::String(tid.to_string()));
+        overlay_obj.insert(tenant_column.to_string(), Value::String(tid.to_string()));
     }
     Value::Object(overlay_obj)
 }
@@ -180,6 +182,7 @@ pub(crate) async fn update_handler(
 
     // Branch CoW Write: redirect updates to overlay
     if let Some(branch_name) = branch_ctx.branch_name() {
+        let mut base_row = None;
         let overlay_rows = match read_branch_overlay_rows(&mut conn, branch_name, &table_name).await
         {
             Ok(rows) => rows,
@@ -221,10 +224,12 @@ pub(crate) async fn update_handler(
                     conn.release().await;
                     return Err(ApiError::not_found(format!("row '{}'", id)));
                 }
+                base_row = rows.first().map(row_to_json);
             }
         }
 
         let row_data = build_branch_update_overlay_row(
+            base_row,
             obj,
             &pk,
             &id,
@@ -340,26 +345,59 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("name".to_string(), json!("new-name"));
 
-        let row = build_branch_update_overlay_row(&obj, "id", "42", "tenant_id", Some("tenant-a"));
+        let row =
+            build_branch_update_overlay_row(None, &obj, "id", "42", "tenant_id", Some("tenant-a"));
         assert_eq!(row.get("id"), Some(&json!("42")));
         assert_eq!(row.get("tenant_id"), Some(&json!("tenant-a")));
         assert_eq!(row.get("name"), Some(&json!("new-name")));
     }
 
     #[test]
-    fn build_branch_update_overlay_row_preserves_existing_fields() {
+    fn build_branch_update_overlay_row_merges_base_row_for_first_update() {
         let mut obj = Map::new();
-        obj.insert("id".to_string(), json!("existing-id"));
-        obj.insert("tenant_id".to_string(), json!("tenant-explicit"));
+        obj.insert("status".to_string(), json!("paid"));
 
         let row = build_branch_update_overlay_row(
+            Some(json!({
+                "id": "order-1",
+                "tenant_id": "tenant-a",
+                "status": "draft",
+                "total": 42
+            })),
             &obj,
             "id",
-            "ignored-id",
+            "order-1",
             "tenant_id",
-            Some("ignored-tenant"),
+            Some("tenant-a"),
         );
-        assert_eq!(row.get("id"), Some(&json!("existing-id")));
-        assert_eq!(row.get("tenant_id"), Some(&json!("tenant-explicit")));
+
+        assert_eq!(
+            row,
+            json!({
+                "id": "order-1",
+                "tenant_id": "tenant-a",
+                "status": "paid",
+                "total": 42
+            })
+        );
+    }
+
+    #[test]
+    fn build_branch_update_overlay_row_keeps_overlay_pk_aligned_with_path() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("payload-id"));
+        obj.insert("tenant_id".to_string(), json!("payload-tenant"));
+
+        let row = build_branch_update_overlay_row(
+            Some(json!({"id": "base-id", "tenant_id": "base-tenant"})),
+            &obj,
+            "id",
+            "path-id",
+            "tenant_id",
+            Some("auth-tenant"),
+        );
+
+        assert_eq!(row.get("id"), Some(&json!("path-id")));
+        assert_eq!(row.get("tenant_id"), Some(&json!("auth-tenant")));
     }
 }
