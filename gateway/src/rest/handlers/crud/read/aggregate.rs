@@ -1,5 +1,10 @@
 use super::*;
 
+fn parse_group_by_exprs(group_by: &str) -> Result<Vec<Expr>, ApiError> {
+    let cols = parse_identifier_csv(group_by).map_err(ApiError::parse_error)?;
+    Ok(cols.into_iter().map(Expr::Named).collect())
+}
+
 pub(crate) async fn aggregate_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -73,12 +78,7 @@ pub(crate) async fn aggregate_handler(
 
     // Group by
     if let Some(ref group_by) = params.group_by {
-        let group_exprs: Vec<Expr> = group_by
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| crate::rest::filters::is_safe_identifier(s))
-            .map(|s| Expr::Named(s.to_string()))
-            .collect();
+        let group_exprs = parse_group_by_exprs(group_by)?;
         // Add group-by columns to SELECT so they appear in the result
         for expr in &group_exprs {
             cmd = cmd.column_expr(expr.clone());
@@ -157,4 +157,29 @@ pub(crate) async fn aggregate_handler(
     let count = data.len();
 
     Ok(Json(AggregateResponse { data, count }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_group_by_exprs;
+    use qail_core::ast::Expr;
+
+    #[test]
+    fn group_by_parser_accepts_safe_identifier_list() {
+        let exprs = parse_group_by_exprs("status, tenant_id,status").unwrap();
+        assert_eq!(
+            exprs,
+            vec![
+                Expr::Named("status".to_string()),
+                Expr::Named("tenant_id".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn group_by_parser_rejects_fail_open_inputs() {
+        assert!(parse_group_by_exprs("").is_err());
+        assert!(parse_group_by_exprs("status,").is_err());
+        assert!(parse_group_by_exprs("status,bad-col").is_err());
+    }
 }
