@@ -292,6 +292,13 @@ impl ApiError {
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
             "PARSE_ERROR"
             | "VALIDATION_ERROR"
+            | "INVALID_BRANCH_NAME"
+            | "MISSING_TXN_ID"
+            | "INVALID_TXN_ID"
+            | "INVALID_SAVEPOINT_NAME"
+            | "TXN_REJECTED"
+            | "TENANT_GUARD_PROJECTION"
+            | "ENCODE_ERROR"
             | "EMPTY_QUERY"
             | "EMPTY_BATCH"
             | "DECODE_ERROR"
