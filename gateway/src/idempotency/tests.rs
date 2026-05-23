@@ -47,6 +47,32 @@ fn store_scoped_by_tenant() {
 }
 
 #[test]
+fn store_cache_key_is_not_colon_ambiguous() {
+    let store = IdempotencyStore::new(100, Duration::from_secs(60));
+
+    store.insert(
+        "tenant:user",
+        "abc",
+        CachedResponse {
+            status: 201,
+            body: b"tenant-user-response".to_vec(),
+            content_type: "application/json".to_string(),
+            replay_headers: vec![],
+            request_fingerprint: "POST:/test".to_string(),
+        },
+    );
+
+    assert_ne!(
+        IdempotencyStore::cache_key("tenant:user", "abc"),
+        IdempotencyStore::cache_key("tenant", "user:abc")
+    );
+    assert!(
+        store.get("tenant", "user:abc").is_none(),
+        "colon-bearing scope/key components must not collide"
+    );
+}
+
+#[test]
 fn idempotency_scope_includes_tenant_and_user() {
     let auth = crate::auth::AuthContext {
         user_id: "user-1".to_string(),

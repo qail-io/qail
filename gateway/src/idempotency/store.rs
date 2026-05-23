@@ -49,9 +49,15 @@ impl IdempotencyStore {
         Self::new(100_000, Duration::from_secs(86400))
     }
 
-    /// Build the composite cache key: `{idempotency_scope}:{idempotency_key}`.
+    /// Build the composite cache key from length-prefixed components.
     pub(crate) fn cache_key(idempotency_scope: &str, idempotency_key: &str) -> String {
-        format!("{}:{}", idempotency_scope, idempotency_key)
+        format!(
+            "scope:{}:{}|key:{}:{}",
+            idempotency_scope.len(),
+            idempotency_scope,
+            idempotency_key.len(),
+            idempotency_key
+        )
     }
 
     /// Look up a cached response by idempotency scope + idempotency key.
