@@ -415,6 +415,15 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
             )?;
         }
 
+        if matches!(direction, MigrateDirection::Down) && !cmds.is_empty() {
+            enforce_apply_down_destructive_policy(
+                &mig.display_name,
+                &cmds,
+                policy.destructive,
+                allow_destructive,
+            )?;
+        }
+
         if matches!(direction, MigrateDirection::Up) && mig.phase == MigrationPhase::Contract {
             enforce_contract_safety(
                 &mig.display_name,
@@ -592,6 +601,59 @@ fn enforce_apply_destructive_policy(
         }
     }
     Ok(())
+}
+
+fn enforce_apply_down_destructive_policy(
+    migration_name: &str,
+    cmds: &[Qail],
+    policy_mode: EnforcementMode,
+    allow_destructive: bool,
+) -> Result<()> {
+    let destructive_ops = obvious_destructive_ops(cmds);
+    enforce_apply_destructive_policy(
+        migration_name,
+        &destructive_ops,
+        policy_mode,
+        allow_destructive,
+    )
+}
+
+fn obvious_destructive_ops(cmds: &[Qail]) -> Vec<String> {
+    let mut ops = Vec::new();
+
+    for cmd in cmds {
+        match cmd.action {
+            Action::Drop => ops.push(format!("DROP TABLE {}", cmd.table)),
+            Action::AlterDrop => {
+                for col in &cmd.columns {
+                    match col {
+                        Expr::Named(name) => {
+                            ops.push(format!("DROP COLUMN {}.{}", cmd.table, name));
+                        }
+                        Expr::Def { name, .. } => {
+                            ops.push(format!("DROP COLUMN {}.{}", cmd.table, name));
+                        }
+                        _ => ops.push(format!("DROP COLUMN {}", cmd.table)),
+                    }
+                }
+                if cmd.columns.is_empty() {
+                    ops.push(format!("DROP COLUMN {}", cmd.table));
+                }
+            }
+            Action::DropIndex => {
+                let name = cmd
+                    .index_def
+                    .as_ref()
+                    .map(|idx| idx.name.as_str())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(cmd.table.as_str());
+                ops.push(format!("DROP INDEX {}", name));
+            }
+            _ => {}
+        }
+    }
+
+    ops
 }
 
 async fn execute_migration_commands(
@@ -1498,7 +1560,8 @@ mod tests {
     use super::{
         ApplyDownContext, ApplyReceiptContext, apply_commands_and_record_receipt_atomic,
         apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
-        enforce_apply_destructive_policy, ensure_applied_checksum_matches, ensure_up_down_pairing,
+        enforce_apply_destructive_policy, enforce_apply_down_destructive_policy,
+        ensure_applied_checksum_matches, ensure_up_down_pairing, parse_qail_to_commands_strict,
         parse_rename_expr, should_adopt_existing_error, split_schema_ident,
         strip_optional_if_exists_prefix, validate_receipts_against_local,
     };
@@ -1645,6 +1708,52 @@ mod tests {
             err.to_string().contains("destructive=deny"),
             "error should mention deny policy"
         );
+    }
+
+    #[test]
+    fn down_destructive_policy_deny_blocks_compiled_drop() {
+        let cmds = parse_qail_to_commands_strict("drop table demo")
+            .expect("drop table should compile to AST command");
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd.action, Action::Drop) && cmd.table == "demo"),
+            "test fixture must compile to Action::Drop"
+        );
+
+        let err = enforce_apply_down_destructive_policy(
+            "001_demo.down.qail",
+            &cmds,
+            EnforcementMode::Deny,
+            false,
+        )
+        .expect_err("deny policy should block destructive down migration before execution");
+
+        let msg = err.to_string();
+        assert!(msg.contains("destructive=deny"), "got: {msg}");
+        assert!(msg.contains("DROP TABLE demo"), "got: {msg}");
+    }
+
+    #[test]
+    fn down_destructive_policy_require_flag_blocks_without_allow_flag() {
+        let cmds = parse_qail_to_commands_strict("drop table demo")
+            .expect("drop table should compile to AST command");
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd.action, Action::Drop) && cmd.table == "demo"),
+            "test fixture must compile to Action::Drop"
+        );
+
+        let err = enforce_apply_down_destructive_policy(
+            "001_demo.down.qail",
+            &cmds,
+            EnforcementMode::RequireFlag,
+            false,
+        )
+        .expect_err("require-flag policy should block destructive down migration without flag");
+
+        let msg = err.to_string();
+        assert!(msg.contains("--allow-destructive"), "got: {msg}");
+        assert!(msg.contains("DROP TABLE demo"), "got: {msg}");
     }
 
     #[test]
