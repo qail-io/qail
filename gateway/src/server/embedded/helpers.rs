@@ -96,7 +96,10 @@ pub(super) async fn verify_schema_drift(
             );
         }
         Err(e) => {
-            tracing::warn!("Schema verification skipped (query failed): {}", e);
+            let msg = format!("Schema verification query failed: {}", e);
+            tracing::error!("{}", msg);
+            let _ = conn.rollback_and_release().await;
+            return Err(GatewayError::Database(msg));
         }
     }
     conn.release().await;
