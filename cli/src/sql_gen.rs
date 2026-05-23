@@ -71,6 +71,9 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
                     "ALTER TABLE {} ADD COLUMN {} {}",
                     cmd.table, name, data_type
                 );
+                if !constraints.contains(&Constraint::Nullable) {
+                    sql.push_str(" NOT NULL");
+                }
                 for c in constraints {
                     match c {
                         Constraint::Nullable => {}
@@ -271,6 +274,27 @@ pub fn generate_down_sql(cmd: &Qail) -> String {
 mod tests {
     use super::*;
     use qail_core::ast::IndexDef;
+
+    #[test]
+    fn alter_add_column_sql_renders_not_null_by_default() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "users".to_string(),
+            columns: vec![Expr::Def {
+                name: "email".to_string(),
+                data_type: "TEXT".to_string(),
+                constraints: vec![],
+            }],
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert!(
+            sql.contains("email TEXT NOT NULL"),
+            "add-column SQL should render NOT NULL by default, got: {sql}"
+        );
+    }
 
     #[test]
     fn index_sql_uses_index_def_table_when_command_table_is_empty() {
