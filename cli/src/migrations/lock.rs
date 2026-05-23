@@ -1,6 +1,7 @@
 //! Global advisory lock for migration operations.
 
 use crate::colors::*;
+use crate::util::redact_url;
 use anyhow::{Result, anyhow, bail};
 use qail_core::prelude::Qail;
 use qail_pg::PgDriver;
@@ -76,7 +77,7 @@ fn normalize_scope(lock_scope: Option<&str>) -> Option<String> {
     lock_scope
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
+        .map(|s| redact_url(s).to_ascii_lowercase())
 }
 
 fn scoped_lock_object_id(lock_scope: Option<&str>) -> i32 {
@@ -111,7 +112,10 @@ async fn try_acquire_lock(driver: &mut PgDriver, lock_object_id: i32) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{LOCK_CLASS_ID, LOCK_OBJECT_SEED, acquire_migration_lock, scoped_lock_object_id};
+    use super::{
+        LOCK_CLASS_ID, LOCK_OBJECT_SEED, acquire_migration_lock, normalize_scope,
+        scoped_lock_object_id,
+    };
     use qail_pg::PgDriver;
     use std::time::Instant;
     use tokio::time::Duration;
@@ -130,6 +134,23 @@ mod tests {
         assert_ne!(users_db, inventory_db);
         assert_eq!(LOCK_OBJECT_SEED, scoped_lock_object_id(Some("")));
         assert_eq!(LOCK_OBJECT_SEED, scoped_lock_object_id(None));
+    }
+
+    #[test]
+    fn scoped_lock_url_scope_redacts_password_before_display_and_hashing() {
+        let url = "postgres://qail_lab:s3cret@127.0.0.1:55432/qail_engine_lab";
+        let rotated_password_url = "postgres://qail_lab:new_secret@127.0.0.1:55432/qail_engine_lab";
+
+        let normalized = normalize_scope(Some(url)).expect("non-empty scope");
+        assert_eq!(
+            normalized,
+            "postgres://qail_lab:***@127.0.0.1:55432/qail_engine_lab"
+        );
+        assert!(!normalized.contains("s3cret"));
+        assert_eq!(
+            scoped_lock_object_id(Some(url)),
+            scoped_lock_object_id(Some(rotated_password_url))
+        );
     }
 
     fn lock_test_db_url() -> Option<String> {
