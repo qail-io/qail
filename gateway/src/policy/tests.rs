@@ -874,6 +874,70 @@ fn test_column_blacklist() {
 }
 
 #[test]
+fn test_column_whitelist_matches_qualified_projection_names() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_whitelist".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["users.id".into(), "email".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users").columns(["id", "users.email", "users.password_hash"]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.columns,
+        vec![
+            Expr::Named("id".to_string()),
+            Expr::Named("users.email".to_string())
+        ]
+    );
+}
+
+#[test]
+fn test_column_blacklist_matches_qualified_projection_names() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "hide_password".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users").columns(["users.id", "users.password_hash", "users.email"]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.columns,
+        vec![
+            Expr::Named("users.id".to_string()),
+            Expr::Named("users.email".to_string())
+        ]
+    );
+}
+
+#[test]
 fn test_column_blacklist_rejects_wildcard_projection() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {

@@ -1194,6 +1194,10 @@ impl PolicyEngine {
             return Ok(());
         }
 
+        let allowed: std::collections::HashSet<String> = allowed
+            .iter()
+            .map(|column| Self::normalized_policy_column(column))
+            .collect();
         let mut filtered = Vec::with_capacity(cmd.columns.len());
         for expr in &cmd.columns {
             let name = Self::projection_column_name(expr).ok_or_else(|| {
@@ -1208,7 +1212,8 @@ impl PolicyEngine {
                     name
                 )));
             }
-            if allowed.iter().any(|a| a == name) {
+            let normalized_name = Self::normalized_policy_column(name);
+            if allowed.contains(&normalized_name) {
                 filtered.push(expr.clone());
             }
         }
@@ -1237,6 +1242,10 @@ impl PolicyEngine {
             ));
         }
 
+        let denied: std::collections::HashSet<String> = denied
+            .iter()
+            .map(|column| Self::normalized_policy_column(column))
+            .collect();
         let mut filtered = Vec::with_capacity(cmd.columns.len());
         for expr in &cmd.columns {
             let name = Self::projection_column_name(expr).ok_or_else(|| {
@@ -1251,7 +1260,8 @@ impl PolicyEngine {
                     name
                 )));
             }
-            if !denied.iter().any(|d| d == name) {
+            let normalized_name = Self::normalized_policy_column(name);
+            if !denied.contains(&normalized_name) {
                 filtered.push(expr.clone());
             }
         }
