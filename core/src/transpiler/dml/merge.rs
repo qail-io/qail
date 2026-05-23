@@ -1,7 +1,7 @@
 //! PostgreSQL MERGE SQL generation.
 
 use crate::ast::{
-    Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
+    Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
@@ -367,10 +367,16 @@ fn render_named_expr(name: &str, generator: &dyn SqlGenerator) -> String {
 }
 
 fn validate_merge_shape(merge: &Merge) -> Option<String> {
-    if let MergeSource::Table { name, .. } = &merge.source
-        && name.trim().is_empty()
-    {
-        return Some("MERGE requires a USING source table or query".to_string());
+    match &merge.source {
+        MergeSource::Table { name, .. } if name.trim().is_empty() => {
+            return Some("MERGE requires a USING source table or query".to_string());
+        }
+        MergeSource::Query { query, .. } => {
+            if let Some(error) = validate_merge_source_query(query) {
+                return Some(error);
+            }
+        }
+        _ => {}
     }
 
     for clause in &merge.clauses {
@@ -399,6 +405,33 @@ fn validate_merge_shape(merge: &Merge) -> Option<String> {
                 }
             }
             _ => {}
+        }
+    }
+
+    None
+}
+
+fn validate_merge_source_query(query: &Qail) -> Option<String> {
+    if !matches!(query.action, Action::Get | Action::With) {
+        return Some(format!(
+            "MERGE source query must be read-only SELECT, got {}",
+            query.action
+        ));
+    }
+
+    for cte in &query.ctes {
+        if let Some(error) = validate_merge_source_query(&cte.base_query) {
+            return Some(error);
+        }
+        if let Some(ref recursive_query) = cte.recursive_query
+            && let Some(error) = validate_merge_source_query(recursive_query)
+        {
+            return Some(error);
+        }
+    }
+    for (_, set_query) in &query.set_ops {
+        if let Some(error) = validate_merge_source_query(set_query) {
+            return Some(error);
         }
     }
 

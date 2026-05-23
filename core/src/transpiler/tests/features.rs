@@ -304,6 +304,35 @@ fn test_merge_postgres_rejects_invalid_action_shape() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_mutating_source_query_to_sql() {
+    let cmd = Qail::merge_into("users")
+        .using_query_as(Qail::del("staging_users"), "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "/* ERROR: MERGE source query must be read-only SELECT, got DEL */"
+    );
+}
+
+#[test]
+fn test_merge_postgres_rejects_mutating_source_cte_to_sql() {
+    let source = Qail::get("incoming").with("incoming", Qail::add("staging_users"));
+    let cmd = Qail::merge_into("users")
+        .using_query_as(source, "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "/* ERROR: MERGE source query must be read-only SELECT, got ADD */"
+    );
+}
+
+#[test]
 fn test_merge_postgres_renders_complex_action_expressions() {
     let cmd = Qail::merge_into("users")
         .target_alias("u")
