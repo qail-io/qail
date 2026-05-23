@@ -13,6 +13,10 @@ use anyhow::{Result, anyhow};
 use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
+use crate::introspection::{
+    IntrospectedForeignKey, IntrospectedKeyColumn, resolve_introspected_foreign_key,
+    sort_introspected_key_columns,
+};
 use crate::util::{parse_pg_url, redact_url};
 
 /// Shadow database state
@@ -542,7 +546,12 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
 
     // Batch query key_column_usage for FK resolution
     let kcu_cmd = Qail::get("information_schema.key_column_usage")
-        .columns(["table_name", "column_name", "constraint_name"])
+        .columns([
+            "table_name",
+            "column_name",
+            "constraint_name",
+            "ordinal_position",
+        ])
         .filter("table_schema", Operator::Eq, "public");
 
     let kcu_rows = driver
@@ -550,41 +559,59 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query key columns: {}", e))?;
 
-    let mut constraint_cols: std::collections::HashMap<String, Vec<(String, String)>> =
+    let mut constraint_cols: std::collections::HashMap<String, Vec<IntrospectedKeyColumn>> =
         std::collections::HashMap::new();
     for row in &kcu_rows {
         let table = row.text(0);
         let column = row.text(1);
         let constraint = row.text(2);
+        let ordinal_position = row
+            .get_string(3)
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
         constraint_cols
             .entry(constraint)
             .or_default()
-            .push((table, column));
+            .push(IntrospectedKeyColumn::new(table, column, ordinal_position));
     }
+    sort_introspected_key_columns(&mut constraint_cols);
 
     // Resolve FKs
     for (fk_name, (ref_name, on_delete, on_update)) in &fk_map {
         let fk_cols = constraint_cols.get(fk_name.as_str());
         let ref_cols = constraint_cols.get(ref_name.as_str());
-        if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols)
-            && fk_list.len() == 1
-            && ref_list.len() == 1
-        {
-            let (fk_table, fk_col) = &fk_list[0];
-            let (ref_table, ref_col) = &ref_list[0];
-            if let Some(table) = schema.tables.get_mut(fk_table.as_str()) {
-                for col in table.columns.iter_mut() {
-                    if col.name == *fk_col {
-                        col.foreign_key = Some(qail_core::migrate::ForeignKey {
-                            table: ref_table.clone(),
-                            column: ref_col.clone(),
-                            on_delete: on_delete.clone(),
-                            on_update: on_update.clone(),
-                            deferrable: qail_core::migrate::schema::Deferrable::NotDeferrable,
-                        });
+
+        let Some((fk_list, ref_list)) = fk_cols.zip(ref_cols) else {
+            continue;
+        };
+
+        match resolve_introspected_foreign_key(
+            fk_name,
+            fk_list,
+            ref_list,
+            on_delete,
+            on_update,
+            qail_core::migrate::schema::Deferrable::NotDeferrable,
+        ) {
+            Some(IntrospectedForeignKey::Single {
+                table,
+                column,
+                foreign_key,
+            }) => {
+                if let Some(table) = schema.tables.get_mut(table.as_str()) {
+                    for col in table.columns.iter_mut() {
+                        if col.name == column {
+                            col.foreign_key = Some(foreign_key.clone());
+                        }
                     }
                 }
             }
+            Some(IntrospectedForeignKey::Multi { table, foreign_key }) => {
+                if let Some(table) = schema.tables.get_mut(table.as_str()) {
+                    table.multi_column_fks.push(foreign_key);
+                }
+            }
+            None => {}
         }
     }
 
