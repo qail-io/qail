@@ -1407,6 +1407,42 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_merge_rejects_mutating_source_query() {
+        use qail_core::ast::{Expr, Operator};
+
+        let source = Qail::del("staging_users");
+        let cmd = Qail::merge_into("users")
+            .using_query_as(source, "s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating source must fail");
+        assert!(
+            err.to_string()
+                .contains("MERGE source query must be read-only SELECT"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_merge_rejects_mutating_source_cte() {
+        use qail_core::ast::{Expr, Operator};
+
+        let source = Qail::get("incoming").with("incoming", Qail::add("staging_users"));
+        let cmd = Qail::merge_into("users")
+            .using_query_as(source, "s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating CTE source must fail");
+        assert!(
+            err.to_string()
+                .contains("MERGE source query must be read-only SELECT"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_encode_merge_complex_expressions_and_params() {
         use qail_core::ast::{BinaryOp, Condition, Expr, Operator, Value};
 

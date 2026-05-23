@@ -4,8 +4,8 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Merge, MergeAction, MergeMatchKind,
-    MergeSource, Qail, SetOp, SortOrder,
+    Action, CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Merge, MergeAction,
+    MergeMatchKind, MergeSource, Qail, SetOp, SortOrder,
 };
 
 use super::helpers::write_usize;
@@ -735,12 +735,16 @@ pub fn encode_merge(
 }
 
 fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeError> {
-    if let MergeSource::Table { name, .. } = &merge.source
-        && name.trim().is_empty()
-    {
-        return Err(crate::protocol::EncodeError::InvalidAst(
-            "MERGE requires a USING source table or query".to_string(),
-        ));
+    match &merge.source {
+        MergeSource::Table { name, .. } if name.trim().is_empty() => {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "MERGE requires a USING source table or query".to_string(),
+            ));
+        }
+        MergeSource::Query { query, .. } => {
+            validate_merge_source_query(query)?;
+        }
+        _ => {}
     }
     if merge.on.is_empty() {
         return Err(crate::protocol::EncodeError::InvalidAst(
@@ -790,6 +794,27 @@ fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeErro
             }
             _ => {}
         }
+    }
+
+    Ok(())
+}
+
+fn validate_merge_source_query(query: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    if !matches!(query.action, Action::Get | Action::With) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "MERGE source query must be read-only SELECT, got {}",
+            query.action
+        )));
+    }
+
+    for cte in &query.ctes {
+        validate_merge_source_query(&cte.base_query)?;
+        if let Some(ref recursive_query) = cte.recursive_query {
+            validate_merge_source_query(recursive_query)?;
+        }
+    }
+    for (_, set_query) in &query.set_ops {
+        validate_merge_source_query(set_query)?;
     }
 
     Ok(())
