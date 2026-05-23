@@ -72,6 +72,9 @@ pub struct ResponseMetadata {
     /// Execution time in milliseconds (server-side).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
+    /// Continuation token for paginated backends that use opaque or point-id offsets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_page_offset: Option<serde_json::Value>,
 }
 
 /// Fast query response (array-of-arrays, no column names)

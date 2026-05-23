@@ -119,6 +119,7 @@ pub(super) async fn execute_qail_cmd_fast(
         metadata: Some(crate::handler::ResponseMetadata {
             request_id,
             duration_ms: Some(duration_ms),
+            next_page_offset: None,
         }),
     }))
 }
@@ -187,6 +188,7 @@ pub(super) async fn execute_qail_cmd(
             response.metadata = Some(crate::handler::ResponseMetadata {
                 request_id,
                 duration_ms: None, // Cached
+                next_page_offset: None,
             });
             return Ok(Json(response));
         }
@@ -266,6 +268,7 @@ pub(super) async fn execute_qail_cmd(
         metadata: Some(crate::handler::ResponseMetadata {
             request_id,
             duration_ms: Some(duration_ms),
+            next_page_offset: None,
         }),
     };
 

@@ -7,7 +7,7 @@ use axum::response::Json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use super::QueryResponse;
+use super::{QueryResponse, ResponseMetadata};
 use crate::GatewayState;
 use crate::middleware::ApiError;
 
@@ -93,15 +93,21 @@ pub(super) async fn execute_qdrant_cmd(
         }
 
         Action::Scroll => {
+            let scroll_offset = qdrant_scroll_offset_from_cmd(&cmd)?;
             let result = if must_conditions.is_empty() && should_groups.is_empty() {
-                conn.scroll(collection, limit_val as u32, None, cmd.with_vector)
-                    .await
-                    .map_err(|e| qdrant_err(e, "scroll"))?
+                conn.scroll(
+                    collection,
+                    limit_val as u32,
+                    scroll_offset.as_ref(),
+                    cmd.with_vector,
+                )
+                .await
+                .map_err(|e| qdrant_err(e, "scroll"))?
             } else {
                 conn.scroll_filtered_grouped_cages(
                     collection,
                     limit_val as u32,
-                    None,
+                    scroll_offset.as_ref(),
                     cmd.with_vector,
                     &must_conditions,
                     &should_groups,
@@ -126,7 +132,7 @@ pub(super) async fn execute_qdrant_cmd(
             Ok(Json(QueryResponse {
                 rows,
                 count,
-                metadata: None,
+                metadata: qdrant_scroll_metadata(result.next_offset.as_ref()),
             }))
         }
 
@@ -420,6 +426,37 @@ fn qdrant_limit_from_cmd(
     }
 
     Ok((requested as u64).min(max_result_rows.max(1) as u64))
+}
+
+fn qdrant_scroll_offset_from_cmd(
+    cmd: &qail_core::ast::Qail,
+) -> Result<Option<qail_qdrant::PointId>, ApiError> {
+    use qail_core::ast::CageKind;
+
+    let Some(offset) = cmd.cages.iter().find_map(|c| match c.kind {
+        CageKind::Offset(n) => Some(n),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let offset = u64::try_from(offset)
+        .map_err(|_| ApiError::parse_error("Qdrant scroll offset is too large"))?;
+    Ok(Some(qail_qdrant::PointId::Num(offset)))
+}
+
+fn qdrant_point_id_to_json(id: &qail_qdrant::PointId) -> serde_json::Value {
+    match id {
+        qail_qdrant::PointId::Num(id) => serde_json::Value::Number((*id).into()),
+        qail_qdrant::PointId::Uuid(id) => serde_json::Value::String(id.clone()),
+    }
+}
+
+fn qdrant_scroll_metadata(next_offset: Option<&qail_qdrant::PointId>) -> Option<ResponseMetadata> {
+    next_offset.map(|offset| ResponseMetadata {
+        request_id: String::new(),
+        duration_ms: None,
+        next_page_offset: Some(qdrant_point_id_to_json(offset)),
+    })
 }
 
 fn verify_existing_qdrant_points_tenant_boundary(
@@ -1109,9 +1146,10 @@ mod tests {
         ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
         extract_upsert_point, prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
-        qdrant_payload_matches_filter_cages, qdrant_request_filter_cages,
-        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
-        tenant_scoped_qdrant_point_id, verify_existing_qdrant_points_tenant_boundary,
+        qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
+        qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd, qdrant_upsert_filter_cages,
+        scored_point_to_json, split_filter_conditions, tenant_scoped_qdrant_point_id,
+        verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
     use qail_core::ast::{
@@ -1247,6 +1285,38 @@ mod tests {
 
         let err = qdrant_limit_from_cmd(&cmd, 1_000).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_scroll_offset_uses_numeric_point_offset() {
+        let cmd = Qail::scroll("embeddings").offset(42);
+
+        let offset = qdrant_scroll_offset_from_cmd(&cmd)
+            .expect("scroll offset should parse")
+            .expect("offset should be present");
+
+        assert_eq!(offset, qail_qdrant::PointId::Num(42));
+    }
+
+    #[test]
+    fn qdrant_scroll_metadata_includes_next_page_offset() {
+        let metadata = qdrant_scroll_metadata(Some(&qail_qdrant::PointId::Uuid(
+            "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".to_string(),
+        )))
+        .expect("metadata should be present when Qdrant returns a next offset");
+
+        assert_eq!(
+            metadata.next_page_offset.as_ref(),
+            Some(&serde_json::json!("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"))
+        );
+    }
+
+    #[test]
+    fn qdrant_point_id_to_json_preserves_numeric_offsets() {
+        assert_eq!(
+            qdrant_point_id_to_json(&qail_qdrant::PointId::Num(7)),
+            serde_json::json!(7)
+        );
     }
 
     #[test]

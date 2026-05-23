@@ -412,6 +412,7 @@ pub async fn execute_batch(
         metadata: Some(crate::handler::ResponseMetadata {
             request_id,
             duration_ms: None, // Complex to calculate per-batch accurately here
+            next_page_offset: None,
         }),
     }))
 }

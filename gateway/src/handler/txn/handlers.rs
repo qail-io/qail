@@ -300,6 +300,7 @@ pub async fn txn_query(
         metadata: Some(crate::handler::ResponseMetadata {
             request_id,
             duration_ms: None, // Txn queries don't use the simple QueryTimer yet
+            next_page_offset: None,
         }),
     }))
 }
