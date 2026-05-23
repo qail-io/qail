@@ -101,13 +101,32 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
                 } else {
                     idx.table.as_str()
                 };
-                return format!(
+                let mut sql = format!(
                     "CREATE {}INDEX {} ON {} ({})",
                     unique,
                     idx.name,
                     table,
                     idx.columns.join(", ")
                 );
+                if let Some(method) = &idx.index_type
+                    && !method.trim().is_empty()
+                {
+                    sql = format!(
+                        "CREATE {}INDEX {} ON {} USING {} ({})",
+                        unique,
+                        idx.name,
+                        table,
+                        method.trim(),
+                        idx.columns.join(", ")
+                    );
+                }
+                if let Some(where_clause) = &idx.where_clause
+                    && !where_clause.trim().is_empty()
+                {
+                    sql.push_str(" WHERE ");
+                    sql.push_str(where_clause.trim());
+                }
+                return sql;
             }
             format!("CREATE INDEX ON {} (...)", cmd.table)
         }
@@ -274,6 +293,30 @@ mod tests {
         assert!(
             sql.contains("ON users (email)"),
             "index SQL should use IndexDef table, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn index_sql_renders_method_and_where_clause() {
+        let cmd = Qail {
+            action: Action::Index,
+            table: String::new(),
+            index_def: Some(IndexDef {
+                name: "idx_users_active_email".to_string(),
+                table: "users".to_string(),
+                columns: vec!["email".to_string()],
+                unique: true,
+                index_type: Some("gin".to_string()),
+                where_clause: Some("deleted_at IS NULL".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX idx_users_active_email ON users USING gin (email) WHERE deleted_at IS NULL"
         );
     }
 
