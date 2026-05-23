@@ -191,6 +191,9 @@ fn parse_filters_impl(
         }
         let (key, value) = match pair.split_once('=') {
             Some((k, v)) => (k, v),
+            None if fail_on_invalid_identifier => {
+                return Err(format!("Malformed filter parameter '{}'", pair));
+            }
             None => continue,
         };
 

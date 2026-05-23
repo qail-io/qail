@@ -63,6 +63,12 @@ fn test_parse_filters_checked_rejects_invalid_percent_encoding() {
 }
 
 #[test]
+fn test_parse_filters_checked_rejects_malformed_pairs() {
+    let err = parse_filters_checked("status.eq").unwrap_err();
+    assert!(err.contains("Malformed filter parameter"));
+}
+
+#[test]
 fn test_parse_filters_checked_rejects_empty_in_lists() {
     let err = parse_filters_checked("status.in=").unwrap_err();
     assert!(err.contains("requires at least one value"));
