@@ -10,7 +10,7 @@ use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{Deferrable, FkAction};
 use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
 use qail_core::migrate::{
-    Column, ForeignKey, Index, MultiColumnForeignKey, Schema, Table, to_qail_string,
+    Column, ForeignKey, Generated, Index, MultiColumnForeignKey, Schema, Table, to_qail_string,
 };
 use qail_pg::driver::PgDriver;
 
@@ -175,6 +175,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "numeric_scale",
             "is_nullable",
             "column_default",
+            "is_identity",
+            "identity_generation",
         ])
         .filter("table_schema", Operator::Eq, "public");
 
@@ -200,6 +202,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let is_nullable_str = row.text(7);
         let is_nullable = is_nullable_str == "YES";
         let column_default_raw = row.get_string(8);
+        let is_identity = row.get_string(9).is_some_and(|s| s == "YES");
+        let identity_generation = row.get_string(10);
 
         let is_nextval_default = column_default_raw
             .as_deref()
@@ -217,6 +221,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;
+        col.generated =
+            identity_generation_to_generated(is_identity, identity_generation.as_deref());
 
         // Parse default value (skip nextval sequences — those are serial types)
         if let Some(ref default_str) = column_default_raw {
@@ -224,12 +230,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             if !d.is_empty() {
                 // For serial/bigserial we intentionally omit explicit nextval()
                 // because type already implies sequence-backed default.
-                if !(d.starts_with("nextval(")
-                    && matches!(
-                        col.data_type,
-                        qail_core::migrate::ColumnType::Serial
-                            | qail_core::migrate::ColumnType::BigSerial
-                    ))
+                if !is_identity
+                    && !(d.starts_with("nextval(")
+                        && matches!(
+                            col.data_type,
+                            qail_core::migrate::ColumnType::Serial
+                                | qail_core::migrate::ColumnType::BigSerial
+                        ))
                 {
                     // Keep default expression as-is to preserve casts/functions.
                     col.default = Some(d.to_string());
@@ -1465,6 +1472,25 @@ pub(crate) fn sort_introspected_key_columns(
     }
 }
 
+pub(crate) fn identity_generation_to_generated(
+    is_identity: bool,
+    identity_generation: Option<&str>,
+) -> Option<Generated> {
+    if !is_identity {
+        return None;
+    }
+
+    match identity_generation
+        .unwrap_or("ALWAYS")
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "BY DEFAULT" => Some(Generated::ByDefaultIdentity),
+        _ => Some(Generated::AlwaysIdentity),
+    }
+}
+
 pub(crate) fn resolve_introspected_unique_constraint(
     constraint_name: &str,
     table_name: &str,
@@ -1715,6 +1741,23 @@ mod tests {
 
     fn key(table: &str, column: &str, ordinal_position: i32) -> IntrospectedKeyColumn {
         IntrospectedKeyColumn::new(table.to_string(), column.to_string(), ordinal_position)
+    }
+
+    #[test]
+    fn maps_identity_generation_to_generated_variants() {
+        assert!(matches!(
+            identity_generation_to_generated(true, Some("ALWAYS")),
+            Some(Generated::AlwaysIdentity)
+        ));
+        assert!(matches!(
+            identity_generation_to_generated(true, Some("BY DEFAULT")),
+            Some(Generated::ByDefaultIdentity)
+        ));
+    }
+
+    #[test]
+    fn ignores_identity_generation_when_column_is_not_identity() {
+        assert!(identity_generation_to_generated(false, Some("BY DEFAULT")).is_none());
     }
 
     #[test]
