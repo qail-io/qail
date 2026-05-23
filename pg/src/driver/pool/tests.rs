@@ -456,6 +456,45 @@ fn test_parse_pg_url_strips_query_string() {
 }
 
 #[test]
+fn test_parse_pg_url_defaults_port_only_when_omitted() {
+    let (host, port, user, db, password) =
+        parse_pg_url("postgresql://alice:secret@db.internal/app").unwrap();
+    assert_eq!(host, "db.internal");
+    assert_eq!(port, 5432);
+    assert_eq!(user, "alice");
+    assert_eq!(db, "app");
+    assert_eq!(password, Some("secret".to_string()));
+}
+
+#[test]
+fn test_from_qail_config_rejects_non_numeric_postgres_port() {
+    let mut qail = qail_core::config::QailConfig::default();
+    qail.postgres.url = "postgres://app@db.example.com:notaport/app".to_string();
+
+    let err = match PoolConfig::from_qail_config(&qail) {
+        Ok(_) => panic!("non-numeric URL port must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+
+    assert!(err.contains("Invalid PostgreSQL URL port 'notaport'"));
+}
+
+#[test]
+fn test_from_qail_config_rejects_out_of_range_postgres_port() {
+    let mut qail = qail_core::config::QailConfig::default();
+    qail.postgres.url = "postgres://app@db.example.com:70000/app".to_string();
+
+    let err = match PoolConfig::from_qail_config(&qail) {
+        Ok(_) => panic!("out-of-range URL port must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+
+    assert!(err.contains("Invalid PostgreSQL URL port '70000'"));
+}
+
+#[test]
 fn test_parse_bool_param_variants() {
     assert_eq!(parse_bool_param("true"), Some(true));
     assert_eq!(parse_bool_param("YES"), Some(true));

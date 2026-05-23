@@ -572,9 +572,25 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
     };
 
     let (host, port) = if host_port.contains(':') {
-        let mut parts = host_port.split(':');
+        let mut parts = host_port.splitn(2, ':');
         let h = parts.next().unwrap_or("localhost").to_string();
-        let p = parts.next().and_then(|s| s.parse().ok()).unwrap_or(5432u16);
+        let port_str = parts.next().unwrap_or("");
+        if port_str.is_empty() {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL port: missing port after ':'".to_string(),
+            ));
+        }
+        let p = port_str.parse::<u16>().map_err(|_| {
+            PgError::Connection(format!(
+                "Invalid PostgreSQL URL port '{}': expected a number from 1 to 65535",
+                port_str
+            ))
+        })?;
+        if p == 0 {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL port '0': expected a number from 1 to 65535".to_string(),
+            ));
+        }
         (h, p)
     } else {
         (host_port.to_string(), 5432u16)
