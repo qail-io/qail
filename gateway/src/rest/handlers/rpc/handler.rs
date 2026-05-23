@@ -44,6 +44,18 @@ fn scalar_arg_matches_tenant(value: &Value, tenant_id: &str) -> bool {
     }
 }
 
+fn rpc_tenant_arg_index(
+    signature: Option<&RpcCallableSignature>,
+    tenant_column: &str,
+) -> Option<usize> {
+    signature.and_then(|signature| {
+        signature.arg_names.iter().position(|name| {
+            name.as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(tenant_column))
+        })
+    })
+}
+
 fn enforce_rpc_tenant_arg_boundary(
     args: Option<&Value>,
     signature: Option<&RpcCallableSignature>,
@@ -51,7 +63,7 @@ fn enforce_rpc_tenant_arg_boundary(
     tenant_column: &str,
     function_name: &str,
 ) -> Result<(), ApiError> {
-    let (Some(args), Some(tenant_id)) = (args, tenant_id) else {
+    let Some(tenant_id) = tenant_id else {
         return Ok(());
     };
     let tenant_column = tenant_column.trim().to_ascii_lowercase();
@@ -59,30 +71,16 @@ fn enforce_rpc_tenant_arg_boundary(
         return Ok(());
     }
 
+    let tenant_arg_index = rpc_tenant_arg_index(signature, &tenant_column);
     let tenant_arg = match args {
-        Value::Object(map) => map.iter().find_map(|(key, value)| {
+        Some(Value::Object(map)) => map.iter().find_map(|(key, value)| {
             (key.trim().eq_ignore_ascii_case(&tenant_column)).then_some(value)
         }),
-        Value::Array(items) => signature.and_then(|signature| {
-            signature
-                .arg_names
-                .iter()
-                .enumerate()
-                .find_map(|(idx, name)| {
-                    name.as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(&tenant_column))
-                        .then(|| items.get(idx))
-                        .flatten()
-                })
-        }),
-        scalar => signature.and_then(|signature| {
-            signature
-                .arg_names
-                .first()
-                .and_then(|name| name.as_deref())
-                .is_some_and(|name| name.eq_ignore_ascii_case(&tenant_column))
-                .then_some(scalar)
-        }),
+        Some(Value::Array(items)) => tenant_arg_index.and_then(|idx| items.get(idx)),
+        Some(scalar) => tenant_arg_index
+            .is_some_and(|idx| idx == 0)
+            .then_some(scalar),
+        None => None,
     };
 
     if let Some(value) = tenant_arg
@@ -90,6 +88,13 @@ fn enforce_rpc_tenant_arg_boundary(
     {
         return Err(ApiError::forbidden(format!(
             "RPC tenant argument '{}' for '{}' must match authenticated tenant",
+            tenant_column, function_name
+        )));
+    }
+
+    if tenant_arg.is_none() && tenant_arg_index.is_some() {
+        return Err(ApiError::forbidden(format!(
+            "RPC tenant argument '{}' for '{}' must be supplied and match authenticated tenant",
             tenant_column, function_name
         )));
     }
@@ -476,6 +481,57 @@ mod tests {
             Some("tenant-a"),
             "tenant_id",
             "api.delete_order",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_rejects_omitted_defaulted_named_tenant_arg() {
+        let args = json!({"order_id": "order-1"});
+        let mut signature = signature_with_args(&[Some("order_id"), Some("tenant_id")]);
+        signature.default_args = 1;
+
+        let err = enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            Some(&signature),
+            Some("tenant-a"),
+            "tenant_id",
+            "api.close_order",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_rejects_omitted_defaulted_positional_tenant_arg() {
+        let args = json!(["order-1"]);
+        let mut signature = signature_with_args(&[Some("order_id"), Some("tenant_id")]);
+        signature.default_args = 1;
+
+        let err = enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            Some(&signature),
+            Some("tenant-a"),
+            "tenant_id",
+            "api.close_order",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_allows_omitted_arg_when_signature_has_no_tenant_arg() {
+        let args = json!({"order_id": "order-1"});
+        let signature = signature_with_args(&[Some("order_id")]);
+
+        enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            Some(&signature),
+            Some("tenant-a"),
+            "tenant_id",
+            "api.close_order",
         )
         .unwrap();
     }

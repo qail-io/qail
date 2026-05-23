@@ -165,12 +165,18 @@ impl AuthContext {
             .unwrap_or("")
             .to_string();
 
-        if !agent_id.is_empty() && !tenant_id.is_empty() {
+        let rls = if !agent_id.is_empty() && !tenant_id.is_empty() {
             qail_core::rls::RlsContext::tenant_and_agent(&tenant_id, &agent_id)
         } else if !agent_id.is_empty() {
             qail_core::rls::RlsContext::agent(&agent_id)
         } else {
             qail_core::rls::RlsContext::tenant(&tenant_id)
+        };
+
+        if self.is_authenticated() {
+            rls.with_user(&self.user_id)
+        } else {
+            rls
         }
     }
 }

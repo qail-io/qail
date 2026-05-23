@@ -474,10 +474,10 @@ fn qdrant_point_id_payload_value(id: &qail_qdrant::PointId) -> qail_qdrant::Payl
 
 fn prepare_tenant_scoped_qdrant_upsert_point(point: &mut qail_qdrant::Point, tenant_id: &str) {
     let original_id = point.id.clone();
-    point
-        .payload
-        .entry(ORIGINAL_POINT_ID_PAYLOAD_KEY.to_string())
-        .or_insert_with(|| qdrant_point_id_payload_value(&original_id));
+    point.payload.insert(
+        ORIGINAL_POINT_ID_PAYLOAD_KEY.to_string(),
+        qdrant_point_id_payload_value(&original_id),
+    );
     point.id = tenant_scoped_qdrant_point_id(&original_id, tenant_id);
 }
 
@@ -518,6 +518,7 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
                         )
                     })?);
                 }
+                _ if is_payload_cage && field == ORIGINAL_POINT_ID_PAYLOAD_KEY => {}
                 _ if is_payload_cage => {
                     if let Some(v) = payload_value_from_ast(&cond.value) {
                         payload.insert(field.to_string(), v);
@@ -1028,6 +1029,22 @@ mod tests {
     }
 
     #[test]
+    fn tenant_scoped_qdrant_upsert_overwrites_client_original_id_payload() {
+        let mut point = qail_qdrant::Point::new_num(7, vec![0.1, 0.2]);
+        point.payload.insert(
+            ORIGINAL_POINT_ID_PAYLOAD_KEY.to_string(),
+            qail_qdrant::PayloadValue::String("victim-id".to_string()),
+        );
+
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a");
+
+        assert_eq!(
+            point.payload.get(ORIGINAL_POINT_ID_PAYLOAD_KEY),
+            Some(&qail_qdrant::PayloadValue::Integer(7))
+        );
+    }
+
+    #[test]
     fn qdrant_limit_is_clamped_to_gateway_max_rows() {
         let cmd = Qail::search("embeddings")
             .vector(vec![0.1, 0.2])
@@ -1087,6 +1104,18 @@ mod tests {
 
         assert!(point.payload.contains_key("tenant_id"));
         assert!(!point.payload.contains_key("region"));
+    }
+
+    #[test]
+    fn extract_upsert_point_drops_reserved_original_id_payload() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value(ORIGINAL_POINT_ID_PAYLOAD_KEY, "victim-id");
+
+        let point = extract_upsert_point(&cmd).unwrap();
+
+        assert!(!point.payload.contains_key(ORIGINAL_POINT_ID_PAYLOAD_KEY));
     }
 
     #[test]

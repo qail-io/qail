@@ -209,6 +209,15 @@ impl RlsContext {
         }
     }
 
+    /// Attach an authenticated user ID to an existing tenant/global context.
+    ///
+    /// User scope is orthogonal to tenant/agent scope: PostgreSQL policies can
+    /// use both `app.current_tenant_id` and `app.current_user_id`.
+    pub fn with_user(mut self, user_id: &str) -> Self {
+        self.user_id = user_id.to_string();
+        self
+    }
+
     /// Returns true if this context has a tenant scope.
     pub fn has_tenant(&self) -> bool {
         !self.tenant_id.is_empty()
@@ -376,6 +385,17 @@ mod tests {
         assert!(!ctx.is_global());
         assert!(ctx.has_user());
         assert_eq!(ctx.user_id(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_with_user_preserves_tenant_scope() {
+        let ctx = RlsContext::tenant("tenant-1").with_user("user-1");
+
+        assert_eq!(ctx.tenant_id, "tenant-1");
+        assert_eq!(ctx.user_id(), "user-1");
+        assert!(ctx.has_tenant());
+        assert!(ctx.has_user());
+        assert!(!ctx.bypasses_rls());
     }
 
     #[test]

@@ -252,6 +252,28 @@ fn test_operator_role_does_not_bypass_rls() {
 }
 
 #[test]
+fn to_rls_context_carries_authenticated_user_id() {
+    let auth = AuthContext {
+        user_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-123".to_string()),
+        claims: HashMap::new(),
+    };
+
+    let rls = auth.to_rls_context();
+
+    assert_eq!(rls.tenant_id, "tenant-123");
+    assert_eq!(rls.user_id(), "550e8400-e29b-41d4-a716-446655440000");
+}
+
+#[test]
+fn to_rls_context_does_not_carry_anonymous_user_id() {
+    let rls = AuthContext::anonymous().to_rls_context();
+
+    assert!(rls.user_id().is_empty());
+}
+
+#[test]
 fn token_expiry_helpers_parse_numeric_and_string_exp() {
     let numeric = AuthContext {
         user_id: "u".to_string(),

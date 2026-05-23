@@ -472,6 +472,33 @@ async fn inspect_backfill_pk_kind(
     })
 }
 
+async fn update_backfill_checkpoint(
+    pg: &mut qail_pg::PgDriver,
+    migration_version: &str,
+    pk_kind: BackfillPkKind,
+    rows_updated: i64,
+    last_pk_int: i64,
+    last_pk_text: Option<String>,
+) -> Result<()> {
+    let mut checkpoint_cmd = Qail::set("_qail_backfill_checkpoints")
+        .set_value("rows_processed", rows_updated)
+        .set_value("updated_at", qail_core::ast::builders::now())
+        .where_eq("migration_version", migration_version);
+    checkpoint_cmd = match pk_kind {
+        BackfillPkKind::Integer => checkpoint_cmd
+            .set_value("last_pk", last_pk_int)
+            .set_value("last_pk_text", Option::<String>::None),
+        BackfillPkKind::TextComparable => checkpoint_cmd
+            .set_value("last_pk", 0i64)
+            .set_value("last_pk_text", last_pk_text),
+    };
+
+    pg.execute(&checkpoint_cmd)
+        .await
+        .context("Failed to update backfill checkpoint")?;
+    Ok(())
+}
+
 pub(super) async fn run_chunked_backfill(
     pg: &mut qail_pg::PgDriver,
     migration_version: &str,
@@ -647,8 +674,28 @@ pub(super) async fn run_chunked_backfill(
         };
         let updated = updated_rows.len() as i64;
         if updated <= 0 {
-            let _ = pg.rollback().await;
-            break;
+            if let Err(err) = update_backfill_checkpoint(
+                pg,
+                migration_version,
+                pk_kind,
+                rows_updated,
+                next_pk_int,
+                next_pk_text.clone(),
+            )
+            .await
+            {
+                let _ = pg.rollback().await;
+                return Err(err);
+            }
+
+            pg.commit()
+                .await
+                .context("Failed to commit backfill checkpoint-only chunk transaction")?;
+
+            last_pk_int = next_pk_int;
+            last_pk_text = next_pk_text;
+            chunks += 1;
+            continue;
         }
 
         if let Err(err) = maybe_failpoint("backfill.after_update_before_checkpoint") {
@@ -658,23 +705,16 @@ pub(super) async fn run_chunked_backfill(
 
         let next_rows_updated = rows_updated.saturating_add(updated);
 
-        let mut checkpoint_cmd = Qail::set("_qail_backfill_checkpoints")
-            .set_value("rows_processed", next_rows_updated)
-            .set_value("updated_at", qail_core::ast::builders::now())
-            .where_eq("migration_version", migration_version);
-        checkpoint_cmd = match pk_kind {
-            BackfillPkKind::Integer => checkpoint_cmd
-                .set_value("last_pk", next_pk_int)
-                .set_value("last_pk_text", Option::<String>::None),
-            BackfillPkKind::TextComparable => checkpoint_cmd
-                .set_value("last_pk", 0i64)
-                .set_value("last_pk_text", next_pk_text.clone()),
-        };
-        let checkpoint_res = pg
-            .execute(&checkpoint_cmd)
-            .await
-            .context("Failed to update backfill checkpoint");
-        if let Err(err) = checkpoint_res {
+        if let Err(err) = update_backfill_checkpoint(
+            pg,
+            migration_version,
+            pk_kind,
+            next_rows_updated,
+            next_pk_int,
+            next_pk_text.clone(),
+        )
+        .await
+        {
             let _ = pg.rollback().await;
             return Err(err);
         }
