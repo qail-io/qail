@@ -151,8 +151,53 @@ fn projects_all_columns(expr: &Expr) -> bool {
     }
 }
 
-fn projects_real_tenant_column(expr: &Expr, tenant_column: &str) -> bool {
-    matches!(expr, Expr::Named(name) if projected_name_matches_tenant(name, tenant_column))
+fn projection_qualifier<'a>(name: &'a str, tenant_column: &str) -> Option<&'a str> {
+    let trimmed = name.trim().trim_matches('"');
+    let (qualifier, column) = trimmed.rsplit_once('.')?;
+    same_identifier(column, tenant_column).then_some(qualifier.trim_matches('"'))
+}
+
+fn table_ref_qualifiers(cmd: &Qail) -> Vec<String> {
+    let (table_name, qualifier) = table_ref_name_and_qualifier(&cmd.table);
+    let mut qualifiers = Vec::with_capacity(3);
+
+    if !qualifier.is_empty() {
+        qualifiers.push(normalize_identifier_part(&qualifier));
+    }
+    if !table_name.is_empty() {
+        qualifiers.push(normalize_identifier_part(&table_name));
+        if let Some(last) = table_name.rsplit('.').next() {
+            qualifiers.push(normalize_identifier_part(last));
+        }
+    }
+
+    qualifiers.sort();
+    qualifiers.dedup();
+    qualifiers
+}
+
+fn projects_base_tenant_column(cmd: &Qail, expr: &Expr, tenant_column: &str) -> bool {
+    let Expr::Named(name) = expr else {
+        return false;
+    };
+
+    let trimmed = name.trim().trim_matches('"');
+    if same_identifier(trimmed, tenant_column) {
+        return cmd.joins.is_empty();
+    }
+
+    let Some(qualifier) = projection_qualifier(trimmed, tenant_column) else {
+        return false;
+    };
+    let normalized = normalize_identifier_part(qualifier);
+    table_ref_qualifiers(cmd)
+        .iter()
+        .any(|allowed| allowed == &normalized)
+}
+
+fn has_joined_wildcard_projection(cmd: &Qail) -> bool {
+    !cmd.joins.is_empty()
+        && (cmd.columns.is_empty() || cmd.columns.iter().any(projects_all_columns))
 }
 
 fn action_returns_rows_for_guard(action: Action) -> bool {
@@ -520,65 +565,16 @@ pub fn expression_projects_tenant_column(expr: &Expr, tenant_column: &str) -> bo
     }
 }
 
-fn aliases_tenant_column(expr: &Expr, tenant_column: &str) -> bool {
-    match expr {
-        Expr::Aliased { alias, .. }
-        | Expr::Aggregate {
-            alias: Some(alias), ..
-        }
-        | Expr::Cast {
-            alias: Some(alias), ..
-        }
-        | Expr::Case {
-            alias: Some(alias), ..
-        }
-        | Expr::JsonAccess {
-            alias: Some(alias), ..
-        }
-        | Expr::FunctionCall {
-            alias: Some(alias), ..
-        }
-        | Expr::SpecialFunction {
-            alias: Some(alias), ..
-        }
-        | Expr::Binary {
-            alias: Some(alias), ..
-        }
-        | Expr::ArrayConstructor {
-            alias: Some(alias), ..
-        }
-        | Expr::RowConstructor {
-            alias: Some(alias), ..
-        }
-        | Expr::Subscript {
-            alias: Some(alias), ..
-        }
-        | Expr::Collate {
-            alias: Some(alias), ..
-        }
-        | Expr::FieldAccess {
-            alias: Some(alias), ..
-        }
-        | Expr::Subquery {
-            alias: Some(alias), ..
-        }
-        | Expr::Exists {
-            alias: Some(alias), ..
-        } => projected_name_matches_tenant(alias, tenant_column),
-        _ => false,
-    }
-}
-
 /// Returns true when the result row will expose the real tenant column rather
 /// than a user-controlled alias with the same output name.
 pub fn has_verifiable_tenant_projection(cmd: &Qail, tenant_column: &str) -> bool {
     !action_returns_rows_for_guard(cmd.action)
-        || cmd.columns.is_empty()
-        || cmd.columns.iter().any(projects_all_columns)
+        || (cmd.joins.is_empty()
+            && (cmd.columns.is_empty() || cmd.columns.iter().any(projects_all_columns)))
         || cmd
             .columns
             .iter()
-            .any(|expr| projects_real_tenant_column(expr, tenant_column))
+            .any(|expr| projects_base_tenant_column(cmd, expr, tenant_column))
 }
 
 /// Return the configured tenant guard column for a table when row-level
@@ -801,13 +797,23 @@ pub fn ensure_tenant_column_projected(
     }
 
     if cmd.columns.iter().any(|expr| {
-        aliases_tenant_column(expr, tenant_column)
-            && !projects_real_tenant_column(expr, tenant_column)
+        expression_projects_tenant_column(expr, tenant_column)
+            && !projects_base_tenant_column(cmd, expr, tenant_column)
     }) {
         return Err(TenantProjectionError {
             column: tenant_column.to_string(),
             reason: None,
         });
+    }
+
+    if has_joined_wildcard_projection(cmd) {
+        return Err(tenant_projection_error(
+            tenant_column,
+            format!(
+                "Tenant-scoped joined {:?} requires explicit base-table projections",
+                cmd.action
+            ),
+        ));
     }
 
     if has_verifiable_tenant_projection(cmd, tenant_column) {
@@ -817,7 +823,11 @@ pub fn ensure_tenant_column_projected(
     let column = if cmd.joins.is_empty() {
         tenant_column.to_string()
     } else {
-        format!("{}.{}", cmd.table, tenant_column)
+        format!(
+            "{}.{}",
+            table_ref_name_and_qualifier(&cmd.table).1,
+            tenant_column
+        )
     };
     cmd.columns.push(Expr::Named(column));
     Ok(true)

@@ -361,6 +361,62 @@ fn inject_join_tenant_filter_scopes_left_join_on_clause() {
     }));
 }
 
+#[tokio::test]
+async fn prepare_tenant_guarded_query_appends_base_alias_projection_for_join() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::get("orders o")
+        .columns(["o.id", "o.total"])
+        .left_join("source_orders s", "o.id", "s.id");
+
+    let plan = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    assert!(plan.as_ref().is_some_and(|plan| plan.strip_output_column));
+    assert!(cmd.columns.iter().any(|expr| {
+        matches!(expr, qail_core::ast::Expr::Named(name) if name == "o.tenant_id")
+    }));
+    assert!(
+        !cmd.columns.iter().any(|expr| {
+            matches!(expr, qail_core::ast::Expr::Named(name) if name == "orders o.tenant_id")
+        }),
+        "guard projection must use the table alias, not the raw table ref"
+    );
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_rejects_join_tenant_projection_spoof() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::get("orders o")
+        .columns(["o.id", "s.tenant_id"])
+        .left_join("source_orders s", "o.id", "s.id");
+
+    let err = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap_err();
+
+    assert_eq!(err.column, "tenant_id");
+    assert!(
+        err.reason.is_none(),
+        "spoofed tenant output should be rejected as a reserved projection"
+    );
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_rejects_joined_wildcard_projection() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd =
+        qail_core::ast::Qail::get("orders o").left_join("source_orders s", "o.id", "s.id");
+
+    let err = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap_err();
+
+    assert_eq!(err.column, "tenant_id");
+    assert!(
+        err.to_string()
+            .contains("requires explicit base-table projections"),
+        "joined wildcard projections cannot prove which tenant_id reached the verifier"
+    );
+}
+
 #[test]
 fn empty_expected_operator_id_skips_check() {
     let rows = vec![json!({"id": 1, "operator_id": "op-123"})];
