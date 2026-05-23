@@ -297,6 +297,19 @@ fn reject_dangerous_action_blocks_nested_cte_ddl() {
 }
 
 #[test]
+fn reject_dangerous_action_allows_qdrant_collection_management_for_admin_gate() {
+    let mut cmd = qail_core::ast::Qail::get("embeddings");
+    cmd.action = qail_core::ast::Action::CreateCollection;
+
+    reject_dangerous_action(&cmd)
+        .expect("Qdrant collection management must reach the role-aware handler gate");
+
+    cmd.action = qail_core::ast::Action::DeleteCollection;
+    reject_dangerous_action(&cmd)
+        .expect("Qdrant collection delete must reach the role-aware handler gate");
+}
+
+#[test]
 fn reject_non_read_action_blocks_mutations() {
     let cmd = qail_core::ast::Qail::add("orders").set_value("total", 1);
 

@@ -25,11 +25,12 @@ pub(super) async fn execute_qdrant_cmd(
 ) -> Result<Json<QueryResponse>, ApiError> {
     use qail_core::ast::{Action, Distance as CoreDistance};
 
+    ensure_qdrant_collection_management_allowed(auth, &cmd.action)?;
+
     let pool = state.qdrant_pool.as_ref().ok_or_else(|| {
         tracing::error!("Qdrant operation requested but no [qdrant] config");
         ApiError::with_code("QDRANT_NOT_CONFIGURED", "Qdrant not configured")
     })?;
-    ensure_qdrant_collection_management_allowed(auth, &cmd.action)?;
 
     let mut conn = pool.get().await.map_err(|e| {
         tracing::error!("Qdrant pool error: {}", e);
