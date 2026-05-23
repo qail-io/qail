@@ -952,12 +952,14 @@ pub fn encode_value(
             write_param_placeholder(buf, params.len());
         }
         Value::Param(n) => {
-            write_param_placeholder(buf, *n);
+            return Err(EncodeError::InvalidAst(format!(
+                "unresolved positional parameter ${n} cannot be encoded without a bind value"
+            )));
         }
         Value::NamedParam(name) => {
-            params.push(None);
-            write_param_placeholder(buf, params.len());
-            let _ = name;
+            return Err(EncodeError::InvalidAst(format!(
+                "unresolved named parameter :{name} cannot be encoded by the PostgreSQL AST encoder"
+            )));
         }
         Value::Uuid(uuid) => {
             let bytes = uuid.as_bytes();

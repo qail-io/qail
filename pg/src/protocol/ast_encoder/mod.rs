@@ -666,6 +666,40 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_rejects_unresolved_positional_parameter() {
+        use qail_core::ast::{Operator, Value};
+
+        let cmd = Qail::get("users").filter("id", Operator::Eq, Value::Param(1));
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).unwrap_err();
+
+        assert!(matches!(
+            err,
+            EncodeError::InvalidAst(message)
+                if message.contains("unresolved positional parameter $1")
+        ));
+    }
+
+    #[test]
+    fn test_encode_rejects_unresolved_named_parameter() {
+        use qail_core::ast::{Operator, Value};
+
+        let cmd = Qail::get("users").filter(
+            "email",
+            Operator::Eq,
+            Value::NamedParam("email".to_string()),
+        );
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).unwrap_err();
+
+        assert!(matches!(
+            err,
+            EncodeError::InvalidAst(message)
+                if message.contains("unresolved named parameter :email")
+        ));
+    }
+
+    #[test]
     fn test_encode_aggregate_filter_parameterizes_string_values() {
         use qail_core::ast::{AggregateFunc, Condition, Expr, Operator, Value};
 
