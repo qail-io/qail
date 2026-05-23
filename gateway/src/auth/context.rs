@@ -137,7 +137,7 @@ impl AuthContext {
     ///
     /// Mapping:
     /// - `tenant_id` → tenant scope
-    /// - `claims["agent_id"]` → `agent_id`
+    /// - `claims["agent_id"]` → secondary legacy scope only when tenant_id exists
     /// - explicit platform-admin claim + role `administrator` + empty tenant
     ///   scope → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
@@ -158,17 +158,18 @@ impl AuthContext {
         }
 
         let tenant_id = self.tenant_id.clone().unwrap_or_default();
-        let agent_id = self
-            .claims
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let agent_id = if tenant_id.is_empty() {
+            String::new()
+        } else {
+            self.claims
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
 
-        let rls = if !agent_id.is_empty() && !tenant_id.is_empty() {
+        let rls = if !agent_id.is_empty() {
             qail_core::rls::RlsContext::tenant_and_agent(&tenant_id, &agent_id)
-        } else if !agent_id.is_empty() {
-            qail_core::rls::RlsContext::agent(&agent_id)
         } else {
             qail_core::rls::RlsContext::tenant(&tenant_id)
         };

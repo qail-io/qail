@@ -578,6 +578,48 @@ fn legacy_agent_only_claim_does_not_satisfy_tenant_scope() {
 }
 
 #[test]
+fn legacy_agent_only_claim_is_not_promoted_to_rls_scope() {
+    let auth = AuthContext {
+        user_id: "agent-only-user".to_string(),
+        role: "operator".to_string(),
+        tenant_id: None,
+        claims: {
+            let mut claims = HashMap::new();
+            claims.insert("agent_id".to_string(), serde_json::json!("legacy-agent"));
+            claims
+        },
+    };
+
+    let rls = auth.to_rls_context();
+    assert!(
+        !rls.has_agent(),
+        "agent_id without tenant_id must not create an RLS scope"
+    );
+    assert!(
+        !rls.has_tenant(),
+        "agent-only claims must remain tenantless until tenant enrichment succeeds"
+    );
+}
+
+#[test]
+fn legacy_agent_claim_is_kept_as_secondary_scope_when_tenant_exists() {
+    let auth = AuthContext {
+        user_id: "tenant-agent-user".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-123".to_string()),
+        claims: {
+            let mut claims = HashMap::new();
+            claims.insert("agent_id".to_string(), serde_json::json!("legacy-agent"));
+            claims
+        },
+    };
+
+    let rls = auth.to_rls_context();
+    assert_eq!(rls.tenant_id, "tenant-123");
+    assert_eq!(rls.agent_id, "legacy-agent");
+}
+
+#[test]
 fn platform_admin_without_tenant_scope_is_allowed() {
     let auth = AuthContext {
         user_id: "platform-admin".to_string(),
