@@ -730,13 +730,7 @@ pub fn encode_conditions(
                 // Encode the subquery from the value
                 match &cond.value {
                     Value::Subquery(q) => {
-                        let mut sub_buf = BytesMut::with_capacity(128);
-                        let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-                        if let Ok(()) =
-                            super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params)
-                        {
-                            buf.extend_from_slice(&sub_buf);
-                        }
+                        super::super::dml::encode_select(q, buf, params)?;
                     }
                     _ => {
                         // Fallback: render value as raw SQL
@@ -884,14 +878,11 @@ pub fn encode_value(
             buf.extend_from_slice(col.as_bytes());
         }
         Value::Subquery(q) => {
-            let mut sub_buf = BytesMut::with_capacity(128);
-            let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
+            buf.extend_from_slice(b"(");
             match q.action {
-                Action::Get => super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params)?,
+                Action::Get => super::super::dml::encode_select(q, buf, params)?,
                 _ => return Err(super::super::EncodeError::UnsupportedAction(q.action)),
             }
-            buf.extend_from_slice(b"(");
-            buf.extend_from_slice(&sub_buf);
             buf.extend_from_slice(b")");
         }
         Value::Timestamp(ts) => {
@@ -1005,9 +996,9 @@ fn encode_frame_bound(bound: &FrameBound, buf: &mut BytesMut) {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_value;
+    use super::{encode_conditions, encode_value};
     use bytes::BytesMut;
-    use qail_core::ast::Value;
+    use qail_core::ast::{Condition, Expr, Operator, Qail, Value};
     use uuid::Uuid;
 
     #[test]
@@ -1025,5 +1016,52 @@ mod tests {
             params[0].as_deref(),
             Some(b"{b0e72b4f-c883-42ce-a5a9-96de097d6c54}".as_slice())
         );
+    }
+
+    #[test]
+    fn encode_value_subquery_appends_to_outer_params() {
+        let subquery =
+            Qail::get("users")
+                .column("id")
+                .filter("tenant_id", Operator::Eq, "tenant-b");
+        let mut sql = BytesMut::new();
+        let mut params = vec![Some(b"tenant-a".to_vec())];
+
+        encode_value(&Value::Subquery(Box::new(subquery)), &mut sql, &mut params).unwrap();
+
+        let sql = String::from_utf8(sql.to_vec()).unwrap();
+        assert!(
+            sql.contains("$2"),
+            "subquery should continue outer placeholder numbering: {sql}"
+        );
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[1].as_deref(), Some(b"tenant-b".as_slice()));
+    }
+
+    #[test]
+    fn encode_exists_subquery_appends_to_outer_params() {
+        let subquery =
+            Qail::get("users")
+                .column("id")
+                .filter("tenant_id", Operator::Eq, "tenant-b");
+        let cond = Condition {
+            left: Expr::Named("ignored".to_string()),
+            op: Operator::Exists,
+            value: Value::Subquery(Box::new(subquery)),
+            is_array_unnest: false,
+        };
+        let mut sql = BytesMut::new();
+        let mut params = vec![Some(b"tenant-a".to_vec())];
+
+        encode_conditions(&[cond], &mut sql, &mut params).unwrap();
+
+        let sql = String::from_utf8(sql.to_vec()).unwrap();
+        assert!(sql.contains("EXISTS ("), "expected EXISTS SQL: {sql}");
+        assert!(
+            sql.contains("$2"),
+            "EXISTS subquery should continue outer placeholder numbering: {sql}"
+        );
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[1].as_deref(), Some(b"tenant-b".as_slice()));
     }
 }

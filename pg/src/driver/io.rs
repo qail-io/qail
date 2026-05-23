@@ -1078,7 +1078,20 @@ impl PgConnection {
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
-                    if msg_type == b'E' || msg_type == b'A' {
+                    if matches!(
+                        msg_type,
+                        b'E' | b'A'
+                            | b'Z'
+                            | b'C'
+                            | b'1'
+                            | b'2'
+                            | b'3'
+                            | b'n'
+                            | b's'
+                            | b'I'
+                            | b'S'
+                            | b'N'
+                    ) {
                         let msg_bytes = self.buffer.split_to(msg_len + 1);
                         let (msg, _) = match BackendMessage::decode(&msg_bytes) {
                             Ok(decoded) => decoded,
@@ -1100,6 +1113,18 @@ impl PgConnection {
                                         payload,
                                     });
                                 continue;
+                            }
+                            BackendMessage::ReadyForQuery(_)
+                            | BackendMessage::CommandComplete(_)
+                            | BackendMessage::ParseComplete
+                            | BackendMessage::BindComplete
+                            | BackendMessage::CloseComplete
+                            | BackendMessage::NoData
+                            | BackendMessage::PortalSuspended
+                            | BackendMessage::EmptyQueryResponse
+                            | BackendMessage::ParameterStatus { .. }
+                            | BackendMessage::NoticeResponse(_) => {
+                                return Ok(msg_type);
                             }
                             _ => {
                                 return Err(PgError::Protocol(
@@ -1862,6 +1887,38 @@ impl PgConnection {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
+
     fn build_data_row_payload(columns: &[Option<&[u8]>]) -> Bytes {
         let mut payload = Vec::new();
         payload.extend_from_slice(&(columns.len() as i16).to_be_bytes());
@@ -1901,5 +1958,34 @@ mod tests {
             err.to_string()
                 .contains("fast-path expects exactly 4 columns")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_msg_type_fast_rejects_malformed_ready_for_query() {
+        let mut conn = test_conn();
+        conn.buffer.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'X']);
+
+        let err = conn.recv_msg_type_fast().await.unwrap_err();
+
+        assert!(err.to_string().contains("Unknown transaction status"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_msg_type_fast_rejects_malformed_command_complete() {
+        let mut conn = test_conn();
+        conn.buffer.extend_from_slice(&[
+            b'C', 0, 0, 0, 12, b'S', b'E', b'L', b'E', b'C', b'T', b' ', b'1',
+        ]);
+
+        let err = conn.recv_msg_type_fast().await.unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("CommandComplete missing null terminator")
+        );
+        assert!(conn.is_io_desynced());
     }
 }

@@ -22,8 +22,126 @@ fn parse_copy_text_row(line: &[u8]) -> Vec<String> {
     } else {
         line
     };
-    let text = String::from_utf8_lossy(line);
-    text.split('\t').map(|s| s.to_string()).collect()
+
+    let mut fields = Vec::new();
+    let mut start = 0;
+    for (idx, byte) in line.iter().enumerate() {
+        if *byte == b'\t' {
+            fields.push(decode_copy_text_field(&line[start..idx]));
+            start = idx + 1;
+        }
+    }
+    fields.push(decode_copy_text_field(&line[start..]));
+    fields
+}
+
+fn decode_copy_text_field(field: &[u8]) -> String {
+    if field == b"\\N" {
+        return String::new();
+    }
+
+    let mut out = Vec::with_capacity(field.len());
+    let mut idx = 0;
+    while idx < field.len() {
+        if field[idx] != b'\\' {
+            out.push(field[idx]);
+            idx += 1;
+            continue;
+        }
+
+        let Some(&escaped) = field.get(idx + 1) else {
+            out.push(b'\\');
+            break;
+        };
+
+        match escaped {
+            b'b' => {
+                out.push(0x08);
+                idx += 2;
+            }
+            b'f' => {
+                out.push(0x0c);
+                idx += 2;
+            }
+            b'n' => {
+                out.push(b'\n');
+                idx += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                idx += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                idx += 2;
+            }
+            b'v' => {
+                out.push(0x0b);
+                idx += 2;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                idx += 2;
+            }
+            b'0'..=b'7' => {
+                let mut value = 0u16;
+                let mut next = idx + 1;
+                for _ in 0..3 {
+                    let Some(&digit) = field.get(next) else {
+                        break;
+                    };
+                    if !(b'0'..=b'7').contains(&digit) {
+                        break;
+                    }
+                    value = (value * 8) + u16::from(digit - b'0');
+                    next += 1;
+                }
+                out.push(value as u8);
+                idx = next;
+            }
+            b'x' => {
+                let mut value = 0u8;
+                let mut next = idx + 2;
+                let mut digits = 0;
+                while digits < 2 {
+                    let Some(&digit) = field.get(next) else {
+                        break;
+                    };
+                    let Some(nibble) = hex_nibble(digit) else {
+                        break;
+                    };
+                    value = (value << 4) | nibble;
+                    next += 1;
+                    digits += 1;
+                }
+                if digits == 0 {
+                    out.push(b'x');
+                    idx += 2;
+                } else {
+                    out.push(value);
+                    idx = next;
+                }
+            }
+            other => {
+                out.push(other);
+                idx += 2;
+            }
+        }
+    }
+
+    String::from_utf8(out).unwrap_or_else(|err| {
+        let bytes = err.into_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn drain_copy_text_rows<F>(pending: &mut Vec<u8>, chunk: &[u8], on_row: &mut F) -> PgResult<()>
@@ -507,6 +625,18 @@ mod tests {
     fn parse_copy_text_row_trims_cr() {
         let row = parse_copy_text_row(b"a\tb\r");
         assert_eq!(row, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_copy_text_row_unescapes_copy_text_values() {
+        let row = parse_copy_text_row(b"a\\tb\tline\\nnext\tc\\\\d");
+        assert_eq!(row, vec!["a\tb", "line\nnext", "c\\d"]);
+    }
+
+    #[test]
+    fn parse_copy_text_row_maps_copy_null_marker_to_empty_string() {
+        let row = parse_copy_text_row(b"a\t\\N\tb");
+        assert_eq!(row, vec!["a", "", "b"]);
     }
 
     #[test]

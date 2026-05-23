@@ -25,6 +25,8 @@ const GRPC_CONTENT_TYPE: &str = "application/grpc";
 
 /// Default per-request timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum buffered unary gRPC response frame size.
+const MAX_GRPC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 // gRPC method paths
 const METHOD_SEARCH: &str = "/qdrant.Points/Search";
@@ -321,8 +323,36 @@ impl GrpcClient {
         while let Some(chunk) = body.data().await {
             let chunk =
                 chunk.map_err(|e| QdrantError::Decode(format!("Body read failed: {}", e)))?;
+            let chunk_len = chunk.len();
+            let next_len = response_buf
+                .len()
+                .checked_add(chunk_len)
+                .ok_or_else(|| QdrantError::Decode("gRPC response size overflow".to_string()))?;
+            if next_len > MAX_GRPC_RESPONSE_BYTES {
+                return Err(QdrantError::Decode(format!(
+                    "gRPC response too large: {} bytes (max {})",
+                    next_len, MAX_GRPC_RESPONSE_BYTES
+                )));
+            }
             response_buf.extend_from_slice(&chunk);
-            let _ = body.flow_control().release_capacity(chunk.len());
+
+            if response_buf.len() >= 5 {
+                let declared_len = u32::from_be_bytes([
+                    response_buf[1],
+                    response_buf[2],
+                    response_buf[3],
+                    response_buf[4],
+                ]) as usize;
+                if declared_len > MAX_GRPC_RESPONSE_BYTES.saturating_sub(5) {
+                    return Err(QdrantError::Decode(format!(
+                        "gRPC response frame too large: {} bytes (max {})",
+                        declared_len,
+                        MAX_GRPC_RESPONSE_BYTES.saturating_sub(5)
+                    )));
+                }
+            }
+
+            let _ = body.flow_control().release_capacity(chunk_len);
         }
 
         let trailers = body
@@ -446,6 +476,14 @@ fn grpc_unframe(mut data: Bytes) -> QdrantResult<Bytes> {
     let _compress = data.get_u8();
     let len = data.get_u32() as usize;
 
+    if len > MAX_GRPC_RESPONSE_BYTES.saturating_sub(5) {
+        return Err(QdrantError::Decode(format!(
+            "gRPC response frame too large: {} bytes (max {})",
+            len,
+            MAX_GRPC_RESPONSE_BYTES.saturating_sub(5)
+        )));
+    }
+
     if len == 0 {
         return Ok(Bytes::new());
     }
@@ -485,6 +523,16 @@ mod tests {
 
         let result = grpc_unframe(data.freeze()).unwrap();
         assert_eq!(&result[..], b"hello");
+    }
+
+    #[test]
+    fn test_grpc_unframe_rejects_oversized_declared_frame() {
+        let mut data = BytesMut::new();
+        data.put_u8(0);
+        data.put_u32((MAX_GRPC_RESPONSE_BYTES - 4) as u32);
+
+        let err = grpc_unframe(data.freeze()).unwrap_err();
+        assert!(matches!(err, QdrantError::Decode(msg) if msg.contains("too large")));
     }
 
     #[test]
