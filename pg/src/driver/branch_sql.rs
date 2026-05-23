@@ -101,9 +101,15 @@ pub fn list_branches_sql() -> &'static str {
 pub fn delete_branch_sql(name: &str) -> String {
     let safe_name = escape_literal(name);
     format!(
-        "UPDATE _qail_branches SET status = 'deleted' \
-         WHERE name = {} AND status = 'active' \
-         RETURNING id;",
+        "WITH target AS (\
+           SELECT id FROM _qail_branches \
+           WHERE name = {} AND status = 'active' \
+           FOR UPDATE\
+         ) \
+         UPDATE _qail_branches b SET status = 'deleted' \
+         FROM target \
+         WHERE b.id = target.id \
+         RETURNING b.id;",
         safe_name
     )
 }
@@ -180,9 +186,15 @@ pub fn write_overlay_sql(
 pub fn mark_merged_sql(name: &str) -> String {
     let safe_name = escape_literal(name);
     format!(
-        "UPDATE _qail_branches SET status = 'merged', merged_at = now() \
-         WHERE name = {} AND status = 'active' \
-         RETURNING id;",
+        "WITH target AS (\
+           SELECT id FROM _qail_branches \
+           WHERE name = {} AND status = 'active' \
+           FOR UPDATE\
+         ) \
+         UPDATE _qail_branches b SET status = 'merged', merged_at = now() \
+         FROM target \
+         WHERE b.id = target.id \
+         RETURNING b.id;",
         safe_name
     )
 }
@@ -281,11 +293,24 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_branch_sql_locks_active_branch() {
+        let sql = delete_branch_sql("dev");
+        assert!(sql.contains("WITH target AS"));
+        assert!(sql.contains("status = 'active'"));
+        assert!(sql.contains("FOR UPDATE"));
+        assert!(sql.contains("status = 'deleted'"));
+        assert!(sql.contains("RETURNING b.id"));
+    }
+
+    #[test]
     fn test_mark_merged_sql() {
         let sql = mark_merged_sql("dev");
+        assert!(sql.contains("WITH target AS"));
+        assert!(sql.contains("status = 'active'"));
+        assert!(sql.contains("FOR UPDATE"));
         assert!(sql.contains("status = 'merged'"));
         assert!(sql.contains("merged_at = now()"));
-        assert!(sql.contains("RETURNING id"));
+        assert!(sql.contains("RETURNING b.id"));
     }
 
     #[test]
