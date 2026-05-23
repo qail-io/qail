@@ -266,10 +266,17 @@ fn parse_endpoint_host_port(input: &str, default_port: u16) -> (String, u16) {
         if host.is_empty() {
             return (raw.to_string(), default_port);
         }
-        let port = raw[end + 1..]
-            .strip_prefix(':')
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(default_port);
+        let suffix = &raw[end + 1..];
+        let port = if suffix.is_empty() {
+            default_port
+        } else if let Some(port_str) = suffix.strip_prefix(':') {
+            match port_str.parse::<u16>() {
+                Ok(port) => port,
+                Err(_) => return (raw.to_string(), default_port),
+            }
+        } else {
+            return (raw.to_string(), default_port);
+        };
         return (host.to_string(), port);
     }
 
@@ -338,6 +345,10 @@ mod tests {
         assert_eq!(
             parse_endpoint_host_port("[]:6334", 6334),
             ("[]:6334".to_string(), 6334)
+        );
+        assert_eq!(
+            parse_endpoint_host_port("[::1]:bad", 6334),
+            ("[::1]:bad".to_string(), 6334)
         );
     }
 
