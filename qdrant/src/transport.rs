@@ -280,7 +280,7 @@ impl GrpcClient {
 
     /// Inner call without timeout wrapper.
     async fn call_inner(&self, method: &str, body: Bytes) -> QdrantResult<Bytes> {
-        let framed = grpc_frame(body);
+        let framed = grpc_frame(body)?;
 
         let request = Request::builder()
             .method("POST")
@@ -485,15 +485,29 @@ fn socket_addr(host: &str, port: u16) -> String {
 /// gRPC uses a 5-byte header:
 /// - 1 byte: compression flag (0 = uncompressed)
 /// - 4 bytes: message length (big-endian)
-fn grpc_frame(message: Bytes) -> Bytes {
-    let len = message.len();
-    let mut frame = BytesMut::with_capacity(5 + len);
+fn grpc_frame(message: Bytes) -> QdrantResult<Bytes> {
+    let len = grpc_frame_len(message.len())?;
+    let capacity = message
+        .len()
+        .checked_add(5)
+        .ok_or_else(|| QdrantError::Encode("gRPC request frame size overflow".to_string()))?;
+    let mut frame = BytesMut::with_capacity(capacity);
 
     frame.put_u8(0);
-    frame.put_u32(len as u32);
+    frame.put_u32(len);
     frame.extend_from_slice(&message);
 
-    frame.freeze()
+    Ok(frame.freeze())
+}
+
+fn grpc_frame_len(len: usize) -> QdrantResult<u32> {
+    u32::try_from(len).map_err(|_| {
+        QdrantError::Encode(format!(
+            "gRPC request frame too large: {} bytes (max {})",
+            len,
+            u32::MAX
+        ))
+    })
 }
 
 /// Remove gRPC framing from response.
@@ -548,12 +562,19 @@ mod tests {
     #[test]
     fn test_grpc_frame() {
         let message = Bytes::from_static(b"hello");
-        let framed = grpc_frame(message);
+        let framed = grpc_frame(message).unwrap();
 
         assert_eq!(framed.len(), 10);
         assert_eq!(framed[0], 0);
         assert_eq!(&framed[1..5], &[0, 0, 0, 5]);
         assert_eq!(&framed[5..], b"hello");
+    }
+
+    #[test]
+    fn test_grpc_frame_rejects_oversized_message_len() {
+        let len = u32::MAX as usize + 1;
+        let err = grpc_frame_len(len).unwrap_err();
+        assert!(matches!(err, QdrantError::Encode(msg) if msg.contains("too large")));
     }
 
     #[test]
