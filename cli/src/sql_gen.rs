@@ -79,6 +79,9 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
                         Constraint::Nullable => {}
                         Constraint::Unique => sql.push_str(" UNIQUE"),
                         Constraint::Default(v) => sql.push_str(&format!(" DEFAULT {}", v)),
+                        Constraint::References(target) => {
+                            sql.push_str(&format!(" REFERENCES {}", target))
+                        }
                         _ => {}
                     }
                 }
@@ -293,6 +296,27 @@ mod tests {
         assert!(
             sql.contains("email TEXT NOT NULL"),
             "add-column SQL should render NOT NULL by default, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn alter_add_column_sql_renders_references_constraint() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "orders".to_string(),
+            columns: vec![Expr::Def {
+                name: "tenant_id".to_string(),
+                data_type: "INT".to_string(),
+                constraints: vec![Constraint::References("tenants(id)".to_string())],
+            }],
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert!(
+            sql.contains("REFERENCES tenants(id)"),
+            "add-column SQL should render REFERENCES constraint, got: {sql}"
         );
     }
 
