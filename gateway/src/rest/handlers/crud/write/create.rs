@@ -485,9 +485,11 @@ pub(crate) async fn create_handler(
         // need the created row even when the HTTP caller did not ask for it.
         let classify_upsert_event =
             conflict_update_cols.is_some() && (has_create_triggers || has_update_triggers);
-        if (response_requested_returning || has_create_triggers || classify_upsert_event)
-            && mutation_params.returning.is_none()
-        {
+        if mutation_needs_full_returning(
+            response_requested_returning,
+            mutation_params.returning.as_deref(),
+            has_create_triggers || classify_upsert_event,
+        ) {
             cmd = apply_returning(cmd, Some("*")).map_err(ApiError::parse_error)?;
         } else {
             cmd = apply_returning(cmd, mutation_params.returning.as_deref())
@@ -623,7 +625,10 @@ pub(crate) async fn create_handler(
 
     if is_batch {
         let response_results = if response_requested_returning {
-            all_results.clone()
+            project_mutation_returning_rows(
+                all_results.clone(),
+                mutation_params.returning.as_deref(),
+            )?
         } else {
             Vec::new()
         };
@@ -637,10 +642,13 @@ pub(crate) async fn create_handler(
         ))
     } else {
         let data = if response_requested_returning {
-            all_results
-                .first()
-                .cloned()
-                .unwrap_or_else(|| json!({"created": true}))
+            project_mutation_returning_rows(
+                all_results.clone(),
+                mutation_params.returning.as_deref(),
+            )?
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| json!({"created": true}))
         } else {
             json!({"created": true})
         };

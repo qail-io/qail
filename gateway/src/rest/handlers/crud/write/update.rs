@@ -124,7 +124,11 @@ pub(crate) async fn update_handler(
 
     // Returning clause. Event triggers need the post-update row even when the
     // HTTP caller did not ask for representation.
-    if has_update_triggers && mutation_params.returning.is_none() {
+    if mutation_needs_full_returning(
+        response_requested_returning,
+        mutation_params.returning.as_deref(),
+        has_update_triggers,
+    ) {
         cmd = cmd.returning_all();
     } else {
         cmd = apply_returning(cmd, mutation_params.returning.as_deref())
@@ -271,11 +275,12 @@ pub(crate) async fn update_handler(
         }
     };
 
-    let returned_data = rows.first().map(row_to_json);
-    let event_new = returned_data.clone();
+    let returned_rows: Vec<Value> = rows.iter().map(row_to_json).collect();
+    let event_new = returned_rows.first().cloned();
     let data = if response_requested_returning {
-        returned_data
-            .clone()
+        project_mutation_returning_rows(returned_rows, mutation_params.returning.as_deref())?
+            .into_iter()
+            .next()
             .unwrap_or_else(|| json!({"updated": true}))
     } else {
         json!({"updated": true})
