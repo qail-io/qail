@@ -389,7 +389,9 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
                     planned_checksum.cyan()
                 );
             }
+        }
 
+        if should_run_apply_lock_risk_preflight(direction, &cmds) {
             preflight_lock_risk(
                 &mut pg,
                 &cmds,
@@ -398,7 +400,9 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
                 policy.lock_risk_max_score,
             )
             .await?;
+        }
 
+        if matches!(direction, MigrateDirection::Up) && !cmds.is_empty() {
             let mut destructive_ops = Vec::<String>::new();
             for cmd in &cmds {
                 let impact = analyze_impact(&mut pg, cmd).await?;
@@ -557,6 +561,10 @@ fn resolve_apply_shadow_receipt_policy(
         return Ok(false);
     }
     Ok(true)
+}
+
+fn should_run_apply_lock_risk_preflight(direction: MigrateDirection, cmds: &[Qail]) -> bool {
+    !cmds.is_empty() && matches!(direction, MigrateDirection::Up | MigrateDirection::Down)
 }
 
 fn enforce_apply_destructive_policy(
@@ -1562,11 +1570,11 @@ mod tests {
         apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
         enforce_apply_destructive_policy, enforce_apply_down_destructive_policy,
         ensure_applied_checksum_matches, ensure_up_down_pairing, parse_qail_to_commands_strict,
-        parse_rename_expr, should_adopt_existing_error, split_schema_ident,
-        strip_optional_if_exists_prefix, validate_receipts_against_local,
+        parse_rename_expr, should_adopt_existing_error, should_run_apply_lock_risk_preflight,
+        split_schema_ident, strip_optional_if_exists_prefix, validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
-    use crate::migrations::apply::types::MigrationPhase;
+    use crate::migrations::apply::types::{MigrateDirection, MigrationPhase};
     use crate::migrations::{EnforcementMode, ReceiptValidationMode};
     use qail_core::ast::{Action, Constraint, Expr};
     use qail_core::prelude::Qail;
@@ -1754,6 +1762,30 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("--allow-destructive"), "got: {msg}");
         assert!(msg.contains("DROP TABLE demo"), "got: {msg}");
+    }
+
+    #[test]
+    fn lock_risk_preflight_runs_for_down_commands() {
+        let cmds = parse_qail_to_commands_strict("drop table demo")
+            .expect("drop table should compile to AST command");
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd.action, Action::Drop) && cmd.table == "demo"),
+            "test fixture must compile to Action::Drop"
+        );
+
+        assert!(should_run_apply_lock_risk_preflight(
+            MigrateDirection::Down,
+            &cmds
+        ));
+        assert!(should_run_apply_lock_risk_preflight(
+            MigrateDirection::Up,
+            &cmds
+        ));
+        assert!(!should_run_apply_lock_risk_preflight(
+            MigrateDirection::Down,
+            &[]
+        ));
     }
 
     #[test]
