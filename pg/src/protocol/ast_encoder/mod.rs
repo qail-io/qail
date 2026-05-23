@@ -650,6 +650,72 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_rejects_unsafe_dml_table_ref() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("orders WHERE tenant_id <> 'tenant-a' --").filter(
+            "tenant_id",
+            Operator::Eq,
+            "tenant-a",
+        );
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("unsafe table ref must fail");
+
+        assert!(matches!(
+            err,
+            EncodeError::InvalidAst(message)
+                if message.contains("unsafe identifier")
+                    && message.contains("table")
+        ));
+    }
+
+    #[test]
+    fn test_encode_rejects_unsafe_dml_column_ref() {
+        let cmd = Qail::get("orders").columns(["id, tenant_id FROM secrets --"]);
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("unsafe column ref must fail");
+
+        assert!(matches!(
+            err,
+            EncodeError::InvalidAst(message)
+                if message.contains("unsafe identifier")
+                    && message.contains("columns")
+        ));
+    }
+
+    #[test]
+    fn test_encode_rejects_unsafe_join_column_ref() {
+        let cmd =
+            Qail::get("orders").left_join("payments p", "orders.payment_id", "p.id OR TRUE --");
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("unsafe join ref must fail");
+
+        assert!(matches!(
+            err,
+            EncodeError::InvalidAst(message)
+                if message.contains("unsafe identifier")
+                    && message.contains("join.on")
+        ));
+    }
+
+    #[test]
+    fn test_encode_allows_safe_table_and_join_aliases() {
+        let cmd = Qail::get("pg_catalog.pg_proc p")
+            .columns(["p.oid", "p.proname"])
+            .left_join("pg_catalog.pg_namespace n", "p.pronamespace", "n.oid");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert!(
+            sql.contains(
+                "FROM pg_catalog.pg_proc p LEFT JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid"
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
     fn test_encode_json_access_escapes_path_segment_quotes() {
         use qail_core::ast::Expr;
 

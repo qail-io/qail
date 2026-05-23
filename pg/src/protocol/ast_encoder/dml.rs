@@ -4,8 +4,8 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    Action, CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Merge, MergeAction,
-    MergeMatchKind, MergeSource, Qail, SetOp, SortOrder,
+    Action, CTEDef, CageKind, Condition, ConflictAction, Expr, GroupByMode, JoinKind, LogicalOp,
+    Merge, MergeAction, MergeMatchKind, MergeSource, Qail, SetOp, SortOrder, Value,
 };
 
 use super::helpers::write_usize;
@@ -13,6 +13,499 @@ use super::values::{
     encode_columns, encode_columns_with_params, encode_conditions, encode_expr, encode_join_value,
     encode_operator, encode_value,
 };
+
+const MAX_IDENT_LEN: usize = 63;
+
+fn invalid_identifier(field: &str, value: &str, reason: &str) -> crate::protocol::EncodeError {
+    let preview: String = value.chars().take(64).collect();
+    crate::protocol::EncodeError::InvalidAst(format!(
+        "unsafe identifier in {field}: `{preview}` ({reason})"
+    ))
+}
+
+fn validate_ident_atom(field: &str, value: &str) -> Result<(), crate::protocol::EncodeError> {
+    if value.is_empty() {
+        return Err(invalid_identifier(field, value, "empty identifier"));
+    }
+    if value.as_bytes().contains(&0) {
+        return Err(crate::protocol::EncodeError::NullByte);
+    }
+    if value.len() > MAX_IDENT_LEN {
+        return Err(invalid_identifier(field, value, "identifier is too long"));
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(invalid_identifier(
+            field,
+            value,
+            "expected only ASCII letters, digits, and underscores",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_qualified_ident(
+    field: &str,
+    value: &str,
+    allow_star: bool,
+) -> Result<(), crate::protocol::EncodeError> {
+    if allow_star && value == "*" {
+        return Ok(());
+    }
+
+    let mut parts = value.split('.').peekable();
+    if parts.peek().is_none() {
+        return Err(invalid_identifier(field, value, "empty identifier"));
+    }
+
+    while let Some(part) = parts.next() {
+        if allow_star && part == "*" && parts.peek().is_none() {
+            continue;
+        }
+        validate_ident_atom(field, part)?;
+    }
+
+    Ok(())
+}
+
+fn validate_table_ref(field: &str, value: &str) -> Result<(), crate::protocol::EncodeError> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    match parts.as_slice() {
+        [table] => validate_qualified_ident(field, table, false),
+        [table, alias] => {
+            validate_qualified_ident(field, table, false)?;
+            validate_ident_atom(&format!("{field}.alias"), alias)
+        }
+        [table, as_kw, alias] if as_kw.eq_ignore_ascii_case("AS") => {
+            validate_qualified_ident(field, table, false)?;
+            validate_ident_atom(&format!("{field}.alias"), alias)
+        }
+        _ => Err(invalid_identifier(
+            field,
+            value,
+            "expected `table`, `schema.table`, or `table alias`",
+        )),
+    }
+}
+
+fn validate_sql_type_fragment(
+    field: &str,
+    value: &str,
+) -> Result<(), crate::protocol::EncodeError> {
+    if value.is_empty() || value.as_bytes().contains(&0) {
+        return Err(invalid_identifier(field, value, "invalid SQL type"));
+    }
+    if value.contains(';')
+        || value.contains('\'')
+        || value.contains('"')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        return Err(invalid_identifier(
+            field,
+            value,
+            "SQL type contains statement or comment delimiters",
+        ));
+    }
+    if !value.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+            )
+    }) {
+        return Err(invalid_identifier(
+            field,
+            value,
+            "SQL type contains unsafe characters",
+        ));
+    }
+    Ok(())
+}
+
+fn is_positional_placeholder(expr: &Expr) -> bool {
+    let Expr::Named(name) = expr else {
+        return false;
+    };
+    name.strip_prefix('$')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn validate_expr_ref(field: &str, expr: &Expr) -> Result<(), crate::protocol::EncodeError> {
+    match expr {
+        Expr::Star => Ok(()),
+        Expr::Named(name) => validate_qualified_ident(field, name, true),
+        Expr::Aliased { name, alias } => {
+            validate_qualified_ident(field, name, true)?;
+            validate_ident_atom(&format!("{field}.alias"), alias)
+        }
+        Expr::Aggregate {
+            col, alias, filter, ..
+        } => {
+            validate_qualified_ident(field, col, true)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            if let Some(filter) = filter {
+                validate_conditions(&format!("{field}.filter"), filter)?;
+            }
+            Ok(())
+        }
+        Expr::Cast {
+            expr,
+            target_type,
+            alias,
+        } => {
+            validate_expr_ref(field, expr)?;
+            validate_sql_type_fragment(&format!("{field}.cast_type"), target_type)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::Def {
+            name, data_type, ..
+        } => {
+            validate_ident_atom(field, name)?;
+            validate_sql_type_fragment(&format!("{field}.type"), data_type)
+        }
+        Expr::Mod { col, .. } => validate_expr_ref(field, col),
+        Expr::Window {
+            name,
+            func,
+            params,
+            partition,
+            order,
+            ..
+        } => {
+            if !name.is_empty() {
+                validate_ident_atom(&format!("{field}.alias"), name)?;
+            }
+            validate_qualified_ident(&format!("{field}.function"), func, false)?;
+            for param in params {
+                validate_expr_ref(&format!("{field}.param"), param)?;
+            }
+            for part in partition {
+                validate_qualified_ident(&format!("{field}.partition"), part, false)?;
+            }
+            for cage in order {
+                validate_cage_conditions(field, cage.kind == CageKind::Payload, &cage.conditions)?;
+            }
+            Ok(())
+        }
+        Expr::Case {
+            when_clauses,
+            else_value,
+            alias,
+        } => {
+            for (condition, then_expr) in when_clauses {
+                validate_condition(&format!("{field}.when"), condition)?;
+                validate_expr_ref(&format!("{field}.then"), then_expr)?;
+            }
+            if let Some(else_value) = else_value {
+                validate_expr_ref(&format!("{field}.else"), else_value)?;
+            }
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::JsonAccess {
+            column,
+            path_segments,
+            alias,
+        } => {
+            validate_qualified_ident(field, column, false)?;
+            for (segment, _) in path_segments {
+                if segment.as_bytes().contains(&0) {
+                    return Err(crate::protocol::EncodeError::NullByte);
+                }
+            }
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::FunctionCall { name, args, alias } => {
+            validate_qualified_ident(&format!("{field}.function"), name, false)?;
+            for arg in args {
+                validate_expr_ref(&format!("{field}.arg"), arg)?;
+            }
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::SpecialFunction { name, args, alias } => {
+            validate_qualified_ident(&format!("{field}.special_function"), name, false)?;
+            for (keyword, arg) in args {
+                if let Some(keyword) = keyword {
+                    validate_ident_atom(&format!("{field}.keyword"), keyword)?;
+                }
+                validate_expr_ref(&format!("{field}.arg"), arg)?;
+            }
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::Binary {
+            left, right, alias, ..
+        } => {
+            validate_expr_ref(&format!("{field}.left"), left)?;
+            validate_expr_ref(&format!("{field}.right"), right)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::Literal(value) => validate_value_ref(field, value),
+        Expr::ArrayConstructor { elements, alias } | Expr::RowConstructor { elements, alias } => {
+            for element in elements {
+                validate_expr_ref(&format!("{field}.element"), element)?;
+            }
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::Subscript { expr, index, alias } => {
+            validate_expr_ref(&format!("{field}.subscript"), expr)?;
+            validate_expr_ref(&format!("{field}.index"), index)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::Collate {
+            expr,
+            collation,
+            alias,
+        } => {
+            validate_expr_ref(&format!("{field}.collate"), expr)?;
+            validate_qualified_ident(&format!("{field}.collation"), collation, false)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::FieldAccess {
+            expr,
+            field: field_name,
+            alias,
+        } => {
+            validate_expr_ref(&format!("{field}.field_access"), expr)?;
+            validate_ident_atom(&format!("{field}.field"), field_name)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+        Expr::Subquery { query, alias } | Expr::Exists { query, alias, .. } => {
+            validate_dml_command(query, &query.columns)?;
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_value_ref(field: &str, value: &Value) -> Result<(), crate::protocol::EncodeError> {
+    match value {
+        Value::Column(column) => validate_qualified_ident(field, column, false),
+        Value::Expr(expr) => validate_expr_ref(field, expr),
+        Value::Subquery(query) => validate_dml_command(query, &query.columns),
+        Value::Array(values) => {
+            for value in values {
+                validate_value_ref(field, value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_condition(
+    field: &str,
+    condition: &Condition,
+) -> Result<(), crate::protocol::EncodeError> {
+    validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+    validate_value_ref(&format!("{field}.value"), &condition.value)
+}
+
+fn validate_join_condition(
+    field: &str,
+    condition: &Condition,
+) -> Result<(), crate::protocol::EncodeError> {
+    validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+    match &condition.value {
+        Value::String(value) if value.contains('.') => {
+            validate_qualified_ident(&format!("{field}.value"), value, false)
+        }
+        value => validate_value_ref(&format!("{field}.value"), value),
+    }
+}
+
+fn validate_conditions(
+    field: &str,
+    conditions: &[Condition],
+) -> Result<(), crate::protocol::EncodeError> {
+    for condition in conditions {
+        validate_condition(field, condition)?;
+    }
+    Ok(())
+}
+
+fn validate_cage_conditions(
+    field: &str,
+    skip_placeholders: bool,
+    conditions: &[Condition],
+) -> Result<(), crate::protocol::EncodeError> {
+    for condition in conditions {
+        if !(skip_placeholders && is_positional_placeholder(&condition.left)) {
+            validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+        }
+        validate_value_ref(&format!("{field}.value"), &condition.value)?;
+    }
+    Ok(())
+}
+
+fn validate_dml_command(
+    cmd: &Qail,
+    projection_columns: &[Expr],
+) -> Result<(), crate::protocol::EncodeError> {
+    if !cmd.table.is_empty() {
+        validate_table_ref("table", &cmd.table)?;
+    }
+
+    for column in projection_columns {
+        validate_expr_ref("columns", column)?;
+    }
+
+    for expr in &cmd.distinct_on {
+        validate_expr_ref("distinct_on", expr)?;
+    }
+
+    for join in &cmd.joins {
+        validate_table_ref("join.table", &join.table)?;
+        if let Some(conditions) = &join.on {
+            for condition in conditions {
+                validate_join_condition("join.on", condition)?;
+            }
+        }
+    }
+
+    for cage in &cmd.cages {
+        validate_cage_conditions(
+            "cage.condition",
+            cage.kind == CageKind::Payload,
+            &cage.conditions,
+        )?;
+    }
+
+    for condition in &cmd.having {
+        validate_condition("having", condition)?;
+    }
+
+    if let GroupByMode::GroupingSets(sets) = &cmd.group_by_mode {
+        for set in sets {
+            for column in set {
+                validate_qualified_ident("group_by.grouping_set", column, true)?;
+            }
+        }
+    }
+
+    for cte in &cmd.ctes {
+        validate_ident_atom("cte.name", &cte.name)?;
+        for column in &cte.columns {
+            validate_ident_atom("cte.column", column)?;
+        }
+        validate_dml_command(&cte.base_query, &cte.base_query.columns)?;
+        if let Some(recursive_query) = &cte.recursive_query {
+            validate_dml_command(recursive_query, &recursive_query.columns)?;
+        }
+    }
+
+    for (_, set_query) in &cmd.set_ops {
+        validate_dml_command(set_query, &set_query.columns)?;
+    }
+
+    if let Some(source_query) = &cmd.source_query {
+        validate_dml_command(source_query, &source_query.columns)?;
+    }
+
+    for table in &cmd.from_tables {
+        validate_table_ref("from_tables", table)?;
+    }
+    for table in &cmd.using_tables {
+        validate_table_ref("using_tables", table)?;
+    }
+
+    if let Some(returning) = &cmd.returning {
+        for expr in returning {
+            validate_expr_ref("returning", expr)?;
+        }
+    }
+
+    if let Some(on_conflict) = &cmd.on_conflict {
+        for column in &on_conflict.columns {
+            validate_qualified_ident("on_conflict.column", column, false)?;
+        }
+        if let ConflictAction::DoUpdate { assignments } = &on_conflict.action {
+            for (column, expr) in assignments {
+                validate_qualified_ident("on_conflict.assignment.column", column, false)?;
+                validate_expr_ref("on_conflict.assignment.expr", expr)?;
+            }
+        }
+    }
+
+    if let Some(merge) = &cmd.merge {
+        if let Some(alias) = &merge.target_alias {
+            validate_ident_atom("merge.target_alias", alias)?;
+        }
+        match &merge.source {
+            MergeSource::Table { name, alias } => {
+                validate_table_ref("merge.source.table", name)?;
+                if let Some(alias) = alias {
+                    validate_ident_atom("merge.source.alias", alias)?;
+                }
+            }
+            MergeSource::Query { query, alias } => {
+                validate_dml_command(query, &query.columns)?;
+                if let Some(alias) = alias {
+                    validate_ident_atom("merge.source.alias", alias)?;
+                }
+            }
+        }
+        validate_conditions("merge.on", &merge.on)?;
+        for clause in &merge.clauses {
+            validate_conditions("merge.clause.condition", &clause.condition)?;
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (column, expr) in assignments {
+                        validate_qualified_ident("merge.update.column", column, false)?;
+                        validate_expr_ref("merge.update.expr", expr)?;
+                    }
+                }
+                MergeAction::Insert { columns, values } => {
+                    for column in columns {
+                        validate_qualified_ident("merge.insert.column", column, false)?;
+                    }
+                    for value in values {
+                        validate_expr_ref("merge.insert.value", value)?;
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Encode a SELECT statement directly to bytes.
 ///
@@ -87,6 +580,8 @@ fn encode_select_with_columns(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    validate_dml_command(cmd, columns)?;
+
     if try_encode_simple_select_fast(cmd, columns, buf, params)? {
         return Ok(());
     }
@@ -527,6 +1022,8 @@ pub fn encode_insert(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    validate_dml_command(cmd, &cmd.columns)?;
+
     buf.extend_from_slice(b"INSERT INTO ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -624,6 +1121,8 @@ pub fn encode_update(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    validate_dml_command(cmd, &cmd.columns)?;
+
     buf.extend_from_slice(b"UPDATE ");
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" SET ");
@@ -691,6 +1190,8 @@ pub fn encode_delete(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    validate_dml_command(cmd, &cmd.columns)?;
+
     buf.extend_from_slice(b"DELETE FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -722,6 +1223,8 @@ pub fn encode_merge(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    validate_dml_command(cmd, &cmd.columns)?;
+
     let merge = cmd
         .merge
         .as_ref()
