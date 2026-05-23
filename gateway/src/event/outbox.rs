@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use qail_pg::{PgError, PgPool, PooledConnection};
+use qail_pg::{PgError, PgPool, PgRow, PooledConnection};
 
 use super::delivery::{WebhookDeliveryResult, deliver_webhook_once};
 use super::{MAX_WEBHOOK_RETRIES, WebhookPayload, retry_delay};
@@ -21,6 +21,12 @@ struct OutboxItem {
     payload: WebhookPayload,
     retry_count: u32,
     attempts: u32,
+}
+
+#[derive(Debug)]
+struct MalformedOutboxItem {
+    id: String,
+    reason: String,
 }
 
 pub(super) struct OutboxEventInsert<'a> {
@@ -191,41 +197,88 @@ RETURNING
     };
 
     let mut items = Vec::with_capacity(rows.len());
+    let mut malformed = Vec::new();
     for row in rows {
-        let id = row.get_string(0).unwrap_or_default();
-        let Some(trigger_name) = row.get_string(1) else {
-            tracing::warn!("Webhook outbox row missing trigger_name");
-            continue;
-        };
-        let Some(webhook_url) = row.get_string(2) else {
-            tracing::warn!(id = %id, "Webhook outbox row missing webhook_url");
-            continue;
-        };
-        let headers: HashMap<String, String> = row
-            .get_string(3)
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
-        let Some(payload) = row
-            .get_string(4)
-            .and_then(|raw| serde_json::from_str::<WebhookPayload>(&raw).ok())
-        else {
-            tracing::warn!(id = %id, "Webhook outbox row has invalid payload JSON");
-            continue;
-        };
-        let retry_count = row.get_i32(5).unwrap_or(0).max(0) as u32;
-        let attempts = row.get_i32(6).unwrap_or(0).max(0) as u32;
-        items.push(OutboxItem {
-            id,
-            trigger_name,
-            webhook_url,
-            headers,
-            payload,
-            retry_count,
-            attempts,
-        });
+        match parse_claimed_outbox_row(&row) {
+            Ok(item) => items.push(item),
+            Err(item) => {
+                tracing::warn!(
+                    id = %item.id,
+                    reason = %item.reason,
+                    "Webhook outbox row is malformed"
+                );
+                malformed.push(item);
+            }
+        }
+    }
+
+    for item in malformed {
+        if let Err(e) = mark_malformed_claimed_item(pool, &item).await {
+            tracing::error!(
+                id = %item.id,
+                error = %e,
+                "Webhook outbox malformed-row update failed"
+            );
+        }
     }
 
     Ok(items)
+}
+
+fn required_string(
+    row: &PgRow,
+    idx: usize,
+    id: &str,
+    field: &str,
+) -> Result<String, MalformedOutboxItem> {
+    row.get_string(idx)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| MalformedOutboxItem {
+            id: id.to_string(),
+            reason: format!("missing {}", field),
+        })
+}
+
+fn required_i32(
+    row: &PgRow,
+    idx: usize,
+    id: &str,
+    field: &str,
+) -> Result<i32, MalformedOutboxItem> {
+    row.get_i32(idx).ok_or_else(|| MalformedOutboxItem {
+        id: id.to_string(),
+        reason: format!("invalid {}", field),
+    })
+}
+
+fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxItem> {
+    let id = row.get_string(0).unwrap_or_default();
+    let trigger_name = required_string(row, 1, &id, "trigger_name")?;
+    let webhook_url = required_string(row, 2, &id, "webhook_url")?;
+    let headers_raw = required_string(row, 3, &id, "headers")?;
+    let headers: HashMap<String, String> =
+        serde_json::from_str(&headers_raw).map_err(|e| MalformedOutboxItem {
+            id: id.clone(),
+            reason: format!("invalid headers JSON: {}", e),
+        })?;
+    let payload_raw = required_string(row, 4, &id, "payload")?;
+    let payload =
+        serde_json::from_str::<WebhookPayload>(&payload_raw).map_err(|e| MalformedOutboxItem {
+            id: id.clone(),
+            reason: format!("invalid payload JSON: {}", e),
+        })?;
+    let retry_count = required_i32(row, 5, &id, "retry_count")?.max(0) as u32;
+    let attempts = required_i32(row, 6, &id, "attempts")?.max(0) as u32;
+
+    Ok(OutboxItem {
+        id,
+        trigger_name,
+        webhook_url,
+        headers,
+        payload,
+        retry_count,
+        attempts,
+    })
 }
 
 async fn deliver_claimed_item(
@@ -280,6 +333,30 @@ async fn deliver_claimed_item(
     }
 }
 
+async fn mark_malformed_claimed_item(
+    pool: &PgPool,
+    item: &MalformedOutboxItem,
+) -> Result<(), PgError> {
+    execute_outbox_update(
+        pool,
+        r#"
+UPDATE qail_webhook_outbox
+SET status = 'failed',
+    attempts = attempts + 1,
+    last_error = $2,
+    locked_at = NULL,
+    next_attempt_at = now()
+WHERE id = $1
+  AND status = 'delivering'
+"#,
+        &[
+            Some(item.id.as_bytes().to_vec()),
+            Some(item.reason.as_bytes().to_vec()),
+        ],
+    )
+    .await
+}
+
 async fn mark_delivered(
     pool: &PgPool,
     item: &OutboxItem,
@@ -306,6 +383,91 @@ WHERE id = $1
         ],
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(values: &[Option<&str>]) -> PgRow {
+        PgRow {
+            columns: values
+                .iter()
+                .map(|value| value.map(|value| value.as_bytes().to_vec()))
+                .collect(),
+            column_info: None,
+        }
+    }
+
+    fn payload_json() -> String {
+        serde_json::json!({
+            "trigger": "order_created",
+            "table": "orders",
+            "operation": "INSERT",
+            "data": {
+                "new": {"id": 1}
+            },
+            "timestamp": "2026-01-01T00:00:00Z"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn parses_claimed_outbox_row() {
+        let row = row(&[
+            Some("evt_1"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some(r#"{"x-api-key":"secret"}"#),
+            Some(&payload_json()),
+            Some("3"),
+            Some("1"),
+        ]);
+
+        let item = parse_claimed_outbox_row(&row).expect("row should parse");
+        assert_eq!(item.id, "evt_1");
+        assert_eq!(item.trigger_name, "order_created");
+        assert_eq!(item.retry_count, 3);
+        assert_eq!(item.attempts, 1);
+        assert_eq!(
+            item.headers.get("x-api-key").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_with_invalid_payload() {
+        let row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("{}"),
+            Some("{bad-json"),
+            Some("3"),
+            Some("0"),
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("payload must be rejected");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("invalid payload JSON"));
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_with_invalid_headers() {
+        let row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("[\"not\", \"headers\"]"),
+            Some(&payload_json()),
+            Some("3"),
+            Some("0"),
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("headers must be rejected");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("invalid headers JSON"));
+    }
 }
 
 async fn mark_failed_or_retry(
