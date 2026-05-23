@@ -548,9 +548,15 @@ pub(crate) fn apply_url_query_params(
 /// Parse a postgres URL into (host, port, user, database, password).
 pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, Option<String>)> {
     let url = url.split('?').next().unwrap_or(url);
-    let url = url
-        .trim_start_matches("postgres://")
-        .trim_start_matches("postgresql://");
+    let url = if let Some(rest) = url.strip_prefix("postgres://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("postgresql://") {
+        rest
+    } else {
+        return Err(PgError::Connection(
+            "PostgreSQL URL must start with postgres:// or postgresql://".to_string(),
+        ));
+    };
 
     let (credentials, host_part) = if url.contains('@') {
         let mut parts = url.splitn(2, '@');
@@ -574,6 +580,11 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
     let (host, port) = if host_port.contains(':') {
         let mut parts = host_port.splitn(2, ':');
         let h = parts.next().unwrap_or("localhost").to_string();
+        if h.is_empty() {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL host: missing host".to_string(),
+            ));
+        }
         let port_str = parts.next().unwrap_or("");
         if port_str.is_empty() {
             return Err(PgError::Connection(
@@ -593,6 +604,11 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
         }
         (h, p)
     } else {
+        if host_port.is_empty() {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL host: missing host".to_string(),
+            ));
+        }
         (host_port.to_string(), 5432u16)
     };
 

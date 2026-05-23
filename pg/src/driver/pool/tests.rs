@@ -467,6 +467,23 @@ fn test_parse_pg_url_defaults_port_only_when_omitted() {
 }
 
 #[test]
+fn test_parse_pg_url_rejects_non_postgres_scheme_and_missing_host() {
+    let err = match parse_pg_url("mysql://alice:secret@db.internal/app") {
+        Ok(_) => panic!("non-postgres URL scheme must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+    assert!(err.contains("postgres://"));
+
+    let err = match parse_pg_url("postgres://:5432/app") {
+        Ok(_) => panic!("missing host must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+    assert!(err.contains("missing host"));
+}
+
+#[test]
 fn test_from_qail_config_rejects_non_numeric_postgres_port() {
     let mut qail = qail_core::config::QailConfig::default();
     qail.postgres.url = "postgres://app@db.example.com:notaport/app".to_string();
