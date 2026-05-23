@@ -31,20 +31,14 @@ pub struct ShadowState {
 
 impl ShadowState {
     pub fn new(primary_url: &str) -> Result<Self> {
-        let (host, port, user, password, database) = parse_pg_url(primary_url)?;
+        let (host, port, user, _password, database) = parse_pg_url(primary_url)?;
         let shadow_name = format!("{}_shadow", database);
 
-        let shadow_url = if let Some(pwd) = &password {
-            format!(
-                "postgres://{}:{}@{}:{}/{}",
-                user, pwd, host, port, shadow_name
-            )
-        } else {
-            format!("postgres://{}@{}:{}/{}", user, host, port, shadow_name)
-        };
+        let shadow_url = format!("postgres://{}@{}:{}/{}", user, host, port, shadow_name);
+        let primary_url = redact_url(primary_url);
 
         Ok(Self {
-            primary_url: primary_url.to_string(),
+            primary_url,
             shadow_name,
             shadow_url,
             is_ready: false,
@@ -142,6 +136,21 @@ pub fn diff_cmds_checksum(diff_cmds: &[Qail]) -> String {
     crate::migrations::stable_cmds_checksum(diff_cmds)
 }
 
+fn persisted_primary_url(state: &ShadowState) -> String {
+    redact_url(&state.primary_url)
+}
+
+fn loaded_shadow_state(shadow_name: String, primary_url: String) -> ShadowState {
+    ShadowState {
+        primary_url: redact_url(&primary_url),
+        shadow_name,
+        shadow_url: String::new(), // Will be reconstructed by caller-supplied URLs when needed
+        is_ready: true,
+        tables_synced: 0,
+        rows_synced: 0,
+    }
+}
+
 /// Save shadow state to _qail_shadow_state table (for promote/abort recovery)
 async fn save_shadow_state(
     driver: &mut PgDriver,
@@ -163,7 +172,7 @@ async fn save_shadow_state(
     // Insert new state
     let insert_cmd = Qail::add("_qail_shadow_state")
         .set_value("shadow_name", state.shadow_name.as_str())
-        .set_value("primary_url", state.primary_url.as_str())
+        .set_value("primary_url", persisted_primary_url(state))
         .set_value("diff_cmds", diff_json)
         .set_value("diff_checksum", diff_checksum)
         .set_value("old_schema_path", old_path)
@@ -220,14 +229,7 @@ async fn load_shadow_state(driver: &mut PgDriver) -> Result<Option<(ShadowState,
     let diff_cmds = qail_core::wire::decode_cmds_text(&diff_json)
         .map_err(|e| anyhow!("Failed to decode diff commands: {}", e))?;
 
-    let state = ShadowState {
-        primary_url,
-        shadow_name,
-        shadow_url: String::new(), // Will be reconstructed
-        is_ready: true,
-        tables_synced: 0,
-        rows_synced: 0,
-    };
+    let state = loaded_shadow_state(shadow_name, primary_url);
 
     Ok(Some((state, diff_cmds)))
 }
@@ -242,6 +244,68 @@ async fn update_shadow_state_status(driver: &mut PgDriver, new_status: &str) -> 
         .await
         .map_err(|e| anyhow!("Failed to update shadow state: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_state_new_redacts_primary_url_and_omits_shadow_password() {
+        let state = ShadowState::new("postgres://admin:s3cret@db.example.com:5432/app").unwrap();
+
+        assert_eq!(
+            state.primary_url,
+            "postgres://admin:***@db.example.com:5432/app"
+        );
+        assert!(!state.primary_url.contains("s3cret"));
+        assert_eq!(
+            state.shadow_url,
+            "postgres://admin@db.example.com:5432/app_shadow"
+        );
+        assert!(!state.shadow_url.contains("s3cret"));
+    }
+
+    #[test]
+    fn persisted_primary_url_redacts_raw_state_url() {
+        let state = ShadowState {
+            primary_url: "postgres://admin:s3cret@db.example.com:5432/app".to_string(),
+            shadow_name: "app_shadow".to_string(),
+            shadow_url: "postgres://admin:s3cret@db.example.com:5432/app_shadow".to_string(),
+            is_ready: false,
+            tables_synced: 0,
+            rows_synced: 0,
+        };
+
+        let persisted = persisted_primary_url(&state);
+
+        assert_eq!(persisted, "postgres://admin:***@db.example.com:5432/app");
+        assert!(!persisted.contains("s3cret"));
+    }
+
+    #[test]
+    fn loaded_shadow_state_redacts_legacy_raw_primary_url() {
+        let state = loaded_shadow_state(
+            "app_shadow".to_string(),
+            "postgres://admin:s3cret@db.example.com:5432/app".to_string(),
+        );
+
+        assert_eq!(
+            state.primary_url,
+            "postgres://admin:***@db.example.com:5432/app"
+        );
+        assert!(!state.primary_url.contains("s3cret"));
+    }
+
+    #[test]
+    fn passwordless_primary_url_remains_readable() {
+        let state = ShadowState::new("postgres://admin@db.example.com:5432/app").unwrap();
+
+        assert_eq!(
+            state.primary_url,
+            "postgres://admin@db.example.com:5432/app"
+        );
+    }
 }
 
 /// Verify an active shadow receipt by SQL checksum.
@@ -718,10 +782,14 @@ pub async fn create_shadow_database(primary_url: &str) -> Result<ShadowState> {
 }
 
 /// Apply migrations to shadow database
-pub async fn apply_migrations_to_shadow(state: &mut ShadowState, cmds: &[Qail]) -> Result<()> {
+pub async fn apply_migrations_to_shadow(
+    primary_url: &str,
+    state: &mut ShadowState,
+    cmds: &[Qail],
+) -> Result<()> {
     println!("  {} Applying migration to shadow...", "[2/4]".cyan());
 
-    let (host, port, user, password, _) = parse_pg_url(&state.primary_url)?;
+    let (host, port, user, password, _) = parse_pg_url(primary_url)?;
 
     let mut shadow_driver = if let Some(pwd) = password {
         PgDriver::connect_with_password(&host, port, &user, &state.shadow_name, &pwd)
@@ -747,13 +815,13 @@ pub async fn apply_migrations_to_shadow(state: &mut ShadowState, cmds: &[Qail]) 
 
 /// Sync data from primary to shadow using COPY streaming (zero-dependency).
 /// Uses COPY TO STDOUT → raw bytes → COPY FROM STDIN for maximum performance.
-pub async fn sync_data_to_shadow(state: &mut ShadowState) -> Result<()> {
+pub async fn sync_data_to_shadow(primary_url: &str, state: &mut ShadowState) -> Result<()> {
     println!(
         "  {} Syncing data from primary to shadow...",
         "[3/4]".cyan()
     );
 
-    let (host, port, user, password, database) = parse_pg_url(&state.primary_url)?;
+    let (host, port, user, password, database) = parse_pg_url(primary_url)?;
 
     // Connect to primary
     let mut primary_driver = if let Some(pwd) = password.clone() {
@@ -1108,12 +1176,12 @@ pub async fn run_shadow_migration(
     let mut state = create_shadow_database(primary_url).await?;
 
     // Step 1: Apply OLD schema to create base tables
-    apply_base_schema_to_shadow(&mut state, old_cmds).await?;
+    apply_base_schema_to_shadow(primary_url, &mut state, old_cmds).await?;
 
     // Step 2: Apply DIFF commands (migrations)
-    apply_migrations_to_shadow(&mut state, diff_cmds).await?;
+    apply_migrations_to_shadow(primary_url, &mut state, diff_cmds).await?;
 
-    sync_data_to_shadow(&mut state).await?;
+    sync_data_to_shadow(primary_url, &mut state).await?;
 
     // Step 3: Save state for promote/abort (Enterprise feature)
     let (host, port, user, password, database) = parse_pg_url(primary_url)?;
@@ -1200,13 +1268,13 @@ pub async fn run_shadow_migration_live(
     let mut state = create_shadow_database(primary_url).await?;
 
     // Step 4: Apply LIVE schema to shadow (not file schema!)
-    apply_base_schema_to_shadow(&mut state, &old_cmds).await?;
+    apply_base_schema_to_shadow(primary_url, &mut state, &old_cmds).await?;
 
     // Step 5: Apply DIFF commands (migrations)
-    apply_migrations_to_shadow(&mut state, &diff_cmds).await?;
+    apply_migrations_to_shadow(primary_url, &mut state, &diff_cmds).await?;
 
     // Step 6: Sync data
-    sync_data_to_shadow(&mut state).await?;
+    sync_data_to_shadow(primary_url, &mut state).await?;
 
     // Step 7: Save state
     let mut primary_reconnect = if let Some(pwd) = password {
@@ -1235,10 +1303,14 @@ pub async fn run_shadow_migration_live(
 }
 
 /// Apply base schema to shadow (CREATE TABLEs from old.qail)
-async fn apply_base_schema_to_shadow(state: &mut ShadowState, cmds: &[Qail]) -> Result<()> {
+async fn apply_base_schema_to_shadow(
+    primary_url: &str,
+    state: &mut ShadowState,
+    cmds: &[Qail],
+) -> Result<()> {
     println!("  {} Applying base schema to shadow...", "[1.5/4]".cyan());
 
-    let (host, port, user, password, _) = parse_pg_url(&state.primary_url)?;
+    let (host, port, user, password, _) = parse_pg_url(primary_url)?;
 
     let mut shadow_driver = if let Some(pwd) = password {
         PgDriver::connect_with_password(&host, port, &user, &state.shadow_name, &pwd)
