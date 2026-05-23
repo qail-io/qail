@@ -9,6 +9,8 @@ use crate::server::RpcCallableSignature;
 use serde_json::Value;
 use std::sync::Arc;
 
+const RPC_SIGNATURE_PROBE_SAVEPOINT: &str = "qail_rpc_signature_probe";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum RpcExecutionMode {
     Rows,
@@ -60,6 +62,19 @@ fn is_rpc_probe_candidate_rejection(err: &qail_pg::PgError) -> bool {
         )
 }
 
+async fn release_rpc_signature_probe(
+    conn: &mut qail_pg::PooledConnection,
+) -> Result<(), qail_pg::PgError> {
+    conn.release_savepoint(RPC_SIGNATURE_PROBE_SAVEPOINT).await
+}
+
+async fn rollback_rpc_signature_probe(
+    conn: &mut qail_pg::PooledConnection,
+) -> Result<(), qail_pg::PgError> {
+    conn.rollback_to(RPC_SIGNATURE_PROBE_SAVEPOINT).await?;
+    conn.release_savepoint(RPC_SIGNATURE_PROBE_SAVEPOINT).await
+}
+
 async fn probe_rpc_signature_candidate(
     conn: &mut qail_pg::PooledConnection,
     function_name: &RpcFunctionName,
@@ -76,13 +91,23 @@ async fn probe_rpc_signature_candidate(
         return Ok(false);
     }
 
+    conn.savepoint(RPC_SIGNATURE_PROBE_SAVEPOINT).await?;
     match conn
         .probe_query_with_param_types(&query.sql, &query.param_type_oids, &query.params)
         .await
     {
-        Ok(()) => Ok(true),
-        Err(err) if is_rpc_probe_candidate_rejection(&err) => Ok(false),
-        Err(err) => Err(err),
+        Ok(()) => {
+            release_rpc_signature_probe(conn).await?;
+            Ok(true)
+        }
+        Err(err) if is_rpc_probe_candidate_rejection(&err) => {
+            rollback_rpc_signature_probe(conn).await?;
+            Ok(false)
+        }
+        Err(err) => {
+            let _ = rollback_rpc_signature_probe(conn).await;
+            Err(err)
+        }
     }
 }
 
@@ -222,6 +247,15 @@ mod tests {
     #[test]
     fn does_not_hide_privilege_errors_as_candidate_rejection() {
         let err = server_error("42501", "permission denied for function secure_fn");
+        assert!(!is_rpc_probe_candidate_rejection(&err));
+    }
+
+    #[test]
+    fn does_not_hide_aborted_transaction_errors_as_candidate_rejection() {
+        let err = server_error(
+            "25P02",
+            "current transaction is aborted, commands ignored until end of transaction block",
+        );
         assert!(!is_rpc_probe_candidate_rejection(&err));
     }
 
