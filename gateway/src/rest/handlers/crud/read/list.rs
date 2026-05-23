@@ -145,6 +145,36 @@ pub(super) fn ensure_branch_policy_filter_columns_projected(
     Ok(())
 }
 
+fn split_expand_relations(
+    expand: &str,
+    max_expand_depth: usize,
+) -> Result<(Vec<&str>, Vec<&str>), ApiError> {
+    let mut seen_flat = std::collections::HashSet::new();
+    let mut seen_nested = std::collections::HashSet::new();
+    let mut flat = Vec::new();
+    let mut nested = Vec::new();
+
+    for relation in expand.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(nested_relation) = relation.strip_prefix("nested:") {
+            if !nested_relation.is_empty() && seen_nested.insert(nested_relation) {
+                nested.push(nested_relation);
+            }
+        } else if seen_flat.insert(relation) {
+            flat.push(relation);
+        }
+    }
+
+    let total = flat.len() + nested.len();
+    if total > max_expand_depth {
+        return Err(ApiError::parse_error(format!(
+            "Too many expand relations ({}). Maximum is {}",
+            total, max_expand_depth
+        )));
+    }
+
+    Ok((flat, nested))
+}
+
 pub(crate) async fn list_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -228,22 +258,11 @@ pub(crate) async fn list_handler(
     // Expand FK relations via LEFT JOIN
     let mut has_joins = false;
     let mut cache_tables = vec![table_name.clone()];
+    let mut nested_rels = Vec::new();
     if let Some(ref expand) = params.expand {
-        let relations: Vec<&str> = {
-            let mut seen = std::collections::HashSet::new();
-            expand
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty() && !s.starts_with("nested:") && seen.insert(*s))
-                .collect()
-        };
-        if relations.len() > state.config.max_expand_depth {
-            return Err(ApiError::parse_error(format!(
-                "Too many expand relations ({}). Maximum is {}",
-                relations.len(),
-                state.config.max_expand_depth
-            )));
-        }
+        let (relations, parsed_nested_rels) =
+            split_expand_relations(expand, state.config.max_expand_depth)?;
+        nested_rels = parsed_nested_rels;
         for rel in relations {
             // SECURITY: Block expand into blocked tables
             check_table_not_blocked(&state, rel)?;
@@ -634,17 +653,8 @@ pub(crate) async fn list_handler(
 
     // Nested FK expansion: `?expand=nested:users,nested:items`
     // Runs sub-queries for each relation and stitches into nested JSON
-    if let Some(ref expand) = params.expand {
-        let nested_rels: Vec<&str> = expand
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| s.starts_with("nested:"))
-            .map(|s| &s[7..])
-            .collect();
-
-        if !nested_rels.is_empty() && !data.is_empty() {
-            expand_nested(&state, &table_name, &mut data, &nested_rels, &auth).await?;
-        }
+    if !nested_rels.is_empty() && !data.is_empty() {
+        expand_nested(&state, &table_name, &mut data, &nested_rels, &auth).await?;
     }
 
     // NDJSON streaming: one JSON object per line
@@ -956,7 +966,7 @@ mod tests {
     use super::{
         BranchReadConstraintInput, apply_branch_read_constraints,
         branch_projection_columns_from_cmd, project_rows_to_selected_columns,
-        row_matches_policy_filter_cages,
+        row_matches_policy_filter_cages, split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
@@ -1096,5 +1106,22 @@ mod tests {
                 Expr::Named("region".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn split_expand_relations_counts_nested_relations_against_limit() {
+        let err = split_expand_relations("nested:items,nested:payments", 1).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn split_expand_relations_deduplicates_flat_and_nested_relations() {
+        let (flat, nested) =
+            split_expand_relations("users, nested:items,users,nested:items,nested:payments", 3)
+                .unwrap();
+
+        assert_eq!(flat, vec!["users"]);
+        assert_eq!(nested, vec!["items", "payments"]);
     }
 }
