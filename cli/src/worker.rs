@@ -470,11 +470,17 @@ fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
     if authority.is_empty() {
         anyhow::bail!("Invalid Qdrant gRPC endpoint: '{url}'");
     }
+    if authority.contains('@') {
+        anyhow::bail!("Qdrant gRPC endpoint must not include credentials: '{url}'");
+    }
 
     if authority.starts_with('[')
         && let Some(end) = authority.find(']')
     {
         let host = &authority[1..end];
+        if host.is_empty() {
+            anyhow::bail!("Invalid Qdrant gRPC endpoint: '{url}'");
+        }
         let suffix = &authority[end + 1..];
         let port = if suffix.is_empty() {
             6334
@@ -488,6 +494,10 @@ fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
         return Ok((host.to_string(), port));
     }
 
+    if authority.starts_with(':') {
+        anyhow::bail!("Invalid Qdrant gRPC endpoint: '{url}'");
+    }
+
     if let Some((host, port_str)) = authority.rsplit_once(':')
         && !host.is_empty()
         && !host.contains(':')
@@ -496,6 +506,10 @@ fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
             .parse::<u16>()
             .map_err(|_| anyhow::anyhow!("Invalid Qdrant gRPC port: {port_str}"))?;
         return Ok((host.to_string(), port));
+    }
+
+    if authority.contains(':') {
+        anyhow::bail!("IPv6 Qdrant gRPC endpoints must use brackets: '[::1]:6334'");
     }
 
     Ok((authority.to_string(), 6334))
@@ -709,6 +723,14 @@ mod tests {
 
         let err = parse_grpc_url("[::1]:bad").expect_err("bad ipv6 port must fail");
         assert!(err.to_string().contains("Invalid Qdrant gRPC port"));
+    }
+
+    #[test]
+    fn parse_grpc_url_rejects_malformed_authority() {
+        assert!(parse_grpc_url(":6334").is_err());
+        assert!(parse_grpc_url("http://:6334").is_err());
+        assert!(parse_grpc_url("user:pass@qdrant.internal:6334").is_err());
+        assert!(parse_grpc_url("::1").is_err());
     }
 
     #[test]
