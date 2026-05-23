@@ -225,6 +225,10 @@ fn ssrf_rejects_url_credentials() {
 fn ssrf_rejects_ipv6_mapped_ipv4_loopback() {
     // ::ffff:127.0.0.1 — IPv6-mapped IPv4 bypass attempt
     assert!(validate_webhook_url("http://[::ffff:127.0.0.1]/hook").is_err());
+    assert!(
+        super::ssrf::reject_private_ip("::ffff:127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+            .is_err()
+    );
 }
 
 #[test]

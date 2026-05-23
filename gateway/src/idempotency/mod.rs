@@ -149,6 +149,10 @@ fn should_capture_response_for_idempotency(
     parse_content_length(headers).is_none_or(|content_length| content_length <= body_limit)
 }
 
+fn response_exceeds_idempotency_body_limit(headers: &HeaderMap, body_limit: usize) -> bool {
+    parse_content_length(headers).is_some_and(|content_length| content_length > body_limit)
+}
+
 #[cfg(test)]
 fn request_fingerprint(
     method: &Method,

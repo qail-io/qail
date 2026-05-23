@@ -531,6 +531,7 @@ fn should_capture_response_enforces_body_limit() {
         &headers,
         1024
     ));
+    assert!(response_exceeds_idempotency_body_limit(&headers, 1024));
 }
 
 #[test]
@@ -542,6 +543,7 @@ fn should_capture_response_accepts_bounded_success() {
         &headers,
         1024
     ));
+    assert!(!response_exceeds_idempotency_body_limit(&headers, 1024));
 }
 
 #[test]

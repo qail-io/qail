@@ -86,6 +86,9 @@ pub(super) fn reject_private_ip(ip: std::net::IpAddr) -> Result<(), String> {
             || v4.is_broadcast() // 255.255.255.255
         }
         std::net::IpAddr::V6(v6) => {
+            if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                return reject_private_ip(std::net::IpAddr::V4(mapped_v4));
+            }
             v6.is_loopback()                                  // ::1
             || v6.is_unspecified()                            // ::
             || (v6.segments()[0] & 0xfe00) == 0xfc00          // unique local (fc00::/7)

@@ -158,12 +158,28 @@ fn manual_notify_channel_rejects_unsafe_tenant_identifier() {
 }
 
 #[test]
-fn live_query_notify_channel_rejects_over_pg_identifier_limit() {
+fn live_query_notify_channel_compacts_long_tenant_table_pairs() {
     let tenant = "t".repeat(32);
     let table = "orders_snapshot_partitioned_2026_region_alpha";
-    let err =
-        build_live_query_notify_channel(Some(&tenant), table).expect_err("must reject overflow");
-    assert!(err.contains("63 bytes"));
+    let channel =
+        build_live_query_notify_channel(Some(&tenant), table).expect("must compact overflow");
+    assert!(channel.len() <= WS_PG_CHANNEL_MAX_BYTES);
+    assert!(channel.starts_with("qail_lq_"));
+    assert_eq!(
+        channel,
+        build_live_query_notify_channel(Some(&tenant), table).unwrap()
+    );
+}
+
+#[test]
+fn live_query_notify_channel_allows_uuid_tenant_common_table_name() {
+    let channel = build_live_query_notify_channel(
+        Some("550e8400-e29b-41d4-a716-446655440000"),
+        "order_line_items",
+    )
+    .expect("uuid tenants with normal table names should subscribe");
+
+    assert!(channel.len() <= WS_PG_CHANNEL_MAX_BYTES);
 }
 
 #[test]

@@ -189,6 +189,23 @@ fn tenant_scoped_channel(tenant_id: &str, suffix: &str) -> Result<String, String
     Ok(format!("{}_{}_{}", tenant_id.len(), tenant_id, suffix))
 }
 
+fn stable_channel_hash(input: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn compact_live_query_channel(tenant_id: &str, table: &str) -> String {
+    format!(
+        "qail_lq_{:016x}_{:016x}",
+        stable_channel_hash(tenant_id),
+        stable_channel_hash(table)
+    )
+}
+
 enum ListenControl {
     Listen {
         channel: String,
@@ -273,7 +290,12 @@ pub(super) fn build_live_query_notify_channel(
 ) -> Result<String, String> {
     let channel = match tenant_id {
         Some(tid) if !tid.is_empty() => {
-            tenant_scoped_channel(tid, &format!("qail_table_{}", table))?
+            let scoped = tenant_scoped_channel(tid, &format!("qail_table_{}", table))?;
+            if scoped.len() <= WS_PG_CHANNEL_MAX_BYTES {
+                scoped
+            } else {
+                compact_live_query_channel(tid, table)
+            }
         }
         _ => format!("qail_table_{}", table),
     };

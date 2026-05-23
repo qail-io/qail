@@ -128,6 +128,26 @@ pub async fn idempotency_middleware(
 
     let (parts, body) = response.into_parts();
     if !should_capture_response_for_idempotency(parts.status, &parts.headers, body_limit) {
+        let mut parts = parts;
+        if parts.status.is_success()
+            && response_exceeds_idempotency_body_limit(&parts.headers, body_limit)
+        {
+            state.idempotency_store.insert(
+                &idempotency_scope,
+                &idempotency_key,
+                CachedResponse {
+                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    body: IDEMPOTENCY_RESPONSE_TOO_LARGE_BODY.as_bytes().to_vec(),
+                    content_type: "application/json".to_string(),
+                    replay_headers: Vec::new(),
+                    request_fingerprint,
+                },
+            );
+            parts.headers.insert(
+                "x-idempotency-body-capture-failed",
+                HeaderValue::from_static("true"),
+            );
+        }
         return Response::from_parts(parts, body);
     }
 

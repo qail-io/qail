@@ -49,16 +49,7 @@ pub(super) async fn execute_qail_cmd_fast(
     let duration_ms = timer.elapsed_ms();
     timer.finish(rows.is_ok());
     let rows = match rows {
-        Ok(rows) => {
-            if is_read_only {
-                conn.release().await;
-            } else {
-                conn.release_checked()
-                    .await
-                    .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
-            }
-            rows
-        }
+        Ok(rows) => rows,
         Err(err) => {
             conn.release().await;
             return Err(err);
@@ -69,17 +60,24 @@ pub(super) async fn execute_qail_cmd_fast(
         && plan.verify_rows
     {
         let guard_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
-        let _proof = crate::tenant_guard::verify_tenant_boundary(
+        if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
             &guard_rows,
             tenant_id,
             &plan.column,
             &cmd.table,
             "qail_cmd_fast",
-        )
-        .map_err(|v| {
+        ) {
             tracing::error!("{}", v);
-            ApiError::with_code("TENANT_BOUNDARY_VIOLATION", "Data integrity error")
-        })?;
+            if is_read_only {
+                conn.release().await;
+            } else {
+                let _ = conn.rollback_and_release().await;
+            }
+            return Err(ApiError::with_code(
+                "TENANT_BOUNDARY_VIOLATION",
+                "Data integrity error",
+            ));
+        }
     }
 
     let strip_index = tenant_guard_plan
@@ -100,6 +98,14 @@ pub(super) async fn execute_qail_cmd_fast(
             values
         })
         .collect();
+
+    if is_read_only {
+        conn.release().await;
+    } else {
+        conn.release_checked()
+            .await
+            .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
+    }
 
     let count = json_rows.len();
     let request_id = match extensions.get::<crate::middleware::RequestId>() {
@@ -204,16 +210,7 @@ pub(super) async fn execute_qail_cmd(
     let duration_ms = timer.elapsed_ms();
     timer.finish(rows.is_ok());
     let rows = match rows {
-        Ok(rows) => {
-            if is_read_only {
-                conn.release().await;
-            } else {
-                conn.release_checked()
-                    .await
-                    .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
-            }
-            rows
-        }
+        Ok(rows) => rows,
         Err(err) => {
             conn.release().await;
             return Err(err);
@@ -226,17 +223,27 @@ pub(super) async fn execute_qail_cmd(
         (auth.tenant_id.as_deref(), tenant_guard_plan)
         && plan.verify_rows
     {
-        crate::tenant_guard::verify_tenant_boundary(
+        match crate::tenant_guard::verify_tenant_boundary(
             &json_rows,
             tenant_id,
             &plan.column,
             &table,
             "qail_cmd",
-        )
-        .map_err(|v| {
-            tracing::error!("{}", v);
-            ApiError::with_code("TENANT_BOUNDARY_VIOLATION", "Data integrity error")
-        })?
+        ) {
+            Ok(proof) => proof,
+            Err(v) => {
+                tracing::error!("{}", v);
+                if is_read_only {
+                    conn.release().await;
+                } else {
+                    let _ = conn.rollback_and_release().await;
+                }
+                return Err(ApiError::with_code(
+                    "TENANT_BOUNDARY_VIOLATION",
+                    "Data integrity error",
+                ));
+            }
+        }
     } else {
         crate::tenant_guard::TenantVerified::unscoped()
     };
@@ -261,6 +268,14 @@ pub(super) async fn execute_qail_cmd(
             duration_ms: Some(duration_ms),
         }),
     };
+
+    if is_read_only {
+        conn.release().await;
+    } else {
+        conn.release_checked()
+            .await
+            .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
+    }
 
     if should_cache_query {
         if let Ok(json) = serde_json::to_string(&response) {
