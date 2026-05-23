@@ -252,15 +252,20 @@ fn parse_endpoint_host_port(input: &str, default_port: u16) -> (String, u16) {
     if raw.contains("://")
         && let Ok(uri) = raw.parse::<Uri>()
     {
-        let host = uri.host().unwrap_or("localhost").to_string();
-        let port = uri.port_u16().unwrap_or(default_port);
-        return (host, port);
+        if let Some(host) = uri.host().filter(|host| !host.is_empty()) {
+            let port = uri.port_u16().unwrap_or(default_port);
+            return (host.to_string(), port);
+        }
+        return (raw.to_string(), default_port);
     }
 
     if raw.starts_with('[')
         && let Some(end) = raw.find(']')
     {
         let host = &raw[1..end];
+        if host.is_empty() {
+            return (raw.to_string(), default_port);
+        }
         let port = raw[end + 1..]
             .strip_prefix(':')
             .and_then(|p| p.parse().ok())
@@ -321,6 +326,18 @@ mod tests {
         assert_eq!(
             parse_endpoint_host_port("qdrant.internal", 6334),
             ("qdrant.internal".to_string(), 6334)
+        );
+    }
+
+    #[test]
+    fn test_parse_endpoint_host_port_does_not_default_malformed_url_to_localhost() {
+        assert_eq!(
+            parse_endpoint_host_port("http://:6334", 6334),
+            ("http://:6334".to_string(), 6334)
+        );
+        assert_eq!(
+            parse_endpoint_host_port("[]:6334", 6334),
+            ("[]:6334".to_string(), 6334)
         );
     }
 
