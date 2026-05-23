@@ -57,6 +57,19 @@ fn run_savepoint_action<'a>(
     })
 }
 
+fn validate_savepoint_action(action: &str) -> Result<(), ApiError> {
+    match action {
+        "create" | "rollback" | "release" => Ok(()),
+        _ => Err(ApiError::bad_request(
+            "TXN_REJECTED",
+            format!(
+                "Invalid savepoint action '{}'. Use 'create', 'rollback', or 'release'",
+                action
+            ),
+        )),
+    }
+}
+
 fn txn_table_name(table_ref: &str) -> String {
     table_ref
         .split_whitespace()
@@ -371,6 +384,7 @@ pub async fn txn_savepoint(
             "Savepoint name must be 1-63 characters",
         ));
     }
+    validate_savepoint_action(&request.action)?;
 
     let action = request.action.clone();
     let name = request.name.clone();
@@ -403,4 +417,20 @@ pub async fn txn_savepoint(
         action: request.action,
         name: request.name,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_savepoint_action;
+
+    #[test]
+    fn savepoint_action_validation_rejects_before_session_access() {
+        assert!(validate_savepoint_action("create").is_ok());
+        assert!(validate_savepoint_action("rollback").is_ok());
+        assert!(validate_savepoint_action("release").is_ok());
+
+        let err = validate_savepoint_action("drop").unwrap_err();
+        assert_eq!(err.code, "TXN_REJECTED");
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
 }
