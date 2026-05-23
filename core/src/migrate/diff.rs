@@ -540,9 +540,11 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
             // New columns
             for col in &new_table.columns {
                 if !old_cols.contains(&col.name) {
-                    let is_rename_target = new.migrations.iter().any(|h| {
-                        matches!(h, MigrationHint::Rename { to, .. } if to.ends_with(&format!(".{}", col.name)))
-                    });
+                    let col_path = format!("{}.{}", name, col.name);
+                    let is_rename_target = new
+                        .migrations
+                        .iter()
+                        .any(|h| matches!(h, MigrationHint::Rename { to, .. } if to == &col_path));
 
                     if !is_rename_target {
                         let mut constraints = Vec::new();
@@ -594,12 +596,13 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
             // Dropped columns (not handled by hints)
             for col in &old_table.columns {
                 if !new_cols.contains(&col.name) {
-                    let is_rename_source = new.migrations.iter().any(|h| {
-                        matches!(h, MigrationHint::Rename { from, .. } if from.ends_with(&format!(".{}", col.name)))
-                    });
+                    let col_path = format!("{}.{}", name, col.name);
+                    let is_rename_source = new.migrations.iter().any(
+                        |h| matches!(h, MigrationHint::Rename { from, .. } if from == &col_path),
+                    );
 
                     let is_drop_hinted = new.migrations.iter().any(|h| {
-                        matches!(h, MigrationHint::Drop { target, confirmed: true } if target == &format!("{}.{}", name, col.name))
+                        matches!(h, MigrationHint::Drop { target, confirmed: true } if target == &col_path)
                     });
 
                     if !is_rename_source && !is_drop_hinted {
@@ -1362,6 +1365,70 @@ mod tests {
         // Should have rename, NOT drop + add
         assert!(cmds.iter().any(|c| matches!(c.action, Action::Mod)));
         assert!(!cmds.iter().any(|c| matches!(c.action, Action::AlterDrop)));
+    }
+
+    #[test]
+    fn rename_hint_does_not_suppress_same_named_add_column_in_other_table() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("username", ColumnType::Text)));
+        old.add_table(Table::new("profiles").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("users").column(Column::new("name", ColumnType::Text)));
+        new.add_table(
+            Table::new("profiles")
+                .column(Column::new("id", ColumnType::Int))
+                .column(Column::new("name", ColumnType::Text)),
+        );
+        new.add_hint(MigrationHint::Rename {
+            from: "users.username".into(),
+            to: "users.name".into(),
+        });
+
+        let cmds = diff_schemas_checked(&old, &new).expect("schema should diff");
+
+        assert!(cmds.iter().any(|cmd| {
+            matches!(cmd.action, Action::Alter)
+                && cmd.table == "profiles"
+                && matches!(
+                    cmd.columns.first(),
+                    Some(Expr::Def { name, .. }) if name == "name"
+                )
+        }));
+    }
+
+    #[test]
+    fn rename_hint_does_not_suppress_same_named_drop_column_in_other_table() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("username", ColumnType::Text)));
+        old.add_table(
+            Table::new("profiles")
+                .column(Column::new("id", ColumnType::Int))
+                .column(Column::new("username", ColumnType::Text)),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("users").column(Column::new("name", ColumnType::Text)));
+        new.add_table(Table::new("profiles").column(Column::new("id", ColumnType::Int)));
+        new.add_hint(MigrationHint::Rename {
+            from: "users.username".into(),
+            to: "users.name".into(),
+        });
+
+        let cmds = diff_schemas_checked(&old, &new).expect("schema should diff");
+
+        assert!(cmds.iter().any(|cmd| {
+            matches!(cmd.action, Action::AlterDrop)
+                && cmd.table == "profiles"
+                && matches!(
+                    cmd.columns.first(),
+                    Some(Expr::Named(name)) if name == "username"
+                )
+        }));
     }
 
     /// Regression test: FK parent tables must be created before child tables
