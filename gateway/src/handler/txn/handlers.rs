@@ -88,6 +88,7 @@ fn txn_action_mutates(action: qail_core::ast::Action) -> bool {
             | qail_core::ast::Action::Over
             | qail_core::ast::Action::Put
             | qail_core::ast::Action::Upsert
+            | qail_core::ast::Action::Merge
     )
 }
 

@@ -66,7 +66,7 @@ impl OperationType {
             | Action::Search
             | Action::Scroll => Some(OperationType::Read),
             Action::Add => Some(OperationType::Create),
-            Action::Set | Action::Put | Action::Over | Action::Upsert => {
+            Action::Set | Action::Put | Action::Over | Action::Upsert | Action::Merge => {
                 Some(OperationType::Update)
             }
             Action::Del => Some(OperationType::Delete),
@@ -86,6 +86,11 @@ impl OperationType {
             Action::Add => Some(&[OperationType::Create]),
             Action::Set | Action::Put | Action::Over => Some(&[OperationType::Update]),
             Action::Upsert => Some(&[OperationType::Create, OperationType::Update]),
+            Action::Merge => Some(&[
+                OperationType::Create,
+                OperationType::Update,
+                OperationType::Delete,
+            ]),
             Action::Del => Some(&[OperationType::Delete]),
             _ => None,
         }

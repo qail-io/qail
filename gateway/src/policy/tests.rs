@@ -1,6 +1,6 @@
 use super::*;
 use crate::auth::AuthContext;
-use qail_core::ast::{Action, CageKind, Expr, LogicalOp, Qail, Value};
+use qail_core::ast::{Action, CageKind, Expr, LogicalOp, MergeAction, Operator, Qail, Value};
 
 #[test]
 fn test_policy_expands_user_id() {
@@ -618,6 +618,146 @@ fn test_vector_upsert_allows_create_and_update_policies() {
 
     let mut cmd = Qail::upsert("embeddings");
     engine.apply_policies(&auth, &mut cmd).unwrap();
+}
+
+fn test_merge_command() -> Qail {
+    Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))])
+        .when_not_matched_insert(
+            &["id", "name"],
+            &[
+                Expr::Named("s.id".to_string()),
+                Expr::Named("s.name".to_string()),
+            ],
+        )
+}
+
+fn merge_policy_auth() -> AuthContext {
+    AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    }
+}
+
+#[test]
+fn test_merge_requires_create_and_update_policies_for_insert_update_merge() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let mut cmd = test_merge_command();
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(err.to_string().contains("Update"));
+}
+
+#[test]
+fn test_merge_rejects_filtered_policy_that_cannot_be_injected() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "users_update_tenant".to_string(),
+        table: "users".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let mut cmd = test_merge_command();
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("cannot be safely enforced on MERGE")
+    );
+}
+
+#[test]
+fn test_merge_enforces_column_policies_for_actions() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec!["id".into(), "name".into()],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec!["email".into()],
+        denied_columns: vec![],
+    });
+
+    let mut cmd = test_merge_command();
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("does not allow Update on column 'name'")
+    );
+}
+
+#[test]
+fn test_merge_delete_requires_delete_policy() {
+    let mut engine = PolicyEngine::new();
+    for operation in [OperationType::Create, OperationType::Update] {
+        engine.add_policy(PolicyDef {
+            name: format!("users_{operation:?}"),
+            table: "users".to_string(),
+            filter: None,
+            role: None,
+            operations: vec![operation],
+            allowed_columns: vec![],
+            denied_columns: vec![],
+        });
+    }
+
+    let mut cmd = test_merge_command();
+    let merge = cmd.merge.as_mut().expect("merge spec");
+    merge.clauses.push(qail_core::ast::MergeClause {
+        match_kind: qail_core::ast::MergeMatchKind::Matched,
+        condition: vec![],
+        action: MergeAction::Delete,
+    });
+
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(err.to_string().contains("Delete"));
 }
 
 #[test]

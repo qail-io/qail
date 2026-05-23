@@ -70,6 +70,7 @@ fn public_query_action_allowed(action: Action) -> bool {
             | Action::Search
             | Action::Scroll
             | Action::Upsert
+            | Action::Merge
             | Action::CreateCollection
             | Action::DeleteCollection
     )

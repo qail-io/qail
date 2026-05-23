@@ -14,12 +14,13 @@ pub(super) fn reject_ddl_in_transaction(cmd: &qail_core::ast::Qail) -> Result<()
             | Action::Cnt
             | Action::Over
             | Action::Upsert
+            | Action::Merge
     );
     if !action_allowed {
         return Err(ApiError::bad_request(
             "UNSUPPORTED_ACTION",
             format!(
-                "Action {} is not allowed inside a transaction session. Only DML operations (get/set/add/del/put/with/cnt/over/upsert) are permitted.",
+                "Action {} is not allowed inside a transaction session. Only DML operations (get/set/add/del/put/with/cnt/over/upsert/merge) are permitted.",
                 cmd.action
             ),
         ));

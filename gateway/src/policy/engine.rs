@@ -1,8 +1,8 @@
 use std::fs;
 
 use qail_core::ast::{
-    Action, Cage, CageKind, Condition, ConflictAction, Expr, Join, JoinKind, LogicalOp, Operator,
-    Qail, Value,
+    Action, Cage, CageKind, Condition, ConflictAction, Expr, Join, JoinKind, LogicalOp,
+    MergeAction, Operator, Qail, Value,
 };
 
 use crate::auth::AuthContext;
@@ -384,6 +384,145 @@ impl PolicyEngine {
                 }
             })
             .collect()
+    }
+
+    fn merge_required_operations(cmd: &Qail) -> Result<Vec<OperationType>, GatewayError> {
+        let Some(merge) = cmd.merge.as_ref() else {
+            return Err(GatewayError::AccessDenied(
+                "MERGE action is missing merge specification".to_string(),
+            ));
+        };
+
+        let mut operations = Vec::new();
+        for clause in &merge.clauses {
+            let operation = match &clause.action {
+                MergeAction::Insert { .. } => Some(OperationType::Create),
+                MergeAction::Update { .. } => Some(OperationType::Update),
+                MergeAction::Delete => Some(OperationType::Delete),
+                MergeAction::DoNothing => None,
+            };
+            if let Some(operation) = operation
+                && !operations.contains(&operation)
+            {
+                operations.push(operation);
+            }
+        }
+
+        if operations.is_empty() {
+            return Err(GatewayError::AccessDenied(
+                "MERGE requires at least one mutating action".to_string(),
+            ));
+        }
+
+        Ok(operations)
+    }
+
+    fn required_operations_for_command(cmd: &Qail) -> Result<Vec<OperationType>, GatewayError> {
+        if cmd.action == Action::Merge {
+            return Self::merge_required_operations(cmd);
+        }
+
+        OperationType::required_for_action(cmd.action)
+            .map(|operations| operations.to_vec())
+            .ok_or_else(|| {
+                GatewayError::AccessDenied(format!(
+                    "Action {:?} is not permitted by policy engine",
+                    cmd.action
+                ))
+            })
+    }
+
+    fn merge_write_columns(
+        cmd: &Qail,
+        operation: OperationType,
+    ) -> Result<Vec<String>, GatewayError> {
+        let Some(merge) = cmd.merge.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let mut columns = Vec::new();
+        for clause in &merge.clauses {
+            match (&clause.action, operation) {
+                (
+                    MergeAction::Insert {
+                        columns: insert_columns,
+                        ..
+                    },
+                    OperationType::Create,
+                ) => {
+                    if insert_columns.is_empty() {
+                        return Err(GatewayError::AccessDenied(
+                            "Policy column restrictions require explicit columns for MERGE INSERT"
+                                .to_string(),
+                        ));
+                    }
+                    for column in insert_columns {
+                        if Self::is_safe_policy_column_name(column) {
+                            columns.push(Self::normalized_policy_column(column));
+                        } else {
+                            return Err(GatewayError::AccessDenied(format!(
+                                "Policy column restrictions rejected unsupported MERGE insert column '{}'",
+                                column
+                            )));
+                        }
+                    }
+                }
+                (MergeAction::Update { assignments }, OperationType::Update) => {
+                    for (column, _) in assignments {
+                        if Self::is_safe_policy_column_name(column) {
+                            columns.push(Self::normalized_policy_column(column));
+                        } else {
+                            return Err(GatewayError::AccessDenied(format!(
+                                "Policy column restrictions rejected unsupported MERGE update column '{}'",
+                                column
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        columns.sort();
+        columns.dedup();
+        Ok(columns)
+    }
+
+    fn enforce_merge_policy_filters(
+        &self,
+        auth: &AuthContext,
+        base_table: &str,
+        required_ops: &[OperationType],
+    ) -> Result<(), GatewayError> {
+        for operation in required_ops {
+            let policies = self.applicable_policies(auth, base_table, *operation)?;
+            let (filters, unrestricted) =
+                self.policy_filters_for(auth, &policies, base_table, false)?;
+            if !unrestricted && !filters.is_empty() {
+                return Err(GatewayError::AccessDenied(format!(
+                    "Filtered {:?} policies cannot be safely enforced on MERGE for table '{}'",
+                    operation, base_table
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn enforce_merge_column_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        operation: OperationType,
+    ) -> Result<(), GatewayError> {
+        if !policies
+            .iter()
+            .any(|policy| Self::policy_restricts_columns(policy))
+        {
+            return Ok(());
+        }
+
+        let columns = Self::merge_write_columns(cmd, operation)?;
+        Self::enforce_write_columns_for_policies(policies, &columns, operation)
     }
 
     fn policy_restricts_columns(policy: &PolicyDef) -> bool {
@@ -768,12 +907,7 @@ impl PolicyEngine {
             return Ok(());
         }
 
-        let required_ops = OperationType::required_for_action(cmd.action).ok_or_else(|| {
-            GatewayError::AccessDenied(format!(
-                "Action {:?} is not permitted by policy engine",
-                cmd.action
-            ))
-        })?;
+        let required_ops = Self::required_operations_for_command(cmd)?;
         let Some(op) = required_ops.last().copied() else {
             return Err(GatewayError::AccessDenied(format!(
                 "Action {:?} has no policy operations",
@@ -781,7 +915,7 @@ impl PolicyEngine {
             )));
         };
         let (base_table, base_qualifier) = Self::table_ref_name_and_qualifier(&cmd.table);
-        for required_op in required_ops {
+        for required_op in &required_ops {
             self.applicable_policies(auth, &base_table, *required_op)?;
         }
         let applicable_policies = self.applicable_policies(auth, &base_table, op)?;
@@ -792,7 +926,13 @@ impl PolicyEngine {
             !cmd.joins.is_empty(),
         )?;
 
-        if cmd.action == Action::Upsert {
+        if cmd.action == Action::Merge {
+            self.enforce_merge_policy_filters(auth, &base_table, &required_ops)?;
+            for required_op in &required_ops {
+                let policies = self.applicable_policies(auth, &base_table, *required_op)?;
+                Self::enforce_merge_column_policies(cmd, &policies, *required_op)?;
+            }
+        } else if cmd.action == Action::Upsert {
             let create_policies =
                 self.applicable_policies(auth, &base_table, OperationType::Create)?;
             Self::enforce_write_column_policies(cmd, &create_policies, OperationType::Create)?;
@@ -818,7 +958,8 @@ impl PolicyEngine {
             }
         }
 
-        if !has_unrestricted_policy && !filters_to_inject.is_empty() {
+        if cmd.action != Action::Merge && !has_unrestricted_policy && !filters_to_inject.is_empty()
+        {
             cmd.cages.push(Cage {
                 kind: CageKind::Filter,
                 conditions: filters_to_inject,

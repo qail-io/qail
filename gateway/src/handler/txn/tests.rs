@@ -37,6 +37,12 @@ fn test_reject_ddl_allows_dml() {
 
     let cmd = qail_core::ast::Qail::del("users");
     assert!(reject_ddl_in_transaction(&cmd).is_ok());
+
+    let cmd = qail_core::ast::Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_matched_update(&[("name", qail_core::ast::Expr::Named("s.name".into()))]);
+    assert!(reject_ddl_in_transaction(&cmd).is_ok());
 }
 
 #[test]

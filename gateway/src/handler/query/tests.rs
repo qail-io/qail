@@ -310,6 +310,16 @@ fn reject_dangerous_action_allows_qdrant_collection_management_for_admin_gate() 
 }
 
 #[test]
+fn reject_dangerous_action_allows_merge_dml() {
+    let cmd = qail_core::ast::Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_matched_update(&[("name", qail_core::ast::Expr::Named("s.name".into()))]);
+
+    reject_dangerous_action(&cmd).expect("MERGE DML must reach policy and execution gates");
+}
+
+#[test]
 fn reject_non_read_action_blocks_mutations() {
     let cmd = qail_core::ast::Qail::add("orders").set_value("total", 1);
 
