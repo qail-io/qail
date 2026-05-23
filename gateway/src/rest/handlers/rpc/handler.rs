@@ -56,6 +56,17 @@ fn rpc_tenant_arg_index(
     })
 }
 
+fn rpc_args_need_signature_for_tenant_boundary(args: Option<&Value>) -> bool {
+    matches!(
+        args,
+        Some(Value::Array(_))
+            | Some(Value::String(_))
+            | Some(Value::Number(_))
+            | Some(Value::Bool(_))
+            | Some(Value::Null)
+    )
+}
+
 fn enforce_rpc_tenant_arg_boundary(
     args: Option<&Value>,
     signature: Option<&RpcCallableSignature>,
@@ -69,6 +80,13 @@ fn enforce_rpc_tenant_arg_boundary(
     let tenant_column = tenant_column.trim().to_ascii_lowercase();
     if tenant_column.is_empty() {
         return Ok(());
+    }
+
+    if signature.is_none() && rpc_args_need_signature_for_tenant_boundary(args) {
+        return Err(ApiError::forbidden(format!(
+            "Tenant-scoped RPC '{}' requires signature validation for positional or scalar arguments",
+            function_name
+        )));
     }
 
     let tenant_arg_index = rpc_tenant_arg_index(signature, &tenant_column);
@@ -452,6 +470,40 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_rejects_positional_args_without_signature() {
+        let args = json!(["tenant-a", "order-1"]);
+
+        let err = enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            None,
+            Some("tenant-a"),
+            "tenant_id",
+            "api.delete_order",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+        assert!(err.message.contains("requires signature validation"));
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_rejects_scalar_args_without_signature() {
+        let args = json!("tenant-a");
+
+        let err = enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            None,
+            Some("tenant-a"),
+            "tenant_id",
+            "api.find_order",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+        assert!(err.message.contains("requires signature validation"));
     }
 
     #[test]
