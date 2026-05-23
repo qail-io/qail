@@ -308,6 +308,7 @@ impl Qail {
     }
 
     fn scope_merge_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
+        self.scope_merge_query_source(ctx)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
         let source_col = self.merge_source_tenant_col();
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
@@ -333,6 +334,7 @@ impl Qail {
     }
 
     fn scope_merge_global(mut self, tenant_col: &str) -> QailBuildResult<Self> {
+        self.scope_merge_query_source(&RlsContext::global())?;
         let target_col = self.merge_target_tenant_col(tenant_col);
         let source_col = self.merge_source_tenant_col();
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
@@ -352,6 +354,19 @@ impl Qail {
         self.scope_merge_clause_conditions(tenant_col, condition, source_condition);
         self.scope_merge_insert_value(tenant_col, Expr::Literal(Value::Null))?;
         Ok(self)
+    }
+
+    fn scope_merge_query_source(&mut self, ctx: &RlsContext) -> QailBuildResult<()> {
+        let Some(merge) = &mut self.merge else {
+            return Ok(());
+        };
+        let MergeSource::Query { query, .. } = &mut merge.source else {
+            return Ok(());
+        };
+
+        let scoped_query = query.as_ref().clone().with_rls(ctx)?;
+        *query = Box::new(scoped_query);
+        Ok(())
     }
 
     fn merge_target_tenant_col(&self, tenant_col: &str) -> String {
@@ -821,6 +836,88 @@ mod tests {
         assert!(
             sql.contains("INSERT (id, status, tenant_id) VALUES (s.id, s.status, 'tenant-merge')"),
             "MERGE insert branch must include tenant value: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_merge_query_source() {
+        register_tenant_table("_rls_merge_query_target_orders", "tenant_id");
+        register_tenant_table("_rls_merge_query_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-query");
+        let source = Qail::get("_rls_merge_query_source_orders").columns(["id", "status"]);
+        let query = Qail::merge_into("_rls_merge_query_target_orders")
+            .target_alias("t")
+            .using_query_as(source, "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_not_matched_insert(
+                &["id", "status"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.status".to_string()),
+                ],
+            )
+            .with_rls(&ctx)
+            .expect("merge rls should apply");
+
+        let merge = query.merge.as_ref().expect("merge spec");
+        let MergeSource::Query {
+            query: source_query,
+            ..
+        } = &merge.source
+        else {
+            panic!("expected query source");
+        };
+        assert!(
+            source_query.cages.iter().any(|cage| {
+                matches!(cage.kind, CageKind::Filter)
+                    && cage.conditions.iter().any(|condition| {
+                        matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                            && condition.op == Operator::Eq
+                            && matches!(&condition.value, Value::String(value) if value == "tenant-query")
+                    })
+            }),
+            "MERGE query source must be tenant-scoped"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_global_scopes_merge_query_source() {
+        register_tenant_table("_rls_global_merge_query_target", "tenant_id");
+        register_tenant_table("_rls_global_merge_query_source", "tenant_id");
+
+        let source = Qail::get("_rls_global_merge_query_source").columns(["id", "name"]);
+        let query = Qail::merge_into("_rls_global_merge_query_target")
+            .using_query_as(source, "s")
+            .merge_on_column("_rls_global_merge_query_target.id", Operator::Eq, "s.id")
+            .when_not_matched_insert(
+                &["id", "name"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.name".to_string()),
+                ],
+            )
+            .with_rls(&RlsContext::global())
+            .expect("global merge rls should apply");
+
+        let merge = query.merge.as_ref().expect("merge spec");
+        let MergeSource::Query {
+            query: source_query,
+            ..
+        } = &merge.source
+        else {
+            panic!("expected query source");
+        };
+        assert!(
+            source_query.cages.iter().any(|cage| {
+                matches!(cage.kind, CageKind::Filter)
+                    && cage.conditions.iter().any(|condition| {
+                        matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                            && condition.op == Operator::IsNull
+                            && matches!(condition.value, Value::Null)
+                    })
+            }),
+            "global MERGE query source must be scoped to NULL tenant rows"
         );
     }
 
