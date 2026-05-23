@@ -114,6 +114,31 @@ fn typed_unknown_oid_falls_back_to_guess() {
 }
 
 #[test]
+fn row_to_json_uses_physical_index_for_duplicate_column_names() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut name_to_index = HashMap::new();
+    name_to_index.insert("tenant_id".to_string(), 1);
+    let row = qail_pg::PgRow {
+        columns: vec![
+            Some(b"joined-tenant".to_vec()),
+            Some(b"base-tenant".to_vec()),
+        ],
+        column_info: Some(Arc::new(qail_pg::driver::ColumnInfo {
+            name_to_index,
+            oids: vec![25, 25],
+            formats: vec![0, 0],
+        })),
+    };
+
+    assert_eq!(
+        row_to_json(&row),
+        serde_json::json!({"tenant_id": "base-tenant"})
+    );
+}
+
+#[test]
 fn guess_integer() {
     assert_eq!(text_to_json_guess("42"), serde_json::json!(42));
 }

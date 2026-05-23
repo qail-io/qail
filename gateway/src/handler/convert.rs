@@ -7,13 +7,16 @@
 ///
 /// Used by both the QAIL handler and the REST handler.
 pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
-    let column_names: Vec<String> = if let Some(ref info) = row.column_info {
+    let column_names: Vec<(String, usize)> = if let Some(ref info) = row.column_info {
         let mut pairs: Vec<_> = info.name_to_index.iter().collect();
         pairs.sort_by_key(|(_, idx)| *idx);
-        pairs.into_iter().map(|(name, _)| name.clone()).collect()
+        pairs
+            .into_iter()
+            .map(|(name, idx)| (name.clone(), *idx))
+            .collect()
     } else {
         (0..row.columns.len())
-            .map(|i| format!("col_{}", i))
+            .map(|i| (format!("col_{}", i), i))
             .collect()
     };
 
@@ -22,7 +25,7 @@ pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
     // Use OID + format conversion when ColumnInfo is available.
     let col_info = row.column_info.as_ref();
 
-    for (i, col_name) in column_names.into_iter().enumerate() {
+    for (col_name, i) in column_names {
         let value = if let Some(bytes) = row.columns.get(i).and_then(|v| v.as_deref()) {
             let oid = match col_info {
                 Some(info) => match info.oids.get(i) {
