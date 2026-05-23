@@ -5,7 +5,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
     character::complete::{char, digit1, multispace0, multispace1},
-    combinator::{map, opt, recognize, value},
+    combinator::{map, map_res, opt, recognize, value},
     sequence::{delimited, preceded},
 };
 
@@ -16,8 +16,7 @@ pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
 
 /// Parse interval shorthand: 24h, 7d, 1w, 30m, 6mo, 1y
 pub fn parse_interval(input: &str) -> IResult<&str, Value> {
-    let (input, num_str) = digit1(input)?;
-    let amount: i64 = num_str.parse().unwrap_or(0);
+    let (input, amount) = map_res(digit1, str::parse::<i64>).parse(input)?;
 
     let (input, unit) = alt((
         value(IntervalUnit::Second, tag_no_case("s")),
@@ -37,8 +36,8 @@ pub fn parse_interval(input: &str) -> IResult<&str, Value> {
 pub fn parse_value(input: &str) -> IResult<&str, Value> {
     alt((
         // Parameter: $1, $2
-        map(preceded(char('$'), digit1), |d: &str| {
-            Value::Param(d.parse().unwrap_or(0))
+        map_res(preceded(char('$'), digit1), |d: &str| {
+            d.parse::<usize>().map(Value::Param)
         }),
         // Named parameter: :name, :id, :user_id
         map(
@@ -76,15 +75,21 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
             |s: &str| Value::String(s.to_string()),
         ),
         // Float (must check before int)
-        map(
+        map_res(
             recognize((opt(char('-')), digit1, char('.'), digit1)),
-            |s: &str| Value::Float(s.parse().unwrap_or(0.0)),
+            |s: &str| {
+                let value = s.parse::<f64>().map_err(|err| err.to_string())?;
+                value
+                    .is_finite()
+                    .then_some(Value::Float(value))
+                    .ok_or_else(|| "float literal must be finite".to_string())
+            },
         ),
         // Interval shorthand before plain integers: 24h, 7d, 1w
         parse_interval,
         // Integer (last, after interval)
-        map(recognize((opt(char('-')), digit1)), |s: &str| {
-            Value::Int(s.parse().unwrap_or(0))
+        map_res(recognize((opt(char('-')), digit1)), |s: &str| {
+            s.parse::<i64>().map(Value::Int)
         }),
     ))
     .parse(input)

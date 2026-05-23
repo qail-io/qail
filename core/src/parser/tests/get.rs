@@ -143,6 +143,17 @@ fn test_v2_param_in_filter() {
 }
 
 #[test]
+fn test_v2_numeric_overflow_is_rejected() {
+    let huge = "999999999999999999999999999999999999999999999999";
+
+    assert!(parse(&format!("get users fields * limit {huge}")).is_err());
+    assert!(parse(&format!("get users fields * offset {huge}")).is_err());
+    assert!(parse(&format!("get users fields id where email = ${huge}")).is_err());
+    assert!(parse(&format!("get users fields id where age = {huge}")).is_err());
+    assert!(parse(&format!("get users fields id where age = {huge}d")).is_err());
+}
+
+#[test]
 fn test_v2_multiple_conditions() {
     let cmd = parse("get users fields * where active = true and role = \"admin\"").unwrap();
     assert_eq!(cmd.cages[0].conditions.len(), 2);

@@ -6,7 +6,7 @@ use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
     character::complete::{char, digit1, multispace0, multispace1},
-    combinator::{map, opt, value},
+    combinator::{map, map_res, opt, value},
     multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, preceded},
 };
@@ -312,6 +312,13 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
     } else if let Ok((i, val)) = parse_value(input) {
         (i, val)
     } else {
+        let trimmed = input.trim_start();
+        if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Digit,
+            )));
+        }
         let (i, col_name) = parse_identifier(input)?;
         (i, Value::Column(col_name.to_string()))
     };
@@ -370,12 +377,12 @@ pub fn parse_sort_column(input: &str) -> IResult<&str, Cage> {
 pub fn parse_limit_clause(input: &str) -> IResult<&str, Cage> {
     let (input, _) = tag_no_case("limit").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, n) = digit1(input)?;
+    let (input, n) = map_res(digit1, str::parse::<usize>).parse(input)?;
 
     Ok((
         input,
         Cage {
-            kind: CageKind::Limit(n.parse().unwrap_or(0)),
+            kind: CageKind::Limit(n),
             conditions: vec![],
             logical_op: LogicalOp::And,
         },
@@ -386,12 +393,12 @@ pub fn parse_limit_clause(input: &str) -> IResult<&str, Cage> {
 pub fn parse_offset_clause(input: &str) -> IResult<&str, Cage> {
     let (input, _) = tag_no_case("offset").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, n) = digit1(input)?;
+    let (input, n) = map_res(digit1, str::parse::<usize>).parse(input)?;
 
     Ok((
         input,
         Cage {
-            kind: CageKind::Offset(n.parse().unwrap_or(0)),
+            kind: CageKind::Offset(n),
             conditions: vec![],
             logical_op: LogicalOp::And,
         },
