@@ -34,3 +34,22 @@ async fn jwks_store_get_key_empty_returns_none() {
     assert_eq!(store.key_count().await, 0);
     assert!(store.get_key("nonexistent").await.is_none());
 }
+
+#[test]
+fn jwks_store_clamps_zero_refresh_interval() {
+    let store = JwksKeyStore::new("https://example.com/jwks", Duration::ZERO);
+    assert_eq!(store.refresh_interval, MIN_JWKS_REFRESH_INTERVAL);
+}
+
+#[test]
+fn parse_jwks_body_accepts_valid_small_payload() {
+    let jwks = parse_jwks_body(br#"{"keys":[]}"#).unwrap();
+    assert!(jwks.keys.is_empty());
+}
+
+#[test]
+fn parse_jwks_body_rejects_oversized_payload() {
+    let oversized = vec![b' '; MAX_JWKS_BODY_BYTES + 1];
+    let err = parse_jwks_body(&oversized).unwrap_err();
+    assert!(err.contains("JWKS body too large"));
+}

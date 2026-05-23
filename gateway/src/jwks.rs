@@ -23,6 +23,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+const DEFAULT_JWKS_REFRESH_SECS: u64 = 300;
+const MIN_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_JWKS_BODY_BYTES: usize = 1024 * 1024;
+
 /// JWKS key store — caches DecodingKeys fetched from a JWKS endpoint.
 #[derive(Clone)]
 pub struct JwksKeyStore {
@@ -39,6 +44,7 @@ impl JwksKeyStore {
     ///
     /// Call `initial_fetch()` after construction to populate keys.
     pub fn new(url: impl Into<String>, refresh_interval: Duration) -> Self {
+        let refresh_interval = refresh_interval.max(MIN_JWKS_REFRESH_INTERVAL);
         Self {
             url: url.into(),
             keys: Arc::new(RwLock::new(HashMap::new())),
@@ -57,7 +63,7 @@ impl JwksKeyStore {
         let refresh_secs = std::env::var("JWKS_REFRESH_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300); // 5 minutes default
+            .unwrap_or(DEFAULT_JWKS_REFRESH_SECS);
 
         Some(Self::new(url, Duration::from_secs(refresh_secs)))
     }
@@ -110,15 +116,24 @@ impl JwksKeyStore {
 
     /// Fetch JWKS and update cached keys.
     async fn refresh_keys(&self) -> Result<usize, String> {
-        let body = reqwest::get(&self.url)
-            .await
-            .map_err(|e| format!("JWKS fetch failed: {}", e))?
-            .text()
-            .await
-            .map_err(|e| format!("JWKS body read failed: {}", e))?;
+        let client = reqwest::Client::builder()
+            .timeout(JWKS_FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| format!("JWKS HTTP client build failed: {}", e))?;
 
-        let jwks: JwkSet =
-            serde_json::from_str(&body).map_err(|e| format!("JWKS parse failed: {}", e))?;
+        let response = client
+            .get(&self.url)
+            .send()
+            .await
+            .map_err(|e| format!("JWKS fetch failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("JWKS endpoint returned status {}", status));
+        }
+
+        let body = read_limited_response_body(response).await?;
+        let jwks = parse_jwks_body(&body)?;
 
         let mut new_keys = HashMap::new();
         for jwk in &jwks.keys {
@@ -142,6 +157,46 @@ impl JwksKeyStore {
 
         Ok(count)
     }
+}
+
+async fn read_limited_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    if let Some(content_length) = response.content_length()
+        && content_length > MAX_JWKS_BODY_BYTES as u64
+    {
+        return Err(format!(
+            "JWKS body too large: {} bytes exceeds {} byte limit",
+            content_length, MAX_JWKS_BODY_BYTES
+        ));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("JWKS body read failed: {}", e))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_JWKS_BODY_BYTES {
+            return Err(format!(
+                "JWKS body too large: exceeds {} byte limit",
+                MAX_JWKS_BODY_BYTES
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+fn parse_jwks_body(body: &[u8]) -> Result<JwkSet, String> {
+    if body.len() > MAX_JWKS_BODY_BYTES {
+        return Err(format!(
+            "JWKS body too large: {} bytes exceeds {} byte limit",
+            body.len(),
+            MAX_JWKS_BODY_BYTES
+        ));
+    }
+
+    serde_json::from_slice(body).map_err(|e| format!("JWKS parse failed: {}", e))
 }
 
 /// Parse `kid` from a JWT header without full validation.
