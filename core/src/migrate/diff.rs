@@ -45,6 +45,39 @@ fn unsupported_state_diff_features(schema: &Schema) -> BTreeSet<&'static str> {
     out
 }
 
+fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+
+            if check_signature(&old_col.check) != check_signature(&new_col.check) {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
+    check
+        .as_ref()
+        .map(|check| format!("{:?}:{:?}", check.name, check.expr))
+}
+
 /// Validate that a schema pair is fully supported by state-based diff.
 ///
 /// Returns an error when object families outside table/index/hint coverage are present.
@@ -52,17 +85,26 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
     let mut unsupported = unsupported_state_diff_features(old);
     unsupported.extend(unsupported_state_diff_features(new));
 
-    if unsupported.is_empty() {
-        return Ok(());
+    if !unsupported.is_empty() {
+        let detail = unsupported.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "State-based diff currently supports tables, columns, indexes, and migration hints only. \
+             Unsupported schema object families present: {}. \
+             Use folder-based strict migrations for these objects.",
+            detail
+        ));
     }
 
-    let detail = unsupported.into_iter().collect::<Vec<_>>().join(", ");
-    Err(format!(
-        "State-based diff currently supports tables, columns, indexes, and migration hints only. \
-         Unsupported schema object families present: {}. \
-         Use folder-based strict migrations for these objects.",
-        detail
-    ))
+    let check_diffs = existing_column_check_diffs(old, new);
+    if !check_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely alter CHECK constraints on existing columns: {}. \
+             Use an explicit migration for ADD/DROP/replace CHECK constraints.",
+            check_diffs.join(", ")
+        ));
+    }
+
+    Ok(())
 }
 
 /// Checked variant of [`diff_schemas`] that rejects unsupported object families.
@@ -507,7 +549,7 @@ fn parse_table_col(s: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::schema::{Column, Index, MultiColumnForeignKey, Table, ViewDef};
+    use super::super::schema::{CheckExpr, Column, Index, MultiColumnForeignKey, Table, ViewDef};
     use super::*;
 
     #[test]
@@ -551,6 +593,33 @@ mod tests {
             cmds.iter().any(|c| matches!(c.action, Action::Make)),
             "checked diff should still produce normal table commands"
         );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_column_check_addition() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("inventory").column(Column::new("quantity", ColumnType::Int).not_null()),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("inventory").column(
+                Column::new("quantity", ColumnType::Int).not_null().check(
+                    CheckExpr::GreaterOrEqual {
+                        column: "quantity".to_string(),
+                        value: 0,
+                    },
+                ),
+            ),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("existing-column CHECK change should fail closed");
+        assert!(err.contains("CHECK constraints"));
+        assert!(err.contains("inventory.quantity"));
     }
 
     #[test]
