@@ -571,7 +571,7 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
         let mut parts = host_part.splitn(2, '/');
         (
             parts.next().unwrap_or("localhost"),
-            parts.next().unwrap_or("postgres").to_string(),
+            percent_decode(parts.next().unwrap_or("postgres")),
         )
     } else {
         (host_part, "postgres".to_string())
@@ -615,17 +615,47 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
     let (user, password) = if let Some(creds) = credentials {
         if creds.contains(':') {
             let mut parts = creds.splitn(2, ':');
-            let u = parts.next().unwrap_or("postgres").to_string();
-            let p = parts.next().map(|s| s.to_string());
+            let u = percent_decode(parts.next().unwrap_or("postgres"));
+            let p = parts.next().map(percent_decode);
             (u, p)
         } else {
-            (creds.to_string(), None)
+            (percent_decode(creds), None)
         }
     } else {
         ("postgres".to_string(), None)
     };
 
     Ok((host, port, user, database, password))
+}
+
+fn percent_decode(s: &str) -> String {
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = s.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            decoded.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 pub(super) fn parse_bool_param(value: &str) -> Option<bool> {

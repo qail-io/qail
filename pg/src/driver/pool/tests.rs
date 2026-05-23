@@ -467,6 +467,27 @@ fn test_parse_pg_url_defaults_port_only_when_omitted() {
 }
 
 #[test]
+fn test_parse_pg_url_decodes_percent_encoded_user_password_and_database() {
+    let (host, port, user, db, password) =
+        parse_pg_url("postgresql://us%40er:p%40ss%2Fword@db.internal/my%2Fdb").unwrap();
+    assert_eq!(host, "db.internal");
+    assert_eq!(port, 5432);
+    assert_eq!(user, "us@er");
+    assert_eq!(db, "my/db");
+    assert_eq!(password, Some("p@ss/word".to_string()));
+}
+
+#[test]
+fn test_parse_pg_url_decodes_utf8_percent_encoding() {
+    let (host, _port, user, db, password) =
+        parse_pg_url("postgresql://caf%C3%A9:p%C3%A9ss@db.internal/app_%E2%9C%93").unwrap();
+    assert_eq!(host, "db.internal");
+    assert_eq!(user, "café");
+    assert_eq!(db, "app_✓");
+    assert_eq!(password, Some("péss".to_string()));
+}
+
+#[test]
 fn test_parse_pg_url_rejects_non_postgres_scheme_and_missing_host() {
     let err = match parse_pg_url("mysql://alice:secret@db.internal/app") {
         Ok(_) => panic!("non-postgres URL scheme must be rejected"),
