@@ -110,17 +110,17 @@ pub fn delete_branch_sql(name: &str) -> String {
 
 /// SQL to read overlay rows for a branch on a specific table.
 ///
-/// Returns the latest overlay row per PK (last write wins).
-/// Use this to merge with main table results in CoW reads.
+/// Returns the ordered operation stream so CoW reads can replay inserts,
+/// patches, and tombstones chronologically.
 pub fn read_overlay_sql(branch_name: &str, table_name: &str) -> String {
     let safe_branch = escape_literal(branch_name);
     let safe_table = escape_literal(table_name);
     format!(
-        "SELECT DISTINCT ON (row_pk) row_pk, operation, row_data \
+        "SELECT row_pk, operation, row_data::text \
          FROM _qail_branch_rows \
          WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active') \
            AND table_name = {} \
-         ORDER BY row_pk, row_seq ASC NULLS FIRST, created_at ASC, id ASC;",
+         ORDER BY row_seq ASC NULLS FIRST, created_at ASC, id ASC;",
         safe_branch, safe_table
     )
 }
@@ -238,11 +238,11 @@ mod tests {
     #[test]
     fn test_read_overlay_sql() {
         let sql = read_overlay_sql("feature-1", "users");
-        assert!(sql.contains("DISTINCT ON (row_pk)"));
+        assert!(!sql.contains("DISTINCT ON"));
         assert!(sql.contains("'feature-1'"));
         assert!(sql.contains("'users'"));
         assert!(sql.contains("status = 'active'"));
-        assert!(sql.contains("ORDER BY row_pk, row_seq ASC NULLS FIRST, created_at ASC, id ASC"));
+        assert!(sql.contains("ORDER BY row_seq ASC NULLS FIRST, created_at ASC, id ASC"));
     }
 
     #[test]
