@@ -433,8 +433,16 @@ impl PgPool {
     {
         let mut conn = self.acquire_with_rls(ctx).await?;
         let out = f(&mut conn).await;
-        conn.release().await;
-        out
+        match out {
+            Ok(value) => {
+                conn.release_checked().await?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = conn.rollback_and_release().await;
+                Err(err)
+            }
+        }
     }
 
     /// Scoped helper for system-level operations (`RlsContext::empty()`).
@@ -510,8 +518,16 @@ impl PgPool {
     {
         let mut conn = self.acquire_with_rls_timeout(ctx, timeout_ms).await?;
         let out = f(&mut conn).await;
-        conn.release().await;
-        out
+        match out {
+            Ok(value) => {
+                conn.release_checked().await?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = conn.rollback_and_release().await;
+                Err(err)
+            }
+        }
     }
 
     /// Acquire a connection with RLS context, statement timeout, AND lock timeout.
@@ -569,8 +585,16 @@ impl PgPool {
             .acquire_with_rls_timeouts(ctx, statement_timeout_ms, lock_timeout_ms)
             .await?;
         let out = f(&mut conn).await;
-        conn.release().await;
-        out
+        match out {
+            Ok(value) => {
+                conn.release_checked().await?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = conn.rollback_and_release().await;
+                Err(err)
+            }
+        }
     }
 
     /// Acquire a connection for system-level operations (no tenant context).
