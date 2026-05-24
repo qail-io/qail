@@ -155,7 +155,8 @@ impl Schema {
         let mut current_fks: Vec<ForeignKey> = Vec::new();
         let mut current_rls_flag = false;
 
-        for raw_line in content.lines() {
+        let mut lines = content.lines().peekable();
+        while let Some(raw_line) = lines.next() {
             let line = strip_schema_comments(raw_line);
 
             // Skip comments and empty lines
@@ -182,17 +183,19 @@ impl Schema {
                 let mut properties = HashMap::new();
 
                 if line.contains('{') {
-                    // Collect block content
-                    let block = rest.split('{').nth(1).unwrap_or("").to_string();
-                    if !block.contains('}') {
-                        for inner in content.lines().skip_while(|l| !l.contains(line)) {
-                            // Simple approach: read until }
-                            if inner.contains('}') {
-                                break;
-                            }
-                        }
+                    let mut block = rest.split('{').nth(1).unwrap_or("").to_string();
+                    while !block.contains('}') {
+                        let Some(next_line) = lines.next() else {
+                            return Err(format!(
+                                "Unclosed {} resource definition for '{}': expected closing '}}'",
+                                kind, name
+                            ));
+                        };
+                        let inner = strip_schema_comments(next_line);
+                        block.push(' ');
+                        block.push_str(inner);
                     }
-                    let block = block.replace('}', "");
+                    let block = block.split('}').next().unwrap_or("").trim();
                     let mut tokens = block.split_whitespace();
                     while let Some(key) = tokens.next() {
                         if let Some(val) = tokens.next() {

@@ -82,6 +82,41 @@ $$
 }
 
 #[test]
+fn test_parse_schema_consumes_multiline_resource_blocks() {
+    let content = r#"
+bucket avatars {
+  provider aws
+  region "ap-southeast-1"
+}
+
+table files {
+  id UUID
+}
+"#;
+
+    let schema = Schema::parse(content).unwrap();
+    let bucket = schema.resources.get("avatars").expect("bucket missing");
+    assert_eq!(bucket.kind, "bucket");
+    assert_eq!(bucket.provider.as_deref(), Some("aws"));
+    assert_eq!(
+        bucket.properties.get("region").map(String::as_str),
+        Some("ap-southeast-1")
+    );
+    assert!(schema.has_table("files"));
+}
+
+#[test]
+fn test_parse_schema_rejects_unclosed_resource_blocks() {
+    let content = r#"
+queue jobs {
+  provider sqs
+"#;
+
+    let err = Schema::parse(content).expect_err("unclosed resource must fail");
+    assert!(err.contains("Unclosed queue resource definition"));
+}
+
+#[test]
 fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
     let mut schema = Schema::parse(
         r#"
