@@ -1431,12 +1431,28 @@ pub fn encode_export(
     Ok(())
 }
 
-/// Encode a WHERE clause that supports both AND and OR filter cages.
+fn encode_condition_group(
+    conditions: &[Condition],
+    joiner: &[u8],
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    for (idx, condition) in conditions.iter().enumerate() {
+        if idx > 0 {
+            buf.extend_from_slice(joiner);
+        }
+        encode_conditions(std::slice::from_ref(condition), buf, params)?;
+    }
+    Ok(())
+}
+
+/// Encode a WHERE clause that preserves each filter cage as its own group.
 ///
-/// - AND conditions (from `.eq()`, `.filter()`, etc.)
-///   are joined with `AND`.
-/// - OR conditions (from `.or_filter()`) are grouped into a single
-///   parenthesized `(c1 OR c2 OR ... OR cN)` block, appended with `AND`.
+/// - AND cages are emitted first and joined internally with `AND`.
+/// - OR cages are emitted after AND cages, joined internally with `OR`, and
+///   parenthesized.
+/// - Distinct OR cages stay separate and are joined together with `AND`, so
+///   policy/user OR groups do not widen each other.
 ///
 /// Example output: `WHERE is_active = $1 AND (topic ILIKE $2 OR question ILIKE $3)`
 fn encode_where(
@@ -1444,32 +1460,21 @@ fn encode_where(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    // Fast pre-scan: detect whether any AND/OR filter cages exist without
-    // allocating temporary vectors.
-    let mut has_and = false;
-    let mut has_or = false;
-    for cage in &cmd.cages {
-        if cage.kind != CageKind::Filter || cage.conditions.is_empty() {
-            continue;
-        }
-        match cage.logical_op {
-            LogicalOp::And => has_and = true,
-            LogicalOp::Or => has_or = true,
-        }
-    }
-
-    if !has_and && !has_or {
+    if !cmd
+        .cages
+        .iter()
+        .any(|cage| cage.kind == CageKind::Filter && !cage.conditions.is_empty())
+    {
         return Ok(());
     }
 
     buf.extend_from_slice(b" WHERE ");
 
     let mut wrote_clause = false;
-
-    if has_and {
+    for target_op in [LogicalOp::And, LogicalOp::Or] {
         for cage in &cmd.cages {
             if cage.kind != CageKind::Filter
-                || cage.logical_op != LogicalOp::And
+                || cage.logical_op != target_op
                 || cage.conditions.is_empty()
             {
                 continue;
@@ -1477,33 +1482,19 @@ fn encode_where(
             if wrote_clause {
                 buf.extend_from_slice(b" AND ");
             }
-            encode_conditions(&cage.conditions, buf, params)?;
+
+            match target_op {
+                LogicalOp::And => {
+                    encode_condition_group(&cage.conditions, b" AND ", buf, params)?;
+                }
+                LogicalOp::Or => {
+                    buf.extend_from_slice(b"(");
+                    encode_condition_group(&cage.conditions, b" OR ", buf, params)?;
+                    buf.extend_from_slice(b")");
+                }
+            }
             wrote_clause = true;
         }
-    }
-
-    if has_or {
-        if wrote_clause {
-            buf.extend_from_slice(b" AND ");
-        }
-        buf.extend_from_slice(b"(");
-        let mut first = true;
-        for cage in &cmd.cages {
-            if cage.kind != CageKind::Filter
-                || cage.logical_op != LogicalOp::Or
-                || cage.conditions.is_empty()
-            {
-                continue;
-            }
-            for cond in &cage.conditions {
-                if !first {
-                    buf.extend_from_slice(b" OR ");
-                }
-                first = false;
-                encode_conditions(std::slice::from_ref(cond), buf, params)?;
-            }
-        }
-        buf.extend_from_slice(b")");
     }
 
     Ok(())

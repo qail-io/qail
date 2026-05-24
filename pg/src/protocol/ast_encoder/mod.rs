@@ -1021,6 +1021,58 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_select_keeps_multiple_or_cages_separate() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("orders");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("city".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("London".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("city".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("Paris".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::Or,
+        });
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("country".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("UK".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("country".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("FR".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::Or,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("(city = $1 OR city = $2) AND (country = $3 OR country = $4)"),
+            "distinct OR cages must remain AND-separated: {}",
+            sql
+        );
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
     fn test_encode_select_with_or_filter() {
         use qail_core::ast::Operator;
 
