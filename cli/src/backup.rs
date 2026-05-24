@@ -48,6 +48,8 @@ pub struct MigrationImpact {
     pub rows_affected: u64,
     /// Columns being dropped (if any)
     pub dropped_columns: Vec<String>,
+    /// Columns whose values are at risk without being dropped.
+    pub affected_columns: Vec<String>,
     pub is_destructive: bool,
 }
 
@@ -74,6 +76,7 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<Migrati
             for col in &cmd.columns {
                 if let Expr::Named(name) = col {
                     impact.dropped_columns.push(name.clone());
+                    impact.affected_columns.push(name.clone());
                     impact.rows_affected += count_column_values(driver, &cmd.table, name).await?;
                 }
             }
@@ -88,6 +91,7 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<Migrati
                 impact.operation =
                     format!("ALTER TYPE (narrowing {} -> {})", source_type, target_type);
                 impact.is_destructive = true;
+                impact.affected_columns.push(column);
                 impact.rows_affected = count_table_rows(driver, &cmd.table).await?;
             }
         }
@@ -97,6 +101,7 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<Migrati
             if table_rows > 0 {
                 impact.is_destructive = true;
                 impact.rows_affected = table_rows;
+                impact.affected_columns = extract_named_columns(&cmd.columns);
             }
         }
         Action::Alter => {
@@ -237,8 +242,9 @@ pub fn display_impact(impacts: &[MigrationImpact]) {
             }
         };
 
-        if !impact.dropped_columns.is_empty() {
-            for col in &impact.dropped_columns {
+        let display_columns = columns_requiring_snapshot(impact);
+        if !display_columns.is_empty() {
+            for col in display_columns {
                 println!(
                     "  {} {}.{} → {} values at risk",
                     op_colored,
@@ -265,6 +271,34 @@ pub fn display_impact(impacts: &[MigrationImpact]) {
         total_rows.to_string().red().bold()
     );
     println!();
+}
+
+fn extract_named_columns(columns: &[Expr]) -> Vec<String> {
+    columns
+        .iter()
+        .filter_map(|expr| match expr {
+            Expr::Named(name) => Some(name.trim().to_string()),
+            Expr::Def { name, .. } => Some(name.trim().to_string()),
+            _ => None,
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn columns_requiring_snapshot(impact: &MigrationImpact) -> &[String] {
+    if !impact.dropped_columns.is_empty() {
+        &impact.dropped_columns
+    } else {
+        &impact.affected_columns
+    }
+}
+
+fn snapshot_label(impact: &MigrationImpact, columns: &[String]) -> String {
+    if columns.is_empty() {
+        impact.table.clone()
+    } else {
+        format!("{}.{}", impact.table, columns.join(","))
+    }
 }
 
 /// User choice for migration
@@ -401,18 +435,23 @@ pub async fn create_snapshots(
             continue;
         }
 
+        let snapshot_columns = columns_requiring_snapshot(impact);
         let path = if impact.operation == "DROP TABLE" {
             backup_table(driver, &impact.table).await?
-        } else if !impact.dropped_columns.is_empty() {
-            backup_columns(driver, &impact.table, &impact.dropped_columns).await?
+        } else if !snapshot_columns.is_empty() {
+            backup_columns(driver, &impact.table, snapshot_columns).await?
         } else {
-            continue;
+            return Err(anyhow!(
+                "No snapshot strategy for destructive operation '{}' on '{}'",
+                impact.operation,
+                impact.table
+            ));
         };
 
         println!(
             "  {} {} → {}",
             "✓".green(),
-            format!("{}.{}", impact.table, impact.dropped_columns.join(",")).cyan(),
+            snapshot_label(impact, snapshot_columns).cyan(),
             path.display().to_string().dimmed()
         );
 
@@ -555,6 +594,23 @@ pub async fn snapshot_column_to_db(
     table: &str,
     column: &str,
 ) -> Result<u64> {
+    snapshot_column_to_db_as(
+        driver,
+        migration_version,
+        table,
+        column,
+        SnapshotType::DropColumn,
+    )
+    .await
+}
+
+async fn snapshot_column_to_db_as(
+    driver: &mut PgDriver,
+    migration_version: &str,
+    table: &str,
+    column: &str,
+    snapshot_type: SnapshotType,
+) -> Result<u64> {
     // Ensure snapshots table exists
     ensure_snapshots_table(driver).await?;
 
@@ -588,7 +644,7 @@ pub async fn snapshot_column_to_db(
                     column.to_string(),
                     row_id,
                     snapshot_json_string(&val)?,
-                    SnapshotType::DropColumn.to_string(),
+                    snapshot_type.to_string(),
                 ]);
 
             driver
@@ -682,11 +738,22 @@ pub async fn create_db_snapshots(
                 count.to_string().green()
             );
             count
-        } else if !impact.dropped_columns.is_empty() {
+        } else if !columns_requiring_snapshot(impact).is_empty() {
             let mut col_saved = 0u64;
-            for col in &impact.dropped_columns {
-                let count =
-                    snapshot_column_to_db(driver, migration_version, &impact.table, col).await?;
+            let snapshot_type = if impact.dropped_columns.is_empty() {
+                SnapshotType::AlterColumn
+            } else {
+                SnapshotType::DropColumn
+            };
+            for col in columns_requiring_snapshot(impact) {
+                let count = snapshot_column_to_db_as(
+                    driver,
+                    migration_version,
+                    &impact.table,
+                    col,
+                    snapshot_type,
+                )
+                .await?;
                 println!(
                     "  {} {}.{} → {} values saved",
                     "✓".green(),
@@ -698,7 +765,11 @@ pub async fn create_db_snapshots(
             }
             col_saved
         } else {
-            0
+            return Err(anyhow!(
+                "No database snapshot strategy for destructive operation '{}' on '{}'",
+                impact.operation,
+                impact.table
+            ));
         };
 
         total_saved += saved;
@@ -799,8 +870,9 @@ pub async fn list_snapshots(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_narrowing_type_change, normalize_type_for_cast, parse_count_text,
-        required_backup_row_string, snapshot_json_string, snapshot_row_json,
+        MigrationImpact, columns_requiring_snapshot, is_narrowing_type_change,
+        normalize_type_for_cast, parse_count_text, required_backup_row_string,
+        snapshot_json_string, snapshot_label, snapshot_row_json,
     };
 
     #[test]
@@ -819,6 +891,24 @@ mod tests {
         assert!(is_narrowing_type_change("TEXT", "INT"));
         assert!(!is_narrowing_type_change("INT", "BIGINT"));
         assert!(!is_narrowing_type_change("INT", "TEXT"));
+    }
+
+    #[test]
+    fn destructive_alter_column_impacts_require_column_snapshots() {
+        let impact = MigrationImpact {
+            table: "users".to_string(),
+            operation: "ALTER SET NOT NULL".to_string(),
+            rows_affected: 7,
+            affected_columns: vec!["email".to_string()],
+            is_destructive: true,
+            ..Default::default()
+        };
+
+        assert_eq!(columns_requiring_snapshot(&impact), &["email".to_string()]);
+        assert_eq!(
+            snapshot_label(&impact, columns_requiring_snapshot(&impact)),
+            "users.email"
+        );
     }
 
     #[test]
