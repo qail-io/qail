@@ -920,6 +920,9 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+    if local_cols.is_empty() || local_cols.iter().any(|col| col.is_empty()) {
+        return Err("foreign_key local columns are required".to_string());
+    }
 
     // After first ) find "references"
     let after_locals = rest[local_end + 1..].trim();
@@ -933,10 +936,19 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     let ref_paren_end = ref_part.find(')').ok_or("foreign_key ref missing )")?;
 
     let ref_table = ref_part[..ref_paren_start].trim().to_string();
+    if ref_table.is_empty() {
+        return Err("foreign_key referenced table is required".to_string());
+    }
     let ref_cols: Vec<String> = ref_part[ref_paren_start + 1..ref_paren_end]
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+    if ref_cols.is_empty() || ref_cols.iter().any(|col| col.is_empty()) {
+        return Err("foreign_key referenced columns are required".to_string());
+    }
+    if local_cols.len() != ref_cols.len() {
+        return Err("foreign_key local/ref column counts must match".to_string());
+    }
 
     Ok(MultiColumnForeignKey::new(local_cols, ref_table, ref_cols))
 }
@@ -2383,6 +2395,31 @@ table bookings {
         assert_eq!(fk.columns, vec!["route_id", "schedule_id"]);
         assert_eq!(fk.ref_table, "schedules");
         assert_eq!(fk.ref_columns, vec!["route_id", "schedule_id"]);
+    }
+
+    #[test]
+    fn test_parse_multi_column_fk_rejects_invalid_shapes() {
+        for (input, expected) in [
+            (
+                "table bookings {\n  foreign_key () references schedules(id)\n}",
+                "foreign_key local columns are required",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id) references (id)\n}",
+                "foreign_key referenced table is required",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id,) references schedules(id)\n}",
+                "foreign_key local columns are required",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id, schedule_id) references schedules(id)\n}",
+                "foreign_key local/ref column counts must match",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid multi-column fk should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
