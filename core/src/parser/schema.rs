@@ -264,18 +264,16 @@ fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
     let (input, type_name) =
         take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.').parse(input)?;
 
-    let (input, params) = if input.starts_with('(') {
-        let paren_start = 1;
-        let mut paren_end = paren_start;
-        for (i, c) in input[paren_start..].char_indices() {
-            if c == ')' {
-                paren_end = paren_start + i;
-                break;
-            }
-        }
-        let param_str = &input[paren_start..paren_end];
+    let (input, params) = if let Some(after_open) = input.strip_prefix('(') {
+        let Some(paren_end) = after_open.find(')') else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Char,
+            )));
+        };
+        let param_str = &after_open[..paren_end];
         let params: Vec<String> = param_str.split(',').map(|s| s.trim().to_string()).collect();
-        (&input[paren_end + 1..], Some(params))
+        (&after_open[paren_end + 1..], Some(params))
     } else {
         (input, None)
     };
@@ -1199,6 +1197,16 @@ mod tests {
             .expect("gateway_state not found");
         assert_eq!(gateway_state.typ, "integrations.payment_state");
         assert!(gateway_state.is_array);
+    }
+
+    #[test]
+    fn test_malformed_type_params_return_parse_error_without_panic() {
+        let input = "table invoices ( amount decimal(";
+
+        let result = std::panic::catch_unwind(|| Schema::parse(input));
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
     }
 
     #[test]
