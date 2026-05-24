@@ -10,7 +10,37 @@ use serde_json::{Value as JsonValue, json};
 fn serialize_json_request(request: &JsonValue) -> Vec<u8> {
     match serde_json::to_vec(request) {
         Ok(bytes) => bytes,
-        Err(_) => b"{}".to_vec(),
+        Err(err) => {
+            encode_error_request(&format!("failed to serialize Qdrant JSON request: {err}"))
+        }
+    }
+}
+
+fn encode_error_request(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "error": message }))
+        .unwrap_or_else(|_| b"{\"error\":\"failed to encode Qdrant JSON error\"}".to_vec())
+}
+
+fn vector_to_json(values: &[f32], label: &str) -> Result<JsonValue, String> {
+    let mut json_values = Vec::with_capacity(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(format!(
+                "Qdrant {label} contains non-finite vector value at index {idx}: {value}"
+            ));
+        }
+        json_values.push(json!(value));
+    }
+    Ok(JsonValue::Array(json_values))
+}
+
+fn optional_threshold_to_json(value: Option<f32>) -> Result<Option<JsonValue>, String> {
+    match value {
+        Some(value) if !value.is_finite() => Err(format!(
+            "Qdrant score threshold must be finite, got {value}"
+        )),
+        Some(value) => Ok(Some(json!(value))),
+        None => Ok(None),
     }
 }
 
@@ -35,6 +65,10 @@ pub fn encode_search_request(
     score_threshold: Option<f32>,
     with_vector: bool,
 ) -> Vec<u8> {
+    let vector = match vector_to_json(vector, "search request") {
+        Ok(vector) => vector,
+        Err(err) => return encode_error_request(&err),
+    };
     let mut request = json!({
         "vector": vector,
         "limit": limit,
@@ -46,8 +80,12 @@ pub fn encode_search_request(
         request["offset"] = json!(off);
     }
 
+    let score_threshold = match optional_threshold_to_json(score_threshold) {
+        Ok(score_threshold) => score_threshold,
+        Err(err) => return encode_error_request(&err),
+    };
     if let Some(threshold) = score_threshold {
-        request["score_threshold"] = json!(threshold);
+        request["score_threshold"] = threshold;
     }
 
     serialize_json_request(&request)
@@ -62,6 +100,10 @@ pub fn encode_search_request_with_filter(
     with_vector: bool,
     filter: JsonValue,
 ) -> Vec<u8> {
+    let vector = match vector_to_json(vector, "search request") {
+        Ok(vector) => vector,
+        Err(err) => return encode_error_request(&err),
+    };
     let mut request = json!({
         "vector": vector,
         "limit": limit,
@@ -74,8 +116,12 @@ pub fn encode_search_request_with_filter(
         request["offset"] = json!(off);
     }
 
+    let score_threshold = match optional_threshold_to_json(score_threshold) {
+        Ok(score_threshold) => score_threshold,
+        Err(err) => return encode_error_request(&err),
+    };
     if let Some(threshold) = score_threshold {
-        request["score_threshold"] = json!(threshold);
+        request["score_threshold"] = threshold;
     }
 
     serialize_json_request(&request)
@@ -94,28 +140,35 @@ pub fn encode_search_request_with_filter(
 /// }
 /// ```
 pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
-    let points_json: Vec<JsonValue> = points
+    let points_json: Result<Vec<JsonValue>, String> = points
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(idx, p)| {
             let id = match &p.id {
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
             };
 
-            let payload: JsonValue = p
+            let payload: Result<serde_json::Map<String, JsonValue>, String> = p
                 .payload
                 .iter()
-                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+                .map(|(k, v)| Ok((k.clone(), payload_value_to_json(v)?)))
                 .collect();
 
-            json!({
+            let vector = vector_to_json(&p.vector, &format!("upsert point {idx}"))?;
+
+            Ok(json!({
                 "id": id,
-                "vector": p.vector,
-                "payload": payload,
-            })
+                "vector": vector,
+                "payload": JsonValue::Object(payload?),
+            }))
         })
         .collect();
 
+    let points_json = match points_json {
+        Ok(points_json) => points_json,
+        Err(err) => return encode_error_request(&err),
+    };
     let request = json!({ "points": points_json });
     serialize_json_request(&request)
 }
@@ -126,35 +179,45 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
 pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoint]) -> Vec<u8> {
     use crate::point::MultiVectorPoint;
 
-    let points_json: Vec<JsonValue> = points
+    let points_json: Result<Vec<JsonValue>, String> = points
         .iter()
-        .map(|p: &MultiVectorPoint| {
+        .enumerate()
+        .map(|(idx, p): (usize, &MultiVectorPoint)| {
             let id = match &p.id {
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
             };
 
-            let payload: JsonValue = p
+            let payload: Result<serde_json::Map<String, JsonValue>, String> = p
                 .payload
                 .iter()
-                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+                .map(|(k, v)| Ok((k.clone(), payload_value_to_json(v)?)))
                 .collect();
 
             // Named vectors as object
-            let vectors: JsonValue = p
+            let vectors: Result<serde_json::Map<String, JsonValue>, String> = p
                 .vectors
                 .iter()
-                .map(|(k, v)| (k.clone(), json!(v)))
+                .map(|(k, v)| {
+                    Ok((
+                        k.clone(),
+                        vector_to_json(v, &format!("multi-vector point {idx}.{k}"))?,
+                    ))
+                })
                 .collect();
 
-            json!({
+            Ok(json!({
                 "id": id,
-                "vector": vectors,
-                "payload": payload,
-            })
+                "vector": JsonValue::Object(vectors?),
+                "payload": JsonValue::Object(payload?),
+            }))
         })
         .collect();
 
+    let points_json = match points_json {
+        Ok(points_json) => points_json,
+        Err(err) => return encode_error_request(&err),
+    };
     let request = json!({ "points": points_json });
     serialize_json_request(&request)
 }
@@ -470,21 +533,28 @@ fn parse_payload_checked(
 }
 
 /// Convert PayloadValue to JSON.
-fn payload_value_to_json(value: &PayloadValue) -> JsonValue {
+fn payload_value_to_json(value: &PayloadValue) -> Result<JsonValue, String> {
     match value {
-        PayloadValue::String(s) => json!(s),
-        PayloadValue::Integer(n) => json!(n),
-        PayloadValue::Float(f) => json!(f),
-        PayloadValue::Bool(b) => json!(b),
+        PayloadValue::String(s) => Ok(json!(s)),
+        PayloadValue::Integer(n) => Ok(json!(n)),
+        PayloadValue::Float(f) if f.is_finite() => Ok(json!(f)),
+        PayloadValue::Float(f) => Err(format!(
+            "Qdrant payload contains non-finite float value: {f}"
+        )),
+        PayloadValue::Bool(b) => Ok(json!(b)),
         PayloadValue::List(arr) => {
-            JsonValue::Array(arr.iter().map(payload_value_to_json).collect())
+            let values: Result<Vec<JsonValue>, String> =
+                arr.iter().map(payload_value_to_json).collect();
+            Ok(JsonValue::Array(values?))
         }
-        PayloadValue::Object(obj) => JsonValue::Object(
-            obj.iter()
-                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
-                .collect(),
-        ),
-        PayloadValue::Null => JsonValue::Null,
+        PayloadValue::Object(obj) => {
+            let values: Result<serde_json::Map<String, JsonValue>, String> = obj
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), payload_value_to_json(v)?)))
+                .collect();
+            Ok(JsonValue::Object(values?))
+        }
+        PayloadValue::Null => Ok(JsonValue::Null),
     }
 }
 
@@ -566,6 +636,52 @@ mod tests {
         assert!(json_str.contains("\"points\""));
         assert!(json_str.contains("\"test-id\""));
         assert!(json_str.contains("[0.5,0.5]"));
+    }
+
+    #[test]
+    fn encode_search_request_rejects_non_finite_vector_json() {
+        let json_bytes = encode_search_request(&[0.1, f32::NAN], 10, None, None, false);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("non-finite vector value")
+        );
+    }
+
+    #[test]
+    fn encode_search_request_rejects_non_finite_threshold_json() {
+        let json_bytes = encode_search_request(&[0.1], 10, None, Some(f32::INFINITY), false);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("score threshold"));
+    }
+
+    #[test]
+    fn encode_upsert_request_rejects_non_finite_payload_json() {
+        let point = Point::new("test-id", vec![0.5, 0.5])
+            .with_payload("score", PayloadValue::Float(f64::INFINITY));
+        let json_bytes = encode_upsert_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("non-finite float"));
+    }
+
+    #[test]
+    fn encode_multi_vector_request_rejects_non_finite_vector_json() {
+        let point = crate::point::MultiVectorPoint::new("test-id")
+            .with_vector("image", vec![0.5, f32::NEG_INFINITY]);
+        let json_bytes = encode_upsert_multi_vector_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("non-finite vector value")
+        );
     }
 
     #[test]
