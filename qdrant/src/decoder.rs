@@ -229,9 +229,8 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                 }
                 let entry_data = read_submessage(&mut buf)?;
                 // Payload is map<string, Value> — each entry is a MapEntry message
-                if let Some((key, value)) = decode_map_entry(entry_data, 0) {
-                    payload.insert(key, value);
-                }
+                let (key, value) = decode_map_entry(entry_data, 0)?;
+                payload.insert(key, value);
             }
             SCORED_POINT_SCORE => {
                 if wire_type != WIRE_FIXED32 {
@@ -379,9 +378,8 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let entry_data = read_submessage(&mut buf)?;
-                if let Some((key, value)) = decode_map_entry(entry_data, 0) {
-                    payload.insert(key, value);
-                }
+                let (key, value) = decode_map_entry(entry_data, 0)?;
+                payload.insert(key, value);
             }
             RETRIEVED_POINT_VECTORS => {
                 if wire_type != WIRE_LEN {
@@ -420,40 +418,48 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
 ///   Value value = 2;
 /// }
 /// ```
-fn decode_map_entry(data: &[u8], depth: usize) -> Option<(String, PayloadValue)> {
+fn decode_map_entry(data: &[u8], depth: usize) -> QdrantResult<(String, PayloadValue)> {
     let mut key = None;
     let mut value = None;
     let mut buf = data;
 
     while !buf.is_empty() {
-        let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
 
         match field_number {
             1 => {
                 // key (string)
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload map key".to_string(),
+                    ));
                 }
-                let s_data = read_submessage(&mut buf).ok()?;
-                key = Some(std::str::from_utf8(s_data).ok()?.to_string());
+                let s_data = read_submessage(&mut buf)?;
+                let decoded_key = std::str::from_utf8(s_data).map_err(|e| {
+                    QdrantError::Decode(format!("Invalid UTF-8 payload map key: {}", e))
+                })?;
+                key = Some(decoded_key.to_string());
             }
             2 => {
                 // value (Value message)
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload map value".to_string(),
+                    ));
                 }
-                let v_data = read_submessage(&mut buf).ok()?;
-                value = decode_value_with_depth(v_data, depth);
+                let v_data = read_submessage(&mut buf)?;
+                value = Some(decode_value_with_depth(v_data, depth)?);
             }
             _ => {
-                skip_field(&mut buf, wire_type).ok()?;
+                skip_field(&mut buf, wire_type)?;
             }
         }
     }
 
-    key.and_then(|k| value.map(|v| (k, v)))
+    let key = key.ok_or_else(|| QdrantError::Decode("Missing payload map key".to_string()))?;
+    let value =
+        value.ok_or_else(|| QdrantError::Decode("Missing payload map value".to_string()))?;
+    Ok((key, value))
 }
 
 /// Decode a protobuf Value message into PayloadValue.
@@ -472,172 +478,193 @@ fn decode_map_entry(data: &[u8], depth: usize) -> Option<(String, PayloadValue)>
 /// }
 /// ```
 #[cfg(test)]
-fn decode_value(data: &[u8]) -> Option<PayloadValue> {
+fn decode_value(data: &[u8]) -> QdrantResult<PayloadValue> {
     decode_value_with_depth(data, 0)
 }
 
 /// Decode a protobuf Value message into PayloadValue with depth tracking.
-fn decode_value_with_depth(data: &[u8], depth: usize) -> Option<PayloadValue> {
+fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadValue> {
     if depth > MAX_DECODE_DEPTH {
-        return None; // Too deep — refuse to recurse further
+        return Err(QdrantError::Decode(
+            "Payload value nesting exceeds maximum depth".to_string(),
+        ));
     }
 
     let mut buf = data;
 
     while !buf.is_empty() {
-        let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
 
         match field_number {
             VALUE_NULL => {
                 // NullValue enum (varint)
                 if wire_type == WIRE_VARINT {
-                    decode_varint(&mut buf).ok()?;
+                    decode_varint(&mut buf)?;
                 } else {
-                    skip_field(&mut buf, wire_type).ok()?;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload null value".to_string(),
+                    ));
                 }
-                return Some(PayloadValue::Null);
+                return Ok(PayloadValue::Null);
             }
             VALUE_DOUBLE => {
                 // double (fixed64)
                 if wire_type != WIRE_FIXED64 {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload double value".to_string(),
+                    ));
                 }
                 if buf.len() < 8 {
-                    return None;
+                    return Err(QdrantError::Decode(
+                        "Truncated payload double value".to_string(),
+                    ));
                 }
-                let bytes: [u8; 8] = buf[..8].try_into().ok()?;
-                let _rest = &buf[8..];
-                return Some(PayloadValue::Float(f64::from_le_bytes(bytes)));
+                let bytes: [u8; 8] = buf[..8].try_into().map_err(|_| {
+                    QdrantError::Decode("Truncated payload double value".to_string())
+                })?;
+                let value = f64::from_le_bytes(bytes);
+                if !value.is_finite() {
+                    return Err(QdrantError::Decode(
+                        "Invalid non-finite payload float value".to_string(),
+                    ));
+                }
+                return Ok(PayloadValue::Float(value));
             }
             VALUE_INTEGER => {
                 // int64 (varint)
                 if wire_type != WIRE_VARINT {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload integer value".to_string(),
+                    ));
                 }
-                let n = decode_varint(&mut buf).ok()? as i64;
-                return Some(PayloadValue::Integer(n));
+                let n = decode_varint(&mut buf)? as i64;
+                return Ok(PayloadValue::Integer(n));
             }
             VALUE_STRING => {
                 // string (len-delimited)
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload string value".to_string(),
+                    ));
                 }
-                let s_data = read_submessage(&mut buf).ok()?;
-                let s = std::str::from_utf8(s_data).ok()?.to_string();
-                return Some(PayloadValue::String(s));
+                let s_data = read_submessage(&mut buf)?;
+                let s = std::str::from_utf8(s_data)
+                    .map_err(|e| {
+                        QdrantError::Decode(format!("Invalid UTF-8 payload string: {}", e))
+                    })?
+                    .to_string();
+                return Ok(PayloadValue::String(s));
             }
             VALUE_BOOL => {
                 // bool (varint)
                 if wire_type != WIRE_VARINT {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload bool value".to_string(),
+                    ));
                 }
-                let v = decode_varint(&mut buf).ok()?;
-                return Some(PayloadValue::Bool(v != 0));
+                let v = decode_varint(&mut buf)?;
+                return Ok(PayloadValue::Bool(v != 0));
             }
             VALUE_STRUCT => {
                 // Struct (len-delimited) — map<string, Value>
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload object value".to_string(),
+                    ));
                 }
-                let struct_data = read_submessage(&mut buf).ok()?;
-                let map = decode_struct_fields_with_depth(struct_data, depth + 1);
-                return Some(PayloadValue::Object(map));
+                let struct_data = read_submessage(&mut buf)?;
+                let map = decode_struct_fields_with_depth(struct_data, depth + 1)?;
+                return Ok(PayloadValue::Object(map));
             }
             VALUE_LIST => {
                 // ListValue (len-delimited) — repeated Value
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload list value".to_string(),
+                    ));
                 }
-                let list_data = read_submessage(&mut buf).ok()?;
-                let items = decode_list_values_with_depth(list_data, depth + 1);
-                return Some(PayloadValue::List(items));
+                let list_data = read_submessage(&mut buf)?;
+                let items = decode_list_values_with_depth(list_data, depth + 1)?;
+                return Ok(PayloadValue::List(items));
             }
             _ => {
-                skip_field(&mut buf, wire_type).ok()?;
+                skip_field(&mut buf, wire_type)?;
             }
         }
     }
 
-    None
+    Err(QdrantError::Decode(
+        "Missing payload value kind".to_string(),
+    ))
 }
 
 /// Decode Struct.fields with depth tracking.
 fn decode_struct_fields_with_depth(
     data: &[u8],
     depth: usize,
-) -> std::collections::HashMap<String, PayloadValue> {
+) -> QdrantResult<std::collections::HashMap<String, PayloadValue>> {
     let mut map = std::collections::HashMap::new();
     if depth > MAX_DECODE_DEPTH {
-        return map; // Too deep — return empty
+        return Err(QdrantError::Decode(
+            "Payload object nesting exceeds maximum depth".to_string(),
+        ));
     }
     let mut buf = data;
 
     while !buf.is_empty() {
-        let Ok((field_number, wire_type)) = decode_tag(&mut buf) else {
-            break;
-        };
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
             1 => {
                 // Struct.fields (field 1, repeated map entry)
                 if wire_type != WIRE_LEN {
-                    let _ = skip_field(&mut buf, wire_type);
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload object field".to_string(),
+                    ));
                 }
-                let Ok(entry_data) = read_submessage(&mut buf) else {
-                    break;
-                };
-                if let Some((key, value)) = decode_map_entry(entry_data, depth) {
-                    map.insert(key, value);
-                }
+                let entry_data = read_submessage(&mut buf)?;
+                let (key, value) = decode_map_entry(entry_data, depth)?;
+                map.insert(key, value);
             }
             _ => {
-                let _ = skip_field(&mut buf, wire_type);
+                skip_field(&mut buf, wire_type)?;
             }
         }
     }
 
-    map
+    Ok(map)
 }
 
 /// Decode ListValue.values with depth tracking.
-fn decode_list_values_with_depth(data: &[u8], depth: usize) -> Vec<PayloadValue> {
+fn decode_list_values_with_depth(data: &[u8], depth: usize) -> QdrantResult<Vec<PayloadValue>> {
     let mut items = Vec::new();
     if depth > MAX_DECODE_DEPTH {
-        return items; // Too deep — return empty
+        return Err(QdrantError::Decode(
+            "Payload list nesting exceeds maximum depth".to_string(),
+        ));
     }
     let mut buf = data;
 
     while !buf.is_empty() {
-        let Ok((field_number, wire_type)) = decode_tag(&mut buf) else {
-            break;
-        };
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
             1 => {
                 // ListValue.values (field 1, repeated Value)
                 if wire_type != WIRE_LEN {
-                    let _ = skip_field(&mut buf, wire_type);
-                    continue;
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for payload list item".to_string(),
+                    ));
                 }
-                let Ok(v_data) = read_submessage(&mut buf) else {
-                    break;
-                };
-                if let Some(value) = decode_value_with_depth(v_data, depth) {
-                    items.push(value);
-                }
+                let v_data = read_submessage(&mut buf)?;
+                let value = decode_value_with_depth(v_data, depth)?;
+                items.push(value);
             }
             _ => {
-                let _ = skip_field(&mut buf, wire_type);
+                skip_field(&mut buf, wire_type)?;
             }
         }
     }
 
-    items
+    Ok(items)
 }
 
 // ============================================================================
@@ -981,6 +1008,65 @@ mod tests {
         let data = &[0x08, 0x00];
         let val = decode_value(data).unwrap();
         assert_eq!(val, PayloadValue::Null);
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_invalid_payload_key_utf8() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x12, 0x09, // payload map entry length
+            0x0A, 0x01, 0xFF, // key = invalid UTF-8
+            0x12, 0x04, // value message length
+            0x22, 0x02, b'o', b'k', // string_value = "ok"
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("Invalid UTF-8 payload map key"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_payload_entry_without_value() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x12, 0x05, // payload map entry length
+            0x0A, 0x03, b'b', b'a', b'd', // key = "bad", missing value
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("Missing payload map value"));
+    }
+
+    #[test]
+    fn test_decode_value_rejects_non_finite_payload_float() {
+        let nan = f64::NAN.to_le_bytes();
+        let mut data = vec![0x11];
+        data.extend_from_slice(&nan);
+
+        let err = decode_value(&data).unwrap_err();
+        assert!(err.to_string().contains("non-finite payload float"));
+    }
+
+    #[test]
+    fn test_decode_value_rejects_malformed_nested_object_entry() {
+        let data = &[
+            0x32, 0x07, // struct_value length
+            0x0A, 0x05, // Struct.fields map entry length
+            0x0A, 0x03, b'b', b'a', b'd', // key = "bad", missing value
+        ];
+
+        let err = decode_value(data).unwrap_err();
+        assert!(err.to_string().contains("Missing payload map value"));
+    }
+
+    #[test]
+    fn test_decode_value_rejects_malformed_nested_list_item() {
+        let data = &[
+            0x3A, 0x02, // list_value length
+            0x0A, 0x00, // ListValue.values has an empty Value message
+        ];
+
+        let err = decode_value(data).unwrap_err();
+        assert!(err.to_string().contains("Missing payload value kind"));
     }
 
     #[test]
