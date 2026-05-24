@@ -1694,10 +1694,16 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
         return Err("grant/revoke role is required".to_string());
     }
 
-    let privileges: Vec<Privilege> = privs_str
-        .split(',')
-        .map(parse_privilege)
-        .collect::<Result<_, _>>()?;
+    let mut privileges = Vec::new();
+    let mut seen_privileges = HashSet::new();
+    for raw_privilege in privs_str.split(',') {
+        let privilege_key = raw_privilege.trim().to_uppercase();
+        let privilege = parse_privilege(raw_privilege)?;
+        if !seen_privileges.insert(privilege_key.clone()) {
+            return Err(format!("duplicate grant/revoke privilege: {privilege_key}"));
+        }
+        privileges.push(privilege);
+    }
 
     if is_revoke {
         Ok(Grant::revoke(privileges, obj_str.trim(), role_str.trim()))
@@ -3275,6 +3281,13 @@ trigger audit_change on posts after update execute audit_post
         let input = "grant selcet on users to app_role";
         let err = parse_qail(input).expect_err("unknown grant privilege should fail");
         assert!(err.contains("unknown grant/revoke privilege: SELCET"));
+    }
+
+    #[test]
+    fn test_parse_grant_rejects_duplicate_privileges() {
+        let input = "grant select, SELECT on users to app_role";
+        let err = parse_qail(input).expect_err("duplicate grant privilege should fail");
+        assert!(err.contains("duplicate grant/revoke privilege: SELECT"));
     }
 
     #[test]
