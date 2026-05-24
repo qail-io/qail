@@ -1490,11 +1490,19 @@ pub fn encode_comment_on(cmd: &Qail, buf: &mut BytesMut) {
             _ => None,
         })
         .unwrap_or("");
-    let escaped = comment_text.replace('\'', "''");
+    let escaped = escape_sql_string_literal(comment_text);
+    let target = comment_target_to_sql(&cmd.table);
 
-    let trimmed = cmd.table.trim_start();
+    buf.extend_from_slice(b"COMMENT ON ");
+    buf.extend_from_slice(target.as_bytes());
+    buf.extend_from_slice(b" IS '");
+    buf.extend_from_slice(escaped.as_bytes());
+    buf.extend_from_slice(b"'");
+}
+
+fn is_explicit_comment_target(trimmed: &str) -> bool {
     let upper = trimmed.to_ascii_uppercase();
-    let has_explicit_kind = upper.starts_with("TABLE ")
+    upper.starts_with("TABLE ")
         || upper.starts_with("COLUMN ")
         || upper.starts_with("FUNCTION ")
         || upper.starts_with("TYPE ")
@@ -1504,27 +1512,29 @@ pub fn encode_comment_on(cmd: &Qail, buf: &mut BytesMut) {
         || upper.starts_with("SEQUENCE ")
         || upper.starts_with("VIEW ")
         || upper.starts_with("MATERIALIZED VIEW ")
-        || upper.starts_with("SCHEMA ");
+        || upper.starts_with("SCHEMA ")
+}
 
-    if has_explicit_kind {
-        buf.extend_from_slice(b"COMMENT ON ");
-        buf.extend_from_slice(trimmed.as_bytes());
-    } else if cmd.table.contains('.') {
-        let mut parts = cmd.table.splitn(2, '.');
+fn comment_target_to_sql(target: &str) -> String {
+    let trimmed = target.trim();
+    if is_explicit_comment_target(trimmed) {
+        if contains_unquoted_statement_delimiter(trimmed) {
+            format!("TABLE {}", escape_identifier(trimmed))
+        } else {
+            trimmed.to_string()
+        }
+    } else if trimmed.contains('.') {
+        let mut parts = trimmed.splitn(2, '.');
         let table = parts.next().unwrap_or_default();
         let col = parts.next().unwrap_or_default();
-        buf.extend_from_slice(b"COMMENT ON COLUMN ");
-        push_identifier(buf, table);
-        buf.extend_from_slice(b".");
-        push_identifier(buf, col);
+        format!(
+            "COLUMN {}.{}",
+            escape_identifier(table),
+            escape_identifier(col)
+        )
     } else {
-        buf.extend_from_slice(b"COMMENT ON TABLE ");
-        push_identifier(buf, &cmd.table);
+        format!("TABLE {}", escape_identifier(trimmed))
     }
-
-    buf.extend_from_slice(b" IS '");
-    buf.extend_from_slice(escaped.replace('\0', "").as_bytes());
-    buf.extend_from_slice(b"'");
 }
 
 /// Encode CREATE SEQUENCE statement.

@@ -923,11 +923,18 @@ pub fn build_comment_on(cmd: &Qail, dialect: Dialect) -> String {
         .unwrap_or_default();
 
     // Escape single quotes in comment text
-    let escaped = comment_text.replace('\'', "''");
+    let escaped = escape_single_string(&comment_text);
 
-    let trimmed = cmd.table.trim();
+    format!(
+        "COMMENT ON {} IS '{}'",
+        comment_target_to_sql(&cmd.table, generator.as_ref()),
+        escaped
+    )
+}
+
+fn is_explicit_comment_target(trimmed: &str) -> bool {
     let upper = trimmed.to_ascii_uppercase();
-    let has_explicit_kind = upper.starts_with("TABLE ")
+    upper.starts_with("TABLE ")
         || upper.starts_with("COLUMN ")
         || upper.starts_with("FUNCTION ")
         || upper.starts_with("TYPE ")
@@ -937,26 +944,26 @@ pub fn build_comment_on(cmd: &Qail, dialect: Dialect) -> String {
         || upper.starts_with("SEQUENCE ")
         || upper.starts_with("VIEW ")
         || upper.starts_with("MATERIALIZED VIEW ")
-        || upper.starts_with("SCHEMA ");
+        || upper.starts_with("SCHEMA ")
+}
 
-    if has_explicit_kind {
-        format!("COMMENT ON {} IS '{}'", trimmed, escaped)
-    } else if cmd.table.contains('.') {
-        // COMMENT ON COLUMN table.column IS '...'
-        let parts: Vec<&str> = cmd.table.splitn(2, '.').collect();
+fn comment_target_to_sql(target: &str, generator: &dyn SqlGenerator) -> String {
+    let trimmed = target.trim();
+    if is_explicit_comment_target(trimmed) {
+        if contains_unquoted_statement_delimiter(trimmed) {
+            format!("TABLE {}", generator.quote_identifier(trimmed))
+        } else {
+            trimmed.to_string()
+        }
+    } else if trimmed.contains('.') {
+        let parts: Vec<&str> = trimmed.splitn(2, '.').collect();
         format!(
-            "COMMENT ON COLUMN {}.{} IS '{}'",
+            "COLUMN {}.{}",
             generator.quote_identifier(parts[0]),
-            generator.quote_identifier(parts[1]),
-            escaped
+            generator.quote_identifier(parts[1])
         )
     } else {
-        // COMMENT ON TABLE table IS '...'
-        format!(
-            "COMMENT ON TABLE {} IS '{}'",
-            generator.quote_identifier(&cmd.table),
-            escaped
-        )
+        format!("TABLE {}", generator.quote_identifier(trimmed))
     }
 }
 

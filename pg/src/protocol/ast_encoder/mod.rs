@@ -2313,6 +2313,37 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_comment_on_targets_are_sanitized() {
+        use qail_core::ast::Expr;
+
+        let safe = Qail {
+            action: Action::CommentOn,
+            table: "FUNCTION public.cleanup(numeric(10,2), text)".to_string(),
+            columns: vec![Expr::Named("cleanup helper".to_string())],
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&safe).unwrap();
+        assert_eq!(
+            sql,
+            "COMMENT ON FUNCTION public.cleanup(numeric(10,2), text) IS 'cleanup helper'"
+        );
+        assert!(params.is_empty());
+
+        let unsafe_target = Qail {
+            action: Action::CommentOn,
+            table: "TABLE users; DROP TABLE users; --".to_string(),
+            columns: vec![Expr::Named("owner's note\0".to_string())],
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&unsafe_target).unwrap();
+        assert_eq!(
+            sql,
+            "COMMENT ON TABLE \"TABLE users; DROP TABLE users; --\" IS 'owner''s note'"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn test_encode_create_view_rejects_mutating_source_query() {
         let cmd = Qail {
             action: Action::CreateView,

@@ -355,6 +355,31 @@ fn test_view_payload_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_comment_on_targets_are_sanitized() {
+    let safe = Qail {
+        action: Action::CommentOn,
+        table: "FUNCTION public.cleanup(numeric(10,2), text)".to_string(),
+        columns: vec![Expr::Named("cleanup helper".to_string())],
+        ..Default::default()
+    };
+    assert_eq!(
+        safe.to_sql_with_dialect(Dialect::Postgres),
+        "COMMENT ON FUNCTION public.cleanup(numeric(10,2), text) IS 'cleanup helper'"
+    );
+
+    let unsafe_target = Qail {
+        action: Action::CommentOn,
+        table: "TABLE users; DROP TABLE users; --".to_string(),
+        columns: vec![Expr::Named("owner's note\0".to_string())],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_target.to_sql_with_dialect(Dialect::Postgres),
+        "COMMENT ON TABLE \"TABLE users; DROP TABLE users; --\" IS 'owner''s note'"
+    );
+}
+
+#[test]
 fn test_revoke_sql() {
     let cmd = Qail {
         action: Action::Revoke,
