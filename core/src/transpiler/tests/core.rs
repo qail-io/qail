@@ -170,6 +170,20 @@ fn test_fuzzy_match() {
 }
 
 #[test]
+fn test_parameterized_fuzzy_match_wraps_placeholder() {
+    use crate::transpiler::ToSqlParameterized;
+
+    let cmd = parse("get users fields * where name ~ :term").unwrap();
+    let result = cmd.to_sql_parameterized();
+
+    assert_eq!(
+        result.sql,
+        "SELECT * FROM users WHERE name ILIKE '%' || $1 || '%'"
+    );
+    assert_eq!(result.named_params, vec!["term"]);
+}
+
+#[test]
 fn test_text_search_multiple_columns_to_sql() {
     use crate::ast::{Operator, Qail};
 

@@ -119,6 +119,10 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
             let p = generator.placeholder(*n);
             generator.string_concat(&["'%'", &p, "'%'"])
         }
+        Value::NamedParam(name) => {
+            let p = format!(":{}", name);
+            generator.string_concat(&["'%'", &p, "'%'"])
+        }
         v => format!("'%{}%'", escape_sql_string_literal(&v.to_string())),
     }
 }
@@ -459,7 +463,8 @@ impl ConditionToSql for Condition {
             Operator::Fuzzy => {
                 // For LIKE, we need to wrap in wildcards
                 let placeholder = value_placeholder(&self.value, params);
-                format!("{} {} {}", col, generator.fuzzy_operator(), placeholder)
+                let pattern = generator.string_concat(&["'%'", &placeholder, "'%'"]);
+                format!("{} {} {}", col, generator.fuzzy_operator(), pattern)
             }
             Operator::TextSearch => {
                 let vector = resolve_text_search_vector(&self.left, generator, context)
