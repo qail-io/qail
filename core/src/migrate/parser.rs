@@ -672,6 +672,9 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
             .next()
             .ok_or_else(|| "sequence name is missing before '{'".to_string())?
             .trim();
+        if name.is_empty() {
+            return Err("sequence name is missing before '{'".to_string());
+        }
         let mut seq = Sequence::new(name);
 
         let mut tokens_str = rest.split('{').nth(1).unwrap_or("").to_string();
@@ -2182,6 +2185,13 @@ sequence order_seq {
 
         let err = parse_qail(input).expect_err("unclosed sequence block should be rejected");
         assert!(err.contains("Unclosed sequence block"));
+    }
+
+    #[test]
+    fn test_parse_sequence_rejects_missing_name() {
+        let input = "sequence { start 1 }";
+        let err = parse_qail(input).expect_err("missing sequence name should fail");
+        assert!(err.contains("sequence name is missing before '{'"));
     }
 
     #[test]
