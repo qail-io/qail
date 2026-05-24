@@ -290,8 +290,10 @@ pub(crate) async fn list_handler(
     }
 
     // Distinct
+    let mut branch_distinct_columns = Vec::new();
     if let Some(ref distinct) = params.distinct {
         let cols = parse_identifier_csv(distinct).map_err(ApiError::parse_error)?;
+        branch_distinct_columns = cols.clone();
         cmd = cmd.distinct_on(cols);
     }
 
@@ -676,6 +678,7 @@ pub(crate) async fn list_handler(
                 limit,
                 base_has_more: branch_base_has_more,
                 materialization_cap: state.config.max_result_rows,
+                distinct_columns: &branch_distinct_columns,
             },
         ) {
             conn.release().await;
@@ -781,6 +784,7 @@ struct BranchReadConstraintInput<'a> {
     limit: i64,
     base_has_more: bool,
     materialization_cap: usize,
+    distinct_columns: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -902,18 +906,6 @@ fn apply_branch_read_constraints(
     }
     *data = filtered;
 
-    let required_window =
-        (input.offset.max(0) as usize).saturating_add(input.limit.max(0) as usize);
-    if input.base_has_more && data.len() < required_window {
-        return Err(ApiError::bad_request(
-            "BRANCH_REPLAY_WINDOW_TOO_LARGE",
-            format!(
-                "Branch replay cannot materialize the requested page within configured max_result_rows ({}) after overlay operations",
-                input.materialization_cap.max(1)
-            ),
-        ));
-    }
-
     let sort_keys = branch_sort_keys(input.sort, input.default_sort_column)?;
     let primary_sort = sort_keys.first().ok_or_else(|| {
         ApiError::internal("Branch sort parser returned no sort keys after validation")
@@ -929,6 +921,19 @@ fn apply_branch_read_constraints(
     }
 
     data.sort_by(|left, right| compare_json_sort_keys(left, right, &sort_keys));
+    apply_branch_distinct(data, input.distinct_columns);
+
+    let required_window =
+        (input.offset.max(0) as usize).saturating_add(input.limit.max(0) as usize);
+    if input.base_has_more && data.len() < required_window {
+        return Err(ApiError::bad_request(
+            "BRANCH_REPLAY_WINDOW_TOO_LARGE",
+            format!(
+                "Branch replay cannot materialize the requested page within configured max_result_rows ({}) after overlay operations",
+                input.materialization_cap.max(1)
+            ),
+        ));
+    }
 
     let start = input.offset.max(0) as usize;
     let take = input.limit.max(0) as usize;
@@ -1246,11 +1251,33 @@ fn compare_json_sort_keys(
     std::cmp::Ordering::Equal
 }
 
+fn branch_distinct_value(row: &Value, column: &str) -> String {
+    match row_field(row, column) {
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+        None => "null".to_string(),
+    }
+}
+
+fn apply_branch_distinct(data: &mut Vec<Value>, distinct_columns: &[String]) {
+    if distinct_columns.is_empty() {
+        return;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    data.retain(|row| {
+        let key: Vec<String> = distinct_columns
+            .iter()
+            .map(|column| branch_distinct_value(row, column))
+            .collect();
+        seen.insert(key)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchReadConstraintInput, apply_branch_read_constraints, branch_base_fetch_limit,
-        branch_projection_columns_from_cmd, encode_ndjson_rows,
+        BranchReadConstraintInput, apply_branch_distinct, apply_branch_read_constraints,
+        branch_base_fetch_limit, branch_projection_columns_from_cmd, encode_ndjson_rows,
         ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
         rest_list_cache_key, row_matches_policy_filter_cages, split_expand_relations,
     };
@@ -1288,6 +1315,7 @@ mod tests {
             limit: 50,
             base_has_more: false,
             materialization_cap: 10_000,
+            distinct_columns: &[],
         }
     }
 
@@ -1561,6 +1589,54 @@ mod tests {
                 json!({"id": 3}),
                 json!({"id": 2, "score": 10}),
                 json!({"id": 4, "score": 5}),
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_read_constraints_applies_distinct_after_overlay_sort() {
+        let distinct_columns = vec!["status".to_string()];
+        let mut rows = vec![
+            json!({"id": 1, "status": "open", "priority": 10}),
+            json!({"id": 2, "status": "open", "priority": 1}),
+            json!({"id": 3, "status": "closed", "priority": 5}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                sort: Some("status:asc,priority:asc"),
+                distinct_columns: &distinct_columns,
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                json!({"id": 3, "status": "closed", "priority": 5}),
+                json!({"id": 2, "status": "open", "priority": 1}),
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_distinct_treats_missing_and_null_as_same_key() {
+        let distinct_columns = vec!["status".to_string()];
+        let mut rows = vec![
+            json!({"id": 1, "status": null}),
+            json!({"id": 2}),
+            json!({"id": 3, "status": "open"}),
+        ];
+
+        apply_branch_distinct(&mut rows, &distinct_columns);
+
+        assert_eq!(
+            rows,
+            vec![
+                json!({"id": 1, "status": null}),
+                json!({"id": 3, "status": "open"}),
             ]
         );
     }
