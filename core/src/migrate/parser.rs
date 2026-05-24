@@ -240,7 +240,10 @@ where
         }
 
         // Table-level multi-column foreign key
-        if line.starts_with("foreign_key") {
+        if line == "foreign_key"
+            || line.starts_with("foreign_key ")
+            || line.starts_with("foreign_key(")
+        {
             let fk = parse_multi_column_fk(line)?;
             table.multi_column_fks.push(fk);
             continue;
@@ -2903,6 +2906,20 @@ table bookings {
         assert_eq!(fk.columns, vec!["route_id", "schedule_id"]);
         assert_eq!(fk.ref_table, "schedules");
         assert_eq!(fk.ref_columns, vec!["route_id", "schedule_id"]);
+    }
+
+    #[test]
+    fn test_parse_column_name_starting_with_foreign_key() {
+        let input = r#"
+table audits {
+  foreign_key_id uuid
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let table = &schema.tables["audits"];
+        assert_eq!(table.columns.len(), 1);
+        assert_eq!(table.columns[0].name, "foreign_key_id");
+        assert!(table.multi_column_fks.is_empty());
     }
 
     #[test]
