@@ -40,6 +40,24 @@ fn apply_cursor_filter(
     Ok(cmd)
 }
 
+fn parse_explain_plan_rows(raw_rows: &[Vec<Option<Vec<u8>>>]) -> Result<Vec<Value>, ApiError> {
+    let mut plan = Vec::with_capacity(raw_rows.len());
+    for (idx, cols) in raw_rows.iter().enumerate() {
+        let bytes = cols
+            .first()
+            .and_then(|c| c.as_ref())
+            .ok_or_else(|| ApiError::internal(format!("EXPLAIN row {idx} is missing plan JSON")))?;
+        let raw = std::str::from_utf8(bytes).map_err(|e| {
+            ApiError::internal(format!("EXPLAIN row {idx} contains invalid UTF-8: {e}"))
+        })?;
+        let value = serde_json::from_str(raw).map_err(|e| {
+            ApiError::internal(format!("EXPLAIN row {idx} contains invalid JSON: {e}"))
+        })?;
+        plan.push(value);
+    }
+    Ok(plan)
+}
+
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
 ///
 /// Accepts the same query params as the list handler (filters, sort, expand, etc.)
@@ -229,16 +247,7 @@ pub(crate) async fn explain_handler(
         }
     };
 
-    // Convert raw row data to JSON
-    let plan: Vec<Value> = raw_rows
-        .iter()
-        .filter_map(|cols| {
-            cols.first()
-                .and_then(|c| c.as_ref())
-                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                .and_then(|s| serde_json::from_str(s).ok())
-        })
-        .collect();
+    let plan = parse_explain_plan_rows(&raw_rows)?;
 
     Ok(Json(json!({
         "query": sql,
@@ -251,7 +260,7 @@ mod tests {
     use qail_core::ast::Qail;
     use qail_core::transpiler::ToSql;
 
-    use super::apply_cursor_filter;
+    use super::{apply_cursor_filter, parse_explain_plan_rows};
 
     #[test]
     fn explain_cursor_filter_uses_default_ascending_sort() {
@@ -285,5 +294,32 @@ mod tests {
                 .as_deref()
                 .is_some_and(|details| details.contains("non-finite numeric value"))
         );
+    }
+
+    #[test]
+    fn explain_plan_parser_rejects_malformed_rows() {
+        let missing = vec![vec![None]];
+        let err = parse_explain_plan_rows(&missing).unwrap_err();
+        assert_eq!(err.code, "INTERNAL_ERROR");
+
+        let invalid_utf8 = vec![vec![Some(vec![0xff])]];
+        let err = parse_explain_plan_rows(&invalid_utf8).unwrap_err();
+        assert_eq!(err.code, "INTERNAL_ERROR");
+
+        let invalid_json = vec![vec![Some(b"not-json".to_vec())]];
+        let err = parse_explain_plan_rows(&invalid_json).unwrap_err();
+        assert_eq!(err.code, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn explain_plan_parser_returns_all_plan_rows() {
+        let rows = vec![
+            vec![Some(br#"[{"Plan":{"Node Type":"Seq Scan"}}]"#.to_vec())],
+            vec![Some(br#"[{"Planning Time":0.1}]"#.to_vec())],
+        ];
+
+        let plan = parse_explain_plan_rows(&rows).expect("valid explain rows");
+
+        assert_eq!(plan.len(), 2);
     }
 }
