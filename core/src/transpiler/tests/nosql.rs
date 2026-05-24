@@ -403,6 +403,92 @@ fn test_mongo_shell_fragments_are_escaped() {
 }
 
 #[test]
+fn test_mongo_rejects_non_finite_numbers() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let insert = Qail {
+        action: Action::Add,
+        table: "events".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("score".to_string()),
+                op: Operator::Eq,
+                value: Value::Float(f64::NAN),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_mongo();
+
+    assert!(insert.starts_with("throw new Error("), "{insert}");
+    assert!(insert.contains("non-finite"), "{insert}");
+}
+
+#[test]
+fn test_mongo_rejects_unsupported_filter_operator() {
+    use crate::ast::{Operator, Qail};
+
+    let find = Qail::get("events")
+        .filter("name", Operator::Like, "%ana%")
+        .to_mongo();
+
+    assert!(find.starts_with("throw new Error("), "{find}");
+    assert!(
+        find.contains("unsupported MongoDB filter operator"),
+        "{find}"
+    );
+}
+
+#[test]
+fn test_mongo_delete_without_filter_returns_error() {
+    use crate::ast::{Action, Qail};
+
+    let delete = Qail {
+        action: Action::Del,
+        table: "events".to_string(),
+        ..Default::default()
+    }
+    .to_mongo();
+
+    assert!(delete.starts_with("throw new Error("), "{delete}");
+    assert!(
+        delete.contains("delete requires at least one filter"),
+        "{delete}"
+    );
+}
+
+#[test]
+fn test_mongo_preserves_array_payload_values() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let insert = Qail {
+        action: Action::Add,
+        table: "events".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("tags".to_string()),
+                op: Operator::Eq,
+                value: Value::Array(vec![
+                    Value::String("blue".to_string()),
+                    Value::Bool(true),
+                    Value::Int(7),
+                ]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_mongo();
+
+    assert!(insert.contains("\"tags\": [\"blue\", true, 7]"), "{insert}");
+}
+
+#[test]
 fn test_dynamo_json_and_expression_names_are_escaped() {
     use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 

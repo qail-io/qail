@@ -33,7 +33,7 @@ pub trait ToMongo {
 
 impl ToMongo for Qail {
     fn to_mongo(&self) -> String {
-        match self.action {
+        let result = match self.action {
             Action::Get => {
                 if !self.joins.is_empty() {
                     build_aggregate(self)
@@ -45,21 +45,32 @@ impl ToMongo for Qail {
             Action::Add => build_insert(self),
             Action::Put => build_upsert(self),
             Action::Del => build_delete(self),
-            Action::Make => format!("db.createCollection({})", js_string(&self.table)),
-            Action::Drop => format!("{}.drop()", mongo_collection(&self.table)),
-            Action::TxnStart => "session.startTransaction()".to_string(),
-            Action::TxnCommit => "session.commitTransaction()".to_string(),
-            Action::TxnRollback => "session.abortTransaction()".to_string(),
-            _ => format!("// Action {:?} not supported for MongoDB yet", self.action),
-        }
+            Action::Make => Ok(format!("db.createCollection({})", js_string(&self.table))),
+            Action::Drop => Ok(format!("{}.drop()", mongo_collection(&self.table))),
+            Action::TxnStart => Ok("session.startTransaction()".to_string()),
+            Action::TxnCommit => Ok("session.commitTransaction()".to_string()),
+            Action::TxnRollback => Ok("session.abortTransaction()".to_string()),
+            _ => {
+                return mongo_error(&format!(
+                    "Action {:?} not supported for MongoDB",
+                    self.action
+                ));
+            }
+        };
+
+        result.unwrap_or_else(|err| mongo_error(&err))
     }
 }
 
-fn build_aggregate(cmd: &Qail) -> String {
+fn mongo_error(message: &str) -> String {
+    format!("throw new Error({})", js_string(message))
+}
+
+fn build_aggregate(cmd: &Qail) -> Result<String, String> {
     let mut stages = Vec::new();
 
     // 1. $match
-    let filter = build_query_filter(cmd);
+    let filter = build_query_filter(cmd)?;
     if filter != "{}" {
         stages.push(format!("{{ \"$match\": {} }}", filter));
     }
@@ -82,7 +93,7 @@ fn build_aggregate(cmd: &Qail) -> String {
 
     // 3. $project & Add Fields logic if needed?
     // For now simple projection if columns exist
-    let proj = build_projection(cmd);
+    let proj = build_projection(cmd)?;
     if proj != "{}" {
         stages.push(format!("{{ \"$project\": {} }}", proj));
     }
@@ -98,7 +109,11 @@ fn build_aggregate(cmd: &Qail) -> String {
                 if let Some(cond) = cage.conditions.first() {
                     let col_str = match &cond.left {
                         Expr::Named(name) => name.clone(),
-                        expr => expr.to_string(),
+                        expr => {
+                            return Err(format!(
+                                "MongoDB sort fields must be named, got expression `{expr}`"
+                            ));
+                        }
                     };
                     stages.push(format!(
                         "{{ \"$sort\": {{ {}: {} }} }}",
@@ -113,16 +128,16 @@ fn build_aggregate(cmd: &Qail) -> String {
         }
     }
 
-    format!(
+    Ok(format!(
         "{}.aggregate([{}])",
         mongo_collection(&cmd.table),
         stages.join(", ")
-    )
+    ))
 }
 
-fn build_find(cmd: &Qail) -> String {
-    let query = build_query_filter(cmd);
-    let projection = build_projection(cmd);
+fn build_find(cmd: &Qail) -> Result<String, String> {
+    let query = build_query_filter(cmd)?;
+    let projection = build_projection(cmd)?;
 
     // Base: db.collection.find(query, projection)
     let mut mongo = format!(
@@ -145,7 +160,11 @@ fn build_find(cmd: &Qail) -> String {
                 if let Some(cond) = cage.conditions.first() {
                     let col_str = match &cond.left {
                         Expr::Named(name) => name.clone(),
-                        expr => expr.to_string(),
+                        expr => {
+                            return Err(format!(
+                                "MongoDB sort fields must be named, got expression `{expr}`"
+                            ));
+                        }
                     };
                     mongo.push_str(&format!(".sort({{ {}: {} }})", js_string(&col_str), val));
                 }
@@ -154,11 +173,11 @@ fn build_find(cmd: &Qail) -> String {
         }
     }
 
-    mongo
+    Ok(mongo)
 }
 
-fn build_update(cmd: &Qail) -> String {
-    let query = build_query_filter(cmd);
+fn build_update(cmd: &Qail) -> Result<String, String> {
+    let query = build_query_filter(cmd)?;
     // Payload logic for $set would go here
     let mut update_doc = String::from("{ $set: { ");
     let mut first = true;
@@ -173,12 +192,16 @@ fn build_update(cmd: &Qail) -> String {
                     }
                     let col_str = match &cond.left {
                         Expr::Named(name) => name.clone(),
-                        expr => expr.to_string(),
+                        expr => {
+                            return Err(format!(
+                                "MongoDB update fields must be named, got expression `{expr}`"
+                            ));
+                        }
                     };
                     update_doc.push_str(&format!(
                         "{}: {}",
                         js_string(&col_str),
-                        value_to_json(&cond.value)
+                        value_to_json(&cond.value)?
                     ));
                     first = false;
                 }
@@ -186,17 +209,20 @@ fn build_update(cmd: &Qail) -> String {
             _ => {}
         }
     }
+    if first {
+        return Err("MongoDB update requires at least one update field".to_string());
+    }
     update_doc.push_str(" } }");
 
-    format!(
+    Ok(format!(
         "{}.updateMany({}, {})",
         mongo_collection(&cmd.table),
         query,
         update_doc
-    )
+    ))
 }
 
-fn build_insert(cmd: &Qail) -> String {
+fn build_insert(cmd: &Qail) -> Result<String, String> {
     let mut doc = String::from("{ ");
     let mut first = true;
 
@@ -211,12 +237,16 @@ fn build_insert(cmd: &Qail) -> String {
                     }
                     let col_str = match &cond.left {
                         Expr::Named(name) => name.clone(),
-                        expr => expr.to_string(),
+                        expr => {
+                            return Err(format!(
+                                "MongoDB insert fields must be named, got expression `{expr}`"
+                            ));
+                        }
                     };
                     doc.push_str(&format!(
                         "{}: {}",
                         js_string(&col_str),
-                        value_to_json(&cond.value)
+                        value_to_json(&cond.value)?
                     ));
                     first = false;
                 }
@@ -224,14 +254,21 @@ fn build_insert(cmd: &Qail) -> String {
             _ => {}
         }
     }
+    if first {
+        return Err("MongoDB insert requires at least one document field".to_string());
+    }
     doc.push_str(" }");
 
-    format!("{}.insertOne({})", mongo_collection(&cmd.table), doc)
+    Ok(format!(
+        "{}.insertOne({})",
+        mongo_collection(&cmd.table),
+        doc
+    ))
 }
 
-fn build_upsert(cmd: &Qail) -> String {
+fn build_upsert(cmd: &Qail) -> Result<String, String> {
     // Similar to update but with upsert: true
-    let query = build_query_filter(cmd);
+    let query = build_query_filter(cmd)?;
 
     // Payload logic for $set
     let mut update_doc = String::from("{ $set: { ");
@@ -246,12 +283,16 @@ fn build_upsert(cmd: &Qail) -> String {
                     }
                     let col_str = match &cond.left {
                         Expr::Named(name) => name.clone(),
-                        expr => expr.to_string(),
+                        expr => {
+                            return Err(format!(
+                                "MongoDB upsert fields must be named, got expression `{expr}`"
+                            ));
+                        }
                     };
                     update_doc.push_str(&format!(
                         "{}: {}",
                         js_string(&col_str),
-                        value_to_json(&cond.value)
+                        value_to_json(&cond.value)?
                     ));
                     first = false;
                 }
@@ -259,22 +300,32 @@ fn build_upsert(cmd: &Qail) -> String {
             _ => {}
         }
     }
+    if first {
+        return Err("MongoDB upsert requires at least one update field".to_string());
+    }
     update_doc.push_str(" } }");
 
-    format!(
+    Ok(format!(
         "{}.updateOne({}, {}, {{ \"upsert\": true }})",
         mongo_collection(&cmd.table),
         query,
         update_doc
-    )
+    ))
 }
 
-fn build_delete(cmd: &Qail) -> String {
-    let query = build_query_filter(cmd);
-    format!("{}.deleteMany({})", mongo_collection(&cmd.table), query)
+fn build_delete(cmd: &Qail) -> Result<String, String> {
+    let query = build_query_filter(cmd)?;
+    if query == "{}" {
+        return Err("MongoDB delete requires at least one filter condition".to_string());
+    }
+    Ok(format!(
+        "{}.deleteMany({})",
+        mongo_collection(&cmd.table),
+        query
+    ))
 }
 
-fn build_query_filter(cmd: &Qail) -> String {
+fn build_query_filter(cmd: &Qail) -> Result<String, String> {
     let mut query_parts = Vec::new();
 
     for cage in &cmd.cages {
@@ -287,12 +338,16 @@ fn build_query_filter(cmd: &Qail) -> String {
                     Operator::Lt => "$lt",
                     Operator::Gte => "$gte",
                     Operator::Lte => "$lte",
-                    _ => "$eq", // Fallback
+                    _ => return Err(format!("unsupported MongoDB filter operator {:?}", cond.op)),
                 };
 
                 let col_str = match &cond.left {
                     Expr::Named(name) => name.clone(),
-                    expr => expr.to_string(),
+                    expr => {
+                        return Err(format!(
+                            "MongoDB filters require named fields, got expression `{expr}`"
+                        ));
+                    }
                 };
 
                 // If simple equality, clean syntax { key: val }
@@ -300,14 +355,14 @@ fn build_query_filter(cmd: &Qail) -> String {
                     query_parts.push(format!(
                         "{}: {}",
                         js_string(&col_str),
-                        value_to_json(&cond.value)
+                        value_to_json(&cond.value)?
                     ));
                 } else {
                     query_parts.push(format!(
                         "{}: {{ \"{}\": {} }}",
                         js_string(&col_str),
                         op,
-                        value_to_json(&cond.value)
+                        value_to_json(&cond.value)?
                     ));
                 }
             }
@@ -315,15 +370,15 @@ fn build_query_filter(cmd: &Qail) -> String {
     }
 
     if query_parts.is_empty() {
-        return "{}".to_string();
+        return Ok("{}".to_string());
     }
 
-    format!("{{ {} }}", query_parts.join(", "))
+    Ok(format!("{{ {} }}", query_parts.join(", ")))
 }
 
-fn build_projection(cmd: &Qail) -> String {
+fn build_projection(cmd: &Qail) -> Result<String, String> {
     if cmd.columns.is_empty() {
-        return "{}".to_string();
+        return Ok("{}".to_string());
     }
 
     let mut proj = String::from("{ ");
@@ -331,22 +386,48 @@ fn build_projection(cmd: &Qail) -> String {
         if i > 0 {
             proj.push_str(", ");
         }
-        if let Expr::Named(name) = col {
-            proj.push_str(&format!("{}: 1", js_string(name)));
-        }
+        let Expr::Named(name) = col else {
+            return Err(format!(
+                "MongoDB projections require named fields, got expression `{col}`"
+            ));
+        };
+        proj.push_str(&format!("{}: 1", js_string(name)));
     }
     proj.push_str(" }");
-    proj
+    Ok(proj)
 }
 
-fn value_to_json(v: &Value) -> String {
+fn value_to_json(v: &Value) -> Result<String, String> {
     match v {
-        Value::String(s) => js_string(s),
-        Value::Int(n) => n.to_string(),
-        Value::Float(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
-        Value::Param(i) => js_string(&format!("$param{}", i)),
-        _ => js_string("unknown"),
+        Value::Null | Value::NullUuid => Ok("null".to_string()),
+        Value::String(s) => Ok(js_string(s)),
+        Value::Int(n) => Ok(n.to_string()),
+        Value::Float(n) if n.is_finite() => Ok(n.to_string()),
+        Value::Float(_) => Err("non-finite floats cannot be encoded as MongoDB JSON".to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Uuid(uuid) => Ok(js_string(&uuid.to_string())),
+        Value::Timestamp(ts) => Ok(js_string(ts)),
+        Value::Array(values) => {
+            let values: Result<Vec<String>, String> = values.iter().map(value_to_json).collect();
+            Ok(format!("[{}]", values?.join(", ")))
+        }
+        Value::Vector(values) => {
+            let values: Result<Vec<String>, String> = values
+                .iter()
+                .map(|value| {
+                    if value.is_finite() {
+                        Ok(value.to_string())
+                    } else {
+                        Err("non-finite vector values cannot be encoded as MongoDB JSON"
+                            .to_string())
+                    }
+                })
+                .collect();
+            Ok(format!("[{}]", values?.join(", ")))
+        }
+        Value::Json(json) => serde_json::from_str::<serde_json::Value>(json)
+            .map(|value| value.to_string())
+            .map_err(|err| format!("invalid JSON value for MongoDB document: {err}")),
+        other => Err(format!("unsupported MongoDB value: {other}")),
     }
 }
