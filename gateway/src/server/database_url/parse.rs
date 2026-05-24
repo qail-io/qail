@@ -63,14 +63,21 @@ pub(super) fn parse_database_url(
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
             "max_connections" => {
-                if let Ok(n) = value.parse() {
-                    config = config.max_connections(n);
+                let n = value.parse::<usize>().map_err(|_| {
+                    GatewayError::Config(format!("Invalid max_connections value: {}", value))
+                })?;
+                if n == 0 {
+                    return Err(GatewayError::Config(
+                        "max_connections must be greater than 0".to_string(),
+                    ));
                 }
+                config = config.max_connections(n);
             }
             "min_connections" => {
-                if let Ok(n) = value.parse() {
-                    config = config.min_connections(n);
-                }
+                let n = value.parse::<usize>().map_err(|_| {
+                    GatewayError::Config(format!("Invalid min_connections value: {}", value))
+                })?;
+                config = config.min_connections(n);
             }
             "sslmode" => {
                 let mode = TlsMode::parse_sslmode(value.as_ref()).ok_or_else(|| {
@@ -255,6 +262,13 @@ pub(super) fn parse_database_url(
             }
             _ => {}
         }
+    }
+
+    if config.min_connections > config.max_connections {
+        return Err(GatewayError::Config(format!(
+            "min_connections ({}) must be <= max_connections ({})",
+            config.min_connections, config.max_connections
+        )));
     }
 
     match (sslcert_path.as_deref(), sslkey_path.as_deref()) {

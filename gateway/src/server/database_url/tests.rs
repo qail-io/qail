@@ -88,6 +88,39 @@ fn test_parse_database_url_parses_gss_retry_settings() {
 }
 
 #[test]
+fn test_parse_database_url_rejects_invalid_pool_size_params() {
+    let err = match parse_database_url(
+        "postgres://alice@db.internal:5432/app?max_connections=not-a-number",
+        &default_cfg(),
+    ) {
+        Ok(_) => panic!("expected invalid max_connections error"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("Invalid max_connections value"));
+
+    let err = match parse_database_url(
+        "postgres://alice@db.internal:5432/app?max_connections=0",
+        &default_cfg(),
+    ) {
+        Ok(_) => panic!("expected zero max_connections error"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string()
+            .contains("max_connections must be greater than 0")
+    );
+
+    let err = match parse_database_url(
+        "postgres://alice@db.internal:5432/app?min_connections=5&max_connections=4",
+        &default_cfg(),
+    ) {
+        Ok(_) => panic!("expected min/max pool size error"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("min_connections (5)"));
+}
+
+#[test]
 fn test_parse_database_url_rejects_invalid_gss_retry_base() {
     let err = match parse_database_url(
         "postgres://alice@db.internal:5432/app?gss_retry_base_ms=0",
