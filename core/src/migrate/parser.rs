@@ -103,6 +103,16 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_function(func);
         } else if line.starts_with("trigger ") {
             let trigger = parse_trigger(line)?;
+            if schema
+                .triggers
+                .iter()
+                .any(|existing| existing.name == trigger.name && existing.table == trigger.table)
+            {
+                return Err(format!(
+                    "duplicate trigger declaration '{} on {}'",
+                    trigger.name, trigger.table
+                ));
+            }
             schema.add_trigger(trigger);
         } else if line.starts_with("grant ") || line.starts_with("revoke ") {
             let grant = parse_grant(line)?;
@@ -2947,6 +2957,26 @@ function normalize_email(email text, fallback text) returns text language sql $$
         let input = "trigger trg_updated_at on users before banana execute set_updated_at";
         let err = parse_qail(input).expect_err("invalid trigger event should fail");
         assert!(err.contains("unsupported trigger event: BANANA"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_duplicate_table_scoped_names() {
+        let input = r#"
+trigger trg_updated_at on users before update execute touch_users
+trigger trg_updated_at on users after insert execute touch_users
+"#;
+        let err = parse_qail(input).expect_err("duplicate trigger should fail");
+        assert!(err.contains("duplicate trigger declaration 'trg_updated_at on users'"));
+    }
+
+    #[test]
+    fn test_parse_trigger_allows_same_name_on_different_tables() {
+        let input = r#"
+trigger audit_change on users after update execute audit_user
+trigger audit_change on posts after update execute audit_post
+"#;
+        let schema = parse_qail(input).expect("same trigger name on different tables should parse");
+        assert_eq!(schema.triggers.len(), 2);
     }
 
     #[test]
