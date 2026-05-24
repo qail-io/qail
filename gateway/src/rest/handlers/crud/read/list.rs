@@ -29,6 +29,17 @@ fn rest_list_cache_key(
     format!("rest:{}:{}:{:016x}", tenant, table_name, hasher.finish())
 }
 
+fn encode_ndjson_rows(data: &[Value]) -> Result<String, ApiError> {
+    let mut body = String::new();
+    for row in data {
+        let line = serde_json::to_string(row)
+            .map_err(|e| ApiError::internal(format!("NDJSON row serialization failed: {}", e)))?;
+        body.push_str(&line);
+        body.push('\n');
+    }
+    Ok(body)
+}
+
 fn projection_json_column_name(expr: &Expr) -> Result<Option<String>, ApiError> {
     match expr {
         Expr::Star => Ok(None),
@@ -633,11 +644,7 @@ pub(crate) async fn list_handler(
 
     // NDJSON streaming: one JSON object per line
     if is_streaming {
-        let mut body = String::new();
-        for row in &data {
-            body.push_str(&serde_json::to_string(row).unwrap_or_default());
-            body.push('\n');
-        }
+        let body = encode_ndjson_rows(&data)?;
         let mut response = Response::new(Body::from(body));
         *response.status_mut() = StatusCode::OK;
         response.headers_mut().insert(
@@ -1150,7 +1157,7 @@ fn compare_json_sort_keys(
 mod tests {
     use super::{
         BranchReadConstraintInput, apply_branch_read_constraints, branch_base_fetch_limit,
-        branch_projection_columns_from_cmd, project_rows_to_selected_columns,
+        branch_projection_columns_from_cmd, encode_ndjson_rows, project_rows_to_selected_columns,
         row_matches_policy_filter_cages, split_expand_relations,
     };
     use crate::auth::AuthContext;
@@ -1202,6 +1209,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows, vec![json!({"id": 1, "region": "west"})]);
+    }
+
+    #[test]
+    fn encode_ndjson_rows_serializes_each_row_on_its_own_line() {
+        let rows = vec![
+            json!({"id": 1, "status": "ready"}),
+            json!({"id": 2, "status": "queued"}),
+        ];
+
+        let body = encode_ndjson_rows(&rows).expect("valid JSON values should serialize");
+
+        assert_eq!(
+            body,
+            "{\"id\":1,\"status\":\"ready\"}\n{\"id\":2,\"status\":\"queued\"}\n"
+        );
     }
 
     #[test]
