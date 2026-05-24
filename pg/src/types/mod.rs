@@ -8,7 +8,7 @@ pub mod temporal;
 pub use numeric::Numeric;
 pub use temporal::{Date, Time, Timestamp};
 
-use crate::protocol::types::{decode_json, decode_jsonb, decode_text_array, decode_uuid, oid};
+use crate::protocol::types::{decode_json, decode_jsonb, decode_uuid, oid, try_decode_text_array};
 
 /// Error type for type conversion failures.
 #[derive(Debug, Clone)]
@@ -514,7 +514,7 @@ impl ToPg for Json {
 impl FromPg for Vec<String> {
     fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
         let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
-        Ok(decode_text_array(s))
+        try_decode_text_array(s).map_err(TypeError::InvalidData)
     }
 }
 

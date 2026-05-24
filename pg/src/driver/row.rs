@@ -241,7 +241,7 @@ impl PgRow {
     pub fn get_text_array(&self, idx: usize) -> Option<Vec<String>> {
         let bytes = self.columns.get(idx)?.as_ref()?;
         let s = std::str::from_utf8(bytes).ok()?;
-        Some(crate::protocol::types::decode_text_array(s))
+        crate::protocol::types::try_decode_text_array(s).ok()
     }
 
     /// Get a column value as integer array.

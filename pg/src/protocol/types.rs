@@ -266,6 +266,10 @@ pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
 /// Decode a PostgreSQL text-format array like `{a,b,c}` to `Vec<String>`.
 /// This handles the common text-format arrays returned by PostgreSQL.
 pub fn decode_text_array(s: &str) -> Vec<String> {
+    if let Ok(values) = try_decode_text_array(s) {
+        return values;
+    }
+
     if s.is_empty() || s == "{}" {
         return vec![];
     }
@@ -307,6 +311,81 @@ pub fn decode_text_array(s: &str) -> Vec<String> {
     result
 }
 
+/// Strictly decode a PostgreSQL text-format array like `{a,b,c}`.
+pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
+    if s == "{}" {
+        return Ok(vec![]);
+    }
+    if !(s.starts_with('{') && s.ends_with('}')) {
+        return Err("Array must be enclosed in braces".to_string());
+    }
+
+    let inner = &s[1..s.len() - 1];
+    if inner.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escape_next = false;
+    let mut element_started = false;
+
+    for c in inner.chars() {
+        if escape_next {
+            current.push(c);
+            escape_next = false;
+            element_started = true;
+            continue;
+        }
+
+        if in_quotes {
+            match c {
+                '\\' => escape_next = true,
+                '"' => in_quotes = false,
+                _ => current.push(c),
+            }
+            continue;
+        }
+
+        match c {
+            '"' if !element_started => {
+                in_quotes = true;
+                element_started = true;
+            }
+            '"' => return Err("Unexpected quote in unquoted array element".to_string()),
+            '\\' => {
+                escape_next = true;
+                element_started = true;
+            }
+            ',' => {
+                if !element_started {
+                    return Err("Empty unquoted array element".to_string());
+                }
+                result.push(std::mem::take(&mut current));
+                element_started = false;
+            }
+            _ => {
+                current.push(c);
+                element_started = true;
+            }
+        }
+    }
+
+    if escape_next {
+        return Err("Array element ends with dangling escape".to_string());
+    }
+    if in_quotes {
+        return Err("Array element has unterminated quote".to_string());
+    }
+    if !element_started {
+        return Err("Array ends with empty unquoted element".to_string());
+    }
+
+    result.push(current);
+    Ok(result)
+}
+
 /// Encode a `Vec<String>` to PostgreSQL text-format array `{a,b,c}`.
 pub fn encode_text_array(items: &[String]) -> String {
     if items.is_empty() {
@@ -334,7 +413,7 @@ pub fn encode_text_array(items: &[String]) -> String {
 
 /// Decode a PostgreSQL text-format integer array to `Vec<i64>`.
 pub fn decode_int_array(s: &str) -> Result<Vec<i64>, String> {
-    decode_text_array(s)
+    try_decode_text_array(s)?
         .into_iter()
         .map(|s| {
             s.parse::<i64>()
@@ -400,6 +479,20 @@ mod tests {
             decode_text_array("{\"hello, world\",foo}"),
             vec!["hello, world", "foo"]
         );
+    }
+
+    #[test]
+    fn test_text_array_strict_decode_rejects_malformed_arrays() {
+        assert_eq!(try_decode_text_array(r#"{""}"#).unwrap(), vec![""]);
+        assert_eq!(
+            try_decode_text_array(r#"{"hello, world",foo}"#).unwrap(),
+            vec!["hello, world", "foo"]
+        );
+        assert!(try_decode_text_array("a,b").is_err());
+        assert!(try_decode_text_array("{\"unterminated}").is_err());
+        assert!(try_decode_text_array("{a,}").is_err());
+        assert!(try_decode_text_array("{,a}").is_err());
+        assert!(try_decode_text_array(r#"{a\}"#).is_err());
     }
 
     #[test]
