@@ -826,21 +826,28 @@ pub fn encode_drop_index(cmd: &Qail, buf: &mut BytesMut) {
 }
 
 /// Encode ALTER TABLE ADD COLUMN statement.
-pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
-    if cmd.columns.is_empty() && !cmd.table_constraints.is_empty() {
-        buf.extend_from_slice(b"ALTER TABLE ");
-        push_identifier(buf, &cmd.table);
-        buf.extend_from_slice(b" ");
-        for (i, constraint) in cmd.table_constraints.iter().enumerate() {
-            if i > 0 {
-                buf.extend_from_slice(b", ");
-            }
-            buf.extend_from_slice(b"ADD ");
-            encode_table_constraint(constraint, buf);
+pub fn encode_alter_add_column(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    if cmd.columns.is_empty() && cmd.table_constraints.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "ALTER ADD requires a column or table constraint".to_string(),
+        ));
+    }
+    for col in &cmd.columns {
+        if !matches!(col, Expr::Def { .. }) {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "ALTER ADD columns must be column definitions".to_string(),
+            ));
         }
-        return;
     }
 
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ");
+
+    let mut first = true;
     for col in &cmd.columns {
         if let Expr::Def {
             name,
@@ -848,9 +855,12 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
             constraints,
         } = col
         {
-            buf.extend_from_slice(b"ALTER TABLE ");
-            push_identifier(buf, &cmd.table);
-            buf.extend_from_slice(b" ADD COLUMN ");
+            if !first {
+                buf.extend_from_slice(b", ");
+            }
+            first = false;
+
+            buf.extend_from_slice(b"ADD COLUMN ");
             push_identifier(buf, name);
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
@@ -882,56 +892,141 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
             }
         }
     }
+
+    for constraint in &cmd.table_constraints {
+        if !first {
+            buf.extend_from_slice(b", ");
+        }
+        first = false;
+        buf.extend_from_slice(b"ADD ");
+        encode_table_constraint(constraint, buf);
+    }
+
+    Ok(())
 }
 
 /// Encode ALTER TABLE DROP COLUMN statement.
-pub fn encode_alter_drop_column(cmd: &Qail, buf: &mut BytesMut) {
+pub fn encode_alter_drop_column(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    if cmd.columns.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "ALTER DROP requires at least one column".to_string(),
+        ));
+    }
+
+    let mut names = Vec::with_capacity(cmd.columns.len());
     for col in &cmd.columns {
         let col_name = match col {
-            Expr::Named(n) => n.clone(),
-            Expr::Def { name, .. } => name.clone(),
-            _ => continue,
+            Expr::Named(n) => n.as_str(),
+            Expr::Def { name, .. } => name.as_str(),
+            _ => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "ALTER DROP columns must be named expressions or definitions".to_string(),
+                ));
+            }
         };
-        buf.extend_from_slice(b"ALTER TABLE ");
-        push_identifier(buf, &cmd.table);
-        buf.extend_from_slice(b" DROP COLUMN ");
-        push_identifier(buf, &col_name);
+        names.push(col_name);
     }
+
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ");
+    for (i, col_name) in names.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        buf.extend_from_slice(b"DROP COLUMN ");
+        push_identifier(buf, col_name);
+    }
+    Ok(())
 }
 
 /// Encode ALTER TABLE ALTER COLUMN TYPE statement.
-pub fn encode_alter_column_type(cmd: &Qail, buf: &mut BytesMut) {
+pub fn encode_alter_column_type(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    if cmd.columns.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "ALTER TYPE requires at least one column definition".to_string(),
+        ));
+    }
+
+    let mut defs = Vec::with_capacity(cmd.columns.len());
     for col in &cmd.columns {
-        if let Expr::Def {
+        let Expr::Def {
             name, data_type, ..
         } = col
-        {
-            buf.extend_from_slice(b"ALTER TABLE ");
-            push_identifier(buf, &cmd.table);
-            buf.extend_from_slice(b" ALTER COLUMN ");
-            push_identifier(buf, name);
-            buf.extend_from_slice(b" TYPE ");
-            buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
-        }
+        else {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "ALTER TYPE columns must be column definitions".to_string(),
+            ));
+        };
+        defs.push((name.as_str(), data_type.as_str()));
     }
+
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ");
+    for (i, (name, data_type)) in defs.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        buf.extend_from_slice(b"ALTER COLUMN ");
+        push_identifier(buf, name);
+        buf.extend_from_slice(b" TYPE ");
+        buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
+    }
+    Ok(())
 }
 
 /// Encode ALTER TABLE RENAME COLUMN statement.
 /// The `Mod` action stores renames as `Expr::Named("old_name -> new_name")`.
-pub fn encode_rename_column(cmd: &Qail, buf: &mut BytesMut) {
+pub fn encode_rename_column(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let mut rename = None;
     for col in &cmd.columns {
-        if let Expr::Named(rename_str) = col {
-            // Parse "old_name -> new_name" format
-            if let Some((old, new)) = rename_str.split_once(" -> ") {
-                buf.extend_from_slice(b"ALTER TABLE ");
-                push_identifier(buf, &cmd.table);
-                buf.extend_from_slice(b" RENAME COLUMN ");
-                push_identifier(buf, old.trim());
-                buf.extend_from_slice(b" TO ");
-                push_identifier(buf, new.trim());
+        match col {
+            Expr::Named(rename_str) => {
+                let Some((old, new)) = rename_str.split_once(" -> ") else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "rename column expressions must use `old -> new`".to_string(),
+                    ));
+                };
+                let old = old.trim();
+                let new = new.trim();
+                if old.is_empty() || new.is_empty() || rename.replace((old, new)).is_some() {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "rename column requires exactly one non-empty `old -> new` expression"
+                            .to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "rename column expressions must be named expressions".to_string(),
+                ));
             }
         }
     }
+
+    let Some((old, new)) = rename else {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "rename column requires exactly one `old -> new` expression".to_string(),
+        ));
+    };
+
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" RENAME COLUMN ");
+    push_identifier(buf, old);
+    buf.extend_from_slice(b" TO ");
+    push_identifier(buf, new);
+    Ok(())
 }
 
 /// Encode CREATE VIEW statement.
@@ -1728,7 +1823,7 @@ mod tests {
         };
         let mut buf = BytesMut::new();
 
-        encode_alter_add_column(&cmd, &mut buf);
+        encode_alter_add_column(&cmd, &mut buf).unwrap();
 
         let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
         assert!(
@@ -1751,7 +1846,7 @@ mod tests {
         };
         let mut buf = BytesMut::new();
 
-        encode_alter_add_column(&cmd, &mut buf);
+        encode_alter_add_column(&cmd, &mut buf).unwrap();
 
         let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
         assert!(

@@ -773,46 +773,47 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
     let mut parts = Vec::new();
 
     for col in &cmd.columns {
-        if let Expr::Def {
+        let Expr::Def {
             name,
             data_type,
             constraints,
         } = col
-        {
-            let sql_type = data_type_to_sql(data_type);
-            let quoted_name = generator.quote_identifier(name);
+        else {
+            return "/* ERROR: Invalid ALTER ADD column */".to_string();
+        };
+        let sql_type = data_type_to_sql(data_type);
+        let quoted_name = generator.quote_identifier(name);
 
-            let mut col_def = format!("{} {}", quoted_name, sql_type);
+        let mut col_def = format!("{} {}", quoted_name, sql_type);
 
-            let is_nullable = constraints.contains(&Constraint::Nullable);
-            if !is_nullable {
-                col_def.push_str(" NOT NULL");
-            }
-            if constraints.contains(&Constraint::Unique) {
-                col_def.push_str(" UNIQUE");
-            }
-
-            for constraint in constraints {
-                if let Constraint::Default(val) = constraint {
-                    col_def.push_str(" DEFAULT ");
-                    let sql_default = match val.as_str() {
-                        "uuid()" => "gen_random_uuid()".to_string(),
-                        "now()" => "NOW()".to_string(),
-                        other => sql_expr_fragment_to_sql(other, "NULL"),
-                    };
-                    col_def.push_str(&sql_default);
-                }
-                if let Constraint::References(target) = constraint {
-                    col_def.push_str(" REFERENCES ");
-                    col_def.push_str(&references_target_to_sql(target, generator.as_ref()));
-                }
-                if let Constraint::Check(vals) = constraint {
-                    append_column_check_sql(&mut col_def, name, vals, generator.as_ref());
-                }
-            }
-
-            parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
+        let is_nullable = constraints.contains(&Constraint::Nullable);
+        if !is_nullable {
+            col_def.push_str(" NOT NULL");
         }
+        if constraints.contains(&Constraint::Unique) {
+            col_def.push_str(" UNIQUE");
+        }
+
+        for constraint in constraints {
+            if let Constraint::Default(val) = constraint {
+                col_def.push_str(" DEFAULT ");
+                let sql_default = match val.as_str() {
+                    "uuid()" => "gen_random_uuid()".to_string(),
+                    "now()" => "NOW()".to_string(),
+                    other => sql_expr_fragment_to_sql(other, "NULL"),
+                };
+                col_def.push_str(&sql_default);
+            }
+            if let Constraint::References(target) = constraint {
+                col_def.push_str(" REFERENCES ");
+                col_def.push_str(&references_target_to_sql(target, generator.as_ref()));
+            }
+            if let Constraint::Check(vals) = constraint {
+                append_column_check_sql(&mut col_def, name, vals, generator.as_ref());
+            }
+        }
+
+        parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
     }
     for constraint in &cmd.table_constraints {
         parts.push(format!(
@@ -822,7 +823,11 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
         ));
     }
 
-    parts.join(";\n")
+    if parts.is_empty() {
+        "/* ERROR: ALTER ADD requires a column or table constraint */".to_string()
+    } else {
+        parts.join(";\n")
+    }
 }
 
 /// Generate ALTER TABLE DROP COLUMN SQL (for migrations).
@@ -836,14 +841,18 @@ pub fn build_alter_drop_column(cmd: &Qail, dialect: Dialect) -> String {
         let col_name = match col {
             Expr::Named(n) => n.clone(),
             Expr::Def { name, .. } => name.clone(),
-            _ => continue,
+            _ => return "/* ERROR: Invalid ALTER DROP column */".to_string(),
         };
 
         let quoted_col = generator.quote_identifier(&col_name);
         parts.push(format!("ALTER TABLE {} DROP COLUMN {}", table, quoted_col));
     }
 
-    parts.join(";\n")
+    if parts.is_empty() {
+        "/* ERROR: ALTER DROP requires at least one column */".to_string()
+    } else {
+        parts.join(";\n")
+    }
 }
 
 /// Generate ALTER TABLE ALTER COLUMN TYPE SQL (for migrations).
@@ -858,7 +867,7 @@ pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
             Expr::Def {
                 name, data_type, ..
             } => (name.clone(), data_type.clone()),
-            _ => continue,
+            _ => return "/* ERROR: Invalid ALTER TYPE column */".to_string(),
         };
 
         let quoted_col = generator.quote_identifier(&col_name);
@@ -870,7 +879,11 @@ pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
         ));
     }
 
-    parts.join(";\n")
+    if parts.is_empty() {
+        "/* ERROR: ALTER TYPE requires at least one column definition */".to_string()
+    } else {
+        parts.join(";\n")
+    }
 }
 
 // ============================================================================

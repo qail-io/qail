@@ -169,10 +169,10 @@ impl AstEncoder {
             Action::Index => ddl::encode_index(cmd, sql_buf),
             Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, sql_buf),
-            Action::Alter => ddl::encode_alter_add_column(cmd, sql_buf),
-            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, sql_buf),
-            Action::AlterType => ddl::encode_alter_column_type(cmd, sql_buf),
-            Action::Mod => ddl::encode_rename_column(cmd, sql_buf),
+            Action::Alter => ddl::encode_alter_add_column(cmd, sql_buf)?,
+            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, sql_buf)?,
+            Action::AlterType => ddl::encode_alter_column_type(cmd, sql_buf)?,
+            Action::Mod => ddl::encode_rename_column(cmd, sql_buf)?,
             Action::CreateView => ddl::encode_create_view(cmd, sql_buf, params)?,
             Action::DropView => ddl::encode_drop_view(cmd, sql_buf),
             Action::CreateMaterializedView => {
@@ -253,10 +253,10 @@ impl AstEncoder {
             Action::Index => ddl::encode_index(cmd, &mut sql_buf),
             Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, &mut sql_buf),
-            Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf),
-            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, &mut sql_buf),
-            Action::AlterType => ddl::encode_alter_column_type(cmd, &mut sql_buf),
-            Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf),
+            Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf)?,
+            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, &mut sql_buf)?,
+            Action::AlterType => ddl::encode_alter_column_type(cmd, &mut sql_buf)?,
+            Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf)?,
             Action::CreateView => ddl::encode_create_view(cmd, &mut sql_buf, &mut params)?,
             Action::DropView => ddl::encode_drop_view(cmd, &mut sql_buf),
             Action::CreateMaterializedView => {
@@ -2212,6 +2212,85 @@ mod tests {
         };
         let sql = AstEncoder::encode_cmd_sql(&alter_type).unwrap().0;
         assert_eq!(sql, "ALTER TABLE events ALTER COLUMN unsafe_type TYPE TEXT");
+    }
+
+    #[test]
+    fn test_encode_alter_columns_validate_shapes_and_multiple_actions() {
+        use qail_core::ast::{Expr, Value};
+
+        let multi_add = Qail {
+            action: Action::Alter,
+            table: "events".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "title".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "attempts".to_string(),
+                    data_type: "int".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&multi_add).unwrap().0,
+            "ALTER TABLE events ADD COLUMN title TEXT NOT NULL, ADD COLUMN attempts INT NOT NULL"
+        );
+
+        let invalid_add = Qail {
+            action: Action::Alter,
+            table: "events".to_string(),
+            columns: vec![Expr::Named("not_a_definition".to_string())],
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&invalid_add).expect_err("invalid alter add must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("ALTER ADD columns")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_drop = Qail {
+            action: Action::AlterDrop,
+            table: "events".to_string(),
+            columns: vec![Expr::Literal(Value::Int(1))],
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&invalid_drop).expect_err("invalid alter drop must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("ALTER DROP columns")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_type = Qail {
+            action: Action::AlterType,
+            table: "events".to_string(),
+            columns: vec![Expr::Named("not_a_definition".to_string())],
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&invalid_type).expect_err("invalid alter type must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("ALTER TYPE columns")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_rename = Qail {
+            action: Action::Mod,
+            table: "events".to_string(),
+            columns: vec![Expr::Named("old_name new_name".to_string())],
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&invalid_rename).expect_err("invalid rename must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("old -> new")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -363,6 +363,42 @@ fn test_column_data_type_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_alter_columns_reject_invalid_shapes() {
+    let invalid_add = Qail {
+        action: Action::Alter,
+        table: "events".to_string(),
+        columns: vec![Expr::Named("not_a_definition".to_string())],
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_add.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid ALTER ADD column */"
+    );
+
+    let invalid_drop = Qail {
+        action: Action::AlterDrop,
+        table: "events".to_string(),
+        columns: vec![Expr::Literal(Value::Int(1))],
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_drop.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid ALTER DROP column */"
+    );
+
+    let invalid_type = Qail {
+        action: Action::AlterType,
+        table: "events".to_string(),
+        columns: vec![Expr::Named("not_a_definition".to_string())],
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_type.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid ALTER TYPE column */"
+    );
+}
+
+#[test]
 fn test_alter_set_default_fragments_are_sanitized() {
     let safe = Qail {
         action: Action::AlterSetDefault,
