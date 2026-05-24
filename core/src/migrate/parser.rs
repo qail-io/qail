@@ -42,6 +42,9 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
 
         if line.starts_with("table ") {
             let (table, consumed) = parse_table(line, &mut lines, &schema.enums)?;
+            if schema.tables.contains_key(&table.name) {
+                return Err(format!("duplicate table declaration '{}'", table.name));
+            }
             schema.add_table(table);
             // consumed lines already processed
             let _ = consumed;
@@ -2213,6 +2216,21 @@ table users {
 "#;
         let err = parse_qail(input).expect_err("duplicate columns should fail");
         assert!(err.contains("duplicate column 'id' in table 'users'"));
+    }
+
+    #[test]
+    fn test_parse_qail_rejects_duplicate_tables() {
+        let input = r#"
+table users {
+  id serial primary_key
+}
+
+table users {
+  email text
+}
+"#;
+        let err = parse_qail(input).expect_err("duplicate tables should fail");
+        assert!(err.contains("duplicate table declaration 'users'"));
     }
 
     #[test]
