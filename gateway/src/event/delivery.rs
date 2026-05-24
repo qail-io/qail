@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::ssrf::{reject_private_ip, validate_webhook_url};
-use super::{MAX_WEBHOOK_RETRIES, WebhookPayload, is_reserved_webhook_header, retry_delay};
+use super::{
+    MAX_WEBHOOK_HEADER_NAME_LEN, MAX_WEBHOOK_HEADER_VALUE_LEN, MAX_WEBHOOK_HEADERS,
+    MAX_WEBHOOK_RETRIES, WebhookPayload, is_reserved_webhook_header, retry_delay,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct WebhookDeliveryResult {
@@ -37,11 +40,31 @@ impl WebhookDeliveryResult {
 pub(super) fn validate_delivery_headers(
     headers: &HashMap<String, String>,
 ) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    if headers.len() > MAX_WEBHOOK_HEADERS {
+        return Err(format!(
+            "too many headers ({} > {})",
+            headers.len(),
+            MAX_WEBHOOK_HEADERS
+        ));
+    }
+
     let mut validated = Vec::with_capacity(headers.len());
     for (key, value) in headers {
         let key_trimmed = key.trim();
         if key_trimmed.is_empty() {
             return Err("empty header name".to_string());
+        }
+        if key_trimmed.len() > MAX_WEBHOOK_HEADER_NAME_LEN {
+            return Err(format!(
+                "header '{}' exceeds max name length {}",
+                key_trimmed, MAX_WEBHOOK_HEADER_NAME_LEN
+            ));
+        }
+        if value.len() > MAX_WEBHOOK_HEADER_VALUE_LEN {
+            return Err(format!(
+                "header '{}' exceeds max value length {}",
+                key_trimmed, MAX_WEBHOOK_HEADER_VALUE_LEN
+            ));
         }
 
         let lower = key_trimmed.to_ascii_lowercase();

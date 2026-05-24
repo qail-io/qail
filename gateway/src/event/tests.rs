@@ -136,6 +136,32 @@ fn delivery_headers_fail_closed_on_invalid_or_reserved_values() {
 }
 
 #[test]
+fn delivery_headers_enforce_config_size_limits() {
+    let mut headers = HashMap::new();
+    for idx in 0..=MAX_WEBHOOK_HEADERS {
+        headers.insert(format!("x-test-{}", idx), "value".to_string());
+    }
+    let err = super::delivery::validate_delivery_headers(&headers).unwrap_err();
+    assert!(err.contains("too many headers"));
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "x".repeat(MAX_WEBHOOK_HEADER_NAME_LEN + 1),
+        "value".to_string(),
+    );
+    let err = super::delivery::validate_delivery_headers(&headers).unwrap_err();
+    assert!(err.contains("max name length"));
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "x-test".to_string(),
+        "v".repeat(MAX_WEBHOOK_HEADER_VALUE_LEN + 1),
+    );
+    let err = super::delivery::validate_delivery_headers(&headers).unwrap_err();
+    assert!(err.contains("max value length"));
+}
+
+#[test]
 fn retry_delay_is_bounded() {
     assert_eq!(retry_delay(1), Duration::from_secs(1));
     assert_eq!(retry_delay(2), Duration::from_secs(2));
