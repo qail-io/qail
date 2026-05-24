@@ -521,6 +521,34 @@ fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<
     Ok((host, port, user, database, password))
 }
 
+fn parse_queue_ref_point_id(ref_id: &str) -> Result<qail_qdrant::PointId> {
+    let trimmed = ref_id.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Invalid Qdrant queue ref_id: empty");
+    }
+
+    if let Ok(id) = trimmed.parse::<u64>() {
+        return Ok(qail_qdrant::PointId::Num(id));
+    }
+
+    if is_canonical_uuid(trimmed) {
+        return Ok(qail_qdrant::PointId::Uuid(trimmed.to_ascii_lowercase()));
+    }
+
+    anyhow::bail!("Invalid Qdrant queue ref_id: '{ref_id}'");
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+
+    value.chars().enumerate().all(|(idx, ch)| match idx {
+        8 | 13 | 18 | 23 => ch == '-',
+        _ => ch.is_ascii_hexdigit(),
+    })
+}
+
 async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<Vec<QueueItem>> {
     // Atomic claim using UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING ...
     // This prevents worker races under concurrent consumers.
@@ -573,6 +601,7 @@ async fn process_item(
 
     match item.operation.as_str() {
         "UPSERT" => {
+            let point_id = parse_queue_ref_point_id(&item.ref_id)?;
             // READ-REPAIR PATTERN: Do NOT use stale payload from queue!
             // The queue is a "dirty flag", not a source of truth.
             // Always fetch FRESH data from the source table to prevent time-travel bugs.
@@ -595,7 +624,7 @@ async fn process_item(
 
                     // Upsert to Qdrant
                     let point = qail_qdrant::Point {
-                        id: qail_qdrant::PointId::Num(item.ref_id.parse().unwrap_or(0)),
+                        id: point_id.clone(),
                         vector,
                         payload: std::collections::HashMap::new(),
                     };
@@ -607,18 +636,17 @@ async fn process_item(
                 Ok(_) | Err(_) => {
                     // Row doesn't exist - treat as DELETE
                     // This handles the case where the row was deleted after the queue event
-                    let point_id = item.ref_id.parse().unwrap_or(0);
                     qdrant
-                        .delete_points(&rule.target_collection, &[point_id])
+                        .delete_points_by_id(&rule.target_collection, &[point_id])
                         .await?;
                 }
             }
         }
         "DELETE" => {
+            let point_id = parse_queue_ref_point_id(&item.ref_id)?;
             // Deletes are idempotent and safe to execute out-of-order
-            let point_id = item.ref_id.parse().unwrap_or(0);
             qdrant
-                .delete_points(&rule.target_collection, &[point_id])
+                .delete_points_by_id(&rule.target_collection, &[point_id])
                 .await?;
         }
         _ => {
@@ -679,7 +707,33 @@ async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_grpc_url, parse_postgres_url};
+    use super::{parse_grpc_url, parse_postgres_url, parse_queue_ref_point_id};
+
+    #[test]
+    fn parse_queue_ref_point_id_accepts_numeric_and_uuid_ids() {
+        assert_eq!(
+            parse_queue_ref_point_id("42").expect("numeric id"),
+            qail_qdrant::PointId::Num(42)
+        );
+        assert_eq!(
+            parse_queue_ref_point_id("550E8400-E29B-41D4-A716-446655440000").expect("uuid id"),
+            qail_qdrant::PointId::Uuid("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_queue_ref_point_id_rejects_invalid_ids() {
+        let err = parse_queue_ref_point_id("").expect_err("empty id must fail");
+        assert!(err.to_string().contains("empty"));
+
+        let err =
+            parse_queue_ref_point_id("not-a-valid-qdrant-id").expect_err("invalid id must fail");
+        assert!(err.to_string().contains("Invalid Qdrant queue ref_id"));
+
+        let err = parse_queue_ref_point_id("550e8400e29b41d4a716446655440000")
+            .expect_err("non-canonical uuid must fail closed");
+        assert!(err.to_string().contains("Invalid Qdrant queue ref_id"));
+    }
 
     #[test]
     fn parse_grpc_url_supports_host_port_and_scheme() {
