@@ -333,17 +333,23 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                         _ => acc,
                     });
                 }
+                if depth != 0 {
+                    return Err(format!("unclosed check expression for column '{}'", name));
+                }
 
                 // Strip "check(" and trailing ")"
                 let inner = check_str
                     .strip_prefix("check(")
                     .and_then(|s| s.strip_suffix(')'))
-                    .unwrap_or("");
-                if !inner.is_empty()
-                    && let Some(expr) = parse_check_expr_from_qail(inner)
-                {
-                    col.check = Some(CheckConstraint { expr, name: None });
+                    .ok_or_else(|| format!("invalid check expression for column '{}'", name))?
+                    .trim();
+                if inner.is_empty() {
+                    return Err(format!("check expression is empty for column '{}'", name));
                 }
+                let expr = parse_check_expr_from_qail(inner).ok_or_else(|| {
+                    format!("invalid check expression for column '{}': {}", name, inner)
+                })?;
+                col.check = Some(CheckConstraint { expr, name: None });
             }
             "check_name" if i + 1 < parts.len() => {
                 i += 1;
@@ -3015,6 +3021,33 @@ table vendors {
                 assert_eq!(*value, 0);
             }
             other => panic!("Expected raw-or-greater-than check expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_check_rejects_invalid_expression_shape() {
+        for (input, expected) in [
+            (
+                r#"
+table tickets {
+  id uuid primary_key
+  score int check(score >= 0
+}
+"#,
+                "unclosed check expression",
+            ),
+            (
+                r#"
+table tickets {
+  id uuid primary_key
+  score int check()
+}
+"#,
+                "check expression is empty",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid check expression should fail");
+            assert!(err.contains(expected), "{err}");
         }
     }
 
