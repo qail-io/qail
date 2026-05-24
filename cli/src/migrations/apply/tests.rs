@@ -875,6 +875,35 @@ ALTER TABLE users ADD COLUMN name_ci text;
     }
 
     #[test]
+    fn test_discover_migrations_rejects_unsupported_sql_files() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "qail_apply_discovery_sql_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&root).expect("create temp migration dir");
+        fs::write(root.join("001_init.up.sql"), "CREATE TABLE users(id int);")
+            .expect("write unsupported sql migration");
+
+        let err = match discover_migrations(&root, MigrateDirection::Up) {
+            Ok(_) => panic!("unsupported sql migrations must fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains(".sql migrations are not supported")
+        );
+        assert!(err.to_string().contains("001_init.up.sql"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_debug_idempotency_keys_sql_shape() {
         let input = r#"
 table idempotency_keys {

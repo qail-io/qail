@@ -1,8 +1,7 @@
 //! Migration file discovery and helper functions.
 
 use super::types::{MigrateDirection, MigrationFile, MigrationPhase};
-use crate::colors::*;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::Path;
 
@@ -161,6 +160,7 @@ pub(crate) fn discover_migrations(
     };
 
     let mut migrations = Vec::new();
+    let mut unsupported_sql = Vec::new();
 
     for entry in fs::read_dir(migrations_dir)?.flatten() {
         let path = entry.path();
@@ -181,12 +181,11 @@ pub(crate) fn discover_migrations(
                     let qail_file = path.join(filename);
                     let sql_file = path.join(filename.replace(".qail", ".sql"));
                     if sql_file.exists() && !qail_file.exists() {
-                        eprintln!(
-                            "  {} {}/{} found but .sql is not supported — convert to .qail",
-                            "⚠".yellow(),
+                        unsupported_sql.push(format!(
+                            "{}/{}",
                             name_str,
                             filename.replace(".qail", ".sql")
-                        );
+                        ));
                     }
                     if qail_file.exists() {
                         migrations.push(MigrationFile {
@@ -203,12 +202,7 @@ pub(crate) fn discover_migrations(
                 let qail_file = path.join(format!("{}.qail", suffix));
                 let sql_file = path.join(format!("{}.sql", suffix));
                 if sql_file.exists() && !qail_file.exists() {
-                    eprintln!(
-                        "  {} {}/{}.sql found but .sql is not supported — convert to .qail",
-                        "⚠".yellow(),
-                        name_str,
-                        suffix
-                    );
+                    unsupported_sql.push(format!("{}/{}.sql", name_str, suffix));
                     continue;
                 }
                 if qail_file.exists() {
@@ -234,13 +228,16 @@ pub(crate) fn discover_migrations(
                     phase: detect_phase(&name_str),
                 });
             } else if name_str.ends_with(&format!(".{}.sql", suffix)) {
-                eprintln!(
-                    "  {} {} — .sql migrations are not supported, convert to .qail",
-                    "⚠".yellow(),
-                    name_str
-                );
+                unsupported_sql.push(name_str.clone());
             }
         }
+    }
+
+    if !unsupported_sql.is_empty() {
+        return Err(anyhow!(
+            ".sql migrations are not supported; convert to .qail: {}",
+            unsupported_sql.join(", ")
+        ));
     }
 
     // Sort by group key + phase order to enforce expand -> backfill -> contract for UP.
