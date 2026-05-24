@@ -16,7 +16,7 @@ use qail_pg::driver::PgDriver;
 use crate::introspection::{
     IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
     IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspected_column_generation,
-    parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
+    parse_index_parts, parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
     resolve_introspected_unique_constraint, resolve_qualified_introspected_foreign_key,
     sort_introspected_key_columns, sort_qualified_introspected_key_columns,
 };
@@ -361,6 +361,19 @@ mod tests {
         assert_eq!(
             state.primary_url,
             "postgres://admin@db.example.com:5432/app"
+        );
+    }
+
+    #[test]
+    fn extract_index_columns_ignores_partial_predicate_parentheses() {
+        let def = "CREATE INDEX idx_docs_expr ON documents USING btree (regexp_replace(title, ')', '', 'g'), lower(slug)) WHERE (notes <> 'keep WHERE literal')";
+
+        assert_eq!(
+            extract_index_columns(def),
+            vec![
+                "regexp_replace(title, ')', '', 'g')".to_string(),
+                "lower(slug)".to_string()
+            ]
         );
     }
 
@@ -1240,14 +1253,7 @@ fn parse_column_type(data_type: &str, udt_name: Option<&str>) -> ColumnType {
 
 /// Extract column names from CREATE INDEX definition
 fn extract_index_columns(indexdef: &str) -> Vec<String> {
-    // Simple parser: find content between parentheses
-    if let Some(start) = indexdef.find('(')
-        && let Some(end) = indexdef.rfind(')')
-    {
-        let cols_str = &indexdef[start + 1..end];
-        return cols_str.split(',').map(|s| s.trim().to_string()).collect();
-    }
-    vec![]
+    parse_index_parts(indexdef).0
 }
 
 /// Create a shadow database for blue-green migration

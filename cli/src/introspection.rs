@@ -1593,31 +1593,24 @@ fn map_pg_base_type_fallback(udt_name_lower: &str, data_type_lower: &str) -> Str
     }
 }
 
-fn parse_index_parts(
+pub(crate) fn parse_index_parts(
     def: &str,
 ) -> (
     Vec<String>,
     Option<String>,
     qail_core::migrate::schema::IndexMethod,
 ) {
-    let upper = def.to_uppercase();
-    let where_pos = upper.find(" WHERE ");
-    let (main, where_clause) = if let Some(pos) = where_pos {
-        (def[..pos].trim(), Some(def[pos + 7..].trim().to_string()))
-    } else {
-        (def.trim(), None)
-    };
-
-    let Some(start) = main.find('(') else {
+    let Some(start) = find_sql_paren(def, '(') else {
         return (
             Vec::new(),
-            where_clause,
+            None,
             qail_core::migrate::schema::IndexMethod::BTree,
         );
     };
 
-    let method = if let Some(using_pos) = main.to_ascii_uppercase().find(" USING ") {
-        let method_chunk = main[using_pos + 7..start].trim().to_ascii_lowercase();
+    let before_cols = &def[..start];
+    let method = if let Some(using_pos) = before_cols.to_ascii_uppercase().find(" USING ") {
+        let method_chunk = before_cols[using_pos + 7..].trim().to_ascii_lowercase();
         match method_chunk.as_str() {
             "hash" => qail_core::migrate::schema::IndexMethod::Hash,
             "gin" => qail_core::migrate::schema::IndexMethod::Gin,
@@ -1632,37 +1625,159 @@ fn parse_index_parts(
         qail_core::migrate::schema::IndexMethod::BTree
     };
 
-    let mut depth = 0_i32;
-    let mut end = None;
-    for (idx, ch) in main.char_indices().skip(start) {
+    let Some(end_idx) = find_matching_sql_paren(def, start) else {
+        return (Vec::new(), None, method);
+    };
+
+    let trailing = def[end_idx + 1..].trim();
+    let where_clause = find_top_level_keyword(trailing, "WHERE")
+        .map(|pos| trailing[pos + "WHERE".len()..].trim().to_string());
+
+    let inner = &def[start + 1..end_idx];
+    (split_top_level_csv(inner), where_clause, method)
+}
+
+fn find_sql_paren(input: &str, target: char) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
         match ch {
-            '(' => depth += 1,
-            ')' => {
+            '\'' if !in_double => {
+                if in_single && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            _ if ch == target && !in_single && !in_double => return Some(idx),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn find_matching_sql_paren(input: &str, start: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input[start..]
+        .char_indices()
+        .map(|(idx, ch)| (start + idx, ch))
+        .peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
                 depth -= 1;
                 if depth == 0 {
-                    end = Some(idx);
-                    break;
+                    return Some(idx);
                 }
             }
             _ => {}
         }
     }
 
-    let Some(end_idx) = end else {
-        return (Vec::new(), where_clause, method);
-    };
+    None
+}
 
-    let inner = &main[start + 1..end_idx];
-    (split_top_level_csv(inner), where_clause, method)
+fn find_top_level_keyword(input: &str, keyword: &str) -> Option<usize> {
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double && depth > 0 => depth -= 1,
+            _ if !in_single && !in_double && depth == 0 => {
+                if input
+                    .get(idx..idx + keyword.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
+                    && input[..idx]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|prev| !is_ident_char(prev))
+                    && input[idx + keyword.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| !is_ident_char(next))
+                {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn split_top_level_csv(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut depth = 0_i32;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
 
-    for ch in s.chars() {
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                if chars.peek().is_some_and(|next| *next == q) {
+                    cur.push(ch);
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
         match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                cur.push(ch);
+            }
             '(' => {
                 depth += 1;
                 cur.push(ch);
@@ -1687,6 +1802,10 @@ fn split_top_level_csv(s: &str) -> Vec<String> {
         out.push(tail.to_string());
     }
     out
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn is_simple_index_column(s: &str) -> bool {
@@ -2306,6 +2425,26 @@ mod tests {
             ivfflat_method,
             qail_core::migrate::schema::IndexMethod::IvfFlat
         );
+    }
+
+    #[test]
+    fn parse_index_parts_ignores_literals_inside_columns_and_predicates() {
+        let def = "CREATE INDEX idx_docs_expr ON documents USING btree (regexp_replace(title, ')', '', 'g'), lower(slug)) WHERE notes <> 'keep WHERE literal'";
+
+        let (cols, where_clause, method) = parse_index_parts(def);
+
+        assert_eq!(
+            cols,
+            vec![
+                "regexp_replace(title, ')', '', 'g')".to_string(),
+                "lower(slug)".to_string()
+            ]
+        );
+        assert_eq!(
+            where_clause,
+            Some("notes <> 'keep WHERE literal'".to_string())
+        );
+        assert_eq!(method, qail_core::migrate::schema::IndexMethod::BTree);
     }
 
     #[test]
