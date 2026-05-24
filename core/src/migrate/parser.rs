@@ -1397,14 +1397,18 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
 
     // Find "to" or "from" keyword
     let (obj_str, role_str) = if is_revoke {
-        let from_idx = after_on
-            .find(" from ")
-            .ok_or("revoke missing 'from' keyword")?;
-        (after_on[..from_idx].trim(), after_on[from_idx + 6..].trim())
+        split_grant_subject(after_on, "from")
+            .ok_or_else(|| "revoke missing 'from' keyword".to_string())?
     } else {
-        let to_idx = after_on.find(" to ").ok_or("grant missing 'to' keyword")?;
-        (after_on[..to_idx].trim(), after_on[to_idx + 4..].trim())
+        split_grant_subject(after_on, "to")
+            .ok_or_else(|| "grant missing 'to' keyword".to_string())?
     };
+    if obj_str.trim().is_empty() {
+        return Err("grant/revoke object is required".to_string());
+    }
+    if role_str.trim().is_empty() {
+        return Err("grant/revoke role is required".to_string());
+    }
 
     let privileges: Vec<Privilege> = privs_str
         .split(',')
@@ -1412,10 +1416,18 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
         .collect::<Result<_, _>>()?;
 
     if is_revoke {
-        Ok(Grant::revoke(privileges, obj_str, role_str))
+        Ok(Grant::revoke(privileges, obj_str.trim(), role_str.trim()))
     } else {
-        Ok(Grant::new(privileges, obj_str, role_str))
+        Ok(Grant::new(privileges, obj_str.trim(), role_str.trim()))
     }
+}
+
+fn split_grant_subject(after_on: &str, keyword: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = after_on.split_whitespace().collect();
+    let idx = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case(keyword))?;
+    Some((parts[..idx].join(" "), parts[idx + 1..].join(" ")))
 }
 
 fn parse_privilege(raw: &str) -> Result<Privilege, String> {
@@ -2585,6 +2597,17 @@ $qail$
         let input = "grant selcet on users to app_role";
         let err = parse_qail(input).expect_err("unknown grant privilege should fail");
         assert!(err.contains("unknown grant/revoke privilege: SELCET"));
+    }
+
+    #[test]
+    fn test_parse_grant_rejects_missing_object_or_role() {
+        let missing_object = "grant select on  to app_role";
+        let err = parse_qail(missing_object).expect_err("missing grant object should fail");
+        assert!(err.contains("grant/revoke object is required"));
+
+        let missing_role = "revoke select on users from ";
+        let err = parse_qail(missing_role).expect_err("missing revoke role should fail");
+        assert!(err.contains("grant/revoke role is required"));
     }
 
     #[test]
