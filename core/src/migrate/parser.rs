@@ -762,6 +762,9 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
             .next()
             .ok_or_else(|| "enum name is missing before '{'".to_string())?
             .trim();
+        if name.is_empty() {
+            return Err("enum name is missing before '{'".to_string());
+        }
 
         let mut values_str = rest.split('{').nth(1).unwrap_or("").to_string();
 
@@ -2241,6 +2244,13 @@ comment on users.name "Full name"
         let input = "enum status { active } garbage";
         let err = parse_qail(input).expect_err("trailing enum content should fail");
         assert!(err.contains("trailing content after enum block"));
+    }
+
+    #[test]
+    fn test_parse_enum_rejects_missing_name() {
+        let input = "enum { active }";
+        let err = parse_qail(input).expect_err("missing enum name should fail");
+        assert!(err.contains("enum name is missing before '{'"));
     }
 
     #[test]
