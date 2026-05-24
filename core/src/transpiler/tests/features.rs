@@ -394,6 +394,23 @@ fn test_column_expression_fragments_reject_invalid_fragments() {
         "/* ERROR: Invalid column check expression */"
     );
 
+    let unsafe_constraint_check = Qail {
+        action: Action::Make,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_check_constraint".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Check(vec![
+                "CONSTRAINT score_positive CHECK (unsafe_check_constraint > 0)\0".to_string(),
+            ])],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_constraint_check.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid column check constraint for unsafe_check_constraint */"
+    );
+
     let unsafe_generated = Qail {
         action: Action::Make,
         table: "events".to_string(),

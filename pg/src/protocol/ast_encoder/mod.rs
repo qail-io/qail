@@ -2244,6 +2244,25 @@ mod tests {
             "unexpected error: {err}"
         );
 
+        let unsafe_constraint_check = Qail {
+            action: Action::Make,
+            table: "events".to_string(),
+            columns: vec![Expr::Def {
+                name: "unsafe_check_constraint".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Check(vec![
+                    "CONSTRAINT score_positive CHECK (unsafe_check_constraint > 0)\0".to_string(),
+                ])],
+            }],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&unsafe_constraint_check)
+            .expect_err("nul column check constraint must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("column check constraint")),
+            "unexpected error: {err}"
+        );
+
         let unsafe_generated = Qail {
             action: Action::Make,
             table: "events".to_string(),

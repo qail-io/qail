@@ -631,7 +631,7 @@ fn encode_column_check_constraint(
             .starts_with("CONSTRAINT ")
     {
         buf.extend_from_slice(b" ");
-        if contains_unquoted_statement_delimiter(&vals[0]) {
+        if vals[0].contains('\0') || contains_unquoted_statement_delimiter(&vals[0]) {
             return Err(crate::protocol::EncodeError::InvalidAst(format!(
                 "invalid column check constraint for {name:?}: {:?}",
                 vals[0]

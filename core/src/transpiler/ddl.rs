@@ -382,7 +382,7 @@ fn append_column_check_sql(
             .starts_with("CONSTRAINT ")
     {
         out.push(' ');
-        if contains_unquoted_statement_delimiter(&vals[0]) {
+        if vals[0].contains('\0') || contains_unquoted_statement_delimiter(&vals[0]) {
             return Err(format!(
                 "/* ERROR: Invalid column check constraint for {column_name} */"
             ));
