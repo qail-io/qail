@@ -1599,6 +1599,7 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         chunks.push(current);
     }
 
+    let mut seen_events = HashSet::new();
     for chunk in chunks {
         if chunk.is_empty() {
             continue;
@@ -1607,6 +1608,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
             && chunk[0].eq_ignore_ascii_case("update")
             && chunk[1].eq_ignore_ascii_case("of")
         {
+            if !seen_events.insert("UPDATE".to_string()) {
+                return Err("duplicate trigger event: UPDATE".to_string());
+            }
             events.push("UPDATE".to_string());
             let before_count = update_columns.len();
             let mut seen_cols = HashSet::new();
@@ -1629,6 +1633,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         let event = chunk.join(" ").to_uppercase();
         if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE" | "TRUNCATE") {
             return Err(format!("unsupported trigger event: {event}"));
+        }
+        if !seen_events.insert(event.clone()) {
+            return Err(format!("duplicate trigger event: {event}"));
         }
         events.push(event);
     }
@@ -3209,6 +3216,17 @@ function normalize_email(email text, fallback text) returns text language sql $$
             "trigger trg_updated_at on users before update of name,name execute set_updated_at";
         let err = parse_qail(input).expect_err("duplicate update-of columns should fail");
         assert!(err.contains("duplicate trigger update column 'name'"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_duplicate_events() {
+        for input in [
+            "trigger trg_updated_at on users before update or update execute set_updated_at",
+            "trigger trg_updated_at on users before update of name or update execute set_updated_at",
+        ] {
+            let err = parse_qail(input).expect_err("duplicate trigger events should fail");
+            assert!(err.contains("duplicate trigger event: UPDATE"), "{err}");
+        }
     }
 
     #[test]
