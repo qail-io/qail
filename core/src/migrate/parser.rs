@@ -695,7 +695,13 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
             return Err(format!("Unclosed sequence block '{}'", name));
         }
 
-        let tokens_str = tokens_str.replace('}', "");
+        let close_idx = tokens_str
+            .find('}')
+            .expect("found_closing_brace guarantees a sequence block terminator");
+        if !tokens_str[close_idx + 1..].trim().is_empty() {
+            return Err("trailing content after sequence block".to_string());
+        }
+        let tokens_str = &tokens_str[..close_idx];
         let tokens: Vec<&str> = tokens_str.split_whitespace().collect();
 
         let mut i = 0;
@@ -2192,6 +2198,13 @@ sequence order_seq {
         let input = "sequence { start 1 }";
         let err = parse_qail(input).expect_err("missing sequence name should fail");
         assert!(err.contains("sequence name is missing before '{'"));
+    }
+
+    #[test]
+    fn test_parse_sequence_rejects_trailing_content_after_block() {
+        let input = "sequence order_seq { start 1 } }";
+        let err = parse_qail(input).expect_err("extra sequence content should fail");
+        assert!(err.contains("trailing content after sequence block"));
     }
 
     #[test]
