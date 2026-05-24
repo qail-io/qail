@@ -39,6 +39,25 @@ fn snapshot_row_json(row: &qail_pg::PgRow) -> Result<String> {
         .map_err(|e| anyhow!("Failed to serialize backup snapshot row: {}", e))
 }
 
+fn escape_tsv_field(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+fn backup_row_tsv(row: &qail_pg::PgRow, width: usize) -> String {
+    (0..width)
+        .map(|idx| {
+            row.get_string(idx)
+                .map(|value| escape_tsv_field(&value))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
 /// Impact analysis result for a migration command
 #[derive(Debug, Default)]
 pub struct MigrationImpact {
@@ -367,11 +386,8 @@ pub async fn backup_table(driver: &mut PgDriver, table: &str) -> Result<PathBuf>
     // Write to file as TSV
     let mut content = String::new();
     for row in rows {
-        let line: Vec<String> = (0..10) // Assume max 10 columns
-            .filter_map(|i| row.get_string(i))
-            .collect();
-        if !line.is_empty() {
-            content.push_str(&line.join("\t"));
+        if !row.columns.is_empty() {
+            content.push_str(&backup_row_tsv(&row, row.columns.len()));
             content.push('\n');
         }
     }
@@ -408,9 +424,8 @@ pub async fn backup_columns(
     // Write to file as TSV
     let mut content = String::new();
     for row in rows {
-        let line: Vec<String> = (0..cols_len).filter_map(|i| row.get_string(i)).collect();
-        if !line.is_empty() {
-            content.push_str(&line.join("\t"));
+        if cols_len > 0 {
+            content.push_str(&backup_row_tsv(&row, cols_len));
             content.push('\n');
         }
     }
@@ -870,9 +885,9 @@ pub async fn list_snapshots(
 #[cfg(test)]
 mod tests {
     use super::{
-        MigrationImpact, columns_requiring_snapshot, is_narrowing_type_change,
-        normalize_type_for_cast, parse_count_text, required_backup_row_string,
-        snapshot_json_string, snapshot_label, snapshot_row_json,
+        MigrationImpact, backup_row_tsv, columns_requiring_snapshot, escape_tsv_field,
+        is_narrowing_type_change, normalize_type_for_cast, parse_count_text,
+        required_backup_row_string, snapshot_json_string, snapshot_label, snapshot_row_json,
     };
 
     #[test]
@@ -943,6 +958,25 @@ mod tests {
         let encoded = snapshot_json_string(raw).unwrap();
         let decoded: String = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn file_backup_tsv_preserves_width_and_escapes_control_chars() {
+        let row = qail_pg::PgRow {
+            columns: vec![
+                Some(b"id-1".to_vec()),
+                None,
+                Some(b"tab\tnewline\nslash\\".to_vec()),
+                Some(b"tail".to_vec()),
+            ],
+            column_info: None,
+        };
+
+        assert_eq!(
+            backup_row_tsv(&row, 4),
+            "id-1\t\ttab\\tnewline\\nslash\\\\\ttail"
+        );
+        assert_eq!(escape_tsv_field("a\rb"), "a\\rb");
     }
 
     #[test]
