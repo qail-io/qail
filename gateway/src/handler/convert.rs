@@ -296,35 +296,75 @@ fn pg_array_to_json(s: &str) -> serde_json::Value {
         let mut escaped = false;
         let mut brace_depth = 0;
         let mut was_quoted = false;
+        let mut element_started = false;
+        let mut malformed = false;
 
         for c in inner.chars() {
             if escaped {
                 current.push(c);
                 escaped = false;
+                element_started = true;
                 continue;
             }
 
             match c {
-                '\\' => escaped = true,
+                '\\' if brace_depth > 0 => {
+                    current.push(c);
+                    if in_quotes {
+                        escaped = true;
+                    }
+                    element_started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    element_started = true;
+                }
                 '"' => {
-                    in_quotes = !in_quotes;
-                    was_quoted = true;
+                    if brace_depth > 0 {
+                        in_quotes = !in_quotes;
+                        current.push(c);
+                        element_started = true;
+                    } else if !in_quotes && !current.trim().is_empty() {
+                        malformed = true;
+                        break;
+                    } else {
+                        in_quotes = !in_quotes;
+                        was_quoted = true;
+                        element_started = true;
+                    }
                 }
                 '{' if !in_quotes => {
                     brace_depth += 1;
                     current.push(c);
+                    element_started = true;
                 }
                 '}' if !in_quotes => {
+                    if brace_depth == 0 {
+                        malformed = true;
+                        break;
+                    }
                     brace_depth -= 1;
                     current.push(c);
+                    element_started = true;
                 }
                 ',' if !in_quotes && brace_depth == 0 => {
+                    if !element_started {
+                        malformed = true;
+                        break;
+                    }
                     elements.push(finish_array_element(current, was_quoted));
                     current = String::new();
                     was_quoted = false;
+                    element_started = false;
                 }
-                _ => current.push(c),
+                _ => {
+                    current.push(c);
+                    element_started = true;
+                }
             }
+        }
+        if malformed || escaped || in_quotes || brace_depth != 0 || !element_started {
+            return serde_json::Value::String(s.to_string());
         }
         elements.push(finish_array_element(current, was_quoted));
         serde_json::Value::Array(elements)

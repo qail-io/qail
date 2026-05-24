@@ -204,6 +204,29 @@ fn pg_array_quoted_strings() {
 }
 
 #[test]
+fn pg_array_nested_quoted_strings() {
+    assert_eq!(
+        pg_array_to_json(r#"{{"hello, world","x"},{"y","z"}}"#),
+        serde_json::json!([["hello, world", "x"], ["y", "z"]])
+    );
+}
+
+#[test]
+fn pg_array_malformed_values_fall_back_to_string() {
+    for raw in [
+        r#"{"unterminated}"#,
+        r#"{1,\}"#,
+        "{1,{2,3}",
+        "{1},2}",
+        "{1,}",
+        "{,1}",
+        "{a\"b}",
+    ] {
+        assert_eq!(pg_array_to_json(raw), serde_json::json!(raw));
+    }
+}
+
+#[test]
 fn pg_array_non_array_passthrough() {
     assert_eq!(
         pg_array_to_json("not an array"),
