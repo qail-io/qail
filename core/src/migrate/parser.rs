@@ -79,6 +79,13 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_enum(enum_type);
         } else if line.starts_with("view ") || line.starts_with("materialized view ") {
             let view = parse_view(line, &mut lines)?;
+            if schema
+                .views
+                .iter()
+                .any(|existing| existing.name == view.name)
+            {
+                return Err(format!("duplicate view declaration '{}'", view.name));
+            }
             schema.add_view(view);
         } else if line.starts_with("function ") {
             let func = parse_function(line, &mut lines)?;
@@ -2783,6 +2790,16 @@ $qail$
         let input = "view $$ SELECT 1 $$";
         let err = parse_qail(input).expect_err("missing view name should fail");
         assert!(err.contains("view name is required"));
+    }
+
+    #[test]
+    fn test_parse_view_rejects_duplicate_names() {
+        let input = r#"
+view active_users $$ SELECT 1 $$
+materialized view active_users $$ SELECT 2 $$
+"#;
+        let err = parse_qail(input).expect_err("duplicate views should fail");
+        assert!(err.contains("duplicate view declaration 'active_users'"));
     }
 
     #[test]
