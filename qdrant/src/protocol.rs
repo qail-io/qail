@@ -219,105 +219,105 @@ pub fn encode_conditions_to_filter(
 ) -> JsonValue {
     use qail_core::ast::{Expr, Operator, Value};
 
-    let clauses: Vec<JsonValue> = conditions
-        .iter()
-        .filter_map(|cond| {
-            // Extract field name from left expression
-            let key = match &cond.left {
-                Expr::Named(name) => name.clone(),
-                Expr::Aliased { name, .. } => name.clone(),
-                _ => return None,
-            };
+    let mut clauses = Vec::with_capacity(conditions.len());
+    for cond in conditions {
+        // Extract field name from left expression
+        let key = match &cond.left {
+            Expr::Named(name) => name.clone(),
+            Expr::Aliased { name, .. } => name.clone(),
+            _ => return impossible_filter(),
+        };
 
-            // Convert operator and value to Qdrant filter clause
-            let clause = match (&cond.op, &cond.value) {
-                // Match (equality)
-                (Operator::Eq, Value::String(s)) => json!({
-                    "key": key,
-                    "match": { "value": s }
-                }),
-                (Operator::Eq, Value::Int(n)) => json!({
-                    "key": key,
-                    "match": { "value": n }
-                }),
-                (Operator::Eq, Value::Bool(b)) => json!({
-                    "key": key,
-                    "match": { "value": b }
-                }),
+        // Convert operator and value to Qdrant filter clause
+        let clause = match (&cond.op, &cond.value) {
+            // Match (equality)
+            (Operator::Eq, Value::String(s)) => json!({
+                "key": key,
+                "match": { "value": s }
+            }),
+            (Operator::Eq, Value::Int(n)) => json!({
+                "key": key,
+                "match": { "value": n }
+            }),
+            (Operator::Eq, Value::Bool(b)) => json!({
+                "key": key,
+                "match": { "value": b }
+            }),
 
-                // Range operators
-                (Operator::Gt, Value::Int(n)) => json!({
-                    "key": key,
-                    "range": { "gt": n }
-                }),
-                (Operator::Gt, Value::Float(f)) => json!({
-                    "key": key,
-                    "range": { "gt": f }
-                }),
-                (Operator::Gte, Value::Int(n)) => json!({
-                    "key": key,
-                    "range": { "gte": n }
-                }),
-                (Operator::Gte, Value::Float(f)) => json!({
-                    "key": key,
-                    "range": { "gte": f }
-                }),
-                (Operator::Lt, Value::Int(n)) => json!({
-                    "key": key,
-                    "range": { "lt": n }
-                }),
-                (Operator::Lt, Value::Float(f)) => json!({
-                    "key": key,
-                    "range": { "lt": f }
-                }),
-                (Operator::Lte, Value::Int(n)) => json!({
-                    "key": key,
-                    "range": { "lte": n }
-                }),
-                (Operator::Lte, Value::Float(f)) => json!({
-                    "key": key,
-                    "range": { "lte": f }
-                }),
+            // Range operators
+            (Operator::Gt, Value::Int(n)) => json!({
+                "key": key,
+                "range": { "gt": n }
+            }),
+            (Operator::Gt, Value::Float(f)) if f.is_finite() => json!({
+                "key": key,
+                "range": { "gt": f }
+            }),
+            (Operator::Gte, Value::Int(n)) => json!({
+                "key": key,
+                "range": { "gte": n }
+            }),
+            (Operator::Gte, Value::Float(f)) if f.is_finite() => json!({
+                "key": key,
+                "range": { "gte": f }
+            }),
+            (Operator::Lt, Value::Int(n)) => json!({
+                "key": key,
+                "range": { "lt": n }
+            }),
+            (Operator::Lt, Value::Float(f)) if f.is_finite() => json!({
+                "key": key,
+                "range": { "lt": f }
+            }),
+            (Operator::Lte, Value::Int(n)) => json!({
+                "key": key,
+                "range": { "lte": n }
+            }),
+            (Operator::Lte, Value::Float(f)) if f.is_finite() => json!({
+                "key": key,
+                "range": { "lte": f }
+            }),
 
-                // In / NotIn (array membership)
-                (Operator::In, Value::Array(arr)) => {
-                    let values: Vec<JsonValue> = arr.iter().filter_map(value_to_json).collect();
-                    json!({
-                        "key": key,
-                        "match": { "any": values }
-                    })
-                }
-
-                // IsNull / IsNotNull
-                (Operator::IsNull, _) => json!({
-                    "is_null": { "key": key }
-                }),
-                (Operator::IsNotNull, _) => json!({
-                    "is_empty": { "key": key, "is_empty": false }
-                }),
-
-                // Text/keyword match with contains
-                (Operator::Contains | Operator::Like, Value::String(s)) => json!({
+            // In / NotIn (array membership)
+            (Operator::In, Value::Array(arr)) => {
+                let Some(values) = values_to_json(arr) else {
+                    return impossible_filter();
+                };
+                json!({
                     "key": key,
-                    "match": { "text": s }
-                }),
+                    "match": { "any": values }
+                })
+            }
 
-                // Default: try match for other types
-                (_, Value::String(s)) => json!({
-                    "key": key,
-                    "match": { "value": s }
-                }),
-                (_, Value::Int(n)) => json!({
-                    "key": key,
-                    "match": { "value": n }
-                }),
+            // IsNull / IsNotNull
+            (Operator::IsNull, _) => json!({
+                "is_null": { "key": key }
+            }),
+            (Operator::IsNotNull, _) => json!({
+                "is_empty": { "key": key, "is_empty": false }
+            }),
 
-                _ => return None,
-            };
+            // Text/keyword match with contains
+            (Operator::Contains | Operator::Like, Value::String(s)) => json!({
+                "key": key,
+                "match": { "text": s }
+            }),
 
-            Some(clause)
-        })
-        .collect();
+            // Default: try match for other types
+            (_, Value::String(s)) => json!({
+                "key": key,
+                "match": { "value": s }
+            }),
+            (_, Value::Int(n)) => json!({
+                "key": key,
+                "match": { "value": n }
+            }),
+
+            _ => return impossible_filter(),
+        };
+
+        clauses.push(clause);
+    }
 
     // Use "should" for OR, "must" for AND
     if is_or {
@@ -327,13 +327,26 @@ pub fn encode_conditions_to_filter(
     }
 }
 
+fn impossible_filter() -> JsonValue {
+    json!({
+        "must": [{
+            "key": "__qail_unrepresentable_filter__",
+            "range": { "gt": 1, "lt": 0 }
+        }]
+    })
+}
+
+fn values_to_json(values: &[qail_core::ast::Value]) -> Option<Vec<JsonValue>> {
+    values.iter().map(value_to_json).collect()
+}
+
 /// Convert Value to JsonValue for filter encoding.
 fn value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
     use qail_core::ast::Value;
     match value {
         Value::String(s) => Some(json!(s)),
         Value::Int(n) => Some(json!(n)),
-        Value::Float(f) => Some(json!(f)),
+        Value::Float(f) if f.is_finite() => Some(json!(f)),
         Value::Bool(b) => Some(json!(b)),
         Value::Null => Some(JsonValue::Null),
         _ => None,
@@ -674,5 +687,68 @@ mod tests {
         // Should have "should" instead of "must"
         assert!(filter["should"].is_array());
         assert!(filter["must"].is_null());
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_fails_closed_on_unrepresentable_condition() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![
+            Condition {
+                left: Expr::Named("tenant_id".to_string()),
+                op: Operator::Eq,
+                value: Value::String("tenant-a".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Literal(Value::String("not-a-field".to_string())),
+                op: Operator::Eq,
+                value: Value::String("tenant-b".to_string()),
+                is_array_unnest: false,
+            },
+        ];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+        assert_eq!(filter["must"][0]["range"]["gt"], 1);
+        assert_eq!(filter["must"][0]["range"]["lt"], 0);
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_fails_closed_on_bad_in_value() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("category".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![
+                Value::String("a".to_string()),
+                Value::Vector(vec![1.0, 2.0]),
+            ]),
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+        assert!(filter.to_string().contains("\"gt\":1"));
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_fails_closed_on_non_finite_float() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("score".to_string()),
+            op: Operator::Gt,
+            value: Value::Float(f64::NAN),
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+        assert!(!filter.to_string().contains("null"));
     }
 }
