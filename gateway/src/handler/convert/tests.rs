@@ -7,10 +7,18 @@ fn typed_bool_oid_16() {
         text_to_json_typed("true", 16),
         serde_json::Value::Bool(true)
     );
+    assert_eq!(
+        text_to_json_typed("TRUE", 16),
+        serde_json::Value::Bool(true)
+    );
     assert_eq!(text_to_json_typed("f", 16), serde_json::Value::Bool(false));
     assert_eq!(
         text_to_json_typed("false", 16),
         serde_json::Value::Bool(false)
+    );
+    assert_eq!(
+        text_to_json_typed("not_bool", 16),
+        serde_json::json!("not_bool")
     );
 }
 

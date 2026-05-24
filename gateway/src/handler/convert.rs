@@ -201,7 +201,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub(crate) fn text_to_json_typed(s: &str, oid: u32) -> serde_json::Value {
     match oid {
         // ── Boolean (OID 16) ──────────────────────────────────────
-        16 => serde_json::Value::Bool(s == "t" || s == "true"),
+        16 => match s.trim() {
+            "t" | "T" | "true" | "TRUE" | "1" => serde_json::Value::Bool(true),
+            "f" | "F" | "false" | "FALSE" | "0" => serde_json::Value::Bool(false),
+            _ => serde_json::Value::String(s.to_string()),
+        },
 
         // ── Integer types (OID 20=int8, 21=int2, 23=int4, 26=oid) ──
         20 | 21 | 23 | 26 => match s.parse::<i64>() {
