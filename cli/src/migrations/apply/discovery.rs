@@ -162,7 +162,8 @@ pub(crate) fn discover_migrations(
     let mut migrations = Vec::new();
     let mut unsupported_sql = Vec::new();
 
-    for entry in fs::read_dir(migrations_dir)?.flatten() {
+    for entry in fs::read_dir(migrations_dir)? {
+        let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy().to_string();
