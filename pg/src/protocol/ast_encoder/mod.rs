@@ -2409,6 +2409,43 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_grant_privileges_are_sanitized() {
+        use qail_core::ast::Expr;
+
+        let grant = Qail {
+            action: Action::Grant,
+            table: "users".to_string(),
+            columns: vec![
+                Expr::Named("SELECT".to_string()),
+                Expr::Named("INSERT; DROP TABLE users; --".to_string()),
+                Expr::Named("all privileges".to_string()),
+                Expr::Named("temp".to_string()),
+            ],
+            payload: Some("app_role".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&grant).unwrap();
+        assert_eq!(
+            sql,
+            "GRANT SELECT, ALL PRIVILEGES, TEMPORARY ON users TO app_role"
+        );
+        assert!(params.is_empty());
+
+        let revoke = Qail {
+            action: Action::Revoke,
+            table: "users".to_string(),
+            columns: vec![Expr::Named("UPDATE; DROP TABLE users; --".to_string())],
+            payload: Some("app_role".to_string()),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&revoke).expect_err("invalid privileges must fail");
+        assert!(
+            err.to_string().contains("Unsupported action Revoke"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_encode_revoke() {
         use qail_core::ast::Expr;
 

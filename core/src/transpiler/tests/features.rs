@@ -115,6 +115,38 @@ fn test_grant_sql() {
 }
 
 #[test]
+fn test_grant_privileges_are_sanitized() {
+    let grant = Qail {
+        action: Action::Grant,
+        table: "users".to_string(),
+        columns: vec![
+            Expr::Named("SELECT".to_string()),
+            Expr::Named("INSERT; DROP TABLE users; --".to_string()),
+            Expr::Named("all privileges".to_string()),
+            Expr::Named("temp".to_string()),
+        ],
+        payload: Some("app_role".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        grant.to_sql_with_dialect(Dialect::Postgres),
+        "GRANT SELECT, ALL PRIVILEGES, TEMPORARY ON users TO app_role"
+    );
+
+    let revoke = Qail {
+        action: Action::Revoke,
+        table: "users".to_string(),
+        columns: vec![Expr::Named("UPDATE; DROP TABLE users; --".to_string())],
+        payload: Some("app_role".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        revoke.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid privileges */"
+    );
+}
+
+#[test]
 fn test_create_database_quotes_hyphenated_name() {
     let cmd = Qail::create_database("qail-engine-db_shadow");
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);

@@ -487,37 +487,29 @@ impl ToSql for Qail {
             }
             Action::Grant => {
                 let role = self.payload.as_deref().unwrap_or("");
-                let privs: Vec<String> = self
-                    .columns
-                    .iter()
-                    .filter_map(|c| match c {
-                        Expr::Named(p) => Some(p.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                format!(
-                    "GRANT {} ON {} TO {}",
-                    privs.join(", "),
-                    escape_identifier(&self.table),
-                    escape_identifier(role)
-                )
+                if let Some(privs) = privileges_to_sql(&self.columns) {
+                    format!(
+                        "GRANT {} ON {} TO {}",
+                        privs,
+                        escape_identifier(&self.table),
+                        escape_identifier(role)
+                    )
+                } else {
+                    "/* ERROR: Invalid privileges */".to_string()
+                }
             }
             Action::Revoke => {
                 let role = self.payload.as_deref().unwrap_or("");
-                let privs: Vec<String> = self
-                    .columns
-                    .iter()
-                    .filter_map(|c| match c {
-                        Expr::Named(p) => Some(p.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                format!(
-                    "REVOKE {} ON {} FROM {}",
-                    privs.join(", "),
-                    escape_identifier(&self.table),
-                    escape_identifier(role)
-                )
+                if let Some(privs) = privileges_to_sql(&self.columns) {
+                    format!(
+                        "REVOKE {} ON {} FROM {}",
+                        privs,
+                        escape_identifier(&self.table),
+                        escape_identifier(role)
+                    )
+                } else {
+                    "/* ERROR: Invalid privileges */".to_string()
+                }
             }
             Action::CreatePolicy => {
                 if let Some(policy) = &self.policy_def {
@@ -650,6 +642,41 @@ fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
 
 fn sql_query_fragment_to_sql(query: &str) -> String {
     sql_expr_fragment_to_sql(query, "SELECT NULL WHERE FALSE")
+}
+
+fn privilege_to_sql(privilege: &str) -> Option<&'static str> {
+    match privilege.trim().to_ascii_uppercase().as_str() {
+        "SELECT" => Some("SELECT"),
+        "INSERT" => Some("INSERT"),
+        "UPDATE" => Some("UPDATE"),
+        "DELETE" => Some("DELETE"),
+        "TRUNCATE" => Some("TRUNCATE"),
+        "REFERENCES" => Some("REFERENCES"),
+        "TRIGGER" => Some("TRIGGER"),
+        "USAGE" => Some("USAGE"),
+        "CREATE" => Some("CREATE"),
+        "CONNECT" => Some("CONNECT"),
+        "TEMP" | "TEMPORARY" => Some("TEMPORARY"),
+        "EXECUTE" => Some("EXECUTE"),
+        "ALL" | "ALL PRIVILEGES" => Some("ALL PRIVILEGES"),
+        _ => None,
+    }
+}
+
+fn privileges_to_sql(columns: &[Expr]) -> Option<String> {
+    let privileges = columns
+        .iter()
+        .filter_map(|c| match c {
+            Expr::Named(p) => privilege_to_sql(p),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if privileges.is_empty() {
+        None
+    } else {
+        Some(privileges.join(", "))
+    }
 }
 
 fn is_safe_sql_type_fragment(fragment: &str) -> bool {

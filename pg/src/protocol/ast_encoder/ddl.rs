@@ -1193,17 +1193,7 @@ pub fn encode_grant(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
         return Err(super::super::EncodeError::UnsupportedAction(Action::Grant));
     };
 
-    let mut first = true;
-    let mut privs = String::new();
-    for col in &cmd.columns {
-        if let Expr::Named(p) = col {
-            if !first {
-                privs.push_str(", ");
-            }
-            first = false;
-            privs.push_str(p);
-        }
-    }
+    let privs = privileges_to_sql(&cmd.columns);
     if privs.is_empty() || cmd.table.trim().is_empty() || role.trim().is_empty() {
         return Err(super::super::EncodeError::UnsupportedAction(Action::Grant));
     }
@@ -1223,17 +1213,7 @@ pub fn encode_revoke(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super:
         return Err(super::super::EncodeError::UnsupportedAction(Action::Revoke));
     };
 
-    let mut first = true;
-    let mut privs = String::new();
-    for col in &cmd.columns {
-        if let Expr::Named(p) = col {
-            if !first {
-                privs.push_str(", ");
-            }
-            first = false;
-            privs.push_str(p);
-        }
-    }
+    let privs = privileges_to_sql(&cmd.columns);
     if privs.is_empty() || cmd.table.trim().is_empty() || role.trim().is_empty() {
         return Err(super::super::EncodeError::UnsupportedAction(Action::Revoke));
     }
@@ -1245,6 +1225,36 @@ pub fn encode_revoke(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super:
     buf.extend_from_slice(b" FROM ");
     push_identifier(buf, role);
     Ok(())
+}
+
+fn privilege_to_sql(privilege: &str) -> Option<&'static str> {
+    match privilege.trim().to_ascii_uppercase().as_str() {
+        "SELECT" => Some("SELECT"),
+        "INSERT" => Some("INSERT"),
+        "UPDATE" => Some("UPDATE"),
+        "DELETE" => Some("DELETE"),
+        "TRUNCATE" => Some("TRUNCATE"),
+        "REFERENCES" => Some("REFERENCES"),
+        "TRIGGER" => Some("TRIGGER"),
+        "USAGE" => Some("USAGE"),
+        "CREATE" => Some("CREATE"),
+        "CONNECT" => Some("CONNECT"),
+        "TEMP" | "TEMPORARY" => Some("TEMPORARY"),
+        "EXECUTE" => Some("EXECUTE"),
+        "ALL" | "ALL PRIVILEGES" => Some("ALL PRIVILEGES"),
+        _ => None,
+    }
+}
+
+fn privileges_to_sql(columns: &[Expr]) -> String {
+    columns
+        .iter()
+        .filter_map(|c| match c {
+            Expr::Named(p) => privilege_to_sql(p),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Encode CREATE POLICY statement.
