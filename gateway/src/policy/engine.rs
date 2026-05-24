@@ -1067,7 +1067,7 @@ impl PolicyEngine {
 
     fn expand_policy_placeholders(template: &str, replacements: &[(String, String)]) -> String {
         let mut ordered: Vec<_> = replacements.iter().collect();
-        ordered.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+        ordered.sort_by_key(|(placeholder, _)| std::cmp::Reverse(placeholder.len()));
 
         let mut result = String::with_capacity(template.len());
         let mut idx = 0;

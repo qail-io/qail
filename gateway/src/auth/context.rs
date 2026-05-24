@@ -191,7 +191,7 @@ impl AuthContext {
     /// requests against the original pinned scope.
     pub fn transaction_scope_fingerprint(&self) -> String {
         let mut claims: Vec<_> = self.claims.iter().collect();
-        claims.sort_by(|(left, _), (right, _)| left.cmp(right));
+        claims.sort_by_key(|(left, _)| *left);
         let claims: Vec<_> = claims
             .into_iter()
             .map(|(key, value)| serde_json::json!([key, value]))
