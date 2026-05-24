@@ -266,6 +266,9 @@ impl Schema {
             if line.starts_with("table ") && (line.ends_with('{') || line.contains('{')) {
                 // Save previous table if any
                 if let Some(table_name) = current_table.take() {
+                    if schema.tables.contains_key(&table_name) {
+                        return Err(format!("duplicate table declaration '{}'", table_name));
+                    }
                     // Auto-detect RLS from tenant_id column or explicit `rls` marker.
                     let has_rls = current_rls_flag || current_columns.contains_key("tenant_id");
                     schema.tables.insert(
@@ -292,6 +295,9 @@ impl Schema {
             // End of table definition
             else if line == "}" {
                 if let Some(table_name) = current_table.take() {
+                    if schema.tables.contains_key(&table_name) {
+                        return Err(format!("duplicate table declaration '{}'", table_name));
+                    }
                     let has_rls = current_rls_flag || current_columns.contains_key("tenant_id");
                     schema.tables.insert(
                         table_name.clone(),

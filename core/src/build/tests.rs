@@ -58,6 +58,21 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_tables() {
+    let content = r#"
+table users {
+  id UUID
+}
+
+table users {
+  email TEXT
+}
+"#;
+    let err = Schema::parse(content).expect_err("duplicate table must fail");
+    assert!(err.contains("duplicate table declaration 'users'"));
+}
+
+#[test]
 fn test_parse_schema_tracks_views() {
     let content = r#"
 table users {
