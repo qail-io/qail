@@ -376,7 +376,10 @@ fn parse_index(line: &str) -> Result<Index, String> {
 
     let before_cols = rest[..paren_start].trim();
     let (table, method) = if let Some((tbl, method)) = before_cols.split_once(" using ") {
-        (tbl.trim().to_string(), Some(parse_index_method_str(method)))
+        (
+            tbl.trim().to_string(),
+            Some(parse_index_method_str(method)?),
+        )
     } else {
         (before_cols.to_string(), None)
     };
@@ -1483,16 +1486,18 @@ fn parse_fk_action_str(s: &str) -> FkAction {
     }
 }
 
-fn parse_index_method_str(s: &str) -> IndexMethod {
+fn parse_index_method_str(s: &str) -> Result<IndexMethod, String> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "hash" => IndexMethod::Hash,
-        "gin" => IndexMethod::Gin,
-        "gist" => IndexMethod::Gist,
-        "brin" => IndexMethod::Brin,
-        "spgist" => IndexMethod::SpGist,
-        "hnsw" => IndexMethod::Hnsw,
-        "ivfflat" => IndexMethod::IvfFlat,
-        _ => IndexMethod::BTree,
+        "btree" => Ok(IndexMethod::BTree),
+        "hash" => Ok(IndexMethod::Hash),
+        "gin" => Ok(IndexMethod::Gin),
+        "gist" => Ok(IndexMethod::Gist),
+        "brin" => Ok(IndexMethod::Brin),
+        "spgist" => Ok(IndexMethod::SpGist),
+        "hnsw" => Ok(IndexMethod::Hnsw),
+        "ivfflat" => Ok(IndexMethod::IvfFlat),
+        "" => Err("index method is empty".to_string()),
+        other => Err(format!("unknown index method: {other}")),
     }
 }
 
@@ -2114,6 +2119,13 @@ index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_co
             schema.indexes[1].columns,
             vec!["embedding vector_cosine_ops".to_string()]
         );
+    }
+
+    #[test]
+    fn test_parse_index_rejects_unknown_method() {
+        let input = "index idx_users_email on users using btre (email)";
+        let err = parse_qail(input).expect_err("unknown index method should fail");
+        assert!(err.contains("unknown index method: btre"));
     }
 
     #[test]
