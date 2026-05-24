@@ -996,11 +996,20 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
                 }
                 "owned_by" if i + 1 < tokens.len() => {
                     record_sequence_option(&mut seen_options, "owned_by")?;
+                    if !is_native_column_ref(tokens[i + 1]) {
+                        return Err(format!(
+                            "invalid sequence owned_by reference '{}'",
+                            tokens[i + 1]
+                        ));
+                    }
                     seq.owned_by = Some(tokens[i + 1].to_string());
                     i += 2;
                 }
                 "as" if i + 1 < tokens.len() => {
                     record_sequence_option(&mut seen_options, "as")?;
+                    if !is_native_identifier(tokens[i + 1]) {
+                        return Err(format!("invalid sequence data type '{}'", tokens[i + 1]));
+                    }
                     seq.data_type = Some(tokens[i + 1].to_string());
                     i += 2;
                 }
@@ -2010,6 +2019,11 @@ fn is_native_table_ref(value: &str) -> bool {
     !first.is_empty() && is_native_identifier(first) && parts.all(is_native_identifier)
 }
 
+fn is_native_column_ref(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() >= 2 && parts.iter().all(|part| is_native_identifier(part))
+}
+
 fn is_native_identifier(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -3011,6 +3025,30 @@ sequence order_ids { start 100 }
             let err = parse_qail(input).expect_err("duplicate sequence option should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_sequence_rejects_invalid_option_values() {
+        for (input, expected) in [
+            (
+                "sequence order_seq { owned_by bad-table.id }",
+                "invalid sequence owned_by reference 'bad-table.id'",
+            ),
+            (
+                "sequence order_seq { owned_by users }",
+                "invalid sequence owned_by reference 'users'",
+            ),
+            (
+                "sequence order_seq { as big-int }",
+                "invalid sequence data type 'big-int'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid sequence option value should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+
+        parse_qail("sequence billing.order_ids { owned_by app.orders.id as bigint }")
+            .expect("schema-qualified owned_by refs should parse");
     }
 
     #[test]
