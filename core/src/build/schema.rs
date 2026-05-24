@@ -992,7 +992,7 @@ fn parse_build_references_target(
     })?;
     let ref_table = ref_table.trim();
     let ref_column = ref_column.trim();
-    if ref_table.is_empty() || ref_column.is_empty() {
+    if !is_build_table_ref(ref_table) || !is_build_identifier(ref_column) {
         return Err(format!(
             "Invalid foreign key reference target '{}' for column '{}' in table '{}'",
             target, col_name, table_name
@@ -1014,14 +1014,16 @@ fn parse_build_ref_spec(
             ref_spec, col_name, table_name
         )
     })?;
-    if ref_table.trim().is_empty() || ref_column.trim().is_empty() {
+    let ref_table = ref_table.trim();
+    let ref_column = ref_column.trim();
+    if !is_build_table_ref(ref_table) || !is_build_identifier(ref_column) {
         return Err(format!(
             "Invalid ref target '{}' for column '{}' in table '{}'",
             ref_spec, col_name, table_name
         ));
     }
 
-    Ok((ref_table.trim().to_string(), ref_column.trim().to_string()))
+    Ok((ref_table.to_string(), ref_column.to_string()))
 }
 
 fn push_build_foreign_key(
@@ -1047,6 +1049,21 @@ fn push_build_foreign_key(
         ref_column,
     });
     Ok(())
+}
+
+fn is_build_table_ref(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    !first.is_empty() && is_build_identifier(first) && parts.all(is_build_identifier)
+}
+
+fn is_build_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {

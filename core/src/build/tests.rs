@@ -160,6 +160,11 @@ table posts {
   user_id UUID ref:users.
 }
 "#,
+        r#"
+table posts {
+  user_id UUID ref:users.id.extra
+}
+"#,
     ] {
         let err = Schema::parse(content).expect_err("malformed ref option must fail");
         assert!(err.contains("Invalid ref target"));
@@ -177,6 +182,26 @@ table posts {
 
     let err = Schema::parse(content).expect_err("duplicate foreign keys must fail");
     assert!(err.contains("duplicate foreign key 'posts.user_id -> users.id'"));
+}
+
+#[test]
+fn test_parse_schema_rejects_malformed_references_target() {
+    for content in [
+        r#"
+table posts {
+  user_id UUID references users(id))
+}
+"#,
+        r#"
+table posts {
+  user_id UUID references users(i-d)
+}
+"#,
+    ] {
+        let err = Schema::parse(content).expect_err("malformed references target must fail");
+        assert!(err.contains("Invalid foreign key reference target"));
+        assert!(err.contains("column 'user_id' in table 'posts'"));
+    }
 }
 
 #[test]
