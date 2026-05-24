@@ -156,6 +156,68 @@ pub(super) fn ensure_branch_policy_filter_columns_projected(
     Ok(())
 }
 
+fn nested_parent_key_column_for_relation(
+    schema: &crate::schema::SchemaRegistry,
+    table_name: &str,
+    rel: &str,
+) -> Result<String, ApiError> {
+    if let Some((fk_col, _)) = schema.relation_for(table_name, rel) {
+        return Ok(fk_col.to_string());
+    }
+    if let Some((_, ref_col)) = schema.relation_for(rel, table_name) {
+        return Ok(ref_col.to_string());
+    }
+    Err(ApiError::parse_error(format!(
+        "No relation between '{}' and '{}' for nested expansion",
+        table_name, rel
+    )))
+}
+
+fn projection_includes_json_column(
+    cmd: &qail_core::ast::Qail,
+    column: &str,
+) -> Result<bool, ApiError> {
+    if cmd.columns.is_empty() {
+        return Ok(true);
+    }
+
+    for expr in &cmd.columns {
+        let Some(projected) = projection_json_column_name(expr)? else {
+            return Ok(true);
+        };
+        if projected == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_nested_parent_key_columns_projected(
+    cmd: &mut qail_core::ast::Qail,
+    schema: &crate::schema::SchemaRegistry,
+    table_name: &str,
+    nested_rels: &[&str],
+) -> Result<Vec<String>, ApiError> {
+    let mut strip_after_expand = Vec::new();
+
+    for rel in nested_rels {
+        let column = nested_parent_key_column_for_relation(schema, table_name, rel)?;
+        if projection_includes_json_column(cmd, &column)? {
+            continue;
+        }
+
+        let projection = if cmd.joins.is_empty() {
+            column.clone()
+        } else {
+            format!("{}.{}", table_name, column)
+        };
+        cmd.columns.push(Expr::Named(projection));
+        strip_after_expand.push(column);
+    }
+
+    Ok(strip_after_expand)
+}
+
 fn split_expand_relations(
     expand: &str,
     max_expand_depth: usize,
@@ -189,6 +251,7 @@ pub(crate) async fn list_handler(
         ));
     }
     let has_branch = branch_ctx.branch_name().is_some();
+    let mut strip_nested_parent_key_columns = Vec::new();
 
     // Build Qail AST
     let page_limit_cap = state.config.max_result_rows.min(1000) as i64;
@@ -303,6 +366,15 @@ pub(crate) async fn list_handler(
                 })
                 .collect();
         }
+    }
+
+    if !nested_rels.is_empty() {
+        strip_nested_parent_key_columns = ensure_nested_parent_key_columns_projected(
+            &mut cmd,
+            &state.schema,
+            &table_name,
+            &nested_rels,
+        )?;
     }
 
     // Parse and apply filters from query string
@@ -630,16 +702,18 @@ pub(crate) async fn list_handler(
             ApiError::internal("Data integrity error")
         })?;
     }
-    if strip_tenant_scope_column && let Some(scope_column) = tenant_scope_column {
-        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut data, scope_column);
-    }
-
     let count = data.len();
 
     // Nested FK expansion: `?expand=nested:users,nested:items`
     // Runs sub-queries for each relation and stitches into nested JSON
     if !nested_rels.is_empty() && !data.is_empty() {
         expand_nested(&state, &table_name, &mut data, &nested_rels, &auth).await?;
+    }
+    for column in &strip_nested_parent_key_columns {
+        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut data, column);
+    }
+    if strip_tenant_scope_column && let Some(scope_column) = tenant_scope_column {
+        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut data, scope_column);
     }
 
     // NDJSON streaming: one JSON object per line
@@ -1157,11 +1231,13 @@ fn compare_json_sort_keys(
 mod tests {
     use super::{
         BranchReadConstraintInput, apply_branch_read_constraints, branch_base_fetch_limit,
-        branch_projection_columns_from_cmd, encode_ndjson_rows, project_rows_to_selected_columns,
+        branch_projection_columns_from_cmd, encode_ndjson_rows,
+        ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
         row_matches_policy_filter_cages, split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
+    use crate::schema::SchemaRegistry;
     use qail_core::ast::{
         Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value as QailValue,
     };
@@ -1572,6 +1648,94 @@ mod tests {
                 Expr::Named("region".to_string())
             ]
         );
+    }
+
+    fn nested_projection_schema() -> SchemaRegistry {
+        let mut schema = SchemaRegistry::new();
+        schema
+            .load_from_qail_str(
+                r#"
+table users {
+    id uuid primary_key
+    name text
+}
+
+table posts {
+    id uuid primary_key
+    user_id uuid references users(id)
+    title text
+}
+"#,
+            )
+            .expect("schema should parse");
+        schema
+    }
+
+    #[test]
+    fn nested_projection_adds_forward_fk_key_without_leaking_it() {
+        let schema = nested_projection_schema();
+        let mut cmd = qail_core::ast::Qail::get("posts").columns(["title"]);
+
+        let strip =
+            ensure_nested_parent_key_columns_projected(&mut cmd, &schema, "posts", &["users"])
+                .unwrap();
+
+        assert_eq!(strip, vec!["user_id".to_string()]);
+        assert_eq!(
+            cmd.columns,
+            vec![
+                Expr::Named("title".to_string()),
+                Expr::Named("user_id".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_projection_adds_reverse_parent_key_without_leaking_it() {
+        let schema = nested_projection_schema();
+        let mut cmd = qail_core::ast::Qail::get("users").columns(["name"]);
+
+        let strip =
+            ensure_nested_parent_key_columns_projected(&mut cmd, &schema, "users", &["posts"])
+                .unwrap();
+
+        assert_eq!(strip, vec!["id".to_string()]);
+        assert_eq!(
+            cmd.columns,
+            vec![
+                Expr::Named("name".to_string()),
+                Expr::Named("id".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_projection_does_not_strip_user_selected_or_wildcard_keys() {
+        let schema = nested_projection_schema();
+        let mut selected_key = qail_core::ast::Qail::get("posts").columns(["title", "user_id"]);
+        let mut wildcard = qail_core::ast::Qail::get("posts").columns(["*"]);
+
+        let strip_selected = ensure_nested_parent_key_columns_projected(
+            &mut selected_key,
+            &schema,
+            "posts",
+            &["users"],
+        )
+        .unwrap();
+        let strip_wildcard =
+            ensure_nested_parent_key_columns_projected(&mut wildcard, &schema, "posts", &["users"])
+                .unwrap();
+
+        assert!(strip_selected.is_empty());
+        assert!(strip_wildcard.is_empty());
+        assert_eq!(
+            selected_key.columns,
+            vec![
+                Expr::Named("title".to_string()),
+                Expr::Named("user_id".to_string())
+            ]
+        );
+        assert_eq!(wildcard.columns, vec![Expr::Named("*".to_string())]);
     }
 
     #[test]
