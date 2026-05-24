@@ -203,25 +203,46 @@ fn quoted_column_list(cols: &[String]) -> String {
         .join(", ")
 }
 
-fn exclude_method_to_sql(method: &str) -> &'static str {
+fn exclude_method_to_sql(method: &str) -> Option<&'static str> {
     match method.trim().to_ascii_lowercase().as_str() {
-        "btree" => "btree",
-        "hash" => "hash",
-        "gin" => "gin",
-        "gist" => "gist",
-        "brin" => "brin",
-        "spgist" | "sp-gist" => "spgist",
-        _ => "btree",
+        "btree" => Some("btree"),
+        "hash" => Some("hash"),
+        "gin" => Some("gin"),
+        "gist" => Some("gist"),
+        "brin" => Some("brin"),
+        "spgist" | "sp-gist" => Some("spgist"),
+        _ => None,
     }
 }
 
-fn exclude_element_to_sql(element: &str) -> String {
+fn exclude_element_to_sql(element: &str) -> Result<String, String> {
     let element = element.trim();
-    if element.is_empty() || contains_unquoted_statement_delimiter(element) {
-        format!("{} WITH =", escape_identifier(element))
+    if element.is_empty()
+        || element.contains('\0')
+        || contains_unquoted_statement_delimiter(element)
+    {
+        Err("/* ERROR: Invalid exclude element */".to_string())
     } else {
-        element.to_string()
+        Ok(element.to_string())
     }
+}
+
+fn exclude_constraint_to_sql(method: &str, elements: &[String]) -> Result<String, String> {
+    let Some(method) = exclude_method_to_sql(method) else {
+        return Err("/* ERROR: Invalid exclude method */".to_string());
+    };
+    if elements.is_empty() {
+        return Err("/* ERROR: Invalid exclude element */".to_string());
+    }
+    let rendered_elements = elements
+        .iter()
+        .map(|element| exclude_element_to_sql(element))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!(
+        "EXCLUDE USING {} ({})",
+        method,
+        rendered_elements.join(", ")
+    ))
 }
 
 /// Transpile an `AlterTable` to SQL statements.
@@ -351,6 +372,18 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                         ),
                         Err(err) => err,
                     }
+                } else if let crate::migrate::alter::TableConstraint::Exclude { method, elements } =
+                    constraint
+                {
+                    match exclude_constraint_to_sql(method, elements) {
+                        Ok(constraint_sql) => format!(
+                            "ALTER TABLE {} ADD CONSTRAINT {} {}",
+                            table,
+                            escape_identifier(name),
+                            constraint_sql
+                        ),
+                        Err(err) => err,
+                    }
                 } else {
                     let constraint_sql = match constraint {
                         crate::migrate::alter::TableConstraint::PrimaryKey(cols) => {
@@ -372,17 +405,7 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                                 quoted_column_list(ref_columns)
                             )
                         }
-                        crate::migrate::alter::TableConstraint::Exclude { method, elements } => {
-                            format!(
-                                "EXCLUDE USING {} ({})",
-                                exclude_method_to_sql(method),
-                                elements
-                                    .iter()
-                                    .map(|element| exclude_element_to_sql(element))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        }
+                        crate::migrate::alter::TableConstraint::Exclude { .. } => unreachable!(),
                     };
                     format!(
                         "ALTER TABLE {} ADD CONSTRAINT {} {}",
@@ -610,10 +633,27 @@ mod tests {
                 },
             )
             .add_constraint(
-                "exclude_bad",
+                "exclude_valid",
+                TableConstraint::Exclude {
+                    method: "gist".to_string(),
+                    elements: vec![
+                        "room_id WITH =".to_string(),
+                        "tsrange(start_at, end_at) WITH &&".to_string(),
+                    ],
+                },
+            )
+            .add_constraint(
+                "exclude_bad_method",
                 TableConstraint::Exclude {
                     method: "gist; DROP TABLE orders; --".to_string(),
                     elements: vec!["room_id WITH =; DROP TABLE orders; --".to_string()],
+                },
+            )
+            .add_constraint(
+                "exclude_bad_element",
+                TableConstraint::Exclude {
+                    method: "gist".to_string(),
+                    elements: vec!["room_id WITH =\0".to_string()],
                 },
             );
 
@@ -632,8 +672,10 @@ mod tests {
         );
         assert_eq!(
             stmts[3],
-            "ALTER TABLE orders ADD CONSTRAINT exclude_bad EXCLUDE USING btree (\"room_id WITH =; DROP TABLE orders; --\" WITH =)"
+            "ALTER TABLE orders ADD CONSTRAINT exclude_valid EXCLUDE USING gist (room_id WITH =, tsrange(start_at, end_at) WITH &&)"
         );
+        assert_eq!(stmts[4], "/* ERROR: Invalid exclude method */");
+        assert_eq!(stmts[5], "/* ERROR: Invalid exclude element */");
     }
 
     #[test]
