@@ -164,6 +164,17 @@ bucket avatars {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_resource_names() {
+    let content = r#"
+bucket notifications { provider s3 }
+queue notifications { provider sqs }
+"#;
+
+    let err = Schema::parse(content).expect_err("duplicate resource name must fail");
+    assert!(err.contains("duplicate resource declaration 'notifications'"));
+}
+
+#[test]
 fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
     let mut schema = Schema::parse(
         r#"

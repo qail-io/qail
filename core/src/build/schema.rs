@@ -226,6 +226,9 @@ impl Schema {
                 }
 
                 if !name.is_empty() {
+                    if schema.resources.contains_key(&name) {
+                        return Err(format!("duplicate resource declaration '{}'", name));
+                    }
                     schema.resources.insert(
                         name.clone(),
                         ResourceSchema {
