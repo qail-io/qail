@@ -1812,6 +1812,9 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
 
     // Check if block is on the same line: `bucket avatars { provider s3 }`
     let has_block = first_line.contains('{');
+    if !has_block && !rest.is_empty() {
+        return Err(format!("Trailing content after {} resource name", keyword));
+    }
 
     if has_block {
         // Collect content until closing brace
@@ -3487,6 +3490,13 @@ bucket avatars {
 
         let err = parse_qail(input).expect_err("unclosed resource block should be rejected");
         assert!(err.contains("Unclosed bucket resource block"));
+    }
+
+    #[test]
+    fn test_parse_resource_rejects_trailing_content_without_block() {
+        let err = parse_qail("bucket avatars provider s3")
+            .expect_err("resource trailing content should fail");
+        assert!(err.contains("Trailing content after bucket resource name"));
     }
 
     #[test]
