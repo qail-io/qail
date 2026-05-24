@@ -125,19 +125,21 @@ pub async fn expand_nested(
 
         match plan.kind {
             NestedRelationKind::ForwardObject => {
-                let related: HashMap<String, Value> = related_rows
-                    .into_iter()
-                    .map(|mut json| {
-                        let key = json
-                            .get(&plan.related_match_column)
-                            .map(json_value_key)
-                            .unwrap_or_default();
-                        if let Some(ref scope_column) = related_tenant_column {
-                            strip_json_column(&mut json, scope_column);
+                let mut related: HashMap<String, Value> =
+                    HashMap::with_capacity(related_rows.len());
+                for mut json in related_rows {
+                    let key = match related_match_key(&json, &plan.related_match_column, rel) {
+                        Ok(key) => key,
+                        Err(err) => {
+                            conn.release().await;
+                            return Err(err);
                         }
-                        (key, json)
-                    })
-                    .collect();
+                    };
+                    if let Some(ref scope_column) = related_tenant_column {
+                        strip_json_column(&mut json, scope_column);
+                    }
+                    related.insert(key, json);
+                }
 
                 for row in data.iter_mut() {
                     if let Some(parent_key_value) = row.get(&plan.parent_key_column) {
@@ -153,10 +155,13 @@ pub async fn expand_nested(
             NestedRelationKind::ReverseArray => {
                 let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
                 for mut json in related_rows {
-                    let key = json
-                        .get(&plan.related_match_column)
-                        .map(json_value_key)
-                        .unwrap_or_default();
+                    let key = match related_match_key(&json, &plan.related_match_column, rel) {
+                        Ok(key) => key,
+                        Err(err) => {
+                            conn.release().await;
+                            return Err(err);
+                        }
+                    };
                     if let Some(ref scope_column) = related_tenant_column {
                         strip_json_column(&mut json, scope_column);
                     }
@@ -186,6 +191,15 @@ fn strip_json_column(row: &mut Value, column: &str) {
     if let Some(object) = row.as_object_mut() {
         object.remove(column);
     }
+}
+
+fn related_match_key(row: &Value, match_column: &str, relation: &str) -> Result<String, ApiError> {
+    row.get(match_column).map(json_value_key).ok_or_else(|| {
+        ApiError::internal(format!(
+            "Nested expansion for relation '{}' returned a row missing match column '{}'",
+            relation, match_column
+        ))
+    })
 }
 
 fn relation_registry_for_pair(
@@ -252,5 +266,23 @@ table posts {
         // posts -> users FK so reverse planning can resolve it.
         let rel = relation_registry_for_pair(&schema, "users", "posts");
         assert_eq!(rel.get("posts", "users"), Some(("user_id", "id")));
+    }
+
+    #[test]
+    fn related_match_key_rejects_rows_missing_match_column() {
+        let row = serde_json::json!({"id": "post-1"});
+
+        let err = related_match_key(&row, "user_id", "posts").unwrap_err();
+
+        assert_eq!(err.code, "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn related_match_key_accepts_scalar_match_column() {
+        let row = serde_json::json!({"user_id": 42});
+
+        let key = related_match_key(&row, "user_id", "posts").unwrap();
+
+        assert_eq!(key, "42");
     }
 }
