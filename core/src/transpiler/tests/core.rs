@@ -22,6 +22,43 @@ fn test_select_with_where() {
 }
 
 #[test]
+fn test_in_literal_list_uses_sql_in() {
+    let cmd = parse("get users fields * where name in (\"O'Reilly\", \"Ada\")").unwrap();
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM users WHERE name IN ('O''Reilly', 'Ada')"
+    );
+}
+
+#[test]
+fn test_not_in_literal_list_uses_sql_not_in() {
+    let cmd = parse("get users fields * where role not in (\"guest\", \"banned\")").unwrap();
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM users WHERE role NOT IN ('guest', 'banned')"
+    );
+}
+
+#[test]
+fn test_in_param_keeps_any_array_binding() {
+    use crate::ast::*;
+
+    let mut cmd = Qail::get("users");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::In,
+            value: Value::Param(1),
+            is_array_unnest: false,
+        }],
+        logical_op: LogicalOp::And,
+    });
+
+    assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE id = ANY($1)");
+}
+
+#[test]
 fn test_select_with_limit() {
     let cmd = parse("get users fields * limit 10").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users LIMIT 10");

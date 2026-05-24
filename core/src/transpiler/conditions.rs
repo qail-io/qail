@@ -132,6 +132,64 @@ fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String 
     }
 }
 
+fn condition_value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
+    match value {
+        Value::Param(n) => generator.placeholder(*n),
+        Value::String(s) => format!("'{}'", escape_sql_string_literal(s)),
+        Value::Bool(b) => generator.bool_literal(*b),
+        Value::Subquery(cmd) => {
+            use crate::transpiler::ToSql;
+            format!("({})", cmd.to_sql())
+        }
+        Value::Column(col) => {
+            if col.contains('.') {
+                col.split('.')
+                    .map(|part| generator.quote_identifier(part))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            } else {
+                generator.quote_identifier(col)
+            }
+        }
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(|value| condition_value_sql(value, generator))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
+        v => v.to_string(),
+    }
+}
+
+fn in_condition_sql(
+    col: &str,
+    op: Operator,
+    value: &Value,
+    generator: &dyn SqlGenerator,
+) -> String {
+    match value {
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(|value| condition_value_sql(value, generator))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{col} {} ({values})", op.sql_symbol())
+        }
+        Value::Subquery(_) => {
+            format!(
+                "{col} {} {}",
+                op.sql_symbol(),
+                condition_value_sql(value, generator)
+            )
+        }
+        _ if op == Operator::In => generator.in_array(col, &condition_value_sql(value, generator)),
+        _ => generator.not_in_array(col, &condition_value_sql(value, generator)),
+    }
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -230,8 +288,9 @@ impl ConditionToSql for Condition {
                     self.to_value_sql(generator)
                 )
             }
-            Operator::In => generator.in_array(&col, &format!("{}", self.value)),
-            Operator::NotIn => generator.not_in_array(&col, &format!("{}", self.value)),
+            Operator::In | Operator::NotIn => {
+                in_condition_sql(&col, self.op, &self.value, generator)
+            }
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),
             Operator::Contains => generator.json_contains(&col, &self.to_value_sql(generator)),
@@ -258,7 +317,12 @@ impl ConditionToSql for Condition {
                 if let Value::Array(vals) = &self.value
                     && vals.len() >= 2
                 {
-                    return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    return format!(
+                        "{} BETWEEN {} AND {}",
+                        col,
+                        condition_value_sql(&vals[0], generator),
+                        condition_value_sql(&vals[1], generator)
+                    );
                 }
                 format!("{} BETWEEN {}", col, self.value)
             }
@@ -266,7 +330,12 @@ impl ConditionToSql for Condition {
                 if let Value::Array(vals) = &self.value
                     && vals.len() >= 2
                 {
-                    return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    return format!(
+                        "{} NOT BETWEEN {} AND {}",
+                        col,
+                        condition_value_sql(&vals[0], generator),
+                        condition_value_sql(&vals[1], generator)
+                    );
                 }
                 format!("{} NOT BETWEEN {}", col, self.value)
             }
@@ -298,37 +367,7 @@ impl ConditionToSql for Condition {
     }
 
     fn to_value_sql(&self, generator: &dyn SqlGenerator) -> String {
-        match &self.value {
-            Value::Param(n) => generator.placeholder(*n),
-            Value::String(s) => format!("'{}'", escape_sql_string_literal(s)),
-            Value::Bool(b) => generator.bool_literal(*b),
-            Value::Subquery(cmd) => {
-                // Use ToSql trait to generate subquery SQL
-                use crate::transpiler::ToSql;
-                format!("({})", cmd.to_sql())
-            }
-            Value::Column(col) => {
-                // Determine if it's "table"."col" or just "col"
-                // Use resolve_col_syntax logic? Or simply quote?
-                // Usually Join ON RHS is just an identifier, but transpiler logic in resolve_col_syntax
-                // requires a Qail context which we don't have here efficiently (we have context: Option<&Qail> in other methods but strictly to_value_sql signature is fixed).
-                // We don't have context here.
-                // However, we can use a basic split check or just quote full string.
-                // If col is "users.id", generator.quote_identifier("users.id") might quote the whole thing which is wrong for Postgres ("users.id" vs "users"."id").
-                // We should manually split if dot is present.
-                if col.contains('.') {
-                    let parts: Vec<&str> = col.split('.').collect();
-                    parts
-                        .iter()
-                        .map(|p| generator.quote_identifier(p))
-                        .collect::<Vec<String>>()
-                        .join(".")
-                } else {
-                    generator.quote_identifier(col)
-                }
-            }
-            v => v.to_string(),
-        }
+        condition_value_sql(&self.value, generator)
     }
 
     fn to_sql_parameterized(

@@ -142,20 +142,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
         }
         Operator::IsNull => format!("{left} IS NULL"),
         Operator::IsNotNull => format!("{left} IS NOT NULL"),
-        Operator::In | Operator::NotIn => {
-            if let Value::Array(values) = &condition.value {
-                let values = values
-                    .iter()
-                    .map(|value| value_sql(value, generator))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{left} {} ({values})", condition.op.sql_symbol())
-            } else if condition.op == Operator::In {
-                generator.in_array(&left, &value_sql(&condition.value, generator))
-            } else {
-                generator.not_in_array(&left, &value_sql(&condition.value, generator))
-            }
-        }
+        Operator::In | Operator::NotIn => in_condition_sql(condition, &left, generator),
         Operator::Contains => {
             generator.json_contains(&left, &value_sql(&condition.value, generator))
         }
@@ -229,6 +216,30 @@ fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String 
         Value::Param(index) => generator.placeholder(*index),
         Value::NamedParam(name) => format!(":{}", name),
         _ => value_sql(&condition.value, generator),
+    }
+}
+
+fn in_condition_sql(condition: &Condition, left: &str, generator: &dyn SqlGenerator) -> String {
+    match &condition.value {
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(|value| value_sql(value, generator))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{left} {} ({values})", condition.op.sql_symbol())
+        }
+        Value::Subquery(_) => {
+            format!(
+                "{left} {} {}",
+                condition.op.sql_symbol(),
+                value_sql(&condition.value, generator)
+            )
+        }
+        _ if condition.op == Operator::In => {
+            generator.in_array(left, &value_sql(&condition.value, generator))
+        }
+        _ => generator.not_in_array(left, &value_sql(&condition.value, generator)),
     }
 }
 
