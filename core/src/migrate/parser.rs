@@ -366,7 +366,10 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 return Err(format!("check_name requires a name for column '{}'", name));
             }
             _ => {
-                // Unknown constraint, might be part of default value
+                return Err(format!(
+                    "unknown column option '{}' for column '{}'",
+                    parts[i], name
+                ));
             }
         }
         i += 1;
@@ -3083,6 +3086,18 @@ table tickets {
             let err = parse_qail(input).expect_err("invalid check name shape should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_column_rejects_unknown_option() {
+        let input = r#"
+table users {
+  id uuid primary_key
+  email text uniq
+}
+"#;
+        let err = parse_qail(input).expect_err("unknown column option should fail");
+        assert!(err.contains("unknown column option 'uniq' for column 'email'"));
     }
 
     #[test]
