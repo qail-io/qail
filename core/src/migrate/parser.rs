@@ -1602,23 +1602,24 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
     if has_block {
         // Collect content until closing brace
         let mut block_content = rest.trim_start_matches('{').to_string();
-        let mut found_closing_brace = block_content.contains('}');
+        let mut found_closing_brace = false;
+        let mut content = String::new();
 
         // If no closing brace on same line, read until we find it
-        if !found_closing_brace {
+        if let Some(closed_content) = resource_block_content_before_closing(&block_content)? {
+            found_closing_brace = true;
+            content = closed_content;
+        } else {
             for next_line in lines.by_ref() {
                 let next_line = next_line.trim();
-                if next_line == "}" || next_line.ends_with('}') {
-                    found_closing_brace = true;
-                    let trimmed = next_line.trim_end_matches('}').trim();
-                    if !trimmed.is_empty() {
-                        block_content.push(' ');
-                        block_content.push_str(trimmed);
-                    }
-                    break;
-                }
                 block_content.push(' ');
                 block_content.push_str(next_line);
+                if let Some(closed_content) = resource_block_content_before_closing(&block_content)?
+                {
+                    found_closing_brace = true;
+                    content = closed_content;
+                    break;
+                }
             }
         }
         if !found_closing_brace {
@@ -1626,7 +1627,7 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
         }
 
         // Parse key-value pairs from block content
-        let content = block_content.trim_end_matches('}').trim();
+        let content = content.trim();
         let tokens = split_resource_tokens(content)?;
         let mut tokens = tokens.iter();
 
@@ -1650,6 +1651,39 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
         provider,
         properties,
     })
+}
+
+fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, ch) in content.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some(q) => match ch {
+                '\\' => escaped = true,
+                c if c == q => quote = None,
+                _ => {}
+            },
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                '}' => {
+                    let rest = &content[idx + ch.len_utf8()..];
+                    if !rest.trim().is_empty() {
+                        return Err("Trailing content after resource block".to_string());
+                    }
+                    return Ok(Some(content[..idx].trim().to_string()));
+                }
+                _ => {}
+            },
+        }
+    }
+
+    Ok(None)
 }
 
 fn split_resource_tokens(content: &str) -> Result<Vec<String>, String> {
@@ -2850,6 +2884,24 @@ bucket avatars {
         assert_eq!(
             resource.properties.get("region").map(String::as_str),
             Some("ap southeast 1")
+        );
+    }
+
+    #[test]
+    fn test_parse_resource_ignores_braces_inside_quoted_values() {
+        let input = r#"
+bucket avatars {
+  provider s3
+  label "Profile } Images"
+}
+"#;
+
+        let schema = parse_qail(input).expect("resource should parse");
+        let resource = schema.resources.first().expect("resource missing");
+
+        assert_eq!(
+            resource.properties.get("label").map(String::as_str),
+            Some("Profile } Images")
         );
     }
 
