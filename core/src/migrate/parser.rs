@@ -395,26 +395,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
 
                 let (table, column) = parse_fk_reference_target(fk_str)?;
                 col = col.references(table, column);
-
-                // Check for on_delete / on_update after references
-                while i + 1 < parts.len() {
-                    match parts[i + 1] {
-                        "on_delete" if i + 2 < parts.len() => {
-                            let action = parse_fk_action_str(parts[i + 2])?;
-                            col = col.on_delete(action);
-                            i += 2;
-                        }
-                        "on_update" if i + 2 < parts.len() => {
-                            let action = parse_fk_action_str(parts[i + 2])?;
-                            col = col.on_update(action);
-                            i += 2;
-                        }
-                        "on_delete" | "on_update" => {
-                            return Err(format!("{} requires a foreign key action", parts[i + 1]));
-                        }
-                        _ => break,
-                    }
-                }
+                col = apply_fk_action_options(col, &parts, &mut i)?;
             }
             s if s.starts_with("references(") => {
                 let inner = s
@@ -428,6 +409,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     return Err(format!("invalid foreign key reference target: {}", s));
                 }
                 col = col.references(table.trim(), column.trim());
+                col = apply_fk_action_options(col, &parts, &mut i)?;
             }
             s if s.starts_with("check(") => {
                 // Parse check(expr) — expression may contain nested parens and spaces.
@@ -1669,6 +1651,33 @@ fn parse_fk_action_str(s: &str) -> Result<FkAction, String> {
         "no_action" => Ok(FkAction::NoAction),
         other => Err(format!("unknown foreign key action: {other}")),
     }
+}
+
+fn apply_fk_action_options(
+    mut col: Column,
+    parts: &[&str],
+    i: &mut usize,
+) -> Result<Column, String> {
+    while *i + 1 < parts.len() {
+        match parts[*i + 1] {
+            "on_delete" if *i + 2 < parts.len() => {
+                let action = parse_fk_action_str(parts[*i + 2])?;
+                col = col.on_delete(action);
+                *i += 2;
+            }
+            "on_update" if *i + 2 < parts.len() => {
+                let action = parse_fk_action_str(parts[*i + 2])?;
+                col = col.on_update(action);
+                *i += 2;
+            }
+            "on_delete" | "on_update" => {
+                return Err(format!("{} requires a foreign key action", parts[*i + 1]));
+            }
+            _ => break,
+        }
+    }
+
+    Ok(col)
 }
 
 fn parse_fk_reference_target(raw: &str) -> Result<(&str, &str), String> {
@@ -3165,7 +3174,7 @@ table orders {
         let input = r#"
 table orders {
   id uuid primary_key
-  user_id uuid references(users.id)
+  user_id uuid references(users.id) on_delete cascade on_update restrict
 }
 "#;
         let schema = parse_qail(input).unwrap();
@@ -3175,6 +3184,8 @@ table orders {
             .unwrap();
         assert_eq!(fk.table, "users");
         assert_eq!(fk.column, "id");
+        assert!(matches!(fk.on_delete, FkAction::Cascade));
+        assert!(matches!(fk.on_update, FkAction::Restrict));
     }
 
     #[test]
