@@ -775,13 +775,20 @@ fn parse_extension(line: &str) -> Result<Extension, String> {
 
     let mut ext = Extension::new(&parts[0]);
     let mut i = 1;
+    let mut seen_options = HashSet::new();
     while i < parts.len() {
         match parts[i].as_str() {
             "schema" if i + 1 < parts.len() => {
+                if !seen_options.insert("schema") {
+                    return Err("duplicate extension option: schema".to_string());
+                }
                 ext = ext.schema(&parts[i + 1]);
                 i += 2;
             }
             "version" if i + 1 < parts.len() => {
+                if !seen_options.insert("version") {
+                    return Err("duplicate extension option: version".to_string());
+                }
                 ext = ext.version(&parts[i + 1]);
                 i += 2;
             }
@@ -2884,6 +2891,23 @@ rename users.username -> users.name
         let input = r#"extension "uuid-ossp"#;
         let err = parse_qail(input).expect_err("unterminated extension quote should fail");
         assert!(err.contains("unterminated quoted extension token"));
+    }
+
+    #[test]
+    fn test_parse_extension_rejects_duplicate_options() {
+        for (input, expected) in [
+            (
+                "extension pgcrypto schema public schema auth",
+                "duplicate extension option: schema",
+            ),
+            (
+                r#"extension "uuid-ossp" version "1.0" version "1.1""#,
+                "duplicate extension option: version",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("duplicate extension option should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
