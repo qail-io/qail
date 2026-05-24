@@ -137,6 +137,13 @@ pub fn verify_stored_receipt_signature(stored: &StoredMigrationReceipt) -> Recei
     let Some(key) = runtime_receipt_hmac_key() else {
         return ReceiptSignatureStatus::DisabledNoKey;
     };
+    verify_stored_receipt_signature_with_key(stored, &key)
+}
+
+fn verify_stored_receipt_signature_with_key(
+    stored: &StoredMigrationReceipt,
+    key: &str,
+) -> ReceiptSignatureStatus {
     let Some(sig) = stored
         .receipt_sig
         .as_deref()
@@ -161,10 +168,15 @@ pub fn verify_stored_receipt_signature(stored: &StoredMigrationReceipt) -> Recei
         risk_summary: stored.risk_summary.clone(),
         shadow_checksum: stored.shadow_checksum.clone(),
     };
-    let Some(expected) = compute_receipt_hmac(&material, &key) else {
+    let Some(expected) = compute_receipt_hmac(&material, key) else {
         return ReceiptSignatureStatus::Invalid;
     };
-    if expected.eq_ignore_ascii_case(sig) {
+    let legacy_expected = compute_legacy_receipt_hmac(&material, key);
+    if expected.eq_ignore_ascii_case(sig)
+        || legacy_expected
+            .as_deref()
+            .is_some_and(|expected| expected.eq_ignore_ascii_case(sig))
+    {
         ReceiptSignatureStatus::Valid
     } else {
         ReceiptSignatureStatus::Invalid
@@ -172,17 +184,84 @@ pub fn verify_stored_receipt_signature(stored: &StoredMigrationReceipt) -> Recei
 }
 
 fn compute_receipt_hmac(receipt: &MigrationReceipt, key: &str) -> Option<String> {
+    compute_receipt_hmac_for_material(&canonical_receipt_material(receipt), key)
+}
+
+fn compute_legacy_receipt_hmac(receipt: &MigrationReceipt, key: &str) -> Option<String> {
+    compute_receipt_hmac_for_material(&legacy_receipt_material(receipt), key)
+}
+
+fn compute_receipt_hmac_for_material(material: &str, key: &str) -> Option<String> {
     if key.trim().is_empty() {
         return None;
     }
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).ok()?;
-    mac.update(canonical_receipt_material(receipt).as_bytes());
+    mac.update(material.as_bytes());
     let digest = mac.finalize().into_bytes();
     Some(digest.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
+fn push_receipt_str_field(material: &mut String, name: &str, value: Option<&str>) {
+    material.push_str(name);
+    material.push(':');
+    match value {
+        Some(value) => {
+            material.push_str("str:");
+            material.push_str(&value.len().to_string());
+            material.push('\n');
+            material.push_str(value);
+        }
+        None => material.push_str("null"),
+    }
+    material.push('\n');
+}
+
+fn push_receipt_i64_field(material: &mut String, name: &str, value: Option<i64>) {
+    material.push_str(name);
+    material.push(':');
+    match value {
+        Some(value) => {
+            material.push_str("i64:");
+            material.push_str(&value.to_string());
+        }
+        None => material.push_str("null"),
+    }
+    material.push('\n');
+}
+
 fn canonical_receipt_material(receipt: &MigrationReceipt) -> String {
+    let mut material = String::new();
+    material.push_str("qail-receipt-v2\n");
+    push_receipt_str_field(&mut material, "version", Some(&receipt.version));
+    push_receipt_str_field(&mut material, "name", Some(&receipt.name));
+    push_receipt_str_field(&mut material, "checksum", Some(&receipt.checksum));
+    push_receipt_str_field(&mut material, "sql_up", Some(&receipt.sql_up));
+    push_receipt_str_field(&mut material, "git_sha", receipt.git_sha.as_deref());
+    push_receipt_str_field(&mut material, "qail_version", Some(&receipt.qail_version));
+    push_receipt_str_field(&mut material, "actor", receipt.actor.as_deref());
+    push_receipt_i64_field(&mut material, "started_at_ms", receipt.started_at_ms);
+    push_receipt_i64_field(&mut material, "finished_at_ms", receipt.finished_at_ms);
+    push_receipt_i64_field(&mut material, "duration_ms", receipt.duration_ms);
+    push_receipt_i64_field(
+        &mut material,
+        "affected_rows_est",
+        receipt.affected_rows_est,
+    );
+    push_receipt_str_field(
+        &mut material,
+        "risk_summary",
+        receipt.risk_summary.as_deref(),
+    );
+    push_receipt_str_field(
+        &mut material,
+        "shadow_checksum",
+        receipt.shadow_checksum.as_deref(),
+    );
+    material
+}
+
+fn legacy_receipt_material(receipt: &MigrationReceipt) -> String {
     let mut material = String::new();
     material.push_str("version=");
     material.push_str(&receipt.version);
@@ -286,8 +365,9 @@ pub fn runtime_git_sha() -> Option<String> {
 mod tests {
     use super::{
         MigrationReceipt, ReceiptSignatureStatus, StoredMigrationReceipt,
-        canonical_receipt_material, compute_receipt_hmac, receipt_column_add_sql,
-        verify_stored_receipt_signature,
+        canonical_receipt_material, compute_legacy_receipt_hmac, compute_receipt_hmac,
+        receipt_column_add_sql, verify_stored_receipt_signature,
+        verify_stored_receipt_signature_with_key,
     };
 
     fn sample_receipt() -> MigrationReceipt {
@@ -305,6 +385,25 @@ mod tests {
             affected_rows_est: Some(0),
             risk_summary: Some("source=test".to_string()),
             shadow_checksum: None,
+        }
+    }
+
+    fn sample_stored_receipt(receipt_sig: Option<String>) -> StoredMigrationReceipt {
+        StoredMigrationReceipt {
+            version: "001_add_users.up.qail".to_string(),
+            name: Some("001_add_users.up.qail".to_string()),
+            checksum: Some("abc123".to_string()),
+            sql_up: Some("CREATE TABLE users (id int);".to_string()),
+            git_sha: Some("deadbeef".to_string()),
+            qail_version: Some("0.25.0".to_string()),
+            actor: Some("tester".to_string()),
+            started_at_ms: Some(1000),
+            finished_at_ms: Some(1100),
+            duration_ms: Some(100),
+            affected_rows_est: Some(0),
+            risk_summary: Some("source=test".to_string()),
+            shadow_checksum: None,
+            receipt_sig,
         }
     }
 
@@ -331,11 +430,65 @@ mod tests {
     }
 
     #[test]
+    fn receipt_hmac_distinguishes_null_and_empty_optional_fields() {
+        let mut null_field = sample_receipt();
+        null_field.shadow_checksum = None;
+        let mut empty_field = sample_receipt();
+        empty_field.shadow_checksum = Some(String::new());
+
+        let null_sig = compute_receipt_hmac(&null_field, "top-secret").expect("hmac");
+        let empty_sig = compute_receipt_hmac(&empty_field, "top-secret").expect("hmac");
+        assert_ne!(
+            null_sig, empty_sig,
+            "v2 receipt signatures must distinguish NULL from empty string"
+        );
+
+        let legacy_null =
+            compute_legacy_receipt_hmac(&null_field, "top-secret").expect("legacy hmac");
+        let legacy_empty =
+            compute_legacy_receipt_hmac(&empty_field, "top-secret").expect("legacy hmac");
+        assert_eq!(
+            legacy_null, legacy_empty,
+            "legacy material collapsed NULL and empty string"
+        );
+    }
+
+    #[test]
+    fn stored_receipt_verification_accepts_v2_and_legacy_signatures() {
+        let receipt = sample_receipt();
+        let v2_sig = compute_receipt_hmac(&receipt, "top-secret").expect("hmac");
+        let legacy_sig = compute_legacy_receipt_hmac(&receipt, "top-secret").expect("legacy hmac");
+
+        assert_eq!(
+            verify_stored_receipt_signature_with_key(
+                &sample_stored_receipt(Some(v2_sig)),
+                "top-secret",
+            ),
+            ReceiptSignatureStatus::Valid
+        );
+        assert_eq!(
+            verify_stored_receipt_signature_with_key(
+                &sample_stored_receipt(Some(legacy_sig)),
+                "top-secret",
+            ),
+            ReceiptSignatureStatus::Valid
+        );
+        assert_eq!(
+            verify_stored_receipt_signature_with_key(
+                &sample_stored_receipt(Some("not-a-valid-signature".to_string())),
+                "top-secret",
+            ),
+            ReceiptSignatureStatus::Invalid
+        );
+    }
+
+    #[test]
     fn canonical_material_contains_core_fields() {
         let material = canonical_receipt_material(&sample_receipt());
-        assert!(material.contains("version=001_add_users.up.qail"));
-        assert!(material.contains("checksum=abc123"));
-        assert!(material.contains("sql_up=CREATE TABLE users (id int);"));
+        assert!(material.starts_with("qail-receipt-v2\n"));
+        assert!(material.contains("version:str:21\n001_add_users.up.qail"));
+        assert!(material.contains("checksum:str:6\nabc123"));
+        assert!(material.contains("sql_up:str:28\nCREATE TABLE users (id int);"));
     }
 
     #[test]
@@ -350,22 +503,7 @@ mod tests {
 
     #[test]
     fn verify_signature_returns_disabled_without_key() {
-        let stored = StoredMigrationReceipt {
-            version: "001_add_users.up.qail".to_string(),
-            name: Some("001_add_users.up.qail".to_string()),
-            checksum: Some("abc123".to_string()),
-            sql_up: Some("CREATE TABLE users (id int);".to_string()),
-            git_sha: Some("deadbeef".to_string()),
-            qail_version: Some("0.25.0".to_string()),
-            actor: Some("tester".to_string()),
-            started_at_ms: Some(1000),
-            finished_at_ms: Some(1100),
-            duration_ms: Some(100),
-            affected_rows_est: Some(0),
-            risk_summary: Some("source=test".to_string()),
-            shadow_checksum: None,
-            receipt_sig: None,
-        };
+        let stored = sample_stored_receipt(None);
         assert_eq!(
             verify_stored_receipt_signature(&stored),
             ReceiptSignatureStatus::DisabledNoKey
