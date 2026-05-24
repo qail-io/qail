@@ -369,6 +369,23 @@ mod tests {
             std::collections::HashSet::from([("orders".to_string(), "order_no".to_string(),)])
         );
     }
+
+    #[test]
+    fn parse_column_type_preserves_unknown_and_user_defined_types() {
+        assert_eq!(
+            parse_column_type("USER-DEFINED", Some("booking_status")),
+            ColumnType::Range("BOOKING_STATUS".to_string())
+        );
+        assert_eq!(
+            parse_column_type("ltree", None),
+            ColumnType::Range("LTREE".to_string())
+        );
+        assert_eq!(
+            parse_column_type("ARRAY", Some("_int4")),
+            ColumnType::Array(Box::new(ColumnType::Int))
+        );
+        assert_ne!(parse_column_type("ltree", None), ColumnType::Text);
+    }
 }
 
 /// Verify an active shadow receipt by SQL checksum.
@@ -452,6 +469,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 "identity_generation",
                 "is_generated",
                 "generation_expression",
+                "udt_name",
             ])
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table_name.clone());
@@ -472,9 +490,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             let identity_generation = row.get_string(5);
             let is_generated = row.get_string(6);
             let generation_expression = row.get_string(7);
+            let udt_name = row.get_string(8);
 
             // Parse data type to ColumnType
-            let data_type = parse_column_type(&data_type_str);
+            let data_type = parse_column_type(&data_type_str, udt_name.as_deref());
             let generated = introspected_column_generation(
                 is_identity,
                 identity_generation.as_deref(),
@@ -901,12 +920,24 @@ async fn introspect_unique_constraints(
     Ok((unique_columns, unique_indexes, unique_constraint_names))
 }
 
-/// Parse PostgreSQL data type string to ColumnType
-fn parse_column_type(s: &str) -> ColumnType {
-    match s.to_lowercase().as_str() {
+/// Parse PostgreSQL data type metadata to ColumnType.
+fn parse_column_type(data_type: &str, udt_name: Option<&str>) -> ColumnType {
+    if data_type.eq_ignore_ascii_case("array")
+        && let Some(array_inner) = udt_name.and_then(|name| name.strip_prefix('_'))
+    {
+        return ColumnType::Array(Box::new(parse_column_type(array_inner, None)));
+    }
+
+    let raw_type = if data_type.eq_ignore_ascii_case("user-defined") {
+        udt_name.unwrap_or(data_type)
+    } else {
+        data_type
+    };
+
+    match raw_type.to_lowercase().as_str() {
         "integer" | "int" | "int4" => ColumnType::Int,
         "bigint" | "int8" => ColumnType::BigInt,
-        "smallint" | "int2" => ColumnType::Int, // Map to Int (no SmallInt)
+        "smallint" | "int2" => ColumnType::Range("SMALLINT".to_string()),
         "text" => ColumnType::Text,
         "character varying" | "varchar" => ColumnType::Varchar(None),
         "boolean" | "bool" => ColumnType::Bool,
@@ -919,7 +950,13 @@ fn parse_column_type(s: &str) -> ColumnType {
         "real" | "float4" | "double precision" | "float8" => ColumnType::Float,
         "numeric" | "decimal" => ColumnType::Decimal(None),
         "bytea" => ColumnType::Bytea,
-        _ => ColumnType::Text, // Default fallback
+        "interval" => ColumnType::Interval,
+        "inet" => ColumnType::Inet,
+        "cidr" => ColumnType::Cidr,
+        "macaddr" => ColumnType::MacAddr,
+        _ => raw_type
+            .parse()
+            .unwrap_or_else(|_| ColumnType::Range(raw_type.to_uppercase())),
     }
 }
 
