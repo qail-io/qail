@@ -18,3 +18,18 @@ fn test_nested_identifiers() {
         panic!("Expected filter cage");
     }
 }
+
+#[test]
+fn test_quoted_strings_parse_doubled_quote_escapes() {
+    let cmd = parse(r#"get users fields id where name = 'O''Reilly'"#).unwrap();
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::String("O'Reilly".to_string())
+    );
+
+    let cmd = parse(r#"get users fields id where quote = "say ""hi""""#).unwrap();
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::String("say \"hi\"".to_string())
+    );
+}

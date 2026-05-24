@@ -57,23 +57,9 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         // JSON object literal: { ... } or array: [ ... ]
         parse_json_literal,
         // String (double quoted) - allow empty strings
-        map(
-            delimited(
-                char('"'),
-                nom::bytes::complete::take_while(|c| c != '"'),
-                char('"'),
-            ),
-            |s: &str| Value::String(s.to_string()),
-        ),
+        parse_double_quoted_string,
         // String (single quoted) - allow empty strings
-        map(
-            delimited(
-                char('\''),
-                nom::bytes::complete::take_while(|c| c != '\''),
-                char('\''),
-            ),
-            |s: &str| Value::String(s.to_string()),
-        ),
+        parse_single_quoted_string,
         // Float (must check before int)
         map_res(
             recognize((opt(char('-')), digit1, char('.'), digit1)),
@@ -93,6 +79,50 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         }),
     ))
     .parse(input)
+}
+
+fn parse_single_quoted_string(input: &str) -> IResult<&str, Value> {
+    parse_quoted_string(input, '\'')
+}
+
+fn parse_double_quoted_string(input: &str) -> IResult<&str, Value> {
+    parse_quoted_string(input, '"')
+}
+
+fn parse_quoted_string(input: &str, quote: char) -> IResult<&str, Value> {
+    if !input.starts_with(quote) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Char,
+        )));
+    }
+
+    let mut value = String::new();
+    let mut index = quote.len_utf8();
+
+    while index < input.len() {
+        let ch = input[index..]
+            .chars()
+            .next()
+            .expect("index must remain on a char boundary");
+        index += ch.len_utf8();
+
+        if ch == quote {
+            if input[index..].starts_with(quote) {
+                value.push(quote);
+                index += quote.len_utf8();
+            } else {
+                return Ok((&input[index..], Value::String(value)));
+            }
+        } else {
+            value.push(ch);
+        }
+    }
+
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Eof,
+    )))
 }
 
 /// Parse triple-quoted multi-line string: '''content''' or """content"""
