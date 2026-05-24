@@ -1,4 +1,4 @@
-use crate::transpiler::nosql::qdrant::ToQdrant;
+use crate::transpiler::nosql::{mongo::ToMongo, qdrant::ToQdrant};
 
 #[test]
 fn test_qdrant_search() {
@@ -196,4 +196,76 @@ fn test_qdrant_json_strings_are_escaped() {
     let parsed: serde_json::Value =
         serde_json::from_str(&upsert).expect("qdrant upsert JSON must stay valid");
     assert_eq!(parsed["points"][0]["payload"]["name\"bad"], "Ana\"bad");
+}
+
+#[test]
+fn test_mongo_shell_fragments_are_escaped() {
+    use crate::ast::{
+        Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, SortOrder, Value,
+    };
+
+    let insert = Qail {
+        action: Action::Add,
+        table: "users\"); db.dropDatabase(); //".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("name\"bad".to_string()),
+                op: Operator::Eq,
+                value: Value::String("Ana\"bad".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_mongo();
+
+    assert!(insert.starts_with("db.getCollection("), "{insert}");
+    assert!(
+        insert.contains("\"users\\\"); db.dropDatabase(); //\""),
+        "{insert}"
+    );
+    assert!(
+        insert.contains("\"name\\\"bad\": \"Ana\\\"bad\""),
+        "{insert}"
+    );
+
+    let find = Qail {
+        table: "events; db.evil()".to_string(),
+        columns: vec![Expr::Named("payload\"key".to_string())],
+        cages: vec![
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("city\", $where: evil".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("London\" }".to_string()),
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            },
+            Cage {
+                kind: CageKind::Sort(SortOrder::Desc),
+                conditions: vec![Condition {
+                    left: Expr::Named("score\"bad".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Null,
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            },
+        ],
+        ..Default::default()
+    }
+    .to_mongo();
+
+    assert!(find.starts_with("db.getCollection("), "{find}");
+    assert!(find.contains("\"events; db.evil()\""), "{find}");
+    assert!(find.contains("\"payload\\\"key\": 1"), "{find}");
+    assert!(
+        find.contains("\"city\\\", $where: evil\": \"London\\\" }\""),
+        "{find}"
+    );
+    assert!(find.contains(".sort({ \"score\\\"bad\": -1 })"), "{find}");
 }

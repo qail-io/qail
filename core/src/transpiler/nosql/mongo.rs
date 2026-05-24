@@ -1,5 +1,30 @@
 use crate::ast::*;
 
+fn js_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn is_js_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+}
+
+fn mongo_collection(name: &str) -> String {
+    if is_js_identifier(name) {
+        format!("db.{name}")
+    } else {
+        format!("db.getCollection({})", js_string(name))
+    }
+}
+
 /// Trait for converting QAIL AST to MongoDB shell commands.
 pub trait ToMongo {
     /// Convert a QAIL query into a MongoDB shell command string.
@@ -20,8 +45,8 @@ impl ToMongo for Qail {
             Action::Add => build_insert(self),
             Action::Put => build_upsert(self),
             Action::Del => build_delete(self),
-            Action::Make => format!("db.createCollection(\"{}\")", self.table),
-            Action::Drop => format!("db.{}.drop()", self.table),
+            Action::Make => format!("db.createCollection({})", js_string(&self.table)),
+            Action::Drop => format!("{}.drop()", mongo_collection(&self.table)),
             Action::TxnStart => "session.startTransaction()".to_string(),
             Action::TxnCommit => "session.commitTransaction()".to_string(),
             Action::TxnRollback => "session.abortTransaction()".to_string(),
@@ -47,8 +72,10 @@ fn build_aggregate(cmd: &Qail) -> String {
 
         // from: orders, localField: _id, foreignField: user_id, as: orders
         let lookup = format!(
-            "{{ \"$lookup\": {{ \"from\": \"{}\", \"localField\": \"_id\", \"foreignField\": \"{}\", \"as\": \"{}\" }} }}",
-            target, pk, target
+            "{{ \"$lookup\": {{ \"from\": {}, \"localField\": \"_id\", \"foreignField\": {}, \"as\": {} }} }}",
+            js_string(target),
+            js_string(&pk),
+            js_string(target)
         );
         stages.push(lookup);
     }
@@ -73,7 +100,11 @@ fn build_aggregate(cmd: &Qail) -> String {
                         Expr::Named(name) => name.clone(),
                         expr => expr.to_string(),
                     };
-                    stages.push(format!("{{ \"$sort\": {{ \"{}\": {} }} }}", col_str, val));
+                    stages.push(format!(
+                        "{{ \"$sort\": {{ {}: {} }} }}",
+                        js_string(&col_str),
+                        val
+                    ));
                 }
             }
             CageKind::Offset(n) => stages.push(format!("{{ \"$skip\": {} }}", n)),
@@ -82,7 +113,11 @@ fn build_aggregate(cmd: &Qail) -> String {
         }
     }
 
-    format!("db.{}.aggregate([{}])", cmd.table, stages.join(", "))
+    format!(
+        "{}.aggregate([{}])",
+        mongo_collection(&cmd.table),
+        stages.join(", ")
+    )
 }
 
 fn build_find(cmd: &Qail) -> String {
@@ -90,7 +125,12 @@ fn build_find(cmd: &Qail) -> String {
     let projection = build_projection(cmd);
 
     // Base: db.collection.find(query, projection)
-    let mut mongo = format!("db.{}.find({}, {})", cmd.table, query, projection);
+    let mut mongo = format!(
+        "{}.find({}, {})",
+        mongo_collection(&cmd.table),
+        query,
+        projection
+    );
 
     // Sort, Limit, Skip logic
     for cage in &cmd.cages {
@@ -107,7 +147,7 @@ fn build_find(cmd: &Qail) -> String {
                         Expr::Named(name) => name.clone(),
                         expr => expr.to_string(),
                     };
-                    mongo.push_str(&format!(".sort({{ \"{}\": {} }})", col_str, val));
+                    mongo.push_str(&format!(".sort({{ {}: {} }})", js_string(&col_str), val));
                 }
             }
             _ => {}
@@ -136,8 +176,8 @@ fn build_update(cmd: &Qail) -> String {
                         expr => expr.to_string(),
                     };
                     update_doc.push_str(&format!(
-                        "\"{}\": {}",
-                        col_str,
+                        "{}: {}",
+                        js_string(&col_str),
                         value_to_json(&cond.value)
                     ));
                     first = false;
@@ -148,7 +188,12 @@ fn build_update(cmd: &Qail) -> String {
     }
     update_doc.push_str(" } }");
 
-    format!("db.{}.updateMany({}, {})", cmd.table, query, update_doc)
+    format!(
+        "{}.updateMany({}, {})",
+        mongo_collection(&cmd.table),
+        query,
+        update_doc
+    )
 }
 
 fn build_insert(cmd: &Qail) -> String {
@@ -168,7 +213,11 @@ fn build_insert(cmd: &Qail) -> String {
                         Expr::Named(name) => name.clone(),
                         expr => expr.to_string(),
                     };
-                    doc.push_str(&format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
+                    doc.push_str(&format!(
+                        "{}: {}",
+                        js_string(&col_str),
+                        value_to_json(&cond.value)
+                    ));
                     first = false;
                 }
             }
@@ -177,7 +226,7 @@ fn build_insert(cmd: &Qail) -> String {
     }
     doc.push_str(" }");
 
-    format!("db.{}.insertOne({})", cmd.table, doc)
+    format!("{}.insertOne({})", mongo_collection(&cmd.table), doc)
 }
 
 fn build_upsert(cmd: &Qail) -> String {
@@ -200,8 +249,8 @@ fn build_upsert(cmd: &Qail) -> String {
                         expr => expr.to_string(),
                     };
                     update_doc.push_str(&format!(
-                        "\"{}\": {}",
-                        col_str,
+                        "{}: {}",
+                        js_string(&col_str),
                         value_to_json(&cond.value)
                     ));
                     first = false;
@@ -213,14 +262,16 @@ fn build_upsert(cmd: &Qail) -> String {
     update_doc.push_str(" } }");
 
     format!(
-        "db.{}.updateOne({}, {}, {{ \"upsert\": true }})",
-        cmd.table, query, update_doc
+        "{}.updateOne({}, {}, {{ \"upsert\": true }})",
+        mongo_collection(&cmd.table),
+        query,
+        update_doc
     )
 }
 
 fn build_delete(cmd: &Qail) -> String {
     let query = build_query_filter(cmd);
-    format!("db.{}.deleteMany({})", cmd.table, query)
+    format!("{}.deleteMany({})", mongo_collection(&cmd.table), query)
 }
 
 fn build_query_filter(cmd: &Qail) -> String {
@@ -246,11 +297,15 @@ fn build_query_filter(cmd: &Qail) -> String {
 
                 // If simple equality, clean syntax { key: val }
                 if let Operator::Eq = cond.op {
-                    query_parts.push(format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
+                    query_parts.push(format!(
+                        "{}: {}",
+                        js_string(&col_str),
+                        value_to_json(&cond.value)
+                    ));
                 } else {
                     query_parts.push(format!(
-                        "\"{}\": {{ \"{}\": {} }}",
-                        col_str,
+                        "{}: {{ \"{}\": {} }}",
+                        js_string(&col_str),
                         op,
                         value_to_json(&cond.value)
                     ));
@@ -277,7 +332,7 @@ fn build_projection(cmd: &Qail) -> String {
             proj.push_str(", ");
         }
         if let Expr::Named(name) = col {
-            proj.push_str(&format!("\"{}\": 1", name));
+            proj.push_str(&format!("{}: 1", js_string(name)));
         }
     }
     proj.push_str(" }");
@@ -286,12 +341,12 @@ fn build_projection(cmd: &Qail) -> String {
 
 fn value_to_json(v: &Value) -> String {
     match v {
-        Value::String(s) => format!("\"{}\"", s),
+        Value::String(s) => js_string(s),
         Value::Int(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
-        Value::Param(i) => format!("\"$param{}\"", i),
-        _ => "\"unknown\"".to_string(),
+        Value::Param(i) => js_string(&format!("$param{}", i)),
+        _ => js_string("unknown"),
     }
 }
