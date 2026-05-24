@@ -384,6 +384,90 @@ fn check_expr_end(rest: &str) -> usize {
     rest.len()
 }
 
+fn parenthesized_content(input: &str) -> IResult<&str, &str> {
+    let mut paren_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut iter = input.char_indices().peekable();
+
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(iter.peek(), Some((_, '\''))) {
+                    iter.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(iter.peek(), Some((_, '"'))) {
+                    iter.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => paren_depth += 1,
+            ')' if !in_single && !in_double => {
+                if paren_depth == 0 {
+                    return Ok((&input[idx + ch.len_utf8()..], &input[..idx]));
+                }
+                paren_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Char,
+    )))
+}
+
+fn split_top_level_csv(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut iter = input.char_indices().peekable();
+
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(iter.peek(), Some((_, '\''))) {
+                    iter.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(iter.peek(), Some((_, '"'))) {
+                    iter.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => paren_depth += 1,
+            ')' if !in_single && !in_double && paren_depth > 0 => paren_depth -= 1,
+            ',' if !in_single && !in_double && paren_depth == 0 => {
+                let part = input[start..idx].trim();
+                if !part.is_empty() {
+                    parts.push(part.to_string());
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let part = input[start..].trim();
+    if !part.is_empty() {
+        parts.push(part.to_string());
+    }
+
+    parts
+}
+
 fn starts_constraint_keyword(input: &str) -> bool {
     let lower = input.to_ascii_lowercase();
     matches!(
@@ -901,16 +985,11 @@ fn parse_index(input: &str) -> IResult<&str, IndexDef> {
     let (input, table) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
     let (input, _) = nom_ws0(input)?;
     let (input, _) = char('(')(input)?;
-    let (input, cols_str) = take_while1(|c: char| c != ')')(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, cols_str) = parenthesized_content(input)?;
     let (input, _) = nom_ws0(input)?;
     let (input, unique_tag) = opt(tag_no_case("unique")).parse(input)?;
 
-    let columns: Vec<String> = cols_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let columns = split_top_level_csv(cols_str);
 
     let is_unique = unique_tag.is_some();
 
@@ -1194,6 +1273,36 @@ mod tests {
         assert_eq!(
             note.default_value,
             Some("'paren ) and comma, still literal'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_index_columns_handle_nested_expression_commas() {
+        let input = r#"
+            table docs (
+                id uuid primary_key,
+                title text,
+                slug text
+            )
+
+            index idx_docs_search on docs (regexp_replace(title, ')', '', 'g'), lower(slug)) unique
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        assert_eq!(schema.indexes.len(), 1);
+        let index = &schema.indexes[0];
+        assert_eq!(index.name, "idx_docs_search");
+        assert_eq!(
+            index.columns,
+            vec![
+                "regexp_replace(title, ')', '', 'g')".to_string(),
+                "lower(slug)".to_string()
+            ]
+        );
+        assert!(index.unique);
+        assert_eq!(
+            index.to_sql(),
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_search ON docs (regexp_replace(title, ')', '', 'g'), lower(slug))"
         );
     }
 
