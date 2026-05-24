@@ -433,7 +433,7 @@ fn test_alter_columns_reject_invalid_shapes() {
 }
 
 #[test]
-fn test_alter_set_default_fragments_are_sanitized() {
+fn test_alter_set_default_rejects_invalid_fragments() {
     let safe = Qail {
         action: Action::AlterSetDefault,
         table: "events".to_string(),
@@ -455,7 +455,18 @@ fn test_alter_set_default_fragments_are_sanitized() {
     };
     assert_eq!(
         unsafe_default.to_sql_with_dialect(Dialect::Postgres),
-        "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL"
+        "/* ERROR: Invalid default expression */"
+    );
+
+    let missing_column = Qail {
+        action: Action::AlterDropDefault,
+        table: "events".to_string(),
+        columns: vec![],
+        ..Default::default()
+    };
+    assert_eq!(
+        missing_column.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: ALTER DROP DEFAULT requires exactly one named column */"
     );
 }
 

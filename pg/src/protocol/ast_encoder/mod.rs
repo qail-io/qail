@@ -192,10 +192,10 @@ impl AstEncoder {
             Action::CreateEnum => ddl::encode_create_enum(cmd, sql_buf),
             Action::DropEnum => ddl::encode_drop_enum(cmd, sql_buf),
             Action::AlterEnumAddValue => ddl::encode_alter_enum_add_value(cmd, sql_buf),
-            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, sql_buf),
-            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, sql_buf),
-            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, sql_buf),
-            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, sql_buf),
+            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, sql_buf)?,
+            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, sql_buf)?,
+            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, sql_buf)?,
+            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, sql_buf)?,
             Action::AlterEnableRls => ddl::encode_alter_enable_rls(cmd, sql_buf),
             Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, sql_buf),
             Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, sql_buf),
@@ -278,10 +278,10 @@ impl AstEncoder {
             Action::CreateEnum => ddl::encode_create_enum(cmd, &mut sql_buf),
             Action::DropEnum => ddl::encode_drop_enum(cmd, &mut sql_buf),
             Action::AlterEnumAddValue => ddl::encode_alter_enum_add_value(cmd, &mut sql_buf),
-            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, &mut sql_buf),
-            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, &mut sql_buf),
-            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, &mut sql_buf),
-            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, &mut sql_buf),
+            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, &mut sql_buf)?,
+            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, &mut sql_buf)?,
+            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, &mut sql_buf)?,
+            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, &mut sql_buf)?,
             Action::AlterEnableRls => ddl::encode_alter_enable_rls(cmd, &mut sql_buf),
             Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, &mut sql_buf),
             Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, &mut sql_buf),
@@ -2332,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_alter_set_default_fragments_are_sanitized() {
+    fn test_encode_alter_set_default_rejects_invalid_fragments() {
         use qail_core::ast::Expr;
 
         let safe = Qail {
@@ -2355,10 +2355,24 @@ mod tests {
             payload: Some("0; DROP TABLE events; --".to_string()),
             ..Default::default()
         };
-        let sql = AstEncoder::encode_cmd_sql(&unsafe_default).unwrap().0;
-        assert_eq!(
-            sql,
-            "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL"
+        let err = AstEncoder::encode_cmd_sql(&unsafe_default)
+            .expect_err("unsafe default expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid default expression")),
+            "unexpected error: {err}"
+        );
+
+        let missing_column = Qail {
+            action: Action::AlterDropDefault,
+            table: "events".to_string(),
+            columns: vec![],
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&missing_column).expect_err("missing column must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("ALTER DROP DEFAULT")),
+            "unexpected error: {err}"
         );
     }
 

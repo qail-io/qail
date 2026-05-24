@@ -1117,50 +1117,88 @@ pub fn encode_drop_materialized_view(cmd: &Qail, buf: &mut BytesMut) {
     push_identifier(buf, &cmd.table);
 }
 
-/// Encode ALTER TABLE ALTER COLUMN SET NOT NULL.
-pub fn encode_alter_set_not_null(cmd: &Qail, buf: &mut BytesMut) {
-    if let Some(Expr::Named(col)) = cmd.columns.first() {
-        buf.extend_from_slice(b"ALTER TABLE ");
-        push_identifier(buf, &cmd.table);
-        buf.extend_from_slice(b" ALTER COLUMN ");
-        push_identifier(buf, col);
-        buf.extend_from_slice(b" SET NOT NULL");
+fn single_named_column<'a>(
+    cmd: &'a Qail,
+    action: &str,
+) -> Result<&'a str, super::super::EncodeError> {
+    let [Expr::Named(col)] = cmd.columns.as_slice() else {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{action} requires exactly one named column"
+        )));
+    };
+    if col.trim().is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{action} column cannot be empty"
+        )));
     }
+    Ok(col)
+}
+
+/// Encode ALTER TABLE ALTER COLUMN SET NOT NULL.
+pub fn encode_alter_set_not_null(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let col = single_named_column(cmd, "ALTER SET NOT NULL")?;
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ALTER COLUMN ");
+    push_identifier(buf, col);
+    buf.extend_from_slice(b" SET NOT NULL");
+    Ok(())
 }
 
 /// Encode ALTER TABLE ALTER COLUMN DROP NOT NULL.
-pub fn encode_alter_drop_not_null(cmd: &Qail, buf: &mut BytesMut) {
-    if let Some(Expr::Named(col)) = cmd.columns.first() {
-        buf.extend_from_slice(b"ALTER TABLE ");
-        push_identifier(buf, &cmd.table);
-        buf.extend_from_slice(b" ALTER COLUMN ");
-        push_identifier(buf, col);
-        buf.extend_from_slice(b" DROP NOT NULL");
-    }
+pub fn encode_alter_drop_not_null(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let col = single_named_column(cmd, "ALTER DROP NOT NULL")?;
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ALTER COLUMN ");
+    push_identifier(buf, col);
+    buf.extend_from_slice(b" DROP NOT NULL");
+    Ok(())
 }
 
 /// Encode ALTER TABLE ALTER COLUMN SET DEFAULT.
-pub fn encode_alter_set_default(cmd: &Qail, buf: &mut BytesMut) {
-    if let Some(Expr::Named(col)) = cmd.columns.first() {
-        buf.extend_from_slice(b"ALTER TABLE ");
-        push_identifier(buf, &cmd.table);
-        buf.extend_from_slice(b" ALTER COLUMN ");
-        push_identifier(buf, col);
-        buf.extend_from_slice(b" SET DEFAULT ");
-        let default_expr = cmd.payload.as_deref().unwrap_or("NULL");
-        buf.extend_from_slice(sql_expr_fragment_to_sql(default_expr, "NULL").as_bytes());
+pub fn encode_alter_set_default(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let col = single_named_column(cmd, "ALTER SET DEFAULT")?;
+    let Some(default_expr) = cmd.payload.as_deref() else {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "ALTER SET DEFAULT requires a default expression".to_string(),
+        ));
+    };
+    if default_expr.trim().is_empty() || contains_unquoted_statement_delimiter(default_expr) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid default expression: {default_expr:?}"
+        )));
     }
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ALTER COLUMN ");
+    push_identifier(buf, col);
+    buf.extend_from_slice(b" SET DEFAULT ");
+    buf.extend_from_slice(default_expr.trim().as_bytes());
+    Ok(())
 }
 
 /// Encode ALTER TABLE ALTER COLUMN DROP DEFAULT.
-pub fn encode_alter_drop_default(cmd: &Qail, buf: &mut BytesMut) {
-    if let Some(Expr::Named(col)) = cmd.columns.first() {
-        buf.extend_from_slice(b"ALTER TABLE ");
-        push_identifier(buf, &cmd.table);
-        buf.extend_from_slice(b" ALTER COLUMN ");
-        push_identifier(buf, col);
-        buf.extend_from_slice(b" DROP DEFAULT");
-    }
+pub fn encode_alter_drop_default(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let col = single_named_column(cmd, "ALTER DROP DEFAULT")?;
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ALTER COLUMN ");
+    push_identifier(buf, col);
+    buf.extend_from_slice(b" DROP DEFAULT");
+    Ok(())
 }
 
 /// Encode ALTER TABLE ENABLE ROW LEVEL SECURITY.

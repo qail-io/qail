@@ -377,62 +377,70 @@ impl ToSql for Qail {
             Action::AlterEnumAddValue => ddl::build_alter_enum_add_value(self, dialect),
             // ALTER TABLE property operations (from diff engine)
             Action::AlterSetNotNull => {
-                if let Some(Expr::Named(col)) = self.columns.first() {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        escape_identifier(&self.table),
-                        escape_identifier(col)
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN ... SET NOT NULL",
-                        escape_identifier(&self.table)
-                    )
+                let [Expr::Named(col)] = self.columns.as_slice() else {
+                    return "/* ERROR: ALTER SET NOT NULL requires exactly one named column */"
+                        .to_string();
+                };
+                if col.trim().is_empty() {
+                    return "/* ERROR: ALTER SET NOT NULL column cannot be empty */".to_string();
                 }
+                format!(
+                    "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+                    escape_identifier(&self.table),
+                    escape_identifier(col)
+                )
             }
             Action::AlterDropNotNull => {
-                if let Some(Expr::Named(col)) = self.columns.first() {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                        escape_identifier(&self.table),
-                        escape_identifier(col)
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN ... DROP NOT NULL",
-                        escape_identifier(&self.table)
-                    )
+                let [Expr::Named(col)] = self.columns.as_slice() else {
+                    return "/* ERROR: ALTER DROP NOT NULL requires exactly one named column */"
+                        .to_string();
+                };
+                if col.trim().is_empty() {
+                    return "/* ERROR: ALTER DROP NOT NULL column cannot be empty */".to_string();
                 }
+                format!(
+                    "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
+                    escape_identifier(&self.table),
+                    escape_identifier(col)
+                )
             }
             Action::AlterSetDefault => {
-                if let Some(Expr::Named(col)) = self.columns.first() {
-                    let default_expr = self.payload.as_deref().unwrap_or("NULL");
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
-                        escape_identifier(&self.table),
-                        escape_identifier(col),
-                        sql_expr_fragment_to_sql(default_expr, "NULL")
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN ... SET DEFAULT ...",
-                        escape_identifier(&self.table)
-                    )
+                let [Expr::Named(col)] = self.columns.as_slice() else {
+                    return "/* ERROR: ALTER SET DEFAULT requires exactly one named column */"
+                        .to_string();
+                };
+                if col.trim().is_empty() {
+                    return "/* ERROR: ALTER SET DEFAULT column cannot be empty */".to_string();
                 }
+                let Some(default_expr) = self.payload.as_deref() else {
+                    return "/* ERROR: ALTER SET DEFAULT requires a default expression */"
+                        .to_string();
+                };
+                if default_expr.trim().is_empty()
+                    || contains_unquoted_statement_delimiter(default_expr)
+                {
+                    return "/* ERROR: Invalid default expression */".to_string();
+                }
+                format!(
+                    "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                    escape_identifier(&self.table),
+                    escape_identifier(col),
+                    default_expr.trim()
+                )
             }
             Action::AlterDropDefault => {
-                if let Some(Expr::Named(col)) = self.columns.first() {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-                        escape_identifier(&self.table),
-                        escape_identifier(col)
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN ... DROP DEFAULT",
-                        escape_identifier(&self.table)
-                    )
+                let [Expr::Named(col)] = self.columns.as_slice() else {
+                    return "/* ERROR: ALTER DROP DEFAULT requires exactly one named column */"
+                        .to_string();
+                };
+                if col.trim().is_empty() {
+                    return "/* ERROR: ALTER DROP DEFAULT column cannot be empty */".to_string();
                 }
+                format!(
+                    "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                    escape_identifier(&self.table),
+                    escape_identifier(col)
+                )
             }
             Action::AlterEnableRls => {
                 format!(
