@@ -114,6 +114,28 @@ fn normalize_trigger_rejects_invalid_header_name() {
 }
 
 #[test]
+fn delivery_headers_fail_closed_on_invalid_or_reserved_values() {
+    let mut headers = HashMap::new();
+    headers.insert("x-api-key".to_string(), "secret".to_string());
+    let validated = super::delivery::validate_delivery_headers(&headers).unwrap();
+    assert_eq!(validated.len(), 1);
+
+    headers.insert("content-type".to_string(), "text/plain".to_string());
+    let err = super::delivery::validate_delivery_headers(&headers).unwrap_err();
+    assert!(err.contains("reserved header"));
+
+    let mut headers = HashMap::new();
+    headers.insert("bad header".to_string(), "value".to_string());
+    let err = super::delivery::validate_delivery_headers(&headers).unwrap_err();
+    assert!(err.contains("invalid header name"));
+
+    let mut headers = HashMap::new();
+    headers.insert("x-api-key".to_string(), "bad\r\nvalue".to_string());
+    let err = super::delivery::validate_delivery_headers(&headers).unwrap_err();
+    assert!(err.contains("invalid header value"));
+}
+
+#[test]
 fn retry_delay_is_bounded() {
     assert_eq!(retry_delay(1), Duration::from_secs(1));
     assert_eq!(retry_delay(2), Duration::from_secs(2));

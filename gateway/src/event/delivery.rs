@@ -34,6 +34,30 @@ impl WebhookDeliveryResult {
     }
 }
 
+pub(super) fn validate_delivery_headers(
+    headers: &HashMap<String, String>,
+) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    let mut validated = Vec::with_capacity(headers.len());
+    for (key, value) in headers {
+        let key_trimmed = key.trim();
+        if key_trimmed.is_empty() {
+            return Err("empty header name".to_string());
+        }
+
+        let lower = key_trimmed.to_ascii_lowercase();
+        if is_reserved_webhook_header(&lower) {
+            return Err(format!("reserved header name '{}'", key_trimmed));
+        }
+
+        let header_name = HeaderName::from_bytes(key_trimmed.as_bytes())
+            .map_err(|e| format!("invalid header name '{}': {}", key_trimmed, e))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|e| format!("invalid header value for '{}': {}", key_trimmed, e))?;
+        validated.push((header_name, header_value));
+    }
+    Ok(validated)
+}
+
 /// Deliver webhook with exponential backoff retry.
 pub(super) async fn deliver_webhook(
     client: Arc<reqwest::Client>,
@@ -216,52 +240,22 @@ pub(super) async fn deliver_webhook_once(
         .header("content-type", "application/json")
         .header("x-qail-trigger", trigger_name);
 
-    for (key, value) in headers {
-        let key_trimmed = key.trim();
-        if key_trimmed.is_empty() {
-            tracing::warn!(
+    let validated_headers = match validate_delivery_headers(headers) {
+        Ok(headers) => headers,
+        Err(reason) => {
+            tracing::error!(
                 trigger = %trigger_name,
-                "Webhook header skipped: empty name"
+                reason = %reason,
+                "Webhook headers rejected"
             );
-            continue;
-        }
-
-        let lower = key_trimmed.to_ascii_lowercase();
-        if is_reserved_webhook_header(&lower) {
-            tracing::warn!(
-                trigger = %trigger_name,
-                header = %key_trimmed,
-                "Webhook header skipped: reserved name"
+            return WebhookDeliveryResult::failure(
+                None,
+                format!("Webhook headers rejected: {}", reason),
+                1,
             );
-            continue;
         }
-
-        let header_name = match HeaderName::from_bytes(key_trimmed.as_bytes()) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(
-                    trigger = %trigger_name,
-                    header = %key_trimmed,
-                    error = %e,
-                    "Webhook header skipped: invalid header name"
-                );
-                continue;
-            }
-        };
-
-        let header_value = match HeaderValue::from_str(value) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    trigger = %trigger_name,
-                    header = %key_trimmed,
-                    error = %e,
-                    "Webhook header skipped: invalid header value"
-                );
-                continue;
-            }
-        };
-
+    };
+    for (header_name, header_value) in validated_headers {
         req = req.header(header_name, header_value);
     }
 
