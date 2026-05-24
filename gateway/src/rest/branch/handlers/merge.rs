@@ -85,6 +85,30 @@ fn ensure_insert_row_pk_matches(
     Ok(())
 }
 
+fn ensure_update_row_pk_matches(
+    table: &str,
+    row_pk: &str,
+    obj: &serde_json::Map<String, Value>,
+    pk_col: &str,
+) -> Result<(), String> {
+    let Some(pk_value) = obj.get(pk_col) else {
+        return Ok(());
+    };
+    let pk_text = json_pk_value_to_text(pk_value).ok_or_else(|| {
+        format!(
+            "{}.{}: update overlay primary key '{}' must be a scalar",
+            table, row_pk, pk_col
+        )
+    })?;
+    if pk_text != row_pk {
+        return Err(format!(
+            "{}.{}: update overlay primary key '{}' does not match row_data value '{}'",
+            table, row_pk, pk_col, pk_text
+        ));
+    }
+    Ok(())
+}
+
 fn json_pk_value_to_text(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
@@ -113,11 +137,12 @@ fn build_branch_overlay_merge_cmd(
         }
         "update" => {
             let obj = parse_overlay_object(operation, row_data_str)?;
+            let pk_col = pk_col.unwrap_or("id");
+            ensure_update_row_pk_matches(table, row_pk, &obj, pk_col)?;
             let mut q = qail_core::ast::Qail::set(table);
             for (k, v) in &obj {
                 q = q.set_value(k, json_to_qail_value(v));
             }
-            let pk_col = pk_col.unwrap_or("id");
             Ok(q.eq(pk_col, row_pk.to_string()).returning([pk_col]))
         }
         "delete" => {
@@ -565,6 +590,31 @@ mod tests {
         let err = build_branch_overlay_merge_cmd("orders", "order-1", "update", "[]", Some("id"))
             .expect_err("non-object update overlay must fail closed");
         assert!(err.contains("expected object"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_update_pk_drift() {
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "update",
+            r#"{"id":"order-2","status":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("update overlay mismatched pk must fail closed");
+
+        assert!(err.contains("does not match"));
+
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "update",
+            r#"{"id":{"nested":"bad"},"status":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("update overlay non-scalar pk must fail closed");
+
+        assert!(err.contains("must be a scalar"));
     }
 
     #[test]
