@@ -330,6 +330,56 @@ fn constraint_text(input: &str) -> IResult<&str, &str> {
     }
 }
 
+fn starts_constraint_keyword(input: &str) -> bool {
+    let lower = input.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        s if s.starts_with("primary_key")
+            || s.starts_with("primary key")
+            || s.starts_with("not_null")
+            || s.starts_with("not null")
+            || s.starts_with("unique")
+            || s.starts_with("references ")
+            || s.starts_with("check(")
+    )
+}
+
+fn default_expr_end(rest: &str) -> usize {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut paren_depth = 0usize;
+    let mut iter = rest.char_indices().peekable();
+
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(iter.peek(), Some((_, '\''))) {
+                    iter.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(iter.peek(), Some((_, '"'))) {
+                    iter.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => paren_depth += 1,
+            ')' if !in_single && !in_double && paren_depth > 0 => paren_depth -= 1,
+            c if c.is_whitespace() && !in_single && !in_double && paren_depth == 0 => {
+                if starts_constraint_keyword(rest[idx..].trim_start()) {
+                    return idx;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    rest.len()
+}
+
 /// Parse a single column definition
 fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
     let (input, _) = ws_and_comments(input)?;
@@ -390,7 +440,7 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
 
         if let Some(idx) = lower.find("default ") {
             let rest = &constraints[idx + 8..];
-            let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+            let end = default_expr_end(rest);
             col.default_value = Some(rest[..end].to_string());
         }
 
@@ -1027,6 +1077,32 @@ mod tests {
 
         let salary = employees.find_column("salary").expect("salary not found");
         assert_eq!(salary.check, Some("salary > 0".to_string()));
+    }
+
+    #[test]
+    fn test_default_expression_with_spaces() {
+        let input = r#"
+            table messages (
+                id uuid primary_key,
+                title text default 'new user' not null,
+                expires_at timestamp default (now() + interval '1 day')
+            )
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let messages = &schema.tables[0];
+
+        let title = messages.find_column("title").expect("title not found");
+        assert_eq!(title.default_value, Some("'new user'".to_string()));
+        assert!(!title.nullable);
+
+        let expires_at = messages
+            .find_column("expires_at")
+            .expect("expires_at not found");
+        assert_eq!(
+            expires_at.default_value,
+            Some("(now() + interval '1 day')".to_string())
+        );
     }
 
     #[test]
