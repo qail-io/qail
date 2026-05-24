@@ -132,6 +132,120 @@ fn sequence_option_to_sql(opt: &str, generator: &dyn SqlGenerator) -> Option<Str
     }
 }
 
+fn contains_statement_delimiter(value: &str) -> bool {
+    value.contains('\0')
+        || value.contains(';')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+}
+
+fn parse_fk_action(tokens: &[&str], index: usize) -> Option<(String, usize)> {
+    match tokens.get(index)?.to_ascii_uppercase().as_str() {
+        "CASCADE" => Some(("CASCADE".to_string(), index + 1)),
+        "RESTRICT" => Some(("RESTRICT".to_string(), index + 1)),
+        "NO" if tokens.get(index + 1)?.eq_ignore_ascii_case("ACTION") => {
+            Some(("NO ACTION".to_string(), index + 2))
+        }
+        "SET" if tokens.get(index + 1)?.eq_ignore_ascii_case("NULL") => {
+            Some(("SET NULL".to_string(), index + 2))
+        }
+        "SET" if tokens.get(index + 1)?.eq_ignore_ascii_case("DEFAULT") => {
+            Some(("SET DEFAULT".to_string(), index + 2))
+        }
+        _ => None,
+    }
+}
+
+fn reference_tail_to_sql(tail: &str) -> Option<String> {
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return Some(String::new());
+    }
+    if contains_statement_delimiter(tail) {
+        return None;
+    }
+
+    let tokens = tail.split_whitespace().collect::<Vec<_>>();
+    let mut rendered = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].eq_ignore_ascii_case("ON") {
+            let event = tokens.get(i + 1)?;
+            let event_sql = if event.eq_ignore_ascii_case("DELETE") {
+                "DELETE"
+            } else if event.eq_ignore_ascii_case("UPDATE") {
+                "UPDATE"
+            } else {
+                return None;
+            };
+            let (action, next) = parse_fk_action(&tokens, i + 2)?;
+            rendered.push(format!("ON {event_sql} {action}"));
+            i = next;
+        } else if tokens[i].eq_ignore_ascii_case("DEFERRABLE") {
+            rendered.push("DEFERRABLE".to_string());
+            i += 1;
+        } else if tokens[i].eq_ignore_ascii_case("NOT")
+            && tokens.get(i + 1)?.eq_ignore_ascii_case("DEFERRABLE")
+        {
+            rendered.push("NOT DEFERRABLE".to_string());
+            i += 2;
+        } else if tokens[i].eq_ignore_ascii_case("INITIALLY") {
+            let mode = tokens.get(i + 1)?;
+            if mode.eq_ignore_ascii_case("DEFERRED") {
+                rendered.push("INITIALLY DEFERRED".to_string());
+            } else if mode.eq_ignore_ascii_case("IMMEDIATE") {
+                rendered.push("INITIALLY IMMEDIATE".to_string());
+            } else {
+                return None;
+            }
+            i += 2;
+        } else {
+            return None;
+        }
+    }
+
+    Some(format!(" {}", rendered.join(" ")))
+}
+
+fn references_target_to_sql(target: &str, generator: &dyn SqlGenerator) -> String {
+    let target = target.trim();
+    if target.is_empty() || contains_statement_delimiter(target) {
+        return generator.quote_identifier(target);
+    }
+
+    let Some((table, rest)) = target.split_once('(') else {
+        return generator.quote_identifier(target);
+    };
+    let Some(close_idx) = rest.find(')') else {
+        return generator.quote_identifier(target);
+    };
+
+    let table = table.trim();
+    let columns = rest[..close_idx]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if table.is_empty() || columns.is_empty() || columns.iter().any(|col| col.is_empty()) {
+        return generator.quote_identifier(target);
+    }
+
+    let Some(tail) = reference_tail_to_sql(&rest[close_idx + 1..]) else {
+        return generator.quote_identifier(target);
+    };
+
+    format!(
+        "{}({}){}",
+        generator.quote_identifier(table),
+        columns
+            .iter()
+            .map(|col| generator.quote_identifier(col))
+            .collect::<Vec<_>>()
+            .join(", "),
+        tail
+    )
+}
+
 fn quoted_column_list(cols: &[String], generator: &dyn SqlGenerator) -> String {
     cols.iter()
         .map(|c| generator.quote_identifier(c))
@@ -287,7 +401,8 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
                     append_column_check_sql(&mut line, name, vals, generator.as_ref());
                 }
                 if let Constraint::References(target) = constraint {
-                    line.push_str(&format!(" REFERENCES {target}"));
+                    line.push_str(" REFERENCES ");
+                    line.push_str(&references_target_to_sql(target, generator.as_ref()));
                 }
             }
 
@@ -567,7 +682,7 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
                 }
                 if let Constraint::References(target) = constraint {
                     col_def.push_str(" REFERENCES ");
-                    col_def.push_str(target);
+                    col_def.push_str(&references_target_to_sql(target, generator.as_ref()));
                 }
                 if let Constraint::Check(vals) = constraint {
                     append_column_check_sql(&mut col_def, name, vals, generator.as_ref());

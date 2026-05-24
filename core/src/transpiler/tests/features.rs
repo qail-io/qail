@@ -126,6 +126,37 @@ fn test_ddl_option_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_foreign_key_reference_targets_are_sanitized() {
+    let cmd = Qail {
+        action: Action::Make,
+        table: "posts".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "user_id".to_string(),
+                data_type: "uuid".to_string(),
+                constraints: vec![Constraint::References(
+                    "public.users(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED".to_string(),
+                )],
+            },
+            Expr::Def {
+                name: "unsafe_ref".to_string(),
+                data_type: "uuid".to_string(),
+                constraints: vec![Constraint::References(
+                    "users(id); DROP TABLE users; --".to_string(),
+                )],
+            },
+        ],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert!(
+        sql.contains("REFERENCES public.users(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED")
+    );
+    assert!(sql.contains("REFERENCES \"users(id); DROP TABLE users; --\""));
+    assert!(!sql.contains("REFERENCES REFERENCES"));
+}
+
+#[test]
 fn test_revoke_sql() {
     let cmd = Qail {
         action: Action::Revoke,

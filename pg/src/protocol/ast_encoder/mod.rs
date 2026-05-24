@@ -2013,6 +2013,40 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_foreign_key_reference_targets_are_sanitized() {
+        use qail_core::ast::{Constraint, Expr};
+
+        let cmd = Qail {
+            action: Action::Make,
+            table: "posts".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "user_id".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::References(
+                        "public.users(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+                            .to_string(),
+                    )],
+                },
+                Expr::Def {
+                    name: "unsafe_ref".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::References(
+                        "users(id); DROP TABLE users; --".to_string(),
+                    )],
+                },
+            ],
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&cmd).unwrap().0;
+        assert!(sql.contains(
+            "REFERENCES public.users(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"
+        ));
+        assert!(sql.contains("REFERENCES \"users(id); DROP TABLE users; --\""));
+        assert!(!sql.contains("REFERENCES REFERENCES"));
+    }
+
+    #[test]
     fn test_encode_savepoint_commands() {
         let savepoint = Qail {
             action: Action::Savepoint,
