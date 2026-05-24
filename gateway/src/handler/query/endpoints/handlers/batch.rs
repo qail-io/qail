@@ -29,6 +29,21 @@ fn mark_transaction_results_rolled_back(results: &mut [BatchQueryResult]) {
     }
 }
 
+fn record_write_cache_invalidations(
+    cmd: &qail_core::ast::Qail,
+    pending: &mut std::collections::BTreeSet<String>,
+) {
+    pending.extend(cache_tables_for_qail(cmd));
+}
+
+fn batch_should_invalidate_after_close(
+    batch_has_write: bool,
+    transaction: bool,
+    had_error: bool,
+) -> bool {
+    batch_has_write && !(transaction && had_error)
+}
+
 /// Execute a batch of Qail queries (POST /qail/batch).
 pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
@@ -64,6 +79,7 @@ pub async fn execute_batch(
     let mut success_count = 0;
     let mut conn: Option<qail_pg::PooledConnection> = None;
     let mut batch_has_write = false;
+    let mut pending_cache_invalidations = std::collections::BTreeSet::new();
 
     let mut had_error = false;
 
@@ -299,9 +315,7 @@ pub async fn execute_batch(
 
                 if !command_is_read_only {
                     batch_has_write = true;
-                    for cache_table in cache_tables_for_qail(&cmd) {
-                        state.cache.invalidate_table(&cache_table);
-                    }
+                    record_write_cache_invalidations(&cmd, &mut pending_cache_invalidations);
                 }
 
                 results.push(BatchQueryResult {
@@ -335,6 +349,8 @@ pub async fn execute_batch(
     }
 
     if let Some(mut conn) = conn {
+        let invalidate_after_close =
+            batch_should_invalidate_after_close(batch_has_write, request.transaction, had_error);
         if request.transaction {
             if had_error {
                 if let Err(e) = conn.rollback_to(BATCH_SAVEPOINT).await {
@@ -370,6 +386,11 @@ pub async fn execute_batch(
         } else {
             conn.release().await;
         }
+        if invalidate_after_close {
+            for cache_table in pending_cache_invalidations {
+                state.cache.invalidate_table(&cache_table);
+            }
+        }
     }
 
     let total = results.len();
@@ -388,4 +409,30 @@ pub async fn execute_batch(
             next_page_offset: None,
         }),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{batch_should_invalidate_after_close, record_write_cache_invalidations};
+
+    #[test]
+    fn batch_cache_invalidates_only_for_committed_writes() {
+        assert!(batch_should_invalidate_after_close(true, false, false));
+        assert!(batch_should_invalidate_after_close(true, false, true));
+        assert!(batch_should_invalidate_after_close(true, true, false));
+        assert!(!batch_should_invalidate_after_close(true, true, true));
+        assert!(!batch_should_invalidate_after_close(false, false, false));
+    }
+
+    #[test]
+    fn batch_cache_invalidations_are_deferred_and_deduped() {
+        let mut pending = std::collections::BTreeSet::new();
+        let cmd = qail_core::ast::Qail::add("orders");
+
+        record_write_cache_invalidations(&cmd, &mut pending);
+        record_write_cache_invalidations(&cmd, &mut pending);
+
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains("orders"));
+    }
 }
