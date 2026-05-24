@@ -1178,9 +1178,12 @@ fn qail_value_matches_json(value: &QailValue, json: &Value) -> bool {
         QailValue::Float(expected) => json
             .as_f64()
             .is_some_and(|actual| (actual - expected).abs() < f64::EPSILON),
-        QailValue::String(expected)
-        | QailValue::Json(expected)
-        | QailValue::Timestamp(expected) => json.as_str() == Some(expected.as_str()),
+        QailValue::String(expected) | QailValue::Timestamp(expected) => {
+            json.as_str() == Some(expected.as_str())
+        }
+        QailValue::Json(expected) => {
+            serde_json::from_str::<Value>(expected).is_ok_and(|expected| expected == *json)
+        }
         QailValue::Uuid(expected) => json.as_str() == Some(&expected.to_string()),
         _ => false,
     }
@@ -1954,6 +1957,24 @@ mod tests {
             !row_matches_policy_filter_cages(&row, &cages).unwrap(),
             "matching one OR cage must not bypass another OR cage"
         );
+    }
+
+    #[test]
+    fn branch_policy_filter_matches_json_objects() {
+        let row = json!({
+            "id": 1,
+            "metadata": {
+                "source": "web",
+                "score": 3
+            }
+        });
+        let cages = vec![policy_cage(
+            "metadata",
+            Operator::Eq,
+            QailValue::Json(r#"{"source":"web","score":3}"#.to_string()),
+        )];
+
+        assert!(row_matches_policy_filter_cages(&row, &cages).unwrap());
     }
 
     #[test]
