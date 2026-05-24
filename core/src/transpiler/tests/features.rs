@@ -23,7 +23,7 @@ fn test_index_sql_unique() {
 }
 
 #[test]
-fn test_index_fragments_are_sanitized() {
+fn test_index_fragments_validate_method_and_predicate() {
     let valid = Qail {
         action: Action::Index,
         index_def: Some(IndexDef {
@@ -41,21 +41,55 @@ fn test_index_fragments_are_sanitized() {
         "CREATE INDEX idx_lower_email ON users USING btree (lower(email)) WHERE active = true"
     );
 
-    let malicious = Qail {
+    let quoted_column = Qail {
         action: Action::Index,
         index_def: Some(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["lower(email); DROP TABLE users; --".to_string()],
             unique: false,
+            index_type: None,
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        quoted_column.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\")"
+    );
+
+    let invalid_method = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_bad".to_string(),
+            table: "users".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
             index_type: Some("btree; DROP TABLE users".to_string()),
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_method.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid index method */"
+    );
+
+    let invalid_predicate = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_bad".to_string(),
+            table: "users".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            index_type: Some("btree".to_string()),
             where_clause: Some("active = true; DROP TABLE users; --".to_string()),
         }),
         ..Default::default()
     };
     assert_eq!(
-        malicious.to_sql_with_dialect(Dialect::Postgres),
-        "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\") WHERE FALSE"
+        invalid_predicate.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid index predicate */"
     );
 }
 

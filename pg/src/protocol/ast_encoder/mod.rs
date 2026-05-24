@@ -166,7 +166,7 @@ impl AstEncoder {
                 dml::encode_export(cmd, sql_buf, params)?;
             }
             Action::Make => ddl::encode_make(cmd, sql_buf),
-            Action::Index => ddl::encode_index(cmd, sql_buf),
+            Action::Index => ddl::encode_index(cmd, sql_buf)?,
             Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, sql_buf),
             Action::Alter => ddl::encode_alter_add_column(cmd, sql_buf)?,
@@ -250,7 +250,7 @@ impl AstEncoder {
                 dml::encode_export(cmd, &mut sql_buf, &mut params)?;
             }
             Action::Make => ddl::encode_make(cmd, &mut sql_buf),
-            Action::Index => ddl::encode_index(cmd, &mut sql_buf),
+            Action::Index => ddl::encode_index(cmd, &mut sql_buf)?,
             Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, &mut sql_buf),
             Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf)?,
@@ -2043,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_index_fragments_are_sanitized() {
+    fn test_encode_index_fragments_validate_method_and_predicate() {
         use qail_core::ast::IndexDef;
 
         let valid = Qail {
@@ -2063,21 +2063,59 @@ mod tests {
             "CREATE INDEX idx_lower_email ON users USING btree (lower(email)) WHERE active = true"
         );
 
-        let malicious = Qail {
+        let quoted_column = Qail {
             action: Action::Index,
             index_def: Some(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["lower(email); DROP TABLE users; --".to_string()],
                 unique: false,
-                index_type: Some("btree; DROP TABLE users".to_string()),
-                where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+                index_type: None,
+                where_clause: None,
             }),
             ..Default::default()
         };
         assert_eq!(
-            AstEncoder::encode_cmd_sql(&malicious).unwrap().0,
-            "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\") WHERE FALSE"
+            AstEncoder::encode_cmd_sql(&quoted_column).unwrap().0,
+            "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\")"
+        );
+
+        let invalid_method = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_bad".to_string(),
+                table: "users".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                index_type: Some("btree; DROP TABLE users".to_string()),
+                where_clause: None,
+            }),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&invalid_method)
+            .expect_err("invalid index method must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid index method")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_predicate = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_bad".to_string(),
+                table: "users".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                index_type: Some("btree".to_string()),
+                where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+            }),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&invalid_predicate)
+            .expect_err("invalid index predicate must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid index predicate")),
+            "unexpected error: {err}"
         );
     }
 

@@ -615,6 +615,9 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     match &cmd.index_def {
         Some(idx) => {
+            if idx.columns.is_empty() {
+                return "/* ERROR: CREATE INDEX requires at least one column */".to_string();
+            }
             let unique = if idx.unique { "UNIQUE " } else { "" };
             let cols = idx
                 .columns
@@ -629,8 +632,11 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
                 generator.quote_identifier(&idx.table)
             );
             if let Some(method) = &idx.index_type
-                && let Some(method) = index_method_to_sql(method)
+                && !method.trim().is_empty()
             {
+                let Some(method) = index_method_to_sql(method) else {
+                    return "/* ERROR: Invalid index method */".to_string();
+                };
                 sql.push_str(" USING ");
                 sql.push_str(method);
             }
@@ -638,12 +644,17 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
             sql.push_str(&cols);
             sql.push(')');
             if let Some(where_clause) = &idx.where_clause {
+                if where_clause.trim().is_empty()
+                    || contains_unquoted_statement_delimiter(where_clause)
+                {
+                    return "/* ERROR: Invalid index predicate */".to_string();
+                }
                 sql.push_str(" WHERE ");
-                sql.push_str(&sql_expr_fragment_to_sql(where_clause, "FALSE"));
+                sql.push_str(where_clause.trim());
             }
             sql
         }
-        None => String::new(),
+        None => "/* ERROR: CREATE INDEX requires an index definition */".to_string(),
     }
 }
 

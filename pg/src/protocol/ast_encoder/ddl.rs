@@ -782,35 +782,55 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
 }
 
 /// Encode CREATE INDEX statement.
-pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) {
-    if let Some(idx) = &cmd.index_def {
-        if idx.unique {
-            buf.extend_from_slice(b"CREATE UNIQUE INDEX ");
-        } else {
-            buf.extend_from_slice(b"CREATE INDEX ");
-        }
-        push_identifier(buf, &idx.name);
-        buf.extend_from_slice(b" ON ");
-        push_identifier(buf, &idx.table);
-        if let Some(method) = &idx.index_type
-            && let Some(method) = index_method_to_sql(method)
-        {
-            buf.extend_from_slice(b" USING ");
-            buf.extend_from_slice(method.as_bytes());
-        }
-        buf.extend_from_slice(b" (");
-        for (i, col) in idx.columns.iter().enumerate() {
-            if i > 0 {
-                buf.extend_from_slice(b", ");
-            }
-            push_index_column(buf, col);
-        }
-        buf.extend_from_slice(b")");
-        if let Some(where_clause) = &idx.where_clause {
-            buf.extend_from_slice(b" WHERE ");
-            buf.extend_from_slice(sql_expr_fragment_to_sql(where_clause, "FALSE").as_bytes());
-        }
+pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::EncodeError> {
+    let Some(idx) = &cmd.index_def else {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "CREATE INDEX requires an index definition".to_string(),
+        ));
+    };
+    if idx.columns.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "CREATE INDEX requires at least one column".to_string(),
+        ));
     }
+
+    if idx.unique {
+        buf.extend_from_slice(b"CREATE UNIQUE INDEX ");
+    } else {
+        buf.extend_from_slice(b"CREATE INDEX ");
+    }
+    push_identifier(buf, &idx.name);
+    buf.extend_from_slice(b" ON ");
+    push_identifier(buf, &idx.table);
+    if let Some(method) = &idx.index_type
+        && !method.trim().is_empty()
+    {
+        let Some(method) = index_method_to_sql(method) else {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "invalid index method: {method:?}"
+            )));
+        };
+        buf.extend_from_slice(b" USING ");
+        buf.extend_from_slice(method.as_bytes());
+    }
+    buf.extend_from_slice(b" (");
+    for (i, col) in idx.columns.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        push_index_column(buf, col);
+    }
+    buf.extend_from_slice(b")");
+    if let Some(where_clause) = &idx.where_clause {
+        if where_clause.trim().is_empty() || contains_unquoted_statement_delimiter(where_clause) {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "invalid index predicate: {where_clause:?}"
+            )));
+        }
+        buf.extend_from_slice(b" WHERE ");
+        buf.extend_from_slice(where_clause.trim().as_bytes());
+    }
+    Ok(())
 }
 
 /// Encode DROP TABLE statement.
