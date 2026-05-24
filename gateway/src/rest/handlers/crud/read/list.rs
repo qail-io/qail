@@ -57,6 +57,16 @@ fn attach_rest_list_debug_headers(
     }
 }
 
+fn rest_explain_cache_shape_hash(sql_shape: &str, auth: &crate::auth::AuthContext) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    sql_shape.hash(&mut hasher);
+    auth.transaction_scope_fingerprint().hash(&mut hasher);
+    hasher.finish()
+}
+
 fn projection_json_column_name(expr: &Expr) -> Result<Option<String>, ApiError> {
     match expr {
         Expr::Star => Ok(None),
@@ -550,8 +560,6 @@ pub(crate) async fn list_handler(
     // to reject outrageously expensive queries before they consume resources.
     {
         use qail_pg::explain::{ExplainMode, check_estimate};
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         let expand_depth = params
             .expand
@@ -568,9 +576,7 @@ pub(crate) async fn list_handler(
         if should_explain {
             // Hash the SQL shape for cache lookup
             let sql_shape = cmd.to_sql();
-            let mut hasher = DefaultHasher::new();
-            sql_shape.hash(&mut hasher);
-            let shape_hash = hasher.finish();
+            let shape_hash = rest_explain_cache_shape_hash(&sql_shape, &auth);
 
             let estimate = if let Some(cached) = state.explain_cache.get(shape_hash, None) {
                 cached
@@ -1296,7 +1302,8 @@ mod tests {
         apply_list_distinct, attach_rest_list_debug_headers, branch_base_fetch_limit,
         branch_projection_columns_from_cmd, encode_ndjson_rows,
         ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
-        rest_list_cache_key, row_matches_policy_filter_cages, split_expand_relations,
+        rest_explain_cache_shape_hash, rest_list_cache_key, row_matches_policy_filter_cages,
+        split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
@@ -1418,6 +1425,30 @@ mod tests {
                 .get("x-qail-sql")
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|sql| sql.contains("orders"))
+        );
+    }
+
+    #[test]
+    fn explain_cache_shape_hash_includes_auth_scope() {
+        let sql_shape = "SELECT * FROM orders WHERE tenant_id = $1";
+        let operator = AuthContext {
+            user_id: "user-1".to_string(),
+            role: "operator".to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            claims: std::collections::HashMap::new(),
+        };
+        let mut viewer = operator.clone();
+        viewer.role = "viewer".to_string();
+        let mut other_tenant = operator.clone();
+        other_tenant.tenant_id = Some("tenant-b".to_string());
+
+        assert_ne!(
+            rest_explain_cache_shape_hash(sql_shape, &operator),
+            rest_explain_cache_shape_hash(sql_shape, &viewer)
+        );
+        assert_ne!(
+            rest_explain_cache_shape_hash(sql_shape, &operator),
+            rest_explain_cache_shape_hash(sql_shape, &other_tenant)
         );
     }
 
