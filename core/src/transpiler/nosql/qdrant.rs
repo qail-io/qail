@@ -1,5 +1,9 @@
 use crate::ast::*;
 
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 /// Trait for converting QAIL AST to Qdrant vector-search JSON.
 pub trait ToQdrant {
     /// Convert a QAIL query into a Qdrant search/upsert/delete JSON body.
@@ -41,8 +45,8 @@ fn build_qdrant_upsert(cmd: &Qail) -> String {
                             vector = value_to_json(&cond.value);
                         } else {
                             payload_parts.push(format!(
-                                "\"{}\": {}",
-                                name,
+                                "{}: {}",
+                                json_string(name),
                                 value_to_json(&cond.value)
                             ));
                         }
@@ -118,7 +122,10 @@ fn build_qdrant_search(cmd: &Qail) -> String {
                         Value::String(s) => {
                             // Output Placeholder for Runtime Resolution
                             // e.g. {{EMBED:cute cat}}
-                            parts.push(format!("\"vector\": \"{{{{EMBED:{}}}}}\"", s));
+                            parts.push(format!(
+                                "\"vector\": {}",
+                                json_string(&format!("{{{{EMBED:{}}}}}", s))
+                            ));
                         }
                         _ => {
                             parts.push(format!("\"vector\": {}", value_to_json(&cond.value)));
@@ -157,7 +164,7 @@ fn build_qdrant_search(cmd: &Qail) -> String {
         let mut incl = Vec::new();
         for c in &cmd.columns {
             if let Expr::Named(n) = c {
-                incl.push(format!("\"{}\"", n));
+                incl.push(json_string(n));
             }
         }
         parts.push(format!(
@@ -193,33 +200,40 @@ fn build_filter(cmd: &Qail) -> String {
 
                 let clause = match cond.op {
                     Operator::Eq => format!(
-                        "{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}",
-                        col_str, val
+                        "{{ \"key\": {}, \"match\": {{ \"value\": {} }} }}",
+                        json_string(&col_str),
+                        val
                     ),
                     // Qdrant range: { "key": "price", "range": { "gt": 10.0 } }
                     Operator::Gt => format!(
-                        "{{ \"key\": \"{}\", \"range\": {{ \"gt\": {} }} }}",
-                        col_str, val
+                        "{{ \"key\": {}, \"range\": {{ \"gt\": {} }} }}",
+                        json_string(&col_str),
+                        val
                     ),
                     Operator::Gte => format!(
-                        "{{ \"key\": \"{}\", \"range\": {{ \"gte\": {} }} }}",
-                        col_str, val
+                        "{{ \"key\": {}, \"range\": {{ \"gte\": {} }} }}",
+                        json_string(&col_str),
+                        val
                     ),
                     Operator::Lt => format!(
-                        "{{ \"key\": \"{}\", \"range\": {{ \"lt\": {} }} }}",
-                        col_str, val
+                        "{{ \"key\": {}, \"range\": {{ \"lt\": {} }} }}",
+                        json_string(&col_str),
+                        val
                     ),
                     Operator::Lte => format!(
-                        "{{ \"key\": \"{}\", \"range\": {{ \"lte\": {} }} }}",
-                        col_str, val
+                        "{{ \"key\": {}, \"range\": {{ \"lte\": {} }} }}",
+                        json_string(&col_str),
+                        val
                     ),
                     Operator::Ne => format!(
-                        "{{ \"must_not\": [{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}] }}",
-                        col_str, val
+                        "{{ \"must_not\": [{{ \"key\": {}, \"match\": {{ \"value\": {} }} }}] }}",
+                        json_string(&col_str),
+                        val
                     ), // This needs wrapping?
                     _ => format!(
-                        "{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}",
-                        col_str, val
+                        "{{ \"key\": {}, \"match\": {{ \"value\": {} }} }}",
+                        json_string(&col_str),
+                        val
                     ),
                 };
                 cage_clauses.push(clause);
@@ -266,7 +280,7 @@ fn get_cage_val(cmd: &Qail, kind_example: CageKind) -> Option<usize> {
 
 fn value_to_json(v: &Value) -> String {
     match v {
-        Value::String(s) => format!("\"{}\"", s),
+        Value::String(s) => json_string(s),
         Value::Int(n) => n.to_string(),
         Value::Float(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),

@@ -136,3 +136,64 @@ fn test_qdrant_multiple_or_cages_remain_separate_groups() {
         "Expected multiple nested OR groups, got {should_count}: {qdrant}"
     );
 }
+
+#[test]
+fn test_qdrant_json_strings_are_escaped() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let search = Qail {
+        table: "points".to_string(),
+        columns: vec![Expr::Named("payload\"key".to_string())],
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("vector".to_string()),
+                    op: Operator::Fuzzy,
+                    value: Value::String("cute \"cat\"".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("city\", \"must\": [".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("London\"}, \"must\": []".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant search JSON must stay valid");
+    assert_eq!(parsed["vector"], "{{EMBED:cute \"cat\"}}");
+    assert_eq!(parsed["with_payload"]["include"][0], "payload\"key");
+    assert_eq!(parsed["filter"]["must"][0]["key"], "city\", \"must\": [");
+    assert_eq!(
+        parsed["filter"]["must"][0]["match"]["value"],
+        "London\"}, \"must\": []"
+    );
+
+    let upsert = Qail {
+        action: crate::ast::Action::Add,
+        table: "points".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("name\"bad".to_string()),
+                op: Operator::Eq,
+                value: Value::String("Ana\"bad".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&upsert).expect("qdrant upsert JSON must stay valid");
+    assert_eq!(parsed["points"][0]["payload"]["name\"bad"], "Ana\"bad");
+}
