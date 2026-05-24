@@ -1405,15 +1405,24 @@ fn parse_function_header(header: &str) -> Result<(String, String, Option<String>
     }
     let returns_idx = returns_matches.first().copied();
     let language_idx = language_matches.first().copied();
-    let volatility_idx = words.iter().position(|word| {
-        if word.depth != 0 {
-            return false;
-        }
-        matches!(
-            header[word.start..word.end].to_ascii_lowercase().as_str(),
-            "volatile" | "stable" | "immutable"
-        )
-    });
+    let volatility_matches: Vec<usize> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, word)| {
+            if word.depth != 0 {
+                return None;
+            }
+            matches!(
+                header[word.start..word.end].to_ascii_lowercase().as_str(),
+                "volatile" | "stable" | "immutable"
+            )
+            .then_some(idx)
+        })
+        .collect();
+    if volatility_matches.len() > 1 {
+        return Err("function has duplicate volatility clauses".to_string());
+    }
+    let volatility_idx = volatility_matches.first().copied();
 
     let returns_idx = returns_idx.ok_or_else(|| "function missing returns clause".to_string())?;
     let start = words[returns_idx].end;
@@ -3137,6 +3146,10 @@ materialized view active_users $$ SELECT 2 $$
             (
                 "function f() returns int language sql language plpgsql $$ SELECT 1 $$",
                 "function has duplicate language clauses",
+            ),
+            (
+                "function f() returns int language sql stable immutable $$ SELECT 1 $$",
+                "function has duplicate volatility clauses",
             ),
         ] {
             let err = parse_qail(input).expect_err("duplicate function header field should fail");
