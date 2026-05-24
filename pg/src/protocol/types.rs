@@ -238,7 +238,7 @@ pub fn encode_jsonb(json_str: &str) -> Vec<u8> {
 /// Decode PostgreSQL JSONB wire format to JSON string.
 pub fn decode_jsonb(bytes: &[u8]) -> Result<String, String> {
     if bytes.is_empty() {
-        return Ok(String::new());
+        return Err("JSONB payload missing version byte".to_string());
     }
     // Skip version byte (first byte is JSONB version, usually 1)
     if bytes[0] != 1 {

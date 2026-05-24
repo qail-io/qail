@@ -476,11 +476,24 @@ impl ToPg for MacAddr {
 pub struct Json(pub String);
 
 impl FromPg for Json {
-    fn from_pg(bytes: &[u8], oid_val: u32, _format: i16) -> Result<Self, TypeError> {
-        let json_str = if oid_val == oid::JSONB {
-            decode_jsonb(bytes).map_err(TypeError::InvalidData)?
-        } else {
-            decode_json(bytes).map_err(TypeError::InvalidData)?
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        let json_str = match (oid_val, format) {
+            (oid::JSON, _) | (oid::JSONB, 0) => {
+                decode_json(bytes).map_err(TypeError::InvalidData)?
+            }
+            (oid::JSONB, 1) => decode_jsonb(bytes).map_err(TypeError::InvalidData)?,
+            (oid::JSONB, other) => {
+                return Err(TypeError::InvalidData(format!(
+                    "Unsupported JSONB format code: {}",
+                    other
+                )));
+            }
+            _ => {
+                return Err(TypeError::UnexpectedOid {
+                    expected: "json/jsonb",
+                    got: oid_val,
+                });
+            }
         };
         Ok(Json(json_str))
     }
@@ -657,5 +670,20 @@ mod tests {
         let (_, mac_oid, mac_format) = mac.to_pg();
         assert_eq!(mac_oid, oid::MACADDR);
         assert_eq!(mac_format, 0);
+    }
+
+    #[test]
+    fn test_json_from_pg_honors_oid_and_format() {
+        let json = Json::from_pg(br#"{"ok":true}"#, oid::JSON, 0).unwrap();
+        assert_eq!(json.0, r#"{"ok":true}"#);
+
+        let jsonb_text = Json::from_pg(br#"{"ok":true}"#, oid::JSONB, 0).unwrap();
+        assert_eq!(jsonb_text.0, r#"{"ok":true}"#);
+
+        let jsonb_binary = Json::from_pg(&[1, b'{', b'}'], oid::JSONB, 1).unwrap();
+        assert_eq!(jsonb_binary.0, "{}");
+
+        assert!(Json::from_pg(&[], oid::JSONB, 1).is_err());
+        assert!(Json::from_pg(b"42", oid::INT4, 0).is_err());
     }
 }
