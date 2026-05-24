@@ -1392,7 +1392,7 @@ fn split_function_args(args: &str) -> Result<Vec<String>, String> {
 fn validate_function_args(args: &[String]) -> Result<(), String> {
     let mut seen_names = HashSet::new();
     for arg in args {
-        let Some(name) = function_arg_name(arg) else {
+        let Some(name) = function_arg_name(arg)? else {
             continue;
         };
         let key = name.to_ascii_lowercase();
@@ -1403,21 +1403,32 @@ fn validate_function_args(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn function_arg_name(arg: &str) -> Option<&str> {
+fn function_arg_name(arg: &str) -> Result<Option<&str>, String> {
     let mut parts = arg.split_whitespace();
-    let first = parts.next()?;
+    let Some(first) = parts.next() else {
+        return Ok(None);
+    };
     let second = parts.next();
     let name = if matches!(
         first.to_ascii_lowercase().as_str(),
         "in" | "out" | "inout" | "variadic"
     ) {
-        second?
+        let Some(name) = second else {
+            return Err(format!(
+                "function argument mode '{}' requires a name",
+                first
+            ));
+        };
+        name
     } else if second.is_some() {
         first
     } else {
-        return None;
+        return Ok(None);
     };
-    is_native_identifier(name).then_some(name)
+    if !is_native_identifier(name) {
+        return Err(format!("invalid function argument name '{}'", name));
+    }
+    Ok(Some(name))
 }
 
 #[derive(Debug)]
@@ -3282,6 +3293,27 @@ $$
             let err = parse_qail(input).expect_err("duplicate function arg should fail");
             assert!(err.contains("duplicate function argument 'email'"), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_function_rejects_invalid_arg_names() {
+        for input in [
+            "function f(bad-name text) returns text language sql $$ SELECT bad_name $$",
+            "function f(IN bad-name text) returns text language sql $$ SELECT bad_name $$",
+        ] {
+            let err = parse_qail(input).expect_err("invalid function arg should fail");
+            assert!(
+                err.contains("invalid function argument name 'bad-name'"),
+                "{err}"
+            );
+        }
+
+        let err = parse_qail("function f(IN) returns text language sql $$ SELECT 1 $$")
+            .expect_err("mode-only function arg should fail");
+        assert!(
+            err.contains("function argument mode 'IN' requires a name"),
+            "{err}"
+        );
     }
 
     #[test]
