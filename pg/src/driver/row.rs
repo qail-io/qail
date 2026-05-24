@@ -30,6 +30,15 @@ fn column_type_meta(
     Ok((oid, format))
 }
 
+#[inline]
+fn parse_bool_text(bytes: &[u8]) -> Option<bool> {
+    match std::str::from_utf8(bytes).ok()?.trim() {
+        "t" | "T" | "true" | "TRUE" | "1" => Some(true),
+        "f" | "F" | "false" | "FALSE" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 /// Trait for types that can be constructed from a database row.
 ///
 /// Implement this trait on your structs to enable typed fetching:
@@ -171,12 +180,7 @@ impl PgRow {
             return Some(v);
         }
         let bytes = self.columns.get(idx)?.as_ref()?;
-        let s = std::str::from_utf8(bytes).ok()?;
-        match s {
-            "t" | "true" | "1" => Some(true),
-            "f" | "false" | "0" => Some(false),
-            _ => None,
-        }
+        parse_bool_text(bytes)
     }
 
     /// Check if a column is NULL.
@@ -527,12 +531,7 @@ impl PgBytesRow {
             return Some(v);
         }
         let bytes = self.get_bytes(idx)?;
-        let s = std::str::from_utf8(bytes).ok()?;
-        match s {
-            "t" | "true" | "1" => Some(true),
-            "f" | "false" | "0" => Some(false),
-            _ => None,
-        }
+        parse_bool_text(bytes)
     }
 }
 
@@ -590,6 +589,9 @@ mod tests {
                 Some(b"f".to_vec()),
                 Some(b"true".to_vec()),
                 Some(b"false".to_vec()),
+                Some(b"T".to_vec()),
+                Some(b"FALSE".to_vec()),
+                Some(b" 1 ".to_vec()),
             ],
             column_info: None,
         };
@@ -598,6 +600,9 @@ mod tests {
         assert_eq!(row.get_bool(1), Some(false));
         assert_eq!(row.get_bool(2), Some(true));
         assert_eq!(row.get_bool(3), Some(false));
+        assert_eq!(row.get_bool(4), Some(true));
+        assert_eq!(row.get_bool(5), Some(false));
+        assert_eq!(row.get_bool(6), Some(true));
     }
 
     #[test]
@@ -740,5 +745,17 @@ mod tests {
 
         let value: i64 = row.try_get(0).unwrap();
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn test_pg_bytes_row_get_bool_fallback_matches_text_decoder() {
+        let row = PgBytesRow {
+            payload: bytes::Bytes::from_static(b"TRUEFALSE"),
+            spans: vec![Some((0, 4)), Some((4, 5))],
+            column_info: None,
+        };
+
+        assert_eq!(row.get_bool(0), Some(true));
+        assert_eq!(row.get_bool(1), Some(false));
     }
 }
