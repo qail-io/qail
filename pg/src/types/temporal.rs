@@ -144,7 +144,7 @@ fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
     }
 
     let (year, month, day) = parse_date_components(parts[0])?;
-    let (time_str, timezone_offset_usec) = split_timezone_suffix(parts[1]);
+    let (time_str, timezone_offset_usec) = split_timezone_suffix(parts[1])?;
     let (hour, minute, second, usec) = parse_time_components(time_str)?;
     let days_since_epoch = days_from_ymd_checked(year, month, day)?;
 
@@ -169,20 +169,22 @@ fn parse_date_components(s: &str) -> Result<(i32, i32, i32), TypeError> {
     Ok((year, month, day))
 }
 
-fn split_timezone_suffix(s: &str) -> (&str, i64) {
+fn split_timezone_suffix(s: &str) -> Result<(&str, i64), TypeError> {
     let s = s.trim_end();
     if let Some(stripped) = s.strip_suffix('Z') {
-        return (stripped, 0);
+        return Ok((stripped, 0));
     }
     if let Some(idx) = s
         .char_indices()
         .skip(1)
         .find_map(|(idx, c)| (c == '+' || c == '-').then_some(idx))
     {
-        let offset = parse_timezone_offset_usec(&s[idx..]).unwrap_or(0);
-        (&s[..idx], offset)
+        let offset = parse_timezone_offset_usec(&s[idx..]).ok_or_else(|| {
+            TypeError::InvalidData(format!("Invalid timezone offset: {}", &s[idx..]))
+        })?;
+        Ok((&s[..idx], offset))
     } else {
-        (s, 0)
+        Ok((s, 0))
     }
 }
 
@@ -561,6 +563,8 @@ mod tests {
         assert!(parse_timestamp_text("2024-12-25 17:30:bad").is_err());
         assert!(parse_timestamp_text("2024-13-25 17:30:00").is_err());
         assert!(parse_timestamp_text("2024-02-30 17:30:00").is_err());
+        assert!(parse_timestamp_text("2024-12-25 17:30:00+bad").is_err());
+        assert!(parse_timestamp_text("2024-12-25 17:30:00+25:00").is_err());
     }
 
     #[test]
