@@ -23,6 +23,8 @@ const WIRE_FIXED32: u8 = 5;
 /// Maximum recursion depth for nested protobuf Value decoding.
 /// Prevents stack overflow from crafted deeply nested Struct/List payloads.
 const MAX_DECODE_DEPTH: usize = 32;
+/// Maximum protobuf field number allowed by the wire format.
+const MAX_PROTO_FIELD_NUMBER: u64 = 536_870_911;
 
 // ============================================================================
 // SearchResponse Field Numbers
@@ -83,9 +85,8 @@ const VALUE_LIST: u32 = 7;
 #[inline]
 fn decode_varint(buf: &mut &[u8]) -> QdrantResult<u64> {
     let mut result: u64 = 0;
-    let mut shift = 0;
 
-    loop {
+    for byte_index in 0..10 {
         if buf.is_empty() {
             return Err(QdrantError::Decode(
                 "Unexpected end of data in varint".to_string(),
@@ -94,27 +95,34 @@ fn decode_varint(buf: &mut &[u8]) -> QdrantResult<u64> {
 
         let byte = buf[0];
         *buf = &buf[1..];
+        let payload = (byte & 0x7F) as u64;
 
-        result |= ((byte & 0x7F) as u64) << shift;
+        if byte_index == 9 && payload > 1 {
+            return Err(QdrantError::Decode("Varint overflows u64".to_string()));
+        }
+
+        result |= payload << (byte_index * 7);
 
         if byte & 0x80 == 0 {
             return Ok(result);
         }
-
-        shift += 7;
-        if shift >= 64 {
-            return Err(QdrantError::Decode("Varint too long".to_string()));
-        }
     }
+
+    Err(QdrantError::Decode("Varint too long".to_string()))
 }
 
 /// Decode a field tag (field_number << 3 | wire_type).
 #[inline]
 fn decode_tag(buf: &mut &[u8]) -> QdrantResult<(u32, u8)> {
     let tag = decode_varint(buf)?;
-    let field_number = (tag >> 3) as u32;
+    let field_number = tag >> 3;
+    if field_number == 0 || field_number > MAX_PROTO_FIELD_NUMBER {
+        return Err(QdrantError::Decode(format!(
+            "Invalid protobuf field number: {field_number}"
+        )));
+    }
     let wire_type = (tag & 0x07) as u8;
-    Ok((field_number, wire_type))
+    Ok((field_number as u32, wire_type))
 }
 
 /// Skip a field value based on wire type.
@@ -818,6 +826,25 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_varint_rejects_u64_overflow() {
+        let mut data = [0xFF; 10];
+        data[9] = 0x7F;
+        let mut buf: &[u8] = &data;
+
+        let err = decode_varint(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("overflows u64"));
+    }
+
+    #[test]
+    fn test_decode_varint_rejects_unterminated_tenth_byte() {
+        let data = [0x80; 10];
+        let mut buf: &[u8] = &data;
+
+        let err = decode_varint(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("Varint too long"));
+    }
+
+    #[test]
     fn test_decode_tag() {
         let mut buf: &[u8] = &[0x0A];
         let (field, wire) = decode_tag(&mut buf).unwrap();
@@ -828,6 +855,29 @@ mod tests {
         let (field, wire) = decode_tag(&mut buf).unwrap();
         assert_eq!(field, 3);
         assert_eq!(wire, WIRE_FIXED32);
+    }
+
+    #[test]
+    fn test_decode_tag_rejects_zero_field_number() {
+        let mut buf: &[u8] = &[0x00];
+
+        let err = decode_tag(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("Invalid protobuf field number"));
+    }
+
+    #[test]
+    fn test_decode_tag_rejects_oversized_field_number() {
+        let mut value = ((MAX_PROTO_FIELD_NUMBER + 1) << 3) | u64::from(WIRE_LEN);
+        let mut encoded = Vec::new();
+        while value >= 0x80 {
+            encoded.push(((value as u8) & 0x7F) | 0x80);
+            value >>= 7;
+        }
+        encoded.push(value as u8);
+
+        let mut buf: &[u8] = &encoded;
+        let err = decode_tag(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("Invalid protobuf field number"));
     }
 
     #[test]
