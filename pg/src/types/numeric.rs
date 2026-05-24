@@ -105,6 +105,11 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
     if sign == 0xC000 {
         return Ok(Numeric("NaN".to_string()));
     }
+    if !matches!(sign, 0 | 0x4000) {
+        return Err(TypeError::InvalidData(format!(
+            "NUMERIC sign out of range: {sign:#06x}"
+        )));
+    }
 
     if ndigits == 0 {
         return Ok(Numeric("0".to_string()));
@@ -225,5 +230,18 @@ mod tests {
 
         let err = Numeric::from_pg(&bytes, oid::NUMERIC, 1).unwrap_err();
         assert!(matches!(err, TypeError::InvalidData(msg) if msg.contains("out of range")));
+    }
+
+    #[test]
+    fn test_numeric_binary_rejects_unknown_sign_code() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // ndigits
+        bytes.extend_from_slice(&0i16.to_be_bytes()); // weight
+        bytes.extend_from_slice(&0x2000u16.to_be_bytes()); // invalid sign
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // dscale
+        bytes.extend_from_slice(&123u16.to_be_bytes()); // digit
+
+        let err = Numeric::from_pg(&bytes, oid::NUMERIC, 1).unwrap_err();
+        assert!(matches!(err, TypeError::InvalidData(msg) if msg.contains("sign out of range")));
     }
 }
