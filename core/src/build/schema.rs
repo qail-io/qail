@@ -410,14 +410,13 @@ impl Schema {
                             break;
                         } else if let Some(ref_spec) = part.strip_prefix("ref:") {
                             // Parse "table.column" or ">table.column"
-                            let ref_spec = ref_spec.trim_start_matches('>');
-                            if let Some((ref_table, ref_col)) = ref_spec.split_once('.') {
-                                current_fks.push(ForeignKey {
-                                    column: col_name.to_string(),
-                                    ref_table: ref_table.to_string(),
-                                    ref_column: ref_col.to_string(),
-                                });
-                            }
+                            let (ref_table, ref_column) =
+                                parse_build_ref_spec(ref_spec, col_name, table_name)?;
+                            current_fks.push(ForeignKey {
+                                column: col_name.to_string(),
+                                ref_table,
+                                ref_column,
+                            });
                         } else if part == "references" {
                             if i + 1 >= parts.len() {
                                 return Err(format!(
@@ -995,6 +994,28 @@ fn parse_build_references_target(
     }
 
     Ok((ref_table.to_string(), ref_column.to_string()))
+}
+
+fn parse_build_ref_spec(
+    ref_spec: &str,
+    col_name: &str,
+    table_name: &str,
+) -> Result<(String, String), String> {
+    let ref_spec = ref_spec.trim_start_matches('>');
+    let (ref_table, ref_column) = ref_spec.split_once('.').ok_or_else(|| {
+        format!(
+            "Invalid ref target '{}' for column '{}' in table '{}'",
+            ref_spec, col_name, table_name
+        )
+    })?;
+    if ref_table.trim().is_empty() || ref_column.trim().is_empty() {
+        return Err(format!(
+            "Invalid ref target '{}' for column '{}' in table '{}'",
+            ref_spec, col_name, table_name
+        ));
+    }
+
+    Ok((ref_table.trim().to_string(), ref_column.trim().to_string()))
 }
 
 fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {

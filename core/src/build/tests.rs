@@ -143,6 +143,31 @@ table posts {
 }
 
 #[test]
+fn test_parse_schema_rejects_malformed_ref_option() {
+    for content in [
+        r#"
+table posts {
+  user_id UUID ref:users
+}
+"#,
+        r#"
+table posts {
+  user_id UUID ref:.id
+}
+"#,
+        r#"
+table posts {
+  user_id UUID ref:users.
+}
+"#,
+    ] {
+        let err = Schema::parse(content).expect_err("malformed ref option must fail");
+        assert!(err.contains("Invalid ref target"));
+        assert!(err.contains("column 'user_id' in table 'posts'"));
+    }
+}
+
+#[test]
 fn test_parse_schema_allows_default_expression_options() {
     let content = r#"
 table users {
