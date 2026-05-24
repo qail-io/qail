@@ -1609,12 +1609,17 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         {
             events.push("UPDATE".to_string());
             let before_count = update_columns.len();
+            let mut seen_cols = HashSet::new();
             let cols = chunk[2..].join(" ");
             for col in cols.split(',') {
                 let c = col.trim();
-                if !c.is_empty() {
-                    update_columns.push(c.to_string());
+                if c.is_empty() {
+                    return Err("trigger update of contains an empty column".to_string());
                 }
+                if !seen_cols.insert(c.to_string()) {
+                    return Err(format!("duplicate trigger update column '{}'", c));
+                }
+                update_columns.push(c.to_string());
             }
             if update_columns.len() == before_count {
                 return Err("trigger update of requires at least one column".to_string());
@@ -3183,9 +3188,27 @@ function normalize_email(email text, fallback text) returns text language sql $$
 
     #[test]
     fn test_parse_trigger_rejects_empty_update_of_columns() {
-        let input = "trigger trg_updated_at on users before update of , execute set_updated_at";
-        let err = parse_qail(input).expect_err("empty update-of columns should fail");
-        assert!(err.contains("trigger update of requires at least one column"));
+        for (input, expected) in [
+            (
+                "trigger trg_updated_at on users before update of , execute set_updated_at",
+                "trigger update of contains an empty column",
+            ),
+            (
+                "trigger trg_updated_at on users before update of name, execute set_updated_at",
+                "trigger update of contains an empty column",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("empty update-of columns should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_duplicate_update_of_columns() {
+        let input =
+            "trigger trg_updated_at on users before update of name,name execute set_updated_at";
+        let err = parse_qail(input).expect_err("duplicate update-of columns should fail");
+        assert!(err.contains("duplicate trigger update column 'name'"));
     }
 
     #[test]
