@@ -287,12 +287,12 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 while i + 1 < parts.len() {
                     match parts[i + 1] {
                         "on_delete" if i + 2 < parts.len() => {
-                            let action = parse_fk_action_str(parts[i + 2]);
+                            let action = parse_fk_action_str(parts[i + 2])?;
                             col = col.on_delete(action);
                             i += 2;
                         }
                         "on_update" if i + 2 < parts.len() => {
-                            let action = parse_fk_action_str(parts[i + 2]);
+                            let action = parse_fk_action_str(parts[i + 2])?;
                             col = col.on_update(action);
                             i += 2;
                         }
@@ -1476,13 +1476,14 @@ fn parse_privilege(raw: &str) -> Result<Privilege, String> {
 
 /// Parse QAIL FK action string to FkAction enum.
 /// Accepts: cascade, set_null, set_default, restrict, no_action
-fn parse_fk_action_str(s: &str) -> FkAction {
+fn parse_fk_action_str(s: &str) -> Result<FkAction, String> {
     match s {
-        "cascade" => FkAction::Cascade,
-        "set_null" => FkAction::SetNull,
-        "set_default" => FkAction::SetDefault,
-        "restrict" => FkAction::Restrict,
-        _ => FkAction::NoAction,
+        "cascade" => Ok(FkAction::Cascade),
+        "set_null" => Ok(FkAction::SetNull),
+        "set_default" => Ok(FkAction::SetDefault),
+        "restrict" => Ok(FkAction::Restrict),
+        "no_action" => Ok(FkAction::NoAction),
+        other => Err(format!("unknown foreign key action: {other}")),
     }
 }
 
@@ -2748,6 +2749,18 @@ table orders {
         assert_eq!(fk.column, "id");
         assert!(matches!(fk.on_delete, FkAction::Cascade));
         assert!(matches!(fk.on_update, FkAction::Restrict));
+    }
+
+    #[test]
+    fn test_parse_fk_rejects_unknown_action() {
+        let input = r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users(id) on_delete cascad
+}
+"#;
+        let err = parse_qail(input).expect_err("unknown foreign key action should fail");
+        assert!(err.contains("unknown foreign key action: cascad"));
     }
 
     #[test]
