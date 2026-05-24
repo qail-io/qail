@@ -186,6 +186,34 @@ fn check_expr_to_sql(expr: &CheckExpr) -> String {
     }
 }
 
+fn quoted_column_list(cols: &[String]) -> String {
+    cols.iter()
+        .map(|col| escape_identifier(col))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn exclude_method_to_sql(method: &str) -> &'static str {
+    match method.trim().to_ascii_lowercase().as_str() {
+        "btree" => "btree",
+        "hash" => "hash",
+        "gin" => "gin",
+        "gist" => "gist",
+        "brin" => "brin",
+        "spgist" | "sp-gist" => "spgist",
+        _ => "btree",
+    }
+}
+
+fn exclude_element_to_sql(element: &str) -> String {
+    let element = element.trim();
+    if element.is_empty() || contains_unquoted_statement_delimiter(element) {
+        format!("{} WITH =", escape_identifier(element))
+    } else {
+        element.to_string()
+    }
+}
+
 /// Transpile an `AlterTable` to SQL statements.
 ///
 /// Handles all `AlterOp` variants including:
@@ -300,10 +328,10 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
             AlterOp::AddConstraint { name, constraint } => {
                 let constraint_sql = match constraint {
                     crate::migrate::alter::TableConstraint::PrimaryKey(cols) => {
-                        format!("PRIMARY KEY ({})", cols.join(", "))
+                        format!("PRIMARY KEY ({})", quoted_column_list(cols))
                     }
                     crate::migrate::alter::TableConstraint::Unique(cols) => {
-                        format!("UNIQUE ({})", cols.join(", "))
+                        format!("UNIQUE ({})", quoted_column_list(cols))
                     }
                     crate::migrate::alter::TableConstraint::Check(expr) => {
                         format!("CHECK ({})", check_expr_to_sql(expr))
@@ -315,13 +343,21 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                     } => {
                         format!(
                             "FOREIGN KEY ({}) REFERENCES {}({})",
-                            columns.join(", "),
+                            quoted_column_list(columns),
                             escape_identifier(ref_table),
-                            ref_columns.join(", ")
+                            quoted_column_list(ref_columns)
                         )
                     }
                     crate::migrate::alter::TableConstraint::Exclude { method, elements } => {
-                        format!("EXCLUDE USING {} ({})", method, elements.join(", "))
+                        format!(
+                            "EXCLUDE USING {} ({})",
+                            exclude_method_to_sql(method),
+                            elements
+                                .iter()
+                                .map(|element| exclude_element_to_sql(element))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                 };
                 format!(
@@ -519,6 +555,54 @@ mod tests {
         assert_eq!(
             stmts[4],
             "ALTER TABLE events ADD CONSTRAINT pattern_check CHECK (kind ~ '^[a-z'']+$')"
+        );
+    }
+
+    #[test]
+    fn test_alter_table_constraint_fragments_are_sanitized() {
+        use crate::migrate::alter::TableConstraint;
+
+        let alter = AlterTable::new("orders")
+            .add_constraint(
+                "pk_bad",
+                TableConstraint::PrimaryKey(vec!["id); DROP TABLE orders; --".to_string()]),
+            )
+            .add_constraint(
+                "uq_bad",
+                TableConstraint::Unique(vec!["email); DROP TABLE orders; --".to_string()]),
+            )
+            .add_constraint(
+                "fk_bad",
+                TableConstraint::ForeignKey {
+                    columns: vec!["user_id); DROP TABLE orders; --".to_string()],
+                    ref_table: "users; DROP TABLE orders; --".to_string(),
+                    ref_columns: vec!["id); DROP TABLE orders; --".to_string()],
+                },
+            )
+            .add_constraint(
+                "exclude_bad",
+                TableConstraint::Exclude {
+                    method: "gist; DROP TABLE orders; --".to_string(),
+                    elements: vec!["room_id WITH =; DROP TABLE orders; --".to_string()],
+                },
+            );
+
+        let stmts = alter_table_sql(&alter);
+        assert_eq!(
+            stmts[0],
+            "ALTER TABLE orders ADD CONSTRAINT pk_bad PRIMARY KEY (\"id); DROP TABLE orders; --\")"
+        );
+        assert_eq!(
+            stmts[1],
+            "ALTER TABLE orders ADD CONSTRAINT uq_bad UNIQUE (\"email); DROP TABLE orders; --\")"
+        );
+        assert_eq!(
+            stmts[2],
+            "ALTER TABLE orders ADD CONSTRAINT fk_bad FOREIGN KEY (\"user_id); DROP TABLE orders; --\") REFERENCES \"users; DROP TABLE orders; --\"(\"id); DROP TABLE orders; --\")"
+        );
+        assert_eq!(
+            stmts[3],
+            "ALTER TABLE orders ADD CONSTRAINT exclude_bad EXCLUDE USING btree (\"room_id WITH =; DROP TABLE orders; --\" WITH =)"
         );
     }
 
