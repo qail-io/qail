@@ -476,6 +476,50 @@ fn auth_replay_fingerprint_changes_with_role_and_claims() {
 }
 
 #[test]
+fn auth_replay_fingerprint_canonicalizes_nested_claim_objects() {
+    let mut left_claims = std::collections::HashMap::new();
+    left_claims.insert(
+        "metadata".to_string(),
+        serde_json::json!({
+            "b": 2,
+            "a": {
+                "z": true,
+                "m": [3, 2, 1]
+            }
+        }),
+    );
+    let mut right_claims = std::collections::HashMap::new();
+    right_claims.insert(
+        "metadata".to_string(),
+        serde_json::json!({
+            "a": {
+                "m": [3, 2, 1],
+                "z": true
+            },
+            "b": 2
+        }),
+    );
+
+    let left = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "admin".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: left_claims,
+    };
+    let right = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "admin".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: right_claims,
+    };
+
+    assert_eq!(
+        auth_replay_fingerprint(&left),
+        auth_replay_fingerprint(&right)
+    );
+}
+
+#[test]
 fn request_fingerprint_changes_with_auth_replay_fingerprint() {
     let uri = "/api/orders".parse::<Uri>().expect("valid uri");
     let headers = HeaderMap::new();
