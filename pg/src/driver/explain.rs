@@ -171,7 +171,15 @@ impl ExplainCache {
 /// ```
 pub fn parse_explain_json(json_str: &str) -> Option<ExplainEstimate> {
     let total_cost = extract_json_number(json_str, "Total Cost")?;
-    let plan_rows = extract_json_number(json_str, "Plan Rows")? as u64;
+    if !total_cost.is_finite() || total_cost < 0.0 {
+        return None;
+    }
+
+    let plan_rows = extract_json_number(json_str, "Plan Rows")?;
+    if !plan_rows.is_finite() || plan_rows < 0.0 || plan_rows > u64::MAX as f64 {
+        return None;
+    }
+    let plan_rows = plan_rows as u64;
 
     Some(ExplainEstimate {
         total_cost,
@@ -285,7 +293,11 @@ pub struct ExplainRejectionDetail {
 
 /// Check an EXPLAIN estimate against configured thresholds.
 pub fn check_estimate(estimate: &ExplainEstimate, config: &ExplainConfig) -> ExplainDecision {
-    if estimate.total_cost > config.max_total_cost || estimate.plan_rows > config.max_plan_rows {
+    if !estimate.total_cost.is_finite()
+        || !config.max_total_cost.is_finite()
+        || estimate.total_cost > config.max_total_cost
+        || estimate.plan_rows > config.max_plan_rows
+    {
         ExplainDecision::Reject {
             total_cost: estimate.total_cost,
             plan_rows: estimate.plan_rows,
@@ -322,6 +334,12 @@ mod tests {
         assert!(parse_explain_json("not json").is_none());
         assert!(parse_explain_json("{}").is_none());
         assert!(parse_explain_json("[]").is_none());
+        assert!(
+            parse_explain_json(r#"[{"Plan": {"Total Cost": 1e999, "Plan Rows": 5000}}]"#).is_none()
+        );
+        assert!(
+            parse_explain_json(r#"[{"Plan": {"Total Cost": 100.0, "Plan Rows": -1}}]"#).is_none()
+        );
     }
 
     #[test]
@@ -356,6 +374,24 @@ mod tests {
         };
         let decision = check_estimate(&est, &config);
         assert!(decision.is_rejected());
+    }
+
+    #[test]
+    fn test_check_estimate_rejects_non_finite_costs() {
+        let mut config = ExplainConfig::default();
+        config.max_total_cost = f64::NAN;
+        let est = ExplainEstimate {
+            total_cost: 50.0,
+            plan_rows: 500,
+        };
+        assert!(check_estimate(&est, &config).is_rejected());
+
+        let config = ExplainConfig::default();
+        let est = ExplainEstimate {
+            total_cost: f64::INFINITY,
+            plan_rows: 500,
+        };
+        assert!(check_estimate(&est, &config).is_rejected());
     }
 
     #[test]
