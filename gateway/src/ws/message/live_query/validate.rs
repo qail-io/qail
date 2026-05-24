@@ -9,7 +9,7 @@ use crate::auth::AuthContext;
 use super::super::super::{WS_ERR_DB_UNAVAILABLE, WsServerMessage};
 use super::PreparedLiveQuery;
 
-pub(super) async fn prepare_and_send_initial_snapshot(
+pub(super) async fn prepare_live_query(
     qail: &str,
     table: &str,
     state: &Arc<GatewayState>,
@@ -141,23 +141,37 @@ pub(super) async fn prepare_and_send_initial_snapshot(
         return None;
     }
 
+    Some(PreparedLiveQuery {
+        cmd,
+        tenant_guard_plan,
+    })
+}
+
+pub(super) async fn send_initial_snapshot(
+    table: &str,
+    state: &Arc<GatewayState>,
+    tx: &mpsc::Sender<WsServerMessage>,
+    auth: &AuthContext,
+    prepared: &PreparedLiveQuery,
+) -> bool {
     if let Ok(mut conn) = state
-        .acquire_with_auth_rls_guarded(auth, Some(&cmd.table))
+        .acquire_with_auth_rls_guarded(auth, Some(&prepared.cmd.table))
         .await
     {
-        match conn.fetch_all_uncached(&cmd).await {
+        match conn.fetch_all_uncached(&prepared.cmd).await {
             Ok(rows) => {
                 let mut json_rows: Vec<serde_json::Value> =
                     rows.iter().map(crate::handler::row_to_json).collect();
 
-                if let (Some(tenant_id), Some(plan)) =
-                    (auth.tenant_id.as_deref(), tenant_guard_plan.as_ref())
-                    && plan.verify_rows
+                if let (Some(tenant_id), Some(plan)) = (
+                    auth.tenant_id.as_deref(),
+                    prepared.tenant_guard_plan.as_ref(),
+                ) && plan.verify_rows
                     && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                         &json_rows,
                         tenant_id,
                         &plan.column,
-                        &cmd.table,
+                        &prepared.cmd.table,
                         "ws_live_query",
                     )
                 {
@@ -168,10 +182,10 @@ pub(super) async fn prepare_and_send_initial_snapshot(
                             message: "Data integrity error".to_string(),
                         })
                         .await;
-                    return None;
+                    return false;
                 }
 
-                if let Some(plan) = tenant_guard_plan.as_ref()
+                if let Some(plan) = prepared.tenant_guard_plan.as_ref()
                     && plan.strip_output_column
                 {
                     crate::tenant_guard::strip_tenant_column_from_json_rows(
@@ -199,7 +213,7 @@ pub(super) async fn prepare_and_send_initial_snapshot(
                         message: "Live query execution failed".to_string(),
                     })
                     .await;
-                return None;
+                return false;
             }
         }
     } else {
@@ -209,11 +223,8 @@ pub(super) async fn prepare_and_send_initial_snapshot(
                 message: WS_ERR_DB_UNAVAILABLE.to_string(),
             })
             .await;
-        return None;
+        return false;
     }
 
-    Some(PreparedLiveQuery {
-        cmd,
-        tenant_guard_plan,
-    })
+    true
 }

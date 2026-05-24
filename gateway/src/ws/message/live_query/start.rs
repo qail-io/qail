@@ -1,5 +1,5 @@
 use super::bootstrap::subscribe_and_spawn_live_query;
-use super::validate::prepare_and_send_initial_snapshot;
+use super::validate::prepare_live_query;
 use super::{LiveQueryRequest, LiveQueryRuntime};
 
 pub(super) async fn handle_live_query(
@@ -12,7 +12,7 @@ pub(super) async fn handle_live_query(
         request.table
     );
 
-    let Some(prepared) = prepare_and_send_initial_snapshot(
+    let Some(prepared) = prepare_live_query(
         &request.qail,
         &request.table,
         runtime.state,

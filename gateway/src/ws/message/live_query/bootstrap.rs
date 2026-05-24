@@ -7,6 +7,7 @@ use super::super::super::{
     decrement_channel_refcount, increment_channel_refcount, tracked_channel_count,
 };
 use super::poller::{LiveQueryPollerConfig, spawn_live_query_poller};
+use super::validate::send_initial_snapshot;
 use super::{LiveQueryRuntime, PreparedLiveQuery};
 
 fn exceeds_live_query_task_limit(task_count: usize, replacing_existing: bool) -> bool {
@@ -99,6 +100,25 @@ pub(super) async fn subscribe_and_spawn_live_query(
             }
         }
         increment_channel_refcount(conn_state, &notify_channel);
+    }
+
+    if !send_initial_snapshot(table, state, tx, auth, &prepared).await {
+        if !same_channel_replacement
+            && decrement_channel_refcount(conn_state, &notify_channel)
+            && let Err(e) = listener_rpc(listener_tx, |reply| ListenControl::Unlisten {
+                channel: notify_channel.clone(),
+                reply,
+            })
+            .await
+        {
+            tracing::warn!(
+                table = %table,
+                channel = %notify_channel,
+                "WS LiveQuery initial snapshot cleanup UNLISTEN failed: {}",
+                e
+            );
+        }
+        return;
     }
 
     let poll_interval = if interval_ms > 0 {
