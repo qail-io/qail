@@ -243,21 +243,26 @@ fn required_string(
         })
 }
 
-fn required_i32(
+fn required_non_negative_u32(
     row: &PgRow,
     idx: usize,
     id: &str,
     field: &str,
-) -> Result<i32, MalformedOutboxItem> {
-    row.get_i32(idx).ok_or_else(|| MalformedOutboxItem {
+) -> Result<u32, MalformedOutboxItem> {
+    let value = row.get_i32(idx).ok_or_else(|| MalformedOutboxItem {
         id: id.to_string(),
         reason: format!("invalid {}", field),
+        locked_at: row.get_string(7).unwrap_or_default(),
+    })?;
+    u32::try_from(value).map_err(|_| MalformedOutboxItem {
+        id: id.to_string(),
+        reason: format!("invalid negative {}", field),
         locked_at: row.get_string(7).unwrap_or_default(),
     })
 }
 
 fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxItem> {
-    let id = row.get_string(0).unwrap_or_default();
+    let id = required_string(row, 0, "<missing>", "id")?;
     let trigger_name = required_string(row, 1, &id, "trigger_name")?;
     let webhook_url = required_string(row, 2, &id, "webhook_url")?;
     let headers_raw = required_string(row, 3, &id, "headers")?;
@@ -274,8 +279,8 @@ fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxIt
             reason: format!("invalid payload JSON: {}", e),
             locked_at: row.get_string(7).unwrap_or_default(),
         })?;
-    let retry_count = required_i32(row, 5, &id, "retry_count")?.max(0) as u32;
-    let attempts = required_i32(row, 6, &id, "attempts")?.max(0) as u32;
+    let retry_count = required_non_negative_u32(row, 5, &id, "retry_count")?;
+    let attempts = required_non_negative_u32(row, 6, &id, "attempts")?;
     let locked_at = required_string(row, 7, &id, "locked_at")?;
 
     Ok(OutboxItem {
@@ -505,6 +510,59 @@ mod tests {
         let err = parse_claimed_outbox_row(&row).expect_err("locked_at must be required");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("missing locked_at"));
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_without_id() {
+        let row = row(&[
+            None,
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("{}"),
+            Some(&payload_json()),
+            Some("3"),
+            Some("0"),
+            Some("2026-01-01 00:00:00+00"),
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("id must be required");
+        assert_eq!(err.id, "<missing>");
+        assert!(err.reason.contains("missing id"));
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_with_negative_counters() {
+        let retry_row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("{}"),
+            Some(&payload_json()),
+            Some("-1"),
+            Some("0"),
+            Some("2026-01-01 00:00:00+00"),
+        ]);
+
+        let err =
+            parse_claimed_outbox_row(&retry_row).expect_err("retry_count must be non-negative");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("negative retry_count"));
+
+        let attempts_row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("{}"),
+            Some(&payload_json()),
+            Some("3"),
+            Some("-1"),
+            Some("2026-01-01 00:00:00+00"),
+        ]);
+
+        let err =
+            parse_claimed_outbox_row(&attempts_row).expect_err("attempts must be non-negative");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("negative attempts"));
     }
 }
 
