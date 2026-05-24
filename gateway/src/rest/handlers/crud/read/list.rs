@@ -183,6 +183,121 @@ pub(super) fn ensure_branch_policy_filter_columns_projected(
     Ok(())
 }
 
+struct BranchReplayProjectionInput<'a> {
+    filters: &'a [(String, Operator, QailValue)],
+    policy_filter_cages: &'a [qail_core::ast::Cage],
+    search: Option<&'a str>,
+    search_columns: Option<&'a str>,
+    sort: Option<&'a str>,
+    default_sort_column: &'a str,
+    distinct_columns: &'a [String],
+    pk_column: &'a str,
+    table_name: &'a str,
+    has_joins: bool,
+}
+
+fn branch_replay_base_column_name(column: &str, table_name: &str) -> Result<String, ApiError> {
+    if !crate::rest::filters::is_safe_identifier(column) {
+        return Err(ApiError::forbidden(format!(
+            "Branch overlay replay cannot safely project column '{}'",
+            column
+        )));
+    }
+
+    let Some((qualifier, column_name)) = column.rsplit_once('.') else {
+        return Ok(column.to_string());
+    };
+
+    if qualifier != table_name {
+        return Err(ApiError::forbidden(format!(
+            "Branch overlay replay cannot safely enforce related-table column '{}'",
+            column
+        )));
+    }
+
+    if column_name.is_empty() {
+        return Err(ApiError::forbidden(
+            "Branch overlay replay cannot safely project an empty column",
+        ));
+    }
+    Ok(column_name.to_string())
+}
+
+fn branch_replay_projection_expr(column: &str, input: &BranchReplayProjectionInput<'_>) -> String {
+    if input.has_joins && !column.contains('.') {
+        format!("{}.{}", input.table_name, column)
+    } else {
+        column.to_string()
+    }
+}
+
+fn ensure_branch_replay_columns_projected(
+    cmd: &mut qail_core::ast::Qail,
+    input: BranchReplayProjectionInput<'_>,
+) -> Result<(), ApiError> {
+    if cmd.columns.is_empty() {
+        return Ok(());
+    }
+
+    let mut existing = std::collections::HashSet::new();
+    for expr in &cmd.columns {
+        let Some(column) = projection_json_column_name(expr)? else {
+            return Ok(());
+        };
+        existing.insert(column);
+    }
+
+    let mut required = Vec::new();
+    let mut seen_required = std::collections::HashSet::new();
+    let mut push_required = |column: &str| -> Result<(), ApiError> {
+        let base_column = branch_replay_base_column_name(column, input.table_name)?;
+        if seen_required.insert(base_column.clone()) {
+            required.push((base_column, column.to_string()));
+        }
+        Ok(())
+    };
+
+    push_required(input.pk_column)?;
+
+    for (column, _, _) in input.filters {
+        push_required(column)?;
+    }
+
+    for cage in input.policy_filter_cages {
+        for condition in &cage.conditions {
+            push_required(policy_filter_column_name(condition)?)?;
+        }
+    }
+
+    if input.search.is_some() {
+        let cols_input = input.search_columns.unwrap_or("name");
+        for column in parse_identifier_csv(cols_input).map_err(ApiError::parse_error)? {
+            push_required(&column)?;
+        }
+    }
+
+    for sort_key in branch_sort_keys(input.sort, input.default_sort_column)? {
+        push_required(&sort_key.column)?;
+    }
+
+    for column in input.distinct_columns {
+        push_required(column)?;
+    }
+
+    let mut to_append = Vec::new();
+    for (base_column, source_column) in required {
+        if existing.insert(base_column.clone()) {
+            to_append.push(Expr::Named(branch_replay_projection_expr(
+                &source_column,
+                &input,
+            )));
+        }
+    }
+
+    cmd.columns.extend(to_append);
+    Ok(())
+}
+
 fn apply_list_distinct(
     mut cmd: qail_core::ast::Qail,
     distinct: Option<&str>,
@@ -501,7 +616,22 @@ pub(crate) async fn list_handler(
         None
     };
     if has_branch {
-        ensure_branch_policy_filter_columns_projected(&mut cmd, &branch_policy_filter_cages)?;
+        let pk_col = table.primary_key.as_deref().unwrap_or("id");
+        ensure_branch_replay_columns_projected(
+            &mut cmd,
+            BranchReplayProjectionInput {
+                filters: &filters,
+                policy_filter_cages: &branch_policy_filter_cages,
+                search: params.search.as_deref(),
+                search_columns: params.search_columns.as_deref(),
+                sort: params.sort.as_deref(),
+                default_sort_column,
+                distinct_columns: &branch_distinct_columns,
+                pk_column: pk_col,
+                table_name: &table_name,
+                has_joins,
+            },
+        )?;
     }
 
     state.optimize_qail_for_execution(&mut cmd);
@@ -1298,12 +1428,12 @@ fn apply_branch_distinct(data: &mut Vec<Value>, distinct_columns: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchReadConstraintInput, apply_branch_distinct, apply_branch_read_constraints,
-        apply_list_distinct, attach_rest_list_debug_headers, branch_base_fetch_limit,
-        branch_projection_columns_from_cmd, encode_ndjson_rows,
-        ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
-        rest_explain_cache_shape_hash, rest_list_cache_key, row_matches_policy_filter_cages,
-        split_expand_relations,
+        BranchReadConstraintInput, BranchReplayProjectionInput, apply_branch_distinct,
+        apply_branch_read_constraints, apply_list_distinct, attach_rest_list_debug_headers,
+        branch_base_fetch_limit, branch_projection_columns_from_cmd, encode_ndjson_rows,
+        ensure_branch_replay_columns_projected, ensure_nested_parent_key_columns_projected,
+        project_rows_to_selected_columns, rest_explain_cache_shape_hash, rest_list_cache_key,
+        row_matches_policy_filter_cages, split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
@@ -1903,6 +2033,143 @@ mod tests {
                 Expr::Named("region".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn branch_replay_projection_adds_internal_constraint_columns_after_public_snapshot() {
+        let filters = vec![(
+            "status".to_string(),
+            Operator::Eq,
+            QailValue::String("open".to_string()),
+        )];
+        let distinct_columns = vec!["region".to_string()];
+        let mut cmd = qail_core::ast::Qail::get("orders").columns(["name"]);
+        let public_projection = branch_projection_columns_from_cmd(&cmd).unwrap().unwrap();
+
+        ensure_branch_replay_columns_projected(
+            &mut cmd,
+            BranchReplayProjectionInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: Some("needle"),
+                search_columns: Some("description"),
+                sort: Some("-priority"),
+                default_sort_column: "id",
+                distinct_columns: &distinct_columns,
+                pk_column: "id",
+                table_name: "orders",
+                has_joins: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(public_projection, vec!["name".to_string()]);
+        assert_eq!(
+            cmd.columns,
+            vec![
+                Expr::Named("name".to_string()),
+                Expr::Named("id".to_string()),
+                Expr::Named("status".to_string()),
+                Expr::Named("description".to_string()),
+                Expr::Named("priority".to_string()),
+                Expr::Named("region".to_string()),
+            ]
+        );
+
+        let mut rows = vec![json!({
+            "name": "base",
+            "id": "order-1",
+            "status": "open",
+            "description": "needle",
+            "priority": 10,
+            "region": "west"
+        })];
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                search: Some("needle"),
+                search_columns: Some("description"),
+                sort: Some("-priority"),
+                distinct_columns: &distinct_columns,
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+        project_rows_to_selected_columns(&mut rows, &public_projection);
+
+        assert_eq!(rows, vec![json!({"name": "base"})]);
+    }
+
+    #[test]
+    fn branch_replay_projection_qualifies_internal_columns_for_joins() {
+        let filters = vec![(
+            "status".to_string(),
+            Operator::Eq,
+            QailValue::String("open".to_string()),
+        )];
+        let policy_cages = vec![policy_cage(
+            "orders.tenant_id",
+            Operator::Eq,
+            QailValue::String("tenant-a".to_string()),
+        )];
+        let mut cmd = qail_core::ast::Qail::get("orders").columns(["orders.name"]);
+
+        ensure_branch_replay_columns_projected(
+            &mut cmd,
+            BranchReplayProjectionInput {
+                filters: &filters,
+                policy_filter_cages: &policy_cages,
+                search: None,
+                search_columns: None,
+                sort: None,
+                default_sort_column: "id",
+                distinct_columns: &[],
+                pk_column: "id",
+                table_name: "orders",
+                has_joins: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            cmd.columns,
+            vec![
+                Expr::Named("orders.name".to_string()),
+                Expr::Named("orders.id".to_string()),
+                Expr::Named("orders.status".to_string()),
+                Expr::Named("orders.tenant_id".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_replay_projection_rejects_related_table_replay_columns() {
+        let filters = vec![(
+            "users.region".to_string(),
+            Operator::Eq,
+            QailValue::String("west".to_string()),
+        )];
+        let mut cmd = qail_core::ast::Qail::get("orders").columns(["orders.name"]);
+
+        let err = ensure_branch_replay_columns_projected(
+            &mut cmd,
+            BranchReplayProjectionInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                sort: None,
+                default_sort_column: "id",
+                distinct_columns: &[],
+                pk_column: "id",
+                table_name: "orders",
+                has_joins: true,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
     fn nested_projection_schema() -> SchemaRegistry {
