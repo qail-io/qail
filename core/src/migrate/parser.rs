@@ -307,6 +307,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let mut i = 2;
     let mut seen_primary_key = false;
     let mut nullability_option: Option<&str> = None;
+    let mut seen_default = false;
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
@@ -359,6 +360,10 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     .map_err(|e| format!("{} (column '{}')", e, name))?;
             }
             "default" if i + 1 < parts.len() => {
+                if seen_default {
+                    return Err(format!("duplicate default option for column '{}'", name));
+                }
+                seen_default = true;
                 let mut default_parts = Vec::new();
                 i += 1;
                 default_parts.push(parts[i]);
@@ -3658,6 +3663,17 @@ table users {
             let err = parse_qail(input).expect_err("conflicting nullability should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_column_rejects_duplicate_default() {
+        let input = r#"
+table users {
+  status text default 'draft' default 'active'
+}
+"#;
+        let err = parse_qail(input).expect_err("duplicate default should fail");
+        assert!(err.contains("duplicate default option for column 'status'"));
     }
 
     #[test]
