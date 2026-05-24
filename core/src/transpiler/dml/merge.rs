@@ -163,18 +163,18 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
             generator.json_key_exists(&left, &value_sql(&condition.value, generator))
         }
         Operator::JsonExists => {
-            let path = value_sql(&condition.value, generator);
-            generator.json_exists(&left, path.trim_matches('\''))
+            let path = json_path_arg(condition, generator);
+            generator.json_exists(&left, &path)
         }
         Operator::JsonQuery => {
-            let path = value_sql(&condition.value, generator);
-            generator.json_query(&left, path.trim_matches('\''))
+            let path = json_path_arg(condition, generator);
+            generator.json_query(&left, &path)
         }
         Operator::JsonValue => {
-            let path = value_sql(&condition.value, generator);
+            let path = json_path_arg(condition, generator);
             format!(
                 "{} = {}",
-                generator.json_value(&left, path.trim_matches('\'')),
+                generator.json_value(&left, &path),
                 value_sql(&condition.value, generator)
             )
         }
@@ -220,6 +220,15 @@ fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
         Value::Expr(expr) => expr_sql(expr, generator),
         Value::Subquery(query) => format!("({})", query.to_sql()),
         _ => value.to_string(),
+    }
+}
+
+fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String {
+    match &condition.value {
+        Value::String(path) => path.clone(),
+        Value::Param(index) => generator.placeholder(*index),
+        Value::NamedParam(name) => format!(":{}", name),
+        _ => value_sql(&condition.value, generator),
     }
 }
 

@@ -90,6 +90,27 @@ pub fn escape_sql_string_literal(value: &str) -> String {
     value.replace('\0', "").replace('\'', "''")
 }
 
+fn is_sql_placeholder(value: &str) -> bool {
+    value == "?"
+        || value
+            .strip_prefix('$')
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        || value
+            .strip_prefix("@p")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        || value.strip_prefix(':').is_some_and(|rest| {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn sql_json_path_argument(path: &str) -> String {
+    if is_sql_placeholder(path) {
+        path.to_string()
+    } else {
+        format!("'{}'", escape_sql_string_literal(path))
+    }
+}
+
 /// Trait for dialect-specific SQL generation.
 pub trait SqlGenerator {
     /// Quote an identifier (table or column name).
@@ -127,17 +148,17 @@ pub trait SqlGenerator {
 
     /// JSON_EXISTS - check if path exists in JSON (Postgres 17+, SQL/JSON standard)
     fn json_exists(&self, col: &str, path: &str) -> String {
-        format!("JSON_EXISTS({}, '{}')", col, path)
+        format!("JSON_EXISTS({}, {})", col, sql_json_path_argument(path))
     }
 
     /// JSON_QUERY - extract JSON object/array at path (Postgres 17+, SQL/JSON standard)
     fn json_query(&self, col: &str, path: &str) -> String {
-        format!("JSON_QUERY({}, '{}')", col, path)
+        format!("JSON_QUERY({}, {})", col, sql_json_path_argument(path))
     }
 
     /// JSON_VALUE - extract scalar value at path (Postgres 17+, SQL/JSON standard)
     fn json_value(&self, col: &str, path: &str) -> String {
-        format!("JSON_VALUE({}, '{}')", col, path)
+        format!("JSON_VALUE({}, {})", col, sql_json_path_argument(path))
     }
 
     /// Generate IN array check (col IN value)

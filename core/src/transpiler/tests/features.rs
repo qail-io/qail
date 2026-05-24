@@ -1401,6 +1401,30 @@ fn test_merge_postgres_fuzzy_fallback_escapes_rendered_value() {
     );
 }
 
+#[test]
+fn test_merge_postgres_json_path_escapes_literal() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.profile".to_string()),
+                op: Operator::JsonExists,
+                value: Value::String("$.flag' OR true --".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("profile", Expr::Named("s.profile".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+         WHEN MATCHED AND JSON_EXISTS(users.profile, '$.flag'' OR true --') \
+         THEN UPDATE SET profile = s.profile"
+    );
+}
+
 // ============= JSON Tests =============
 
 #[test]
@@ -1606,6 +1630,45 @@ fn test_json_exists() {
     println!("JSON_EXISTS: {}", sql);
     assert!(sql.contains("JSON_EXISTS("));
     assert!(sql.contains("$.theme"));
+}
+
+#[test]
+fn test_json_exists_escapes_path_literal() {
+    let mut cmd = Qail::get("users");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![Condition {
+            left: Expr::Named("metadata".to_string()),
+            op: Operator::JsonExists,
+            value: Value::String("$.owner' ? (@ == \"root\")".to_string()),
+            is_array_unnest: false,
+        }],
+        logical_op: LogicalOp::And,
+    });
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "SELECT * FROM users WHERE JSON_EXISTS(metadata, '$.owner'' ? (@ == \"root\")')"
+    );
+}
+
+#[test]
+fn test_json_exists_keeps_placeholder_unquoted() {
+    let mut cmd = Qail::get("users");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![Condition {
+            left: Expr::Named("metadata".to_string()),
+            op: Operator::JsonExists,
+            value: Value::Param(1),
+            is_array_unnest: false,
+        }],
+        logical_op: LogicalOp::And,
+    });
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "SELECT * FROM users WHERE JSON_EXISTS(metadata, $1)");
 }
 
 #[test]

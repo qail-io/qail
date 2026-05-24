@@ -123,6 +123,15 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
     }
 }
 
+fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String {
+    match &condition.value {
+        Value::String(path) => path.clone(),
+        Value::Param(n) => generator.placeholder(*n),
+        Value::NamedParam(name) => format!(":{}", name),
+        _ => condition.to_value_sql(generator),
+    }
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -229,18 +238,18 @@ impl ConditionToSql for Condition {
             Operator::KeyExists => generator.json_key_exists(&col, &self.to_value_sql(generator)),
             // Postgres 17+ SQL/JSON standard functions
             Operator::JsonExists => {
-                let path = self.to_value_sql(generator);
-                generator.json_exists(&col, path.trim_matches('\''))
+                let path = json_path_arg(self, generator);
+                generator.json_exists(&col, &path)
             }
             Operator::JsonQuery => {
-                let path = self.to_value_sql(generator);
-                generator.json_query(&col, path.trim_matches('\''))
+                let path = json_path_arg(self, generator);
+                generator.json_query(&col, &path)
             }
             Operator::JsonValue => {
-                let path = self.to_value_sql(generator);
+                let path = json_path_arg(self, generator);
                 format!(
                     "{} = {}",
-                    generator.json_value(&col, path.trim_matches('\'')),
+                    generator.json_value(&col, &path),
                     self.to_value_sql(generator)
                 )
             }

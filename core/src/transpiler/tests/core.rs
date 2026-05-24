@@ -363,6 +363,31 @@ fn test_array_elem_contained_in_text_parameterized() {
 }
 
 #[test]
+fn test_json_exists_parameterized_path_is_not_quoted() {
+    use crate::ast::*;
+    use crate::transpiler::ToSqlParameterized;
+
+    let mut cmd = Qail::get("events");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![Condition {
+            left: Expr::Named("payload".to_string()),
+            op: Operator::JsonExists,
+            value: Value::NamedParam("json_path".to_string()),
+            is_array_unnest: false,
+        }],
+        logical_op: LogicalOp::And,
+    });
+
+    let result = cmd.to_sql_parameterized();
+    assert_eq!(
+        result.sql,
+        "SELECT * FROM events WHERE JSON_EXISTS(payload, $1)"
+    );
+    assert_eq!(result.named_params, vec!["json_path"]);
+}
+
+#[test]
 fn test_left_join() {
     use crate::ast::*;
     let mut cmd = Qail::get("users");
