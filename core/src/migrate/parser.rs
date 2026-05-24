@@ -308,6 +308,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let mut seen_primary_key = false;
     let mut nullability_option: Option<&str> = None;
     let mut seen_default = false;
+    let mut seen_unique = false;
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
@@ -355,6 +356,10 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 col.nullable = true;
             }
             "unique" => {
+                if seen_unique {
+                    return Err(format!("duplicate unique option for column '{}'", name));
+                }
+                seen_unique = true;
                 col = col
                     .try_unique()
                     .map_err(|e| format!("{} (column '{}')", e, name))?;
@@ -3674,6 +3679,31 @@ table users {
 "#;
         let err = parse_qail(input).expect_err("duplicate default should fail");
         assert!(err.contains("duplicate default option for column 'status'"));
+    }
+
+    #[test]
+    fn test_parse_column_rejects_duplicate_key_options() {
+        for (input, expected) in [
+            (
+                r#"
+table users {
+  id uuid primary_key primary_key
+}
+"#,
+                "duplicate primary_key option for column 'id'",
+            ),
+            (
+                r#"
+table users {
+  email text unique unique
+}
+"#,
+                "duplicate unique option for column 'email'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("duplicate key option should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
