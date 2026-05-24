@@ -436,7 +436,7 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
             constraints,
         } = col
         {
-            let sql_type = map_type(data_type);
+            let sql_type = data_type_to_sql(data_type);
             let mut line = format!("    {} {}", generator.quote_identifier(name), sql_type);
 
             // Default to NOT NULL unless Nullable (?) constraint is present
@@ -562,7 +562,7 @@ pub fn build_alter_table(cmd: &Qail, dialect: Dialect) -> String {
                         constraints,
                     } = col.as_ref()
                     {
-                        let sql_type = map_type(data_type);
+                        let sql_type = data_type_to_sql(data_type);
                         let mut line = format!(
                             "ALTER TABLE {} ADD COLUMN {} {}",
                             table_name,
@@ -663,6 +663,43 @@ fn map_type(t: &str) -> &str {
     }
 }
 
+fn is_safe_sql_type_fragment(fragment: &str) -> bool {
+    let fragment = fragment.trim();
+    !fragment.is_empty()
+        && !fragment.contains('\0')
+        && !fragment.contains(';')
+        && !fragment.contains('\'')
+        && !fragment.contains('"')
+        && !fragment.contains("--")
+        && !fragment.contains("/*")
+        && !fragment.contains("*/")
+        && fragment.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+                )
+        })
+}
+
+fn sql_type_fragment_to_sql(fragment: &str, fallback: &str) -> String {
+    let fragment = fragment.trim();
+    if is_safe_sql_type_fragment(fragment) {
+        fragment.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn data_type_to_sql(t: &str) -> String {
+    let mapped = map_type(t);
+    if mapped != t {
+        mapped.to_string()
+    } else {
+        sql_type_fragment_to_sql(t, "TEXT")
+    }
+}
+
 fn is_simple_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
@@ -742,7 +779,7 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
             constraints,
         } = col
         {
-            let sql_type = map_type(data_type);
+            let sql_type = data_type_to_sql(data_type);
             let quoted_name = generator.quote_identifier(name);
 
             let mut col_def = format!("{} {}", quoted_name, sql_type);
@@ -827,7 +864,9 @@ pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
         let quoted_col = generator.quote_identifier(&col_name);
         parts.push(format!(
             "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-            table, quoted_col, new_type
+            table,
+            quoted_col,
+            data_type_to_sql(&new_type)
         ));
     }
 

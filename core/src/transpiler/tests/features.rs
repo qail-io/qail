@@ -236,6 +236,62 @@ fn test_column_expression_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_column_data_type_fragments_are_sanitized() {
+    let unsafe_type = "text); DROP TABLE users; --";
+    let make = Qail {
+        action: Action::Make,
+        table: "events".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "safe_custom".to_string(),
+                data_type: "public.citext".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "unsafe_type".to_string(),
+                data_type: unsafe_type.to_string(),
+                constraints: vec![],
+            },
+        ],
+        ..Default::default()
+    };
+    let sql = make.to_sql_with_dialect(Dialect::Postgres);
+    assert!(sql.contains("safe_custom public.citext NOT NULL"));
+    assert!(sql.contains("unsafe_type TEXT NOT NULL"));
+    assert!(!sql.contains("DROP TABLE"));
+
+    let alter_add = Qail {
+        action: Action::Alter,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_type".to_string(),
+            data_type: unsafe_type.to_string(),
+            constraints: vec![],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        alter_add.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE events ADD COLUMN unsafe_type TEXT NOT NULL"
+    );
+
+    let alter_type = Qail {
+        action: Action::AlterType,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_type".to_string(),
+            data_type: unsafe_type.to_string(),
+            constraints: vec![],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        alter_type.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE events ALTER COLUMN unsafe_type TYPE TEXT"
+    );
+}
+
+#[test]
 fn test_revoke_sql() {
     let cmd = Qail {
         action: Action::Revoke,

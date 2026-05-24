@@ -2128,6 +2128,63 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_column_data_type_fragments_are_sanitized() {
+        use qail_core::ast::Expr;
+
+        let unsafe_type = "text); DROP TABLE users; --";
+        let make = Qail {
+            action: Action::Make,
+            table: "events".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "safe_custom".to_string(),
+                    data_type: "public.citext".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "unsafe_type".to_string(),
+                    data_type: unsafe_type.to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&make).unwrap().0;
+        assert!(sql.contains("safe_custom public.citext NOT NULL"));
+        assert!(sql.contains("unsafe_type TEXT NOT NULL"));
+        assert!(!sql.contains("DROP TABLE"));
+
+        let alter_add = Qail {
+            action: Action::Alter,
+            table: "events".to_string(),
+            columns: vec![Expr::Def {
+                name: "unsafe_type".to_string(),
+                data_type: unsafe_type.to_string(),
+                constraints: vec![],
+            }],
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&alter_add).unwrap().0;
+        assert_eq!(
+            sql,
+            "ALTER TABLE events ADD COLUMN unsafe_type TEXT NOT NULL"
+        );
+
+        let alter_type = Qail {
+            action: Action::AlterType,
+            table: "events".to_string(),
+            columns: vec![Expr::Def {
+                name: "unsafe_type".to_string(),
+                data_type: unsafe_type.to_string(),
+                constraints: vec![],
+            }],
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&alter_type).unwrap().0;
+        assert_eq!(sql, "ALTER TABLE events ALTER COLUMN unsafe_type TYPE TEXT");
+    }
+
+    #[test]
     fn test_encode_savepoint_commands() {
         let savepoint = Qail {
             action: Action::Savepoint,

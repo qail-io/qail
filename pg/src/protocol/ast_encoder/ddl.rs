@@ -38,6 +38,15 @@ pub fn map_type(t: &str) -> &str {
     }
 }
 
+fn data_type_to_sql(t: &str) -> String {
+    let mapped = map_type(t);
+    if mapped != t {
+        mapped.to_string()
+    } else {
+        sql_type_fragment_to_sql(t, "TEXT")
+    }
+}
+
 fn push_joined_ident_list(buf: &mut BytesMut, cols: &[String]) {
     for (i, col) in cols.iter().enumerate() {
         if i > 0 {
@@ -668,7 +677,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
 
             push_identifier(buf, name);
             buf.extend_from_slice(b" ");
-            buf.extend_from_slice(map_type(data_type).as_bytes());
+            buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
 
             // Default to NOT NULL unless Nullable
             if !constraints.contains(&Constraint::Nullable) {
@@ -838,7 +847,7 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
             buf.extend_from_slice(b" ADD COLUMN ");
             push_identifier(buf, name);
             buf.extend_from_slice(b" ");
-            buf.extend_from_slice(map_type(data_type).as_bytes());
+            buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
 
             if !constraints.contains(&Constraint::Nullable) {
                 buf.extend_from_slice(b" NOT NULL");
@@ -896,7 +905,7 @@ pub fn encode_alter_column_type(cmd: &Qail, buf: &mut BytesMut) {
             buf.extend_from_slice(b" ALTER COLUMN ");
             push_identifier(buf, name);
             buf.extend_from_slice(b" TYPE ");
-            buf.extend_from_slice(map_type(data_type).as_bytes());
+            buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
         }
     }
 }
