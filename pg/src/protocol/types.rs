@@ -395,7 +395,10 @@ pub fn encode_text_array(items: &[String]) -> String {
     let escaped: Vec<String> = items
         .iter()
         .map(|s| {
-            if s.contains(',')
+            if s.is_empty()
+                || s.eq_ignore_ascii_case("NULL")
+                || s.chars().any(char::is_whitespace)
+                || s.contains(',')
                 || s.contains('"')
                 || s.contains('\\')
                 || s.contains('{')
@@ -501,6 +504,19 @@ mod tests {
         assert_eq!(
             encode_text_array(&["a".to_string(), "b".to_string()]),
             "{a,b}"
+        );
+        assert_eq!(
+            encode_text_array(&["".to_string(), "NULL".to_string(), "two words".to_string()]),
+            r#"{"","NULL","two words"}"#
+        );
+        assert_eq!(
+            try_decode_text_array(&encode_text_array(&[
+                "".to_string(),
+                "NULL".to_string(),
+                "two words".to_string()
+            ]))
+            .unwrap(),
+            vec!["", "NULL", "two words"]
         );
     }
 
