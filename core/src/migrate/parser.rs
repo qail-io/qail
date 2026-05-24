@@ -567,6 +567,9 @@ fn parse_drop(line: &str) -> Result<MigrationHint, String> {
     } else {
         rest.trim().to_string()
     };
+    if target.is_empty() {
+        return Err("drop requires a target".to_string());
+    }
 
     Ok(MigrationHint::Drop { target, confirmed })
 }
@@ -2226,6 +2229,12 @@ index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_co
             let err = parse_qail(input).expect_err("empty transform parts should fail");
             assert!(err.contains("transform requires non-empty expression and target"));
         }
+    }
+
+    #[test]
+    fn test_parse_drop_rejects_empty_target() {
+        let err = parse_qail("drop  confirm").expect_err("empty drop target should fail");
+        assert!(err.contains("drop requires a target"));
     }
 
     #[test]
