@@ -358,15 +358,20 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
         if !columns.is_null() {
             // SAFETY: `columns` is non-null in this branch and the caller
             // contract requires it to be a valid NUL-terminated C string.
-            if let Ok(cols_str) = unsafe { CStr::from_ptr(columns) }.to_str() {
-                if cols_str == "*" {
-                    base_cmd = base_cmd.select_all();
-                } else {
-                    for col in cols_str.split(',') {
-                        let col = col.trim();
-                        if !col.is_empty() {
-                            base_cmd = base_cmd.column(col);
-                        }
+            let cols_str = match unsafe { CStr::from_ptr(columns) }.to_str() {
+                Ok(s) => s,
+                Err(e) => {
+                    set_error(format!("Invalid UTF-8 in columns: {}", e));
+                    return -3;
+                }
+            };
+            if cols_str == "*" {
+                base_cmd = base_cmd.select_all();
+            } else {
+                for col in cols_str.split(',') {
+                    let col = col.trim();
+                    if !col.is_empty() {
+                        base_cmd = base_cmd.column(col);
                     }
                 }
             }
@@ -623,28 +628,37 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
 
         // SAFETY: `statement` is checked non-null above and the caller
         // contract requires it to be a valid NUL-terminated C string.
-        let stmt_str = unsafe { CStr::from_ptr(statement) }
-            .to_str()
-            .unwrap_or_default();
+        let stmt_str = match unsafe { CStr::from_ptr(statement) }.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                set_error(format!("Invalid UTF-8 in statement: {}", e));
+                return -2;
+            }
+        };
 
         // Collect params
         let param_strs: Vec<&str> = if params.is_null() || params_count == 0 {
             vec![]
         } else {
-            (0..params_count)
-                .filter_map(|i| {
-                    // SAFETY: The caller contract requires `params` to point
-                    // to an array containing at least `params_count` entries.
-                    let p = unsafe { *params.add(i) };
-                    if p.is_null() {
-                        None
-                    } else {
-                        // SAFETY: Non-null parameter entries are expected to
-                        // point to valid NUL-terminated C strings.
-                        unsafe { CStr::from_ptr(p) }.to_str().ok()
+            let mut out = Vec::new();
+            for i in 0..params_count {
+                // SAFETY: The caller contract requires `params` to point
+                // to an array containing at least `params_count` entries.
+                let p = unsafe { *params.add(i) };
+                if p.is_null() {
+                    continue;
+                }
+                // SAFETY: Non-null parameter entries are expected to
+                // point to valid NUL-terminated C strings.
+                match unsafe { CStr::from_ptr(p) }.to_str() {
+                    Ok(s) => out.push(s),
+                    Err(e) => {
+                        set_error(format!("Invalid UTF-8 in param {i}: {e}"));
+                        return -3;
                     }
-                })
-                .collect()
+                }
+            }
+            out
         };
 
         let batch_len =
@@ -1188,5 +1202,77 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Bind/Execute batch"));
+    }
+
+    #[test]
+    fn test_uniform_batch_rejects_invalid_columns_utf8() {
+        let table = CString::new("users").unwrap();
+        let columns = b"\xff\0";
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_uniform_batch(
+                table.as_ptr(),
+                columns.as_ptr() as *const c_char,
+                1,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -3);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid UTF-8 in columns"));
+    }
+
+    #[test]
+    fn test_bind_execute_batch_rejects_invalid_statement_utf8() {
+        let statement = b"\xff\0";
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_bind_execute_batch(
+                statement.as_ptr() as *const c_char,
+                std::ptr::null(),
+                0,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -2);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid UTF-8 in statement"));
+    }
+
+    #[test]
+    fn test_bind_execute_batch_rejects_invalid_param_utf8() {
+        let statement = CString::new("stmt").unwrap();
+        let invalid = b"\xff\0";
+        let params = [invalid.as_ptr() as *const c_char];
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_bind_execute_batch(
+                statement.as_ptr(),
+                params.as_ptr(),
+                params.len(),
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -3);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid UTF-8 in param 0"));
     }
 }
