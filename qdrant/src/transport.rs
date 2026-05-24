@@ -551,16 +551,22 @@ fn grpc_unframe(mut data: Bytes) -> QdrantResult<Bytes> {
         )));
     }
 
-    if len == 0 {
-        return Ok(Bytes::new());
-    }
-
     if data.len() < len {
         return Err(QdrantError::Decode(format!(
             "Response truncated: expected {} bytes, got {}",
             len,
             data.len()
         )));
+    }
+    if data.len() != len {
+        return Err(QdrantError::Decode(format!(
+            "Trailing bytes after gRPC response frame: expected {} bytes, got {}",
+            len,
+            data.len()
+        )));
+    }
+    if len == 0 {
+        return Ok(Bytes::new());
     }
 
     Ok(data.slice(0..len))
@@ -618,6 +624,29 @@ mod tests {
 
         let err = grpc_unframe(data.freeze()).unwrap_err();
         assert!(matches!(err, QdrantError::Decode(msg) if msg.contains("too large")));
+    }
+
+    #[test]
+    fn test_grpc_unframe_rejects_trailing_bytes() {
+        let mut data = BytesMut::new();
+        data.put_u8(0);
+        data.put_u32(5);
+        data.extend_from_slice(b"hello");
+        data.extend_from_slice(b"extra");
+
+        let err = grpc_unframe(data.freeze()).unwrap_err();
+        assert!(matches!(err, QdrantError::Decode(msg) if msg.contains("Trailing bytes")));
+    }
+
+    #[test]
+    fn test_grpc_unframe_rejects_zero_length_frame_with_trailing_bytes() {
+        let mut data = BytesMut::new();
+        data.put_u8(0);
+        data.put_u32(0);
+        data.put_u8(0);
+
+        let err = grpc_unframe(data.freeze()).unwrap_err();
+        assert!(matches!(err, QdrantError::Decode(msg) if msg.contains("Trailing bytes")));
     }
 
     #[test]
