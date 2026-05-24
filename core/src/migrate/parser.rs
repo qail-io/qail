@@ -1630,6 +1630,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     let func_name = parts
         .get(exec_idx + 1)
         .ok_or("trigger missing function name")?;
+    if parts.len() > exec_idx + 2 {
+        return Err("trailing content after trigger function".to_string());
+    }
 
     let mut trigger = SchemaTriggerDef::new(name, *table, *func_name);
     trigger.timing = timing;
@@ -3165,6 +3168,13 @@ function normalize_email(email text, fallback text) returns text language sql $$
         let input = "trigger trg_updated_at on users before banana execute set_updated_at";
         let err = parse_qail(input).expect_err("invalid trigger event should fail");
         assert!(err.contains("unsupported trigger event: BANANA"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_trailing_content() {
+        let input = "trigger trg_updated_at on users before update execute set_updated_at garbage";
+        let err = parse_qail(input).expect_err("trailing trigger content should fail");
+        assert!(err.contains("trailing content after trigger function"));
     }
 
     #[test]
