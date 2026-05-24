@@ -8,6 +8,7 @@ use crate::protocol::types::oid;
 /// PostgreSQL epoch: 2000-01-01 00:00:00 UTC
 /// Difference from Unix epoch (1970-01-01) in microseconds
 const PG_EPOCH_OFFSET_USEC: i64 = 946_684_800_000_000;
+const USEC_PER_DAY: i64 = 86_400_000_000;
 
 /// Timestamp without timezone (microseconds since 2000-01-01)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +268,16 @@ fn validate_time_components(
     Ok(())
 }
 
+fn validate_time_usec(usec: i64) -> Result<(), TypeError> {
+    if !(0..USEC_PER_DAY).contains(&usec) {
+        return Err(TypeError::InvalidData(format!(
+            "Time out of range: {} microseconds",
+            usec
+        )));
+    }
+    Ok(())
+}
+
 fn days_in_month(year: i32, month: i32) -> i32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -412,6 +423,7 @@ impl FromPg for Time {
             let usec = i64::from_be_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
+            validate_time_usec(usec)?;
             Ok(Time { usec })
         } else {
             // Text format: HH:MM:SS or HH:MM:SS.ffffff
@@ -482,6 +494,12 @@ mod tests {
         assert_eq!(time.minute(), 30);
         assert_eq!(time.second(), 45);
         assert_eq!(time.microsecond(), 123456);
+    }
+
+    #[test]
+    fn test_time_from_pg_binary_rejects_out_of_range_values() {
+        assert!(Time::from_pg(&(-1i64).to_be_bytes(), oid::TIME, 1).is_err());
+        assert!(Time::from_pg(&USEC_PER_DAY.to_be_bytes(), oid::TIME, 1).is_err());
     }
 
     #[test]

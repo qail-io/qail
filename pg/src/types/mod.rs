@@ -170,13 +170,27 @@ impl ToPg for f64 {
 impl FromPg for bool {
     fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
         if format == 1 {
-            // Binary: 1 byte, 0 or 1
-            Ok(bytes.first().map(|b| *b != 0).unwrap_or(false))
+            if bytes.len() != 1 {
+                return Err(TypeError::InvalidData(
+                    "Expected 1 byte for boolean".to_string(),
+                ));
+            }
+            match bytes[0] {
+                0 => Ok(false),
+                1 => Ok(true),
+                value => Err(TypeError::InvalidData(format!(
+                    "Invalid binary boolean: {}",
+                    value
+                ))),
+            }
         } else {
             // Text: 't' or 'f'
-            match bytes.first() {
-                Some(b't') | Some(b'T') | Some(b'1') => Ok(true),
-                Some(b'f') | Some(b'F') | Some(b'0') => Ok(false),
+            match std::str::from_utf8(bytes)
+                .map_err(|e| TypeError::InvalidData(e.to_string()))?
+                .trim()
+            {
+                "t" | "T" | "true" | "TRUE" | "1" => Ok(true),
+                "f" | "F" | "false" | "FALSE" | "0" => Ok(false),
                 _ => Err(TypeError::InvalidData("Invalid boolean".to_string())),
             }
         }
@@ -543,6 +557,14 @@ mod tests {
         assert!(!bool::from_pg(b"f", oid::BOOL, 0).unwrap());
         assert!(bool::from_pg(&[1], oid::BOOL, 1).unwrap());
         assert!(!bool::from_pg(&[0], oid::BOOL, 1).unwrap());
+    }
+
+    #[test]
+    fn test_bool_from_pg_rejects_malformed_values() {
+        assert!(bool::from_pg(&[], oid::BOOL, 1).is_err());
+        assert!(bool::from_pg(&[2], oid::BOOL, 1).is_err());
+        assert!(bool::from_pg(b"trash", oid::BOOL, 0).is_err());
+        assert!(bool::from_pg(b"falsey", oid::BOOL, 0).is_err());
     }
 
     #[test]
