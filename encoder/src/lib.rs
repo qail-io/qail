@@ -531,7 +531,13 @@ pub unsafe extern "C" fn qail_encode_parse(
         } else {
             // SAFETY: `name` is non-null in this branch and the caller
             // contract requires it to be a valid NUL-terminated C string.
-            unsafe { CStr::from_ptr(name) }.to_str().unwrap_or_default()
+            match unsafe { CStr::from_ptr(name) }.to_str() {
+                Ok(s) => s,
+                Err(e) => {
+                    set_error(format!("Invalid UTF-8 in statement name: {}", e));
+                    return -3;
+                }
+            }
         };
 
         // SAFETY: `sql` is checked non-null above and the caller contract
@@ -1274,5 +1280,27 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Invalid UTF-8 in param 0"));
+    }
+
+    #[test]
+    fn test_encode_parse_rejects_invalid_statement_name_utf8() {
+        let name = b"\xff\0";
+        let sql = CString::new("SELECT 1").unwrap();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_parse(
+                name.as_ptr() as *const c_char,
+                sql.as_ptr(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -3);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid UTF-8 in statement name"));
     }
 }
