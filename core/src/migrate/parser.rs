@@ -925,33 +925,10 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
 
     let after_args = rest[paren_end + 1..].trim();
 
-    let mut returns = "void".to_string();
-    let mut language = "plpgsql".to_string();
-
     let (body_start_idx, delimiter) = find_dollar_delimiter(after_args)
         .ok_or_else(|| "function body must be wrapped in a dollar-quoted block".to_string())?;
     let header = after_args[..body_start_idx].trim();
-    let parts: Vec<&str> = header.split_whitespace().collect();
-
-    let mut volatility: Option<String> = None;
-    let mut i = 0;
-    while i < parts.len() {
-        if parts[i] == "returns" && i + 1 < parts.len() {
-            returns = parts[i + 1].to_string();
-            i += 2;
-        } else if parts[i] == "language" && i + 1 < parts.len() {
-            language = parts[i + 1].to_string();
-            i += 2;
-        } else {
-            let token = parts[i].to_ascii_lowercase();
-            if token == "volatile" || token == "stable" || token == "immutable" {
-                volatility = Some(token);
-                i += 1;
-            } else {
-                i += 1;
-            }
-        }
-    }
+    let (returns, language, volatility) = parse_function_header(header);
 
     let body = collect_dollar_body(
         &after_args[body_start_idx + delimiter.len()..],
@@ -1045,6 +1022,114 @@ fn split_function_args(args: &str) -> Vec<String> {
     }
 
     out
+}
+
+#[derive(Debug)]
+struct HeaderWord {
+    start: usize,
+    end: usize,
+    depth: usize,
+}
+
+fn parse_function_header(header: &str) -> (String, String, Option<String>) {
+    let words = header_word_spans(header);
+    let returns_idx = words.iter().position(|word| {
+        word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("returns")
+    });
+    let language_idx = words.iter().position(|word| {
+        word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("language")
+    });
+    let volatility_idx = words.iter().position(|word| {
+        if word.depth != 0 {
+            return false;
+        }
+        matches!(
+            header[word.start..word.end].to_ascii_lowercase().as_str(),
+            "volatile" | "stable" | "immutable"
+        )
+    });
+
+    let returns = returns_idx
+        .map(|idx| {
+            let start = words[idx].end;
+            let end = [language_idx, volatility_idx]
+                .into_iter()
+                .flatten()
+                .filter(|next_idx| *next_idx > idx)
+                .min()
+                .map(|next_idx| words[next_idx].start)
+                .unwrap_or(header.len());
+            header[start..end].trim()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or("void")
+        .to_string();
+
+    let language = language_idx
+        .and_then(|idx| words.get(idx + 1))
+        .map(|word| header[word.start..word.end].to_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "plpgsql".to_string());
+
+    let volatility =
+        volatility_idx.map(|idx| header[words[idx].start..words[idx].end].to_ascii_lowercase());
+
+    (returns, language, volatility)
+}
+
+fn header_word_spans(header: &str) -> Vec<HeaderWord> {
+    let mut words = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut start_depth = 0usize;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = header.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if ch.is_whitespace() {
+            if let Some(word_start) = start.take() {
+                words.push(HeaderWord {
+                    start: word_start,
+                    end: idx,
+                    depth: start_depth,
+                });
+            }
+            continue;
+        }
+
+        if start.is_none() {
+            start = Some(idx);
+            start_depth = depth;
+        }
+
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    if let Some(word_start) = start {
+        words.push(HeaderWord {
+            start: word_start,
+            end: header.len(),
+            depth: start_depth,
+        });
+    }
+
+    words
 }
 
 fn find_dollar_delimiter(raw: &str) -> Option<(usize, String)> {
@@ -2003,6 +2088,24 @@ $$
         );
         assert_eq!(func.returns, "numeric");
         assert_eq!(func.language, "sql");
+    }
+
+    #[test]
+    fn test_parse_function_returns_table_with_nested_type_parentheses() {
+        let input = r#"
+function report_amounts() returns table(id uuid, amount numeric(10,2), language text) language sql stable $$
+  SELECT id, amount, language FROM reports
+$$
+"#;
+        let schema = parse_qail(input).unwrap();
+        let func = &schema.functions[0];
+
+        assert_eq!(
+            func.returns,
+            "table(id uuid, amount numeric(10,2), language text)"
+        );
+        assert_eq!(func.language, "sql");
+        assert_eq!(func.volatility.as_deref(), Some("stable"));
     }
 
     #[test]
