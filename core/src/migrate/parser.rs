@@ -923,7 +923,7 @@ fn parse_enum_values(raw: &str) -> Result<Vec<String>, String> {
 
 fn push_enum_value(values: &mut Vec<String>, raw: &str) -> Result<(), String> {
     if raw.trim().is_empty() {
-        return Ok(());
+        return Err("enum value is empty".to_string());
     }
 
     let value = parse_enum_value(raw)?;
@@ -2439,6 +2439,17 @@ comment on users.name "Full name"
         let input = "enum order_status { pending, paid, pending }";
         let err = parse_qail(input).expect_err("duplicate enum values should fail");
         assert!(err.contains("duplicate enum value 'pending'"));
+    }
+
+    #[test]
+    fn test_parse_enum_rejects_empty_unquoted_values() {
+        for input in [
+            "enum order_status { pending,, paid }",
+            "enum order_status { pending, }",
+        ] {
+            let err = parse_qail(input).expect_err("empty enum values should fail");
+            assert!(err.contains("enum value is empty"), "{err}");
+        }
     }
 
     #[test]
