@@ -224,6 +224,14 @@ fn pg_array_quoted_strings() {
 }
 
 #[test]
+fn pg_array_quoted_strings_preserve_padding() {
+    assert_eq!(
+        pg_array_to_json(r#"{"  padded  ",""}"#),
+        serde_json::json!(["  padded  ", ""])
+    );
+}
+
+#[test]
 fn pg_array_nested_quoted_strings() {
     assert_eq!(
         pg_array_to_json(r#"{{"hello, world","x"},{"y","z"}}"#),

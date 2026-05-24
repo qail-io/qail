@@ -378,37 +378,37 @@ fn pg_array_to_json(s: &str) -> serde_json::Value {
 }
 
 fn finish_array_element(s: String, was_quoted: bool) -> serde_json::Value {
+    if was_quoted {
+        return serde_json::Value::String(s);
+    }
+
     let trimmed = s.trim();
 
     // Recursive case for nested arrays
-    if !was_quoted && trimmed.starts_with('{') && trimmed.ends_with('}') {
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
         return pg_array_to_json(trimmed);
     }
 
-    if !was_quoted {
-        if trimmed.eq_ignore_ascii_case("null") {
-            return serde_json::Value::Null;
-        }
-        match trimmed {
-            "t" | "T" | "true" | "TRUE" => return serde_json::Value::Bool(true),
-            "f" | "F" | "false" | "FALSE" => return serde_json::Value::Bool(false),
-            _ => {}
-        }
-        if let Ok(n) = trimmed.parse::<i64>() {
-            return serde_json::Value::Number(n.into());
-        }
-        if let Some(num) = trimmed
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-        {
-            return serde_json::Value::Number(num);
-        }
+    if trimmed.eq_ignore_ascii_case("null") {
+        return serde_json::Value::Null;
+    }
+    match trimmed {
+        "t" | "T" | "true" | "TRUE" => return serde_json::Value::Bool(true),
+        "f" | "F" | "false" | "FALSE" => return serde_json::Value::Bool(false),
+        _ => {}
+    }
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Some(num) = trimmed
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+    {
+        return serde_json::Value::Number(num);
     }
 
-    // For quoted strings or non-numeric types, return as string.
-    // If it was quoted, the quotes were stripped by the state machine logic
-    // (by toggling in_quotes but not pushing the '"' char).
+    // For unquoted non-numeric values, return the normalized element text.
     serde_json::Value::String(trimmed.to_string())
 }
 
