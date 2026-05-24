@@ -26,7 +26,6 @@ fn apply_insert_conflict_target(
             let updates: Vec<(&str, qail_core::ast::Expr)> = obj
                 .keys()
                 .filter(|k| k.as_str() != pk_col)
-                .filter(|k| crate::rest::filters::is_safe_identifier(k))
                 .map(|k| {
                     (
                         k.as_str(),
@@ -42,6 +41,21 @@ fn apply_insert_conflict_target(
         }
         None => cmd,
     }
+}
+
+fn validate_overlay_object_keys(
+    operation: &str,
+    obj: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    for key in obj.keys() {
+        if !crate::rest::filters::is_safe_identifier(key) {
+            return Err(format!(
+                "Invalid {} overlay row_data key '{}'",
+                operation, key
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_overlay_object(
@@ -128,6 +142,7 @@ fn build_branch_overlay_merge_cmd(
     match operation {
         "insert" => {
             let obj = parse_overlay_object(operation, row_data_str)?;
+            validate_overlay_object_keys(operation, &obj)?;
             ensure_insert_row_pk_matches(table, row_pk, &obj, pk_col)?;
             let mut q = qail_core::ast::Qail::add(table);
             for (k, v) in &obj {
@@ -137,6 +152,7 @@ fn build_branch_overlay_merge_cmd(
         }
         "update" => {
             let obj = parse_overlay_object(operation, row_data_str)?;
+            validate_overlay_object_keys(operation, &obj)?;
             let pk_col = pk_col.unwrap_or("id");
             ensure_update_row_pk_matches(table, row_pk, &obj, pk_col)?;
             let mut q = qail_core::ast::Qail::set(table);
@@ -590,6 +606,29 @@ mod tests {
         let err = build_branch_overlay_merge_cmd("orders", "order-1", "update", "[]", Some("id"))
             .expect_err("non-object update overlay must fail closed");
         assert!(err.contains("expected object"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_unsafe_payload_keys() {
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "insert",
+            r#"{"id":"order-1","bad-key":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("unsafe insert overlay keys must fail closed");
+        assert!(err.contains("Invalid insert overlay row_data key"));
+
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "update",
+            r#"{"bad-key":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("unsafe update overlay keys must fail closed");
+        assert!(err.contains("Invalid update overlay row_data key"));
     }
 
     #[test]
