@@ -55,6 +55,45 @@ fn parse_overlay_object(
         .ok_or_else(|| format!("Invalid {} overlay row_data: expected object", operation))
 }
 
+fn ensure_insert_row_pk_matches(
+    table: &str,
+    row_pk: &str,
+    obj: &serde_json::Map<String, Value>,
+    pk_col: Option<&str>,
+) -> Result<(), String> {
+    let Some(pk_col) = pk_col else {
+        return Ok(());
+    };
+    let pk_value = obj.get(pk_col).ok_or_else(|| {
+        format!(
+            "{}.{}: insert overlay row_data is missing primary key '{}'",
+            table, row_pk, pk_col
+        )
+    })?;
+    let pk_text = json_pk_value_to_text(pk_value).ok_or_else(|| {
+        format!(
+            "{}.{}: insert overlay primary key '{}' must be a scalar",
+            table, row_pk, pk_col
+        )
+    })?;
+    if pk_text != row_pk {
+        return Err(format!(
+            "{}.{}: insert overlay primary key '{}' does not match row_data value '{}'",
+            table, row_pk, pk_col, pk_text
+        ));
+    }
+    Ok(())
+}
+
+fn json_pk_value_to_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
 fn build_branch_overlay_merge_cmd(
     table: &str,
     row_pk: &str,
@@ -65,6 +104,7 @@ fn build_branch_overlay_merge_cmd(
     match operation {
         "insert" => {
             let obj = parse_overlay_object(operation, row_data_str)?;
+            ensure_insert_row_pk_matches(table, row_pk, &obj, pk_col)?;
             let mut q = qail_core::ast::Qail::add(table);
             for (k, v) in &obj {
                 q = q.set_value(k, json_to_qail_value(v));
@@ -495,6 +535,29 @@ mod tests {
         let err = build_branch_overlay_merge_cmd("orders", "order-1", "insert", "{bad", Some("id"))
             .expect_err("malformed insert overlay JSON must fail closed");
         assert!(err.contains("Invalid insert overlay JSON"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_insert_pk_drift() {
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "insert",
+            r#"{"status":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("insert overlay missing pk must fail closed");
+        assert!(err.contains("missing primary key"));
+
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "insert",
+            r#"{"id":"order-2","status":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("insert overlay mismatched pk must fail closed");
+        assert!(err.contains("does not match"));
     }
 
     #[test]
