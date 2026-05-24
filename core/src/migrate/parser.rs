@@ -1408,22 +1408,27 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
 
     let privileges: Vec<Privilege> = privs_str
         .split(',')
-        .map(|s| match s.trim().to_uppercase().as_str() {
-            "ALL" => Privilege::All,
-            "SELECT" => Privilege::Select,
-            "INSERT" => Privilege::Insert,
-            "UPDATE" => Privilege::Update,
-            "DELETE" => Privilege::Delete,
-            "USAGE" => Privilege::Usage,
-            "EXECUTE" => Privilege::Execute,
-            _ => Privilege::All,
-        })
-        .collect();
+        .map(parse_privilege)
+        .collect::<Result<_, _>>()?;
 
     if is_revoke {
         Ok(Grant::revoke(privileges, obj_str, role_str))
     } else {
         Ok(Grant::new(privileges, obj_str, role_str))
+    }
+}
+
+fn parse_privilege(raw: &str) -> Result<Privilege, String> {
+    match raw.trim().to_uppercase().as_str() {
+        "ALL" => Ok(Privilege::All),
+        "SELECT" => Ok(Privilege::Select),
+        "INSERT" => Ok(Privilege::Insert),
+        "UPDATE" => Ok(Privilege::Update),
+        "DELETE" => Ok(Privilege::Delete),
+        "USAGE" => Ok(Privilege::Usage),
+        "EXECUTE" => Ok(Privilege::Execute),
+        "" => Err("grant/revoke privilege is empty".to_string()),
+        other => Err(format!("unknown grant/revoke privilege: {other}")),
     }
 }
 
@@ -2573,6 +2578,13 @@ $qail$
         assert!(matches!(schema.grants[0].action, GrantAction::Revoke));
         assert_eq!(schema.grants[0].on_object, "users");
         assert_eq!(schema.grants[0].to_role, "public");
+    }
+
+    #[test]
+    fn test_parse_grant_rejects_unknown_privilege() {
+        let input = "grant selcet on users to app_role";
+        let err = parse_qail(input).expect_err("unknown grant privilege should fail");
+        assert!(err.contains("unknown grant/revoke privilege: SELCET"));
     }
 
     #[test]
