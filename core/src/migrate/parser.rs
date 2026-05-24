@@ -523,7 +523,7 @@ fn parse_index(line: &str) -> Result<Index, String> {
         return Err("index table is required".to_string());
     }
     let cols_str = &rest[paren_start + 1..paren_end];
-    let columns: Vec<String> = split_top_level_csv(cols_str);
+    let columns: Vec<String> = split_top_level_csv(cols_str)?;
     if columns.is_empty() {
         return Err("index columns are required".to_string());
     }
@@ -559,7 +559,7 @@ fn parse_index(line: &str) -> Result<Index, String> {
     Ok(index)
 }
 
-fn split_top_level_csv(s: &str) -> Vec<String> {
+fn split_top_level_csv(s: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut depth = 0usize;
@@ -590,25 +590,39 @@ fn split_top_level_csv(s: &str) -> Vec<String> {
                 cur.push(ch);
             }
             ')' => {
-                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Err("unbalanced parentheses in index columns".to_string());
+                }
+                depth -= 1;
                 cur.push(ch);
             }
             ',' if depth == 0 => {
                 let piece = cur.trim();
-                if !piece.is_empty() {
-                    out.push(piece.to_string());
+                if piece.is_empty() {
+                    return Err("empty index column or expression".to_string());
                 }
+                out.push(piece.to_string());
                 cur.clear();
             }
             _ => cur.push(ch),
         }
     }
 
+    if quote.is_some() {
+        return Err("unterminated quote in index columns".to_string());
+    }
+    if depth != 0 {
+        return Err("unbalanced parentheses in index columns".to_string());
+    }
     let tail = cur.trim();
-    if !tail.is_empty() {
+    if tail.is_empty() {
+        if !s.trim().is_empty() {
+            return Err("empty index column or expression".to_string());
+        }
+    } else {
         out.push(tail.to_string());
     }
-    out
+    Ok(out)
 }
 
 /// Parse a rename hint.
@@ -2333,6 +2347,18 @@ table users {
             (
                 "index idx_users_email on users ()",
                 "index columns are required",
+            ),
+            (
+                "index idx_users_email on users (email,)",
+                "empty index column or expression",
+            ),
+            (
+                "index idx_users_email on users (,email)",
+                "empty index column or expression",
+            ),
+            (
+                "index idx_users_email on users (email,,name)",
+                "empty index column or expression",
             ),
         ] {
             let err = parse_qail(input).expect_err("invalid index should fail");
