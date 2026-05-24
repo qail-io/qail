@@ -23,6 +23,13 @@ fn parse_required_i32(raw: Option<String>, label: &str) -> Result<i32> {
         .map_err(|e| anyhow!("Invalid {label} {:?}: {}", raw, e))
 }
 
+fn public_rls_status_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_class")
+        .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
+        .filter("relkind", Operator::Eq, "r")
+        .filter("relnamespace", Operator::Eq, public_namespace_oid)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct IntrospectedKeyColumn {
     pub table: String,
@@ -614,9 +621,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     // ── 6. RLS Status (AST-native) ──────────────────────────────────────
-    let rls_cmd = Qail::get("pg_catalog.pg_class")
-        .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
-        .filter("relkind", Operator::Eq, "r"); // 'r' = ordinary table
+    let rls_cmd = public_rls_status_cmd(public_namespace_oid.clone());
 
     let rls_rows = driver
         .fetch_all(&rls_cmd)
@@ -1897,6 +1902,18 @@ mod tests {
         );
         assert!(parse_required_i32(None, "ordinal").is_err());
         assert!(parse_required_i32(Some("not-an-int".to_string()), "ordinal").is_err());
+    }
+
+    #[test]
+    fn rls_status_query_is_scoped_to_public_namespace() {
+        let cmd = public_rls_status_cmd("2200".to_string());
+
+        assert!(cmd.cages.iter().any(|cage| {
+            cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "relnamespace")
+                    && condition.value == qail_core::ast::Value::String("2200".to_string())
+            })
+        }));
     }
 
     #[test]

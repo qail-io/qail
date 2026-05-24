@@ -39,6 +39,17 @@ fn required_shadow_metadata_i32(row: &qail_pg::PgRow, idx: usize, label: &str) -
         .map_err(|_| anyhow!("Invalid shadow introspection metadata: malformed {}", label))
 }
 
+fn public_rls_status_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_class")
+        .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
+        .filter("relkind", qail_core::ast::Operator::Eq, "r")
+        .filter(
+            "relnamespace",
+            qail_core::ast::Operator::Eq,
+            public_namespace_oid,
+        )
+}
+
 /// Shadow database state
 #[derive(Debug, Clone)]
 pub struct ShadowState {
@@ -428,6 +439,18 @@ mod tests {
         };
         assert!(required_shadow_metadata_i32(&malformed, 0, "ordinal_position").is_err());
     }
+
+    #[test]
+    fn shadow_rls_status_query_is_scoped_to_public_namespace() {
+        let cmd = public_rls_status_cmd("2200".to_string());
+
+        assert!(cmd.cages.iter().any(|cage| {
+            cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, Expr::Named(name) if name == "relnamespace")
+                    && condition.value == qail_core::ast::Value::String("2200".to_string())
+            })
+        }));
+    }
 }
 
 /// Verify an active shadow receipt by SQL checksum.
@@ -478,6 +501,20 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     use qail_core::ast::Operator;
 
     let mut schema = Schema::default();
+
+    let public_ns_cmd = Qail::get("pg_catalog.pg_namespace")
+        .columns(["oid"])
+        .filter("nspname", Operator::Eq, "public");
+    let public_ns_rows = driver
+        .fetch_all(&public_ns_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query public namespace OID: {}", e))?;
+    let public_namespace_oid = public_ns_rows
+        .first()
+        .map(|row| required_shadow_metadata_string(row, 0, "public namespace oid"))
+        .transpose()?
+        .ok_or_else(|| anyhow!("Public schema not found in pg_namespace"))?;
+
     let (single_unique_columns, unique_constraint_indexes, unique_constraint_names) =
         introspect_unique_constraints(driver).await?;
     let primary_key_columns = introspect_primary_key_columns(driver).await?;
@@ -779,9 +816,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     }
 
     // 5. Query RLS status from pg_class
-    let rls_cmd = Qail::get("pg_catalog.pg_class")
-        .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
-        .filter("relkind", Operator::Eq, "r");
+    let rls_cmd = public_rls_status_cmd(public_namespace_oid);
 
     let rls_rows = driver
         .fetch_all(&rls_cmd)
