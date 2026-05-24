@@ -348,6 +348,177 @@ async fn prepare_tenant_guarded_query_filters_insert_select_source_and_injects_t
     ));
 }
 
+#[tokio::test]
+async fn prepare_tenant_guarded_query_scopes_merge_target_source_and_insert_values() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::merge_into("orders")
+        .using_table_as("source_orders", "s")
+        .merge_on_column("orders.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_matched_update(&[("total", qail_core::ast::Expr::Named("s.total".to_string()))])
+        .when_not_matched_insert(
+            &["id", "total"],
+            &[
+                qail_core::ast::Expr::Named("s.id".to_string()),
+                qail_core::ast::Expr::Named("s.total".to_string()),
+            ],
+        );
+
+    let plan = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    assert!(plan.is_some());
+    let merge = cmd.merge.as_ref().expect("merge spec");
+    assert!(merge.on.iter().any(|condition| {
+        matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "orders.tenant_id")
+            && matches!(&condition.value, qail_core::ast::Value::Column(name) if name == "s.tenant_id")
+    }));
+    assert!(merge.clauses.iter().any(|clause| {
+        matches!(clause.match_kind, qail_core::ast::MergeMatchKind::Matched)
+            && clause.condition.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "orders.tenant_id")
+                    && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+            })
+    }));
+    assert!(merge.clauses.iter().any(|clause| {
+        matches!(clause.match_kind, qail_core::ast::MergeMatchKind::NotMatchedByTarget)
+            && clause.condition.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "s.tenant_id")
+                    && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+            })
+            && matches!(&clause.action, qail_core::ast::MergeAction::Insert { columns, values }
+                if columns.iter().any(|column| column == "tenant_id")
+                    && values.iter().any(|expr| {
+                        matches!(expr, qail_core::ast::Expr::Literal(qail_core::ast::Value::String(value)) if value == "tenant-1")
+                    }))
+    }));
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_filters_merge_query_source() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let source = qail_core::ast::Qail::get("source_orders").columns(["id", "total"]);
+    let mut cmd = qail_core::ast::Qail::merge_into("orders")
+        .using_query_as(source, "s")
+        .merge_on_column("orders.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_not_matched_insert(
+            &["id", "total"],
+            &[
+                qail_core::ast::Expr::Named("s.id".to_string()),
+                qail_core::ast::Expr::Named("s.total".to_string()),
+            ],
+        );
+
+    prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    let merge = cmd.merge.as_ref().expect("merge spec");
+    let qail_core::ast::MergeSource::Query { query, .. } = &merge.source else {
+        panic!("expected query source");
+    };
+    assert!(query.cages.iter().any(|cage| {
+        matches!(cage.kind, qail_core::ast::CageKind::Filter)
+            && cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "tenant_id")
+                    && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+            })
+    }));
+    assert!(merge.clauses.iter().any(|clause| {
+        matches!(&clause.action, qail_core::ast::MergeAction::Insert { columns, values }
+            if columns.iter().any(|column| column == "tenant_id")
+                && values.iter().any(|expr| {
+                    matches!(expr, qail_core::ast::Expr::Literal(qail_core::ast::Value::String(value)) if value == "tenant-1")
+                }))
+    }));
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_filters_expression_subquery() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::get("orders").columns(["id"]);
+    cmd.columns.push(qail_core::ast::Expr::Subquery {
+        query: Box::new(qail_core::ast::Qail::get("source_orders").columns(["total"])),
+        alias: Some("source_total".to_string()),
+    });
+
+    prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    let subquery = cmd
+        .columns
+        .iter()
+        .find_map(|expr| {
+            if let qail_core::ast::Expr::Subquery { query, .. } = expr {
+                Some(query)
+            } else {
+                None
+            }
+        })
+        .expect("expression subquery");
+    assert!(subquery.cages.iter().any(|cage| {
+        matches!(cage.kind, qail_core::ast::CageKind::Filter)
+            && cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "tenant_id")
+                    && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+            })
+    }));
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_filters_condition_value_subquery() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::get("orders").filter(
+        "id",
+        qail_core::ast::Operator::In,
+        qail_core::ast::Value::Subquery(Box::new(
+            qail_core::ast::Qail::get("source_orders").columns(["id"]),
+        )),
+    );
+
+    prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    let subquery = cmd
+        .cages
+        .iter()
+        .flat_map(|cage| &cage.conditions)
+        .find_map(|condition| {
+            if let qail_core::ast::Value::Subquery(query) = &condition.value {
+                Some(query)
+            } else {
+                None
+            }
+        })
+        .expect("condition value subquery");
+    assert!(subquery.cages.iter().any(|cage| {
+        matches!(cage.kind, qail_core::ast::CageKind::Filter)
+            && cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "tenant_id")
+                    && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+            })
+    }));
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_rejects_merge_tenant_column_update() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::merge_into("orders")
+        .using_table_as("source_orders", "s")
+        .merge_on_column("orders.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_matched_update(&[(
+            "tenant_id",
+            qail_core::ast::Expr::Named("s.tenant_id".to_string()),
+        )]);
+
+    let err = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("cannot update tenant guard column"),
+        "MERGE must not be able to overwrite tenant guard column"
+    );
+}
+
 #[test]
 fn inject_join_tenant_filter_scopes_left_join_on_clause() {
     let mut cmd =

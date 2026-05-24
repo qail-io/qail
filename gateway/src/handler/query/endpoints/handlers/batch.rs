@@ -29,33 +29,6 @@ fn mark_transaction_results_rolled_back(results: &mut [BatchQueryResult]) {
     }
 }
 
-fn batch_command_is_read_only(cmd: &qail_core::ast::Qail) -> bool {
-    let action_is_read_only = matches!(
-        cmd.action,
-        qail_core::ast::Action::Get
-            | qail_core::ast::Action::Cnt
-            | qail_core::ast::Action::JsonTable
-            | qail_core::ast::Action::With
-            | qail_core::ast::Action::Export
-    );
-    action_is_read_only
-        && cmd.ctes.iter().all(|cte| {
-            batch_command_is_read_only(&cte.base_query)
-                && cte
-                    .recursive_query
-                    .as_deref()
-                    .is_none_or(batch_command_is_read_only)
-        })
-        && cmd
-            .source_query
-            .as_deref()
-            .is_none_or(batch_command_is_read_only)
-        && cmd
-            .set_ops
-            .iter()
-            .all(|(_, set_query)| batch_command_is_read_only(set_query))
-}
-
 /// Execute a batch of Qail queries (POST /qail/batch).
 pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
@@ -224,7 +197,7 @@ pub async fn execute_batch(
         }
 
         clamp_query_limit(&mut cmd, state.config.max_result_rows);
-        let command_is_read_only = batch_command_is_read_only(&cmd);
+        let command_is_read_only = qail_command_is_read_only(&cmd);
 
         if conn.is_none() {
             let mut acquired = state.acquire_with_auth_rls_guarded(&auth, None).await?;

@@ -17,7 +17,8 @@
 //! - **Performance**: O(n) scan per response, no allocations beyond the counter.
 
 use qail_core::ast::{
-    Action, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, Qail, Value,
+    Action, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, MergeAction,
+    MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
 use serde_json::Value as JsonValue;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -514,6 +515,334 @@ fn inject_join_tenant_filter(
     }
 }
 
+fn condition_references_tenant_column(condition: &Condition, tenant_column: &str) -> bool {
+    expression_projects_tenant_column(&condition.left, tenant_column)
+        || matches!(&condition.value, Value::Column(column) if projected_name_matches_tenant(column, tenant_column))
+}
+
+fn merge_target_tenant_column(cmd: &Qail, tenant_column: &str) -> String {
+    let qualifier = cmd
+        .merge
+        .as_ref()
+        .and_then(|merge| merge.target_alias.as_deref())
+        .map(str::to_string)
+        .unwrap_or_else(|| table_ref_name_and_qualifier(&cmd.table).1);
+    format!("{}.{}", qualifier, tenant_column)
+}
+
+fn reject_merge_tenant_update_mutation(
+    cmd: &Qail,
+    tenant_column: &str,
+) -> Result<(), TenantProjectionError> {
+    let assigns_tenant = cmd.merge.as_ref().is_some_and(|merge| {
+        merge.clauses.iter().any(|clause| {
+            matches!(&clause.action, MergeAction::Update { assignments }
+                if assignments
+                    .iter()
+                    .any(|(column, _)| same_identifier(column, tenant_column)))
+        })
+    });
+
+    if assigns_tenant {
+        return Err(tenant_projection_error(
+            tenant_column,
+            format!(
+                "Tenant-scoped MERGE cannot update tenant guard column '{}'",
+                tenant_column
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn scope_merge_insert_values(
+    cmd: &mut Qail,
+    tenant_column: &str,
+    tenant_id: &str,
+) -> Result<(), TenantProjectionError> {
+    let table = cmd.table.clone();
+    let Some(merge) = &mut cmd.merge else {
+        return Ok(());
+    };
+
+    for clause in &mut merge.clauses {
+        let MergeAction::Insert { columns, values } = &mut clause.action else {
+            continue;
+        };
+
+        if columns.is_empty() {
+            return Err(tenant_projection_error(
+                tenant_column,
+                format!(
+                    "Tenant-scoped MERGE into '{}' requires explicit insert columns",
+                    table
+                ),
+            ));
+        }
+
+        let tenant_expr = Expr::Literal(Value::String(tenant_id.to_string()));
+        if let Some(pos) = columns
+            .iter()
+            .position(|column| same_identifier(column, tenant_column))
+        {
+            if let Some(value) = values.get_mut(pos) {
+                *value = tenant_expr;
+            } else {
+                values.push(tenant_expr);
+            }
+        } else {
+            columns.push(tenant_column.to_string());
+            values.push(tenant_expr);
+        }
+    }
+
+    Ok(())
+}
+
+fn scope_merge_target(
+    cmd: &mut Qail,
+    tenant_column: &str,
+    tenant_id: &str,
+    source_condition: Option<Condition>,
+) -> Result<(), TenantProjectionError> {
+    reject_merge_tenant_update_mutation(cmd, tenant_column)?;
+
+    let target_column = merge_target_tenant_column(cmd, tenant_column);
+    let target_condition = tenant_filter_condition(target_column.clone(), tenant_id);
+    let source_column = source_condition.as_ref().and_then(|condition| {
+        if let Expr::Named(column) = &condition.left {
+            Some(column.clone())
+        } else {
+            None
+        }
+    });
+
+    if let Some(merge) = &mut cmd.merge {
+        merge
+            .on
+            .retain(|condition| !condition_references_tenant_column(condition, tenant_column));
+        if let Some(source_column) = source_column {
+            merge.on.push(Condition {
+                left: Expr::Named(target_column),
+                op: Operator::Eq,
+                value: Value::Column(source_column),
+                is_array_unnest: false,
+            });
+        }
+
+        for clause in &mut merge.clauses {
+            clause
+                .condition
+                .retain(|condition| !condition_references_tenant_column(condition, tenant_column));
+            match clause.match_kind {
+                MergeMatchKind::Matched | MergeMatchKind::NotMatchedBySource => {
+                    clause.condition.push(target_condition.clone());
+                }
+                MergeMatchKind::NotMatchedByTarget => {
+                    if let Some(condition) = &source_condition {
+                        clause.condition.push(condition.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    scope_merge_insert_values(cmd, tenant_column, tenant_id)
+}
+
+fn prepare_value_subquery_guards(
+    state: &crate::GatewayState,
+    auth: &crate::auth::AuthContext,
+    value: &mut Value,
+    plan: &mut Option<TenantGuardPlan>,
+) -> Result<(), TenantProjectionError> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                prepare_value_subquery_guards(state, auth, value, plan)?;
+            }
+        }
+        Value::Subquery(query) => {
+            if let Some(subquery_plan) = prepare_tenant_guarded_query_inner(
+                state,
+                auth,
+                query,
+                TenantGuardMode::InsertSource,
+            )? {
+                merge_tenant_guard_plan(plan, subquery_plan);
+            }
+        }
+        Value::Expr(expr) => prepare_expr_subquery_guards(state, auth, expr, plan)?,
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn prepare_condition_subquery_guards(
+    state: &crate::GatewayState,
+    auth: &crate::auth::AuthContext,
+    condition: &mut Condition,
+    plan: &mut Option<TenantGuardPlan>,
+) -> Result<(), TenantProjectionError> {
+    prepare_expr_subquery_guards(state, auth, &mut condition.left, plan)?;
+    prepare_value_subquery_guards(state, auth, &mut condition.value, plan)
+}
+
+fn prepare_expr_subquery_guards(
+    state: &crate::GatewayState,
+    auth: &crate::auth::AuthContext,
+    expr: &mut Expr,
+    plan: &mut Option<TenantGuardPlan>,
+) -> Result<(), TenantProjectionError> {
+    match expr {
+        Expr::Aggregate {
+            filter: Some(filter),
+            ..
+        } => {
+            for condition in filter {
+                prepare_condition_subquery_guards(state, auth, condition, plan)?;
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
+            prepare_expr_subquery_guards(state, auth, expr, plan)?;
+        }
+        Expr::Window { params, order, .. } => {
+            for expr in params {
+                prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+            for cage in order {
+                for condition in &mut cage.conditions {
+                    prepare_condition_subquery_guards(state, auth, condition, plan)?;
+                }
+            }
+        }
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            for (condition, then_expr) in when_clauses {
+                prepare_condition_subquery_guards(state, auth, condition, plan)?;
+                prepare_expr_subquery_guards(state, auth, then_expr, plan)?;
+            }
+            if let Some(expr) = else_value {
+                prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+        }
+        Expr::FunctionCall { args, .. } => {
+            for expr in args {
+                prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+        }
+        Expr::SpecialFunction { args, .. } => {
+            for (_, expr) in args {
+                prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            prepare_expr_subquery_guards(state, auth, left, plan)?;
+            prepare_expr_subquery_guards(state, auth, right, plan)?;
+        }
+        Expr::Literal(value) => prepare_value_subquery_guards(state, auth, value, plan)?,
+        Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+            for expr in elements {
+                prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+        }
+        Expr::Subscript { expr, index, .. } => {
+            prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            prepare_expr_subquery_guards(state, auth, index, plan)?;
+        }
+        Expr::FieldAccess { expr, .. } => prepare_expr_subquery_guards(state, auth, expr, plan)?,
+        Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+            if let Some(subquery_plan) = prepare_tenant_guarded_query_inner(
+                state,
+                auth,
+                query,
+                TenantGuardMode::InsertSource,
+            )? {
+                merge_tenant_guard_plan(plan, subquery_plan);
+            }
+        }
+        Expr::Star
+        | Expr::Named(_)
+        | Expr::Aliased { .. }
+        | Expr::Aggregate { filter: None, .. }
+        | Expr::Def { .. }
+        | Expr::JsonAccess { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn prepare_embedded_subquery_guards(
+    state: &crate::GatewayState,
+    auth: &crate::auth::AuthContext,
+    cmd: &mut Qail,
+    plan: &mut Option<TenantGuardPlan>,
+) -> Result<(), TenantProjectionError> {
+    for expr in &mut cmd.columns {
+        prepare_expr_subquery_guards(state, auth, expr, plan)?;
+    }
+    for expr in &mut cmd.distinct_on {
+        prepare_expr_subquery_guards(state, auth, expr, plan)?;
+    }
+    if let Some(returning) = &mut cmd.returning {
+        for expr in returning {
+            prepare_expr_subquery_guards(state, auth, expr, plan)?;
+        }
+    }
+    for cage in &mut cmd.cages {
+        for condition in &mut cage.conditions {
+            prepare_condition_subquery_guards(state, auth, condition, plan)?;
+        }
+    }
+    for condition in &mut cmd.having {
+        prepare_condition_subquery_guards(state, auth, condition, plan)?;
+    }
+    for join in &mut cmd.joins {
+        if let Some(conditions) = &mut join.on {
+            for condition in conditions {
+                prepare_condition_subquery_guards(state, auth, condition, plan)?;
+            }
+        }
+    }
+    if let Some(on_conflict) = &mut cmd.on_conflict
+        && let qail_core::ast::ConflictAction::DoUpdate { assignments } = &mut on_conflict.action
+    {
+        for (_, expr) in assignments {
+            prepare_expr_subquery_guards(state, auth, expr, plan)?;
+        }
+    }
+    if let Some(merge) = &mut cmd.merge {
+        for condition in &mut merge.on {
+            prepare_condition_subquery_guards(state, auth, condition, plan)?;
+        }
+        for clause in &mut merge.clauses {
+            for condition in &mut clause.condition {
+                prepare_condition_subquery_guards(state, auth, condition, plan)?;
+            }
+            match &mut clause.action {
+                MergeAction::Update { assignments } => {
+                    for (_, expr) in assignments {
+                        prepare_expr_subquery_guards(state, auth, expr, plan)?;
+                    }
+                }
+                MergeAction::Insert { values, .. } => {
+                    for expr in values {
+                        prepare_expr_subquery_guards(state, auth, expr, plan)?;
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn expression_projects_tenant_column(expr: &Expr, tenant_column: &str) -> bool {
     match expr {
         Expr::Named(name) => projected_name_matches_tenant(name, tenant_column),
@@ -661,6 +990,37 @@ fn prepare_tenant_guarded_query_inner(
         }
     }
 
+    let mut merge_source_condition = None;
+    if let Some(merge) = &mut cmd.merge {
+        match &mut merge.source {
+            MergeSource::Query { query, .. } => {
+                let source_plan = prepare_tenant_guarded_query_inner(
+                    state,
+                    auth,
+                    query,
+                    TenantGuardMode::InsertSource,
+                )?;
+                if let Some(source_plan) = source_plan {
+                    merge_tenant_guard_plan(&mut plan, source_plan);
+                }
+            }
+            MergeSource::Table { name, alias } => {
+                let (source_table, source_qualifier) = table_ref_name_and_qualifier(name);
+                if let Some(source_tenant_column) =
+                    tenant_guard_column_for_table(state, &source_table)
+                {
+                    let qualifier = alias.as_deref().unwrap_or(&source_qualifier);
+                    merge_source_condition = Some(tenant_filter_condition(
+                        format!("{}.{}", qualifier, source_tenant_column),
+                        tenant_id,
+                    ));
+                }
+            }
+        }
+    }
+
+    prepare_embedded_subquery_guards(state, auth, cmd, &mut plan)?;
+
     let tenant_guard_column = auth.tenant_id.as_ref().and_then(|_| {
         tenant_guard_column_for_table(state, &table_ref_name_and_qualifier(&cmd.table).0)
     });
@@ -690,6 +1050,12 @@ fn prepare_tenant_guarded_query_inner(
             } else {
                 inject_tenant_payload(cmd, tenant_column, tenant_id)?;
             }
+            merge_tenant_guard_plan(
+                &mut plan,
+                TenantGuardPlan::filter_guard(tenant_column.clone()),
+            );
+        } else if cmd.action == Action::Merge {
+            scope_merge_target(cmd, tenant_column, tenant_id, merge_source_condition)?;
             merge_tenant_guard_plan(
                 &mut plan,
                 TenantGuardPlan::filter_guard(tenant_column.clone()),

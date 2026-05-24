@@ -1,7 +1,7 @@
 use super::rules::{auth_scoped_cache_key, exact_cache_key};
 use super::{
-    execute_query_binary, execute_query_export, is_query_allowed, reject_dangerous_action,
-    reject_non_read_action,
+    execute_query_binary, execute_query_export, is_query_allowed, qail_command_is_read_only,
+    reject_dangerous_action, reject_non_read_action,
 };
 use crate::GatewayState;
 use crate::cache::QueryCache;
@@ -384,6 +384,17 @@ fn reject_non_read_action_blocks_expression_subquery_mutation() {
     });
 
     assert!(reject_non_read_action(&cmd, "test").is_err());
+}
+
+#[test]
+fn shared_read_only_gate_blocks_expression_subquery_mutation() {
+    let mut cmd = qail_core::ast::Qail::get("safe");
+    cmd.columns.push(qail_core::ast::Expr::Subquery {
+        query: Box::new(qail_core::ast::Qail::add("evil")),
+        alias: Some("evil_count".to_string()),
+    });
+
+    assert!(!qail_command_is_read_only(&cmd));
 }
 
 #[tokio::test]

@@ -118,6 +118,103 @@ fn test_apply_policies_recurses_into_cte_body() {
 }
 
 #[test]
+fn test_apply_policies_recurses_into_expression_subquery_body() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_open".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "source_tenant".to_string(),
+        table: "source_orders".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_expr".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("orders").columns(["id"]);
+    cmd.columns.push(Expr::Subquery {
+        query: Box::new(Qail::get("source_orders").columns(["total"])),
+        alias: Some("source_total".to_string()),
+    });
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    let subquery = cmd
+        .columns
+        .iter()
+        .find_map(|expr| {
+            if let Expr::Subquery { query, .. } = expr {
+                Some(query)
+            } else {
+                None
+            }
+        })
+        .expect("expression subquery");
+    let condition = &subquery.cages[0].conditions[0];
+    assert_eq!(condition.left, Expr::Named("tenant_id".to_string()));
+    assert_eq!(condition.value, Value::String("tenant-1".to_string()));
+}
+
+#[test]
+fn test_apply_policies_recurses_into_merge_query_source() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_update".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "source_tenant".to_string(),
+        table: "source_orders".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_merge_source".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let source = Qail::get("source_orders").columns(["id", "total"]);
+    let mut cmd = Qail::merge_into("orders")
+        .using_query_as(source, "s")
+        .merge_on_column("orders.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("total", Expr::Named("s.total".to_string()))]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    let merge = cmd.merge.as_ref().expect("merge spec");
+    let qail_core::ast::MergeSource::Query { query, .. } = &merge.source else {
+        panic!("expected query source");
+    };
+    let condition = &query.cages[0].conditions[0];
+    assert_eq!(condition.left, Expr::Named("tenant_id".to_string()));
+    assert_eq!(condition.value, Value::String("tenant-1".to_string()));
+}
+
+#[test]
 fn test_apply_policies_adds_joined_table_filter_to_join_clause() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {
@@ -1454,6 +1551,36 @@ fn test_parse_expanded_filter_unescapes_quoted_tenant_id() {
         .expect("expanded policy filter should parse");
 
     assert_eq!(condition.value, Value::String("O'Brien".to_string()));
+}
+
+#[test]
+fn test_parse_expanded_filter_keeps_operator_outside_quoted_user_id() {
+    let engine = PolicyEngine::new();
+    let auth = AuthContext {
+        user_id: "alice != admin".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let expanded = engine.expand_filter("user_id = $user_id", &auth);
+    let condition = engine
+        .parse_filter_to_condition(&expanded)
+        .expect("expanded policy filter should parse");
+
+    assert_eq!(condition.op, Operator::Eq);
+    assert_eq!(condition.value, Value::String("alice != admin".to_string()));
+}
+
+#[test]
+fn test_parse_expanded_filter_keeps_equals_inside_quoted_inequality_value() {
+    let engine = PolicyEngine::new();
+    let condition = engine
+        .parse_filter_to_condition("status != 'role = admin'")
+        .expect("policy filter should parse");
+
+    assert_eq!(condition.op, Operator::Ne);
+    assert_eq!(condition.value, Value::String("role = admin".to_string()));
 }
 
 #[test]

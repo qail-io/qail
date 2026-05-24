@@ -277,7 +277,170 @@ impl Qail {
             **set_query = set_query.as_ref().clone().with_rls(ctx)?;
         }
 
+        self.scope_embedded_expr_rls(ctx)?;
+
         Ok(self)
+    }
+
+    fn scope_value_nested_rls(value: &mut Value, ctx: &RlsContext) -> QailBuildResult<()> {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    Self::scope_value_nested_rls(value, ctx)?;
+                }
+            }
+            Value::Subquery(query) => {
+                **query = query.as_ref().clone().with_rls(ctx)?;
+            }
+            Value::Expr(expr) => Self::scope_expr_nested_rls(expr, ctx)?,
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn scope_condition_nested_rls(
+        condition: &mut Condition,
+        ctx: &RlsContext,
+    ) -> QailBuildResult<()> {
+        Self::scope_expr_nested_rls(&mut condition.left, ctx)?;
+        Self::scope_value_nested_rls(&mut condition.value, ctx)
+    }
+
+    fn scope_expr_nested_rls(expr: &mut Expr, ctx: &RlsContext) -> QailBuildResult<()> {
+        match expr {
+            Expr::Aggregate {
+                filter: Some(filter),
+                ..
+            } => {
+                for condition in filter {
+                    Self::scope_condition_nested_rls(condition, ctx)?;
+                }
+            }
+            Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
+                Self::scope_expr_nested_rls(expr, ctx)?;
+            }
+            Expr::Window { params, order, .. } => {
+                for expr in params {
+                    Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+                for cage in order {
+                    for condition in &mut cage.conditions {
+                        Self::scope_condition_nested_rls(condition, ctx)?;
+                    }
+                }
+            }
+            Expr::Case {
+                when_clauses,
+                else_value,
+                ..
+            } => {
+                for (condition, then_expr) in when_clauses {
+                    Self::scope_condition_nested_rls(condition, ctx)?;
+                    Self::scope_expr_nested_rls(then_expr, ctx)?;
+                }
+                if let Some(expr) = else_value {
+                    Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+            }
+            Expr::FunctionCall { args, .. } => {
+                for expr in args {
+                    Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+            }
+            Expr::SpecialFunction { args, .. } => {
+                for (_, expr) in args {
+                    Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::scope_expr_nested_rls(left, ctx)?;
+                Self::scope_expr_nested_rls(right, ctx)?;
+            }
+            Expr::Literal(value) => Self::scope_value_nested_rls(value, ctx)?,
+            Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+                for expr in elements {
+                    Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+            }
+            Expr::Subscript { expr, index, .. } => {
+                Self::scope_expr_nested_rls(expr, ctx)?;
+                Self::scope_expr_nested_rls(index, ctx)?;
+            }
+            Expr::FieldAccess { expr, .. } => Self::scope_expr_nested_rls(expr, ctx)?,
+            Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+                **query = query.as_ref().clone().with_rls(ctx)?;
+            }
+            Expr::Star
+            | Expr::Named(_)
+            | Expr::Aliased { .. }
+            | Expr::Aggregate { filter: None, .. }
+            | Expr::Def { .. }
+            | Expr::JsonAccess { .. } => {}
+        }
+
+        Ok(())
+    }
+
+    fn scope_embedded_expr_rls(&mut self, ctx: &RlsContext) -> QailBuildResult<()> {
+        for expr in &mut self.columns {
+            Self::scope_expr_nested_rls(expr, ctx)?;
+        }
+        for expr in &mut self.distinct_on {
+            Self::scope_expr_nested_rls(expr, ctx)?;
+        }
+        if let Some(returning) = &mut self.returning {
+            for expr in returning {
+                Self::scope_expr_nested_rls(expr, ctx)?;
+            }
+        }
+        for cage in &mut self.cages {
+            for condition in &mut cage.conditions {
+                Self::scope_condition_nested_rls(condition, ctx)?;
+            }
+        }
+        for condition in &mut self.having {
+            Self::scope_condition_nested_rls(condition, ctx)?;
+        }
+        for join in &mut self.joins {
+            if let Some(conditions) = &mut join.on {
+                for condition in conditions {
+                    Self::scope_condition_nested_rls(condition, ctx)?;
+                }
+            }
+        }
+        if let Some(on_conflict) = &mut self.on_conflict
+            && let crate::ast::ConflictAction::DoUpdate { assignments } = &mut on_conflict.action
+        {
+            for (_, expr) in assignments {
+                Self::scope_expr_nested_rls(expr, ctx)?;
+            }
+        }
+        if let Some(merge) = &mut self.merge {
+            for condition in &mut merge.on {
+                Self::scope_condition_nested_rls(condition, ctx)?;
+            }
+            for clause in &mut merge.clauses {
+                for condition in &mut clause.condition {
+                    Self::scope_condition_nested_rls(condition, ctx)?;
+                }
+                match &mut clause.action {
+                    MergeAction::Update { assignments } => {
+                        for (_, expr) in assignments {
+                            Self::scope_expr_nested_rls(expr, ctx)?;
+                        }
+                    }
+                    MergeAction::Insert { values, .. } => {
+                        for expr in values {
+                            Self::scope_expr_nested_rls(expr, ctx)?;
+                        }
+                    }
+                    MergeAction::Delete | MergeAction::DoNothing => {}
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn scope_update_tenant(self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
@@ -1044,6 +1207,78 @@ mod tests {
             }),
             "Expected tenant_id = NULL in payload"
         );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_expression_subquery() {
+        register_tenant_table("_rls_expr_orders", "tenant_id");
+        register_tenant_table("_rls_expr_invoices", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-expr");
+        let mut query = Qail::get("_rls_expr_orders").columns(["id"]);
+        query.columns.push(Expr::Subquery {
+            query: Box::new(Qail::get("_rls_expr_invoices").columns(["total"])),
+            alias: Some("invoice_total".to_string()),
+        });
+
+        let query = query.with_rls(&ctx).expect("rls should apply");
+        let subquery = query
+            .columns
+            .iter()
+            .find_map(|expr| {
+                if let Expr::Subquery { query, .. } = expr {
+                    Some(query)
+                } else {
+                    None
+                }
+            })
+            .expect("expression subquery");
+
+        assert!(subquery.cages.iter().any(|cage| {
+            matches!(cage.kind, CageKind::Filter) && cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                    && matches!(&condition.value, Value::String(value) if value == "tenant-expr")
+            })
+        }));
+    }
+
+    #[test]
+    fn test_with_rls_scopes_condition_value_subquery() {
+        register_tenant_table("_rls_condition_orders", "tenant_id");
+        register_tenant_table("_rls_condition_invoices", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-condition");
+        let query = Qail::get("_rls_condition_orders")
+            .filter(
+                "id",
+                Operator::In,
+                Value::Subquery(Box::new(
+                    Qail::get("_rls_condition_invoices").columns(["order_id"]),
+                )),
+            )
+            .with_rls(&ctx)
+            .expect("rls should apply");
+
+        let subquery = query
+            .cages
+            .iter()
+            .flat_map(|cage| &cage.conditions)
+            .find_map(|condition| {
+                if let Value::Subquery(query) = &condition.value {
+                    Some(query)
+                } else {
+                    None
+                }
+            })
+            .expect("condition subquery");
+
+        assert!(subquery.cages.iter().any(|cage| {
+            matches!(cage.kind, CageKind::Filter)
+                && cage.conditions.iter().any(|condition| {
+                    matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                        && matches!(&condition.value, Value::String(value) if value == "tenant-condition")
+                })
+        }));
     }
 
     #[test]

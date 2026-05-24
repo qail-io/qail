@@ -2,7 +2,7 @@ use std::fs;
 
 use qail_core::ast::{
     Action, Cage, CageKind, Condition, ConflictAction, Expr, Join, JoinKind, LogicalOp,
-    MergeAction, Operator, Qail, Value,
+    MergeAction, MergeSource, Operator, Qail, Value,
 };
 
 use crate::auth::AuthContext;
@@ -882,6 +882,182 @@ impl PolicyEngine {
         }])
     }
 
+    fn apply_value_subquery_policies(
+        &self,
+        auth: &AuthContext,
+        value: &mut Value,
+    ) -> Result<(), GatewayError> {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    self.apply_value_subquery_policies(auth, value)?;
+                }
+            }
+            Value::Subquery(query) => self.apply_policies_inner(auth, query)?,
+            Value::Expr(expr) => self.apply_expr_subquery_policies(auth, expr)?,
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn apply_condition_subquery_policies(
+        &self,
+        auth: &AuthContext,
+        condition: &mut Condition,
+    ) -> Result<(), GatewayError> {
+        self.apply_expr_subquery_policies(auth, &mut condition.left)?;
+        self.apply_value_subquery_policies(auth, &mut condition.value)
+    }
+
+    fn apply_expr_subquery_policies(
+        &self,
+        auth: &AuthContext,
+        expr: &mut Expr,
+    ) -> Result<(), GatewayError> {
+        match expr {
+            Expr::Aggregate {
+                filter: Some(filter),
+                ..
+            } => {
+                for condition in filter {
+                    self.apply_condition_subquery_policies(auth, condition)?;
+                }
+            }
+            Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
+                self.apply_expr_subquery_policies(auth, expr)?;
+            }
+            Expr::Window { params, order, .. } => {
+                for expr in params {
+                    self.apply_expr_subquery_policies(auth, expr)?;
+                }
+                for cage in order {
+                    for condition in &mut cage.conditions {
+                        self.apply_condition_subquery_policies(auth, condition)?;
+                    }
+                }
+            }
+            Expr::Case {
+                when_clauses,
+                else_value,
+                ..
+            } => {
+                for (condition, then_expr) in when_clauses {
+                    self.apply_condition_subquery_policies(auth, condition)?;
+                    self.apply_expr_subquery_policies(auth, then_expr)?;
+                }
+                if let Some(expr) = else_value {
+                    self.apply_expr_subquery_policies(auth, expr)?;
+                }
+            }
+            Expr::FunctionCall { args, .. } => {
+                for expr in args {
+                    self.apply_expr_subquery_policies(auth, expr)?;
+                }
+            }
+            Expr::SpecialFunction { args, .. } => {
+                for (_, expr) in args {
+                    self.apply_expr_subquery_policies(auth, expr)?;
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                self.apply_expr_subquery_policies(auth, left)?;
+                self.apply_expr_subquery_policies(auth, right)?;
+            }
+            Expr::Literal(value) => self.apply_value_subquery_policies(auth, value)?,
+            Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+                for expr in elements {
+                    self.apply_expr_subquery_policies(auth, expr)?;
+                }
+            }
+            Expr::Subscript { expr, index, .. } => {
+                self.apply_expr_subquery_policies(auth, expr)?;
+                self.apply_expr_subquery_policies(auth, index)?;
+            }
+            Expr::FieldAccess { expr, .. } => self.apply_expr_subquery_policies(auth, expr)?,
+            Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+                self.apply_policies_inner(auth, query)?;
+            }
+            Expr::Star
+            | Expr::Named(_)
+            | Expr::Aliased { .. }
+            | Expr::Aggregate { filter: None, .. }
+            | Expr::Def { .. }
+            | Expr::JsonAccess { .. } => {}
+        }
+
+        Ok(())
+    }
+
+    fn apply_embedded_subquery_policies(
+        &self,
+        auth: &AuthContext,
+        cmd: &mut Qail,
+    ) -> Result<(), GatewayError> {
+        for expr in &mut cmd.columns {
+            self.apply_expr_subquery_policies(auth, expr)?;
+        }
+        for expr in &mut cmd.distinct_on {
+            self.apply_expr_subquery_policies(auth, expr)?;
+        }
+        if let Some(returning) = &mut cmd.returning {
+            for expr in returning {
+                self.apply_expr_subquery_policies(auth, expr)?;
+            }
+        }
+        for cage in &mut cmd.cages {
+            for condition in &mut cage.conditions {
+                self.apply_condition_subquery_policies(auth, condition)?;
+            }
+        }
+        for condition in &mut cmd.having {
+            self.apply_condition_subquery_policies(auth, condition)?;
+        }
+        for join in &mut cmd.joins {
+            if let Some(conditions) = &mut join.on {
+                for condition in conditions {
+                    self.apply_condition_subquery_policies(auth, condition)?;
+                }
+            }
+        }
+        if let Some(on_conflict) = &mut cmd.on_conflict
+            && let qail_core::ast::ConflictAction::DoUpdate { assignments } =
+                &mut on_conflict.action
+        {
+            for (_, expr) in assignments {
+                self.apply_expr_subquery_policies(auth, expr)?;
+            }
+        }
+        if let Some(merge) = &mut cmd.merge {
+            if let MergeSource::Query { query, .. } = &mut merge.source {
+                self.apply_policies_inner(auth, query)?;
+            }
+            for condition in &mut merge.on {
+                self.apply_condition_subquery_policies(auth, condition)?;
+            }
+            for clause in &mut merge.clauses {
+                for condition in &mut clause.condition {
+                    self.apply_condition_subquery_policies(auth, condition)?;
+                }
+                match &mut clause.action {
+                    MergeAction::Update { assignments } => {
+                        for (_, expr) in assignments {
+                            self.apply_expr_subquery_policies(auth, expr)?;
+                        }
+                    }
+                    MergeAction::Insert { values, .. } => {
+                        for expr in values {
+                            self.apply_expr_subquery_policies(auth, expr)?;
+                        }
+                    }
+                    MergeAction::Delete | MergeAction::DoNothing => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_policies_inner(&self, auth: &AuthContext, cmd: &mut Qail) -> Result<(), GatewayError> {
         for cte in &mut cmd.ctes {
             self.apply_policies_inner(auth, &mut cte.base_query)?;
@@ -895,6 +1071,8 @@ impl PolicyEngine {
         if let Some(ref mut source_query) = cmd.source_query {
             self.apply_policies_inner(auth, source_query)?;
         }
+
+        self.apply_embedded_subquery_policies(auth, cmd)?;
 
         let cte_names: Vec<String> = cmd.ctes.iter().map(|cte| cte.name.clone()).collect();
         self.apply_join_policies(auth, cmd, &cte_names)?;
@@ -1125,32 +1303,61 @@ impl PolicyEngine {
         Some(parsed)
     }
 
+    fn split_policy_filter(filter_expr: &str) -> Option<(&str, Operator, &str)> {
+        let mut in_quote = false;
+        let mut iter = filter_expr.char_indices().peekable();
+
+        while let Some((idx, ch)) = iter.next() {
+            if ch == '\'' {
+                if in_quote && iter.peek().is_some_and(|(_, next)| *next == '\'') {
+                    iter.next();
+                } else {
+                    in_quote = !in_quote;
+                }
+                continue;
+            }
+
+            if in_quote {
+                continue;
+            }
+
+            if filter_expr[idx..].starts_with(" != ") {
+                return Some((
+                    filter_expr[..idx].trim(),
+                    Operator::Ne,
+                    filter_expr[idx + 4..].trim(),
+                ));
+            }
+            if filter_expr[idx..].starts_with(" = ") {
+                return Some((
+                    filter_expr[..idx].trim(),
+                    Operator::Eq,
+                    filter_expr[idx + 3..].trim(),
+                ));
+            }
+        }
+
+        None
+    }
+
     /// Parse a filter string into an AST Condition.
     pub(super) fn parse_filter_to_condition(
         &self,
         filter_expr: &str,
     ) -> Result<Condition, GatewayError> {
-        let parts: Vec<&str> = if filter_expr.contains(" = ") {
-            filter_expr.splitn(2, " = ").collect()
-        } else if filter_expr.contains(" != ") {
-            filter_expr.splitn(2, " != ").collect()
-        } else {
+        let Some((column, op, value_str)) = Self::split_policy_filter(filter_expr) else {
             return Err(GatewayError::Config(format!(
                 "Unsupported filter expression: {}. Use 'column = value' format.",
                 filter_expr
             )));
         };
 
-        if parts.len() != 2 {
+        if column.is_empty() || value_str.is_empty() {
             return Err(GatewayError::Config(format!(
                 "Invalid filter expression: {}",
                 filter_expr
             )));
         }
-
-        let column = parts[0].trim();
-        let value_str = parts[1].trim();
-        let is_not_equal = filter_expr.contains(" != ");
 
         let value = if let Some(parsed) = Self::parse_policy_quoted_string(value_str) {
             Value::String(parsed)
@@ -1166,11 +1373,7 @@ impl PolicyEngine {
 
         Ok(Condition {
             left: Expr::Named(column.to_string()),
-            op: if is_not_equal {
-                Operator::Ne
-            } else {
-                Operator::Eq
-            },
+            op,
             value,
             is_array_unnest: false,
         })
