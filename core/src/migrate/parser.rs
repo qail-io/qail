@@ -59,6 +59,13 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_comment(comment);
         } else if line.starts_with("sequence ") {
             let seq = parse_sequence(line, &mut lines)?;
+            if schema
+                .sequences
+                .iter()
+                .any(|existing| existing.name == seq.name)
+            {
+                return Err(format!("duplicate sequence declaration '{}'", seq.name));
+            }
             schema.add_sequence(seq);
         } else if line.starts_with("enum ") {
             let enum_type = parse_enum(line, &mut lines)?;
@@ -2484,6 +2491,16 @@ sequence order_seq {
         let input = "sequence { start 1 }";
         let err = parse_qail(input).expect_err("missing sequence name should fail");
         assert!(err.contains("sequence name is missing before '{'"));
+    }
+
+    #[test]
+    fn test_parse_sequence_rejects_duplicate_names() {
+        let input = r#"
+sequence order_ids
+sequence order_ids { start 100 }
+"#;
+        let err = parse_qail(input).expect_err("duplicate sequences should fail");
+        assert!(err.contains("duplicate sequence declaration 'order_ids'"));
     }
 
     #[test]
