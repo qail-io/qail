@@ -452,15 +452,7 @@ pub(crate) async fn list_handler(
     // When JOINs are present, table-qualify unqualified filter columns
     // to avoid ambiguous column errors (e.g., RLS `tenant_id` → `base_table.tenant_id`)
     if has_joins {
-        for cage in &mut cmd.cages {
-            for cond in &mut cage.conditions {
-                if let Expr::Named(ref name) = cond.left
-                    && !name.contains('.')
-                {
-                    cond.left = Expr::Named(format!("{}.{}", table_name, name));
-                }
-            }
-        }
+        crate::rest::filters::qualify_base_filter_columns_for_join(&mut cmd, &table_name);
     }
 
     if let Some(scope_column) = tenant_scope_column {

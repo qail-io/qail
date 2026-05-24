@@ -82,6 +82,36 @@ fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> St
     generator.json_access(col_name, path)
 }
 
+fn resolve_text_search_vector(
+    expr: &Expr,
+    generator: &dyn SqlGenerator,
+    context: Option<&Qail>,
+) -> Option<String> {
+    let Expr::Named(columns) = expr else {
+        return None;
+    };
+
+    let parts: Vec<String> = columns
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(|column| {
+            let rendered = if let Some(cmd) = context {
+                resolve_col_syntax(column, cmd, generator)
+            } else {
+                generator.quote_identifier(column)
+            };
+            format!("coalesce({}, '')", rendered)
+        })
+        .collect();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" || ' ' || "))
+    }
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -184,6 +214,15 @@ impl ConditionToSql for Condition {
                     v => format!("'%{}%'", v),
                 };
                 format!("{} {} {}", col, generator.fuzzy_operator(), val)
+            }
+            Operator::TextSearch => {
+                let vector = resolve_text_search_vector(&self.left, generator, context)
+                    .unwrap_or_else(|| col.clone());
+                format!(
+                    "to_tsvector('english', {}) @@ websearch_to_tsquery('english', {})",
+                    vector,
+                    self.to_value_sql(generator)
+                )
             }
             Operator::In => generator.in_array(&col, &format!("{}", self.value)),
             Operator::NotIn => generator.not_in_array(&col, &format!("{}", self.value)),
@@ -376,6 +415,15 @@ impl ConditionToSql for Condition {
                 // For LIKE, we need to wrap in wildcards
                 let placeholder = value_placeholder(&self.value, params);
                 format!("{} {} {}", col, generator.fuzzy_operator(), placeholder)
+            }
+            Operator::TextSearch => {
+                let vector = resolve_text_search_vector(&self.left, generator, context)
+                    .unwrap_or_else(|| col.clone());
+                format!(
+                    "to_tsvector('english', {}) @@ websearch_to_tsquery('english', {})",
+                    vector,
+                    value_placeholder(&self.value, params)
+                )
             }
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),

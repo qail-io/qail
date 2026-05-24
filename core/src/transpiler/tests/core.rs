@@ -132,6 +132,18 @@ fn test_fuzzy_match() {
     );
 }
 
+#[test]
+fn test_text_search_multiple_columns_to_sql() {
+    use crate::ast::{Operator, Qail};
+
+    let cmd = Qail::get("products").filter("name,description", Operator::TextSearch, "fast ferry");
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM products WHERE to_tsvector('english', coalesce(name, '') || ' ' || coalesce(description, '')) @@ websearch_to_tsquery('english', 'fast ferry')"
+    );
+}
+
 // OR conditions - using manual Qail construction
 #[test]
 fn test_or_conditions() {

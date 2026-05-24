@@ -5,7 +5,7 @@
 use bytes::BytesMut;
 use qail_core::ast::{
     Action, CTEDef, CageKind, Condition, ConflictAction, Expr, GroupByMode, JoinKind, LogicalOp,
-    Merge, MergeAction, MergeMatchKind, MergeSource, Qail, SetOp, SortOrder, Value,
+    Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, SetOp, SortOrder, Value,
 };
 
 use super::helpers::write_usize;
@@ -333,8 +333,47 @@ fn validate_condition(
     field: &str,
     condition: &Condition,
 ) -> Result<(), crate::protocol::EncodeError> {
-    validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+    if condition.op == Operator::TextSearch {
+        validate_text_search_columns(&format!("{field}.left"), &condition.left)?;
+    } else {
+        validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+    }
     validate_value_ref(&format!("{field}.value"), &condition.value)
+}
+
+fn validate_text_search_columns(
+    field: &str,
+    expr: &Expr,
+) -> Result<(), crate::protocol::EncodeError> {
+    let Expr::Named(columns) = expr else {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "text search left side must be a comma-separated identifier list in {field}"
+        )));
+    };
+
+    let mut saw_column = false;
+    for raw_column in columns.split(',') {
+        let column = raw_column.trim();
+        if column.is_empty() {
+            return Err(invalid_identifier(
+                field,
+                columns,
+                "text search column list contains an empty entry",
+            ));
+        }
+        validate_qualified_ident(field, column, false)?;
+        saw_column = true;
+    }
+
+    if !saw_column {
+        return Err(invalid_identifier(
+            field,
+            columns,
+            "text search column list cannot be empty",
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_join_condition(
@@ -367,7 +406,11 @@ fn validate_cage_conditions(
 ) -> Result<(), crate::protocol::EncodeError> {
     for condition in conditions {
         if !(skip_placeholders && is_positional_placeholder(&condition.left)) {
-            validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+            if condition.op == Operator::TextSearch {
+                validate_text_search_columns(&format!("{field}.left"), &condition.left)?;
+            } else {
+                validate_expr_ref(&format!("{field}.left"), &condition.left)?;
+            }
         }
         validate_value_ref(&format!("{field}.value"), &condition.value)?;
     }

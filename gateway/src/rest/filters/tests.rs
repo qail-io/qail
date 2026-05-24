@@ -98,6 +98,34 @@ fn test_parse_cursor_value_rejects_non_finite_numbers() {
 }
 
 #[test]
+fn test_qualify_base_filter_columns_for_join_handles_text_search_csv() {
+    let mut cmd = qail_core::ast::Qail::get("orders")
+        .filter("status", Operator::Eq, "open")
+        .filter(
+            "name,description,products.title",
+            Operator::TextSearch,
+            "fast ferry",
+        );
+
+    qualify_base_filter_columns_for_join(&mut cmd, "orders");
+
+    let filters: Vec<_> = cmd
+        .cages
+        .iter()
+        .flat_map(|cage| cage.conditions.iter())
+        .collect();
+    assert!(filters.iter().any(|condition| {
+        condition.left == qail_core::ast::Expr::Named("orders.status".to_string())
+    }));
+    assert!(filters.iter().any(|condition| {
+        condition.left
+            == qail_core::ast::Expr::Named(
+                "orders.name,orders.description,products.title".to_string(),
+            )
+    }));
+}
+
+#[test]
 fn test_parse_filters_in() {
     let filters = parse_filters("status.in=active,pending,closed");
     assert_eq!(filters.len(), 1);

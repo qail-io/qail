@@ -10,7 +10,9 @@ mod apply;
 mod convert;
 mod parse;
 
-pub(crate) use apply::{apply_filters, apply_returning, apply_sorting};
+pub(crate) use apply::{
+    apply_filters, apply_returning, apply_sorting, qualify_base_filter_columns_for_join,
+};
 pub(crate) use convert::json_to_qail_value;
 #[cfg(test)]
 pub(crate) use parse::parse_filters;

@@ -1,4 +1,4 @@
-use qail_core::ast::{Operator, Value as QailValue};
+use qail_core::ast::{Expr, Operator, Value as QailValue};
 
 use super::{is_safe_identifier, parse_select_columns};
 
@@ -30,6 +30,45 @@ pub(crate) fn apply_filters(
         }
     }
     cmd
+}
+
+/// Qualify unqualified base-table filter columns after flat JOIN expansion.
+///
+/// TextSearch stores a validated CSV column list in `Expr::Named`, so each
+/// comma segment must be qualified independently.
+pub(crate) fn qualify_base_filter_columns_for_join(
+    cmd: &mut qail_core::ast::Qail,
+    table_name: &str,
+) {
+    for cage in &mut cmd.cages {
+        for cond in &mut cage.conditions {
+            let Expr::Named(ref name) = cond.left else {
+                continue;
+            };
+
+            if cond.op == Operator::TextSearch {
+                cond.left = Expr::Named(qualify_text_search_columns(name, table_name));
+            } else if !name.contains('.') {
+                cond.left = Expr::Named(format!("{}.{}", table_name, name));
+            }
+        }
+    }
+}
+
+fn qualify_text_search_columns(columns: &str, table_name: &str) -> String {
+    columns
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(|column| {
+            if column.contains('.') {
+                column.to_string()
+            } else {
+                format!("{}.{}", table_name, column)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Apply multi-column sorting.

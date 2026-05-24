@@ -1073,6 +1073,42 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_text_search_multiple_columns() {
+        use qail_core::ast::Operator;
+
+        let cmd =
+            Qail::get("products").filter("name,description", Operator::TextSearch, "fast ferry");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains(
+                "to_tsvector('english', coalesce(name,'') || ' ' || coalesce(description,'')) @@ websearch_to_tsquery('english', $1)"
+            ),
+            "text search must encode each CSV column separately: {sql}"
+        );
+        assert_eq!(params, vec![Some(b"fast ferry".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_text_search_rejects_unsafe_column_csv() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("products").filter(
+            "name,description;DROP",
+            Operator::TextSearch,
+            "fast ferry",
+        );
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("unsafe text search column fails");
+
+        assert!(
+            err.to_string().contains("unsafe identifier"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_encode_select_with_or_filter() {
         use qail_core::ast::Operator;
 
