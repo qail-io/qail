@@ -310,7 +310,7 @@ pub(crate) async fn list_handler(
     if let Some(ref cursor) = params.cursor {
         let (sort_col, sort_desc) =
             primary_sort_for_cursor(params.sort.as_deref(), default_sort_column);
-        let cursor_val = parse_scalar_value(cursor);
+        let cursor_val = parse_cursor_value(cursor).map_err(ApiError::parse_error)?;
         if sort_desc {
             cmd = cmd.lt(&sort_col, cursor_val);
         } else {
@@ -818,7 +818,7 @@ fn apply_branch_read_constraints(
         ApiError::internal("Branch sort parser returned no sort keys after validation")
     })?;
     if let Some(cursor) = input.cursor {
-        let cursor_val = parse_scalar_value(cursor);
+        let cursor_val = parse_cursor_value(cursor).map_err(ApiError::parse_error)?;
         let cursor_op = if primary_sort.desc {
             Operator::Lt
         } else {

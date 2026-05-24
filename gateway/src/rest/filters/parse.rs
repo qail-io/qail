@@ -302,6 +302,15 @@ pub(crate) fn parse_scalar_value(s: &str) -> QailValue {
     QailValue::String(s.to_string())
 }
 
+/// Parse a cursor value and reject non-finite numeric sentinels such as NaN/inf.
+pub(crate) fn parse_cursor_value(cursor: &str) -> Result<QailValue, String> {
+    let value = parse_scalar_value(cursor);
+    if qail_value_contains_non_finite_number(&value) {
+        return Err("cursor contains a non-finite numeric value".to_string());
+    }
+    Ok(value)
+}
+
 /// Parse an operator token used by key/value style filters.
 fn parse_operator_token(op_str: &str) -> Option<Operator> {
     match op_str {

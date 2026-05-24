@@ -90,6 +90,14 @@ fn test_parse_filters_checked_rejects_non_finite_numbers() {
 }
 
 #[test]
+fn test_parse_cursor_value_rejects_non_finite_numbers() {
+    let err = parse_cursor_value("NaN").unwrap_err();
+    assert!(err.contains("non-finite numeric value"));
+
+    assert!(parse_cursor_value("42").is_ok());
+}
+
+#[test]
 fn test_parse_filters_in() {
     let filters = parse_filters("status.in=active,pending,closed");
     assert_eq!(filters.len(), 1);

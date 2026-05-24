@@ -15,7 +15,7 @@ use crate::middleware::ApiError;
 
 use super::extract_table_name;
 use super::filters::{
-    apply_filters, apply_sorting, parse_expand_relations, parse_filters_checked, parse_scalar_value,
+    apply_filters, apply_sorting, parse_cursor_value, parse_expand_relations, parse_filters_checked,
 };
 use super::handlers::{check_table_not_blocked, primary_sort_for_cursor};
 use super::types::ListParams;
@@ -25,19 +25,19 @@ fn apply_cursor_filter(
     cursor: Option<&str>,
     sort: Option<&str>,
     default_sort_column: &str,
-) -> qail_core::ast::Qail {
+) -> Result<qail_core::ast::Qail, ApiError> {
     let Some(cursor) = cursor else {
-        return cmd;
+        return Ok(cmd);
     };
 
     let (sort_col, sort_desc) = primary_sort_for_cursor(sort, default_sort_column);
-    let cursor_val = parse_scalar_value(cursor);
+    let cursor_val = parse_cursor_value(cursor).map_err(ApiError::parse_error)?;
     if sort_desc {
         cmd = cmd.lt(&sort_col, cursor_val);
     } else {
         cmd = cmd.gt(&sort_col, cursor_val);
     }
-    cmd
+    Ok(cmd)
 }
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
@@ -163,7 +163,7 @@ pub(crate) async fn explain_handler(
         params.cursor.as_deref(),
         params.sort.as_deref(),
         default_sort_column,
-    );
+    )?;
 
     cmd = cmd.limit(limit);
     cmd = cmd.offset(offset);
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn explain_cursor_filter_uses_default_ascending_sort() {
-        let cmd = apply_cursor_filter(Qail::get("orders"), Some("42"), None, "id");
+        let cmd = apply_cursor_filter(Qail::get("orders"), Some("42"), None, "id").unwrap();
 
         assert_eq!(cmd.to_sql(), "SELECT * FROM orders WHERE id > 42");
     }
@@ -267,11 +267,23 @@ mod tests {
             Some("2026-01-01"),
             Some("-created_at,total:asc"),
             "id",
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             cmd.to_sql(),
             "SELECT * FROM orders WHERE created_at < '2026-01-01'"
+        );
+    }
+
+    #[test]
+    fn explain_cursor_filter_rejects_non_finite_numbers() {
+        let err = apply_cursor_filter(Qail::get("orders"), Some("NaN"), None, "id").unwrap_err();
+        assert_eq!(err.code, "PARSE_ERROR");
+        assert!(
+            err.details
+                .as_deref()
+                .is_some_and(|details| details.contains("non-finite numeric value"))
         );
     }
 }
