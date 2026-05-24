@@ -1365,12 +1365,12 @@ pub fn to_qail_string(schema: &Schema) -> String {
 
     // Extensions first (must be created before any DDL)
     for ext in &schema.extensions {
-        let mut line = format!("extension \"{}\"", ext.name);
+        let mut line = format!("extension {}", quote_qail_string(&ext.name));
         if let Some(ref s) = ext.schema {
-            line.push_str(&format!(" schema {}", s));
+            line.push_str(&format!(" schema {}", quote_qail_string(s)));
         }
         if let Some(ref v) = ext.version {
-            line.push_str(&format!(" version \"{}\"", v));
+            line.push_str(&format!(" version {}", quote_qail_string(v)));
         }
         output.push_str(&line);
         output.push('\n');

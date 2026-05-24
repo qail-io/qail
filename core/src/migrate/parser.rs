@@ -518,28 +518,7 @@ fn parse_extension(line: &str) -> Result<Extension, String> {
         .strip_prefix("extension ")
         .ok_or("Expected 'extension' prefix")?
         .trim();
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-
-    for ch in rest.chars() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ' ' if !in_quotes => {
-                if !current.is_empty() {
-                    parts.push(current.clone());
-                    current.clear();
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-    if in_quotes {
-        return Err("unterminated quoted extension token".to_string());
-    }
-    if !current.is_empty() {
-        parts.push(current);
-    }
+    let parts = split_extension_tokens(rest)?;
 
     if parts.is_empty() {
         return Err("extension requires a name".to_string());
@@ -562,6 +541,41 @@ fn parse_extension(line: &str) -> Result<Extension, String> {
     }
 
     Ok(ext)
+}
+
+fn split_extension_tokens(rest: &str) -> Result<Vec<String>, String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = rest.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes => {
+                if chars.peek().is_some_and(|next| *next == '"') {
+                    current.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if in_quotes {
+        return Err("unterminated quoted extension token".to_string());
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    Ok(parts)
 }
 
 /// Parse a comment definition.
@@ -2041,6 +2055,26 @@ rename users.username -> users.name
         assert_eq!(schema.extensions[0].name, "uuid-ossp");
         assert_eq!(schema.extensions[0].schema.as_deref(), Some("public"));
         assert_eq!(schema.extensions[0].version.as_deref(), Some("1.1"));
+    }
+
+    #[test]
+    fn test_parse_extension_round_trips_quoted_tokens() {
+        let input = r#"extension "uuid""ossp" schema "tenant schema" version "1.""1""#;
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.extensions[0].name, r#"uuid"ossp"#);
+        assert_eq!(
+            schema.extensions[0].schema.as_deref(),
+            Some("tenant schema")
+        );
+        assert_eq!(schema.extensions[0].version.as_deref(), Some(r#"1."1"#));
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        assert!(
+            rendered.contains(r#"extension "uuid""ossp" schema "tenant schema" version "1.""1""#)
+        );
+
+        let reparsed = parse_qail(&rendered).unwrap();
+        assert_eq!(reparsed.extensions, schema.extensions);
     }
 
     #[test]
