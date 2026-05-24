@@ -1423,6 +1423,8 @@ fn parse_index_parts(
             "gist" => qail_core::migrate::schema::IndexMethod::Gist,
             "brin" => qail_core::migrate::schema::IndexMethod::Brin,
             "spgist" => qail_core::migrate::schema::IndexMethod::SpGist,
+            "hnsw" => qail_core::migrate::schema::IndexMethod::Hnsw,
+            "ivfflat" => qail_core::migrate::schema::IndexMethod::IvfFlat,
             _ => qail_core::migrate::schema::IndexMethod::BTree,
         }
     } else {
@@ -2025,6 +2027,30 @@ mod tests {
         assert_eq!(foreign_key.on_delete, FkAction::Cascade);
         assert_eq!(foreign_key.on_update, FkAction::Restrict);
         assert_eq!(foreign_key.deferrable, Deferrable::InitiallyDeferred);
+    }
+
+    #[test]
+    fn parse_index_parts_preserves_vector_index_methods() {
+        let hnsw_def =
+            "CREATE INDEX idx_docs_embedding ON documents USING hnsw (embedding vector_l2_ops)";
+        let (hnsw_cols, hnsw_where, hnsw_method) = parse_index_parts(hnsw_def);
+
+        assert_eq!(hnsw_cols, vec!["embedding vector_l2_ops".to_string()]);
+        assert_eq!(hnsw_where, None);
+        assert_eq!(hnsw_method, qail_core::migrate::schema::IndexMethod::Hnsw);
+
+        let ivfflat_def = "CREATE INDEX idx_docs_embedding_cosine ON documents USING ivfflat (embedding vector_cosine_ops) WHERE tenant_id IS NOT NULL";
+        let (ivfflat_cols, ivfflat_where, ivfflat_method) = parse_index_parts(ivfflat_def);
+
+        assert_eq!(
+            ivfflat_cols,
+            vec!["embedding vector_cosine_ops".to_string()]
+        );
+        assert_eq!(ivfflat_where, Some("tenant_id IS NOT NULL".to_string()));
+        assert_eq!(
+            ivfflat_method,
+            qail_core::migrate::schema::IndexMethod::IvfFlat
+        );
     }
 
     #[test]

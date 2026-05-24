@@ -361,6 +361,10 @@ pub enum IndexMethod {
     Brin,
     /// SP-GiST (space-partitioned).
     SpGist,
+    /// HNSW vector index (pgvector).
+    Hnsw,
+    /// IVFFlat vector index (pgvector).
+    IvfFlat,
 }
 
 pub(crate) fn index_method_str(method: &IndexMethod) -> &'static str {
@@ -371,6 +375,8 @@ pub(crate) fn index_method_str(method: &IndexMethod) -> &'static str {
         IndexMethod::Gist => "gist",
         IndexMethod::Brin => "brin",
         IndexMethod::SpGist => "spgist",
+        IndexMethod::Hnsw => "hnsw",
+        IndexMethod::IvfFlat => "ivfflat",
     }
 }
 
@@ -1942,6 +1948,36 @@ mod tests {
         assert!(output.contains("table users"));
         assert!(output.contains("id SERIAL primary_key"));
         assert!(output.contains("unique index idx_users_email"));
+    }
+
+    #[test]
+    fn test_to_qail_string_preserves_vector_index_methods() {
+        let mut schema = Schema::new();
+        schema.add_index(
+            Index::new(
+                "idx_docs_embedding_hnsw",
+                "documents",
+                vec!["embedding vector_l2_ops".into()],
+            )
+            .using(IndexMethod::Hnsw),
+        );
+        schema.add_index(
+            Index::new(
+                "idx_docs_embedding_ivfflat",
+                "documents",
+                vec!["embedding vector_cosine_ops".into()],
+            )
+            .using(IndexMethod::IvfFlat),
+        );
+
+        let output = to_qail_string(&schema);
+
+        assert!(output.contains(
+            "index idx_docs_embedding_hnsw on documents using hnsw (embedding vector_l2_ops)"
+        ));
+        assert!(output.contains(
+            "index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_cosine_ops)"
+        ));
     }
 
     #[test]

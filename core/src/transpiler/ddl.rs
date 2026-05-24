@@ -206,6 +206,8 @@ fn index_method_to_sql(method: &str) -> Option<&'static str> {
         "gist" => Some("gist"),
         "brin" => Some("brin"),
         "spgist" | "sp-gist" => Some("spgist"),
+        "hnsw" => Some("hnsw"),
+        "ivfflat" | "ivf-flat" => Some("ivfflat"),
         _ => None,
     }
 }

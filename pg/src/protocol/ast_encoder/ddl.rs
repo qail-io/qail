@@ -193,16 +193,20 @@ fn push_index_column(buf: &mut BytesMut, column: &str) -> Result<(), crate::prot
             "invalid index column: {column:?}"
         )));
     }
-    if column.contains('(') {
-        if contains_unquoted_statement_delimiter(column) {
-            push_identifier(buf, column);
-        } else {
-            buf.extend_from_slice(column.trim().as_bytes());
-        }
-    } else {
+    if is_simple_identifier(column) {
         push_identifier(buf, column);
+    } else if contains_unquoted_statement_delimiter(column) {
+        push_identifier(buf, column);
+    } else {
+        buf.extend_from_slice(column.as_bytes());
     }
     Ok(())
+}
+
+fn is_simple_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
 fn dollar_quote_block(body: &str) -> String {
@@ -475,6 +479,8 @@ fn index_method_to_sql(method: &str) -> Option<&'static str> {
         "gist" => Some("gist"),
         "brin" => Some("brin"),
         "spgist" | "sp-gist" => Some("spgist"),
+        "hnsw" => Some("hnsw"),
+        "ivfflat" | "ivf-flat" => Some("ivfflat"),
         _ => None,
     }
 }

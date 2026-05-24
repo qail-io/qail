@@ -2063,6 +2063,40 @@ mod tests {
             "CREATE INDEX idx_lower_email ON users USING btree (lower(email)) WHERE active = true"
         );
 
+        let hnsw = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_docs_embedding".to_string(),
+                table: "documents".to_string(),
+                columns: vec!["embedding vector_l2_ops".to_string()],
+                unique: false,
+                index_type: Some("hnsw".to_string()),
+                where_clause: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&hnsw).unwrap().0,
+            "CREATE INDEX idx_docs_embedding ON documents USING hnsw (embedding vector_l2_ops)"
+        );
+
+        let ivfflat = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_docs_embedding_cosine".to_string(),
+                table: "documents".to_string(),
+                columns: vec!["embedding vector_cosine_ops".to_string()],
+                unique: false,
+                index_type: Some("ivf-flat".to_string()),
+                where_clause: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&ivfflat).unwrap().0,
+            "CREATE INDEX idx_docs_embedding_cosine ON documents USING ivfflat (embedding vector_cosine_ops)"
+        );
+
         let quoted_column = Qail {
             action: Action::Index,
             index_def: Some(IndexDef {

@@ -1068,6 +1068,8 @@ fn parse_index_method_str(s: &str) -> IndexMethod {
         "gist" => IndexMethod::Gist,
         "brin" => IndexMethod::Brin,
         "spgist" => IndexMethod::SpGist,
+        "hnsw" => IndexMethod::Hnsw,
+        "ivfflat" => IndexMethod::IvfFlat,
         _ => IndexMethod::BTree,
     }
 }
@@ -1469,6 +1471,27 @@ table users {
         assert_eq!(schema.indexes.len(), 1);
         assert!(schema.indexes[0].unique);
         assert_eq!(schema.indexes[0].name, "idx_users_email");
+    }
+
+    #[test]
+    fn test_parse_vector_index_methods() {
+        let input = r#"
+index idx_docs_embedding_hnsw on documents using hnsw (embedding vector_l2_ops)
+index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_cosine_ops)
+"#;
+        let schema = parse_qail(input).unwrap();
+
+        assert_eq!(schema.indexes.len(), 2);
+        assert_eq!(schema.indexes[0].method, IndexMethod::Hnsw);
+        assert_eq!(
+            schema.indexes[0].columns,
+            vec!["embedding vector_l2_ops".to_string()]
+        );
+        assert_eq!(schema.indexes[1].method, IndexMethod::IvfFlat);
+        assert_eq!(
+            schema.indexes[1].columns,
+            vec!["embedding vector_cosine_ops".to_string()]
+        );
     }
 
     #[test]
