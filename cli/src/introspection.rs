@@ -16,6 +16,13 @@ use qail_pg::driver::PgDriver;
 
 use crate::util::{parse_pg_url, redact_url};
 
+fn parse_required_i32(raw: Option<String>, label: &str) -> Result<i32> {
+    let raw = raw.ok_or_else(|| anyhow!("Missing {label}"))?;
+    raw.trim()
+        .parse::<i32>()
+        .map_err(|e| anyhow!("Invalid {label} {:?}: {}", raw, e))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct IntrospectedKeyColumn {
     pub table: String,
@@ -320,10 +327,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let table = row.text(0);
         let column = row.text(1);
         let constraint = row.text(2);
-        let ordinal_position = row
-            .get_string(3)
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0);
+        let ordinal_position = parse_required_i32(
+            row.get_string(3),
+            "information_schema.key_column_usage.ordinal_position",
+        )?;
 
         if pk_constraint_names.contains(&constraint) {
             pk_columns.insert((table.clone(), column.clone()));
@@ -848,7 +855,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let pname = row.text(1);
         let ptype = row.text(2);
         let mode = row.text(3);
-        let ordinal: i32 = row.get_string(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let ordinal = parse_required_i32(
+            row.get_string(4),
+            "information_schema.parameters.ordinal_position",
+        )?;
         let default = row.get_string(5);
 
         // Only include IN parameters (skip OUT/INOUT for now)
@@ -1130,10 +1140,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     for row in col_comment_rows {
         let table = row.text(0);
         let column = row.text(1);
-        let attnum = row
-            .get_string(2)
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0);
+        let attnum = parse_required_i32(row.get_string(2), "pg_attribute.attnum")?;
         let attisdropped = row.text(3) == "t";
         let text = normalize_comment_text(&row.get_string(4).unwrap_or_default());
         if attnum > 0
@@ -1880,6 +1887,16 @@ mod tests {
     #[test]
     fn ignores_identity_generation_when_column_is_not_identity() {
         assert!(identity_generation_to_generated(false, Some("BY DEFAULT")).is_none());
+    }
+
+    #[test]
+    fn required_i32_metadata_parsing_fails_closed() {
+        assert_eq!(
+            parse_required_i32(Some("7".to_string()), "ordinal").unwrap(),
+            7
+        );
+        assert!(parse_required_i32(None, "ordinal").is_err());
+        assert!(parse_required_i32(Some("not-an-int".to_string()), "ordinal").is_err());
     }
 
     #[test]
