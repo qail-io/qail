@@ -37,16 +37,15 @@ pub(super) async fn build_pool(config: &GatewayConfig) -> Result<PgPool, Gateway
     tracing::info!("Creating connection pool...");
     let mut pool_config = parse_database_url(&config.database_url, config)?;
 
-    if let Ok(min) = std::env::var("POOL_MIN_CONNECTIONS")
-        && let Ok(n) = min.parse()
-    {
+    if let Ok(min) = std::env::var("POOL_MIN_CONNECTIONS") {
+        let n = parse_pool_size_override("POOL_MIN_CONNECTIONS", &min)?;
         pool_config = pool_config.min_connections(n);
     }
-    if let Ok(max) = std::env::var("POOL_MAX_CONNECTIONS")
-        && let Ok(n) = max.parse()
-    {
+    if let Ok(max) = std::env::var("POOL_MAX_CONNECTIONS") {
+        let n = parse_pool_size_override("POOL_MAX_CONNECTIONS", &max)?;
         pool_config = pool_config.max_connections(n);
     }
+    validate_pool_size_bounds(pool_config.min_connections, pool_config.max_connections)?;
 
     let pool = PgPool::connect(pool_config)
         .await
@@ -60,6 +59,29 @@ pub(super) async fn build_pool(config: &GatewayConfig) -> Result<PgPool, Gateway
     );
 
     Ok(pool)
+}
+
+fn parse_pool_size_override(name: &str, value: &str) -> Result<usize, GatewayError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| GatewayError::Config(format!("Invalid {name} value: {value}")))
+}
+
+fn validate_pool_size_bounds(
+    min_connections: usize,
+    max_connections: usize,
+) -> Result<(), GatewayError> {
+    if max_connections == 0 {
+        return Err(GatewayError::Config(
+            "POOL_MAX_CONNECTIONS must be greater than 0".to_string(),
+        ));
+    }
+    if min_connections > max_connections {
+        return Err(GatewayError::Config(format!(
+            "POOL_MIN_CONNECTIONS ({min_connections}) must be <= POOL_MAX_CONNECTIONS ({max_connections})"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) async fn verify_schema_drift(
@@ -209,4 +231,41 @@ pub(super) async fn load_user_tenant_map(
 
     conn.release().await;
     Ok(user_tenant_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_pool_size_override, validate_pool_size_bounds};
+
+    #[test]
+    fn pool_size_override_rejects_invalid_values() {
+        let err = parse_pool_size_override("POOL_MAX_CONNECTIONS", "not-a-number").unwrap_err();
+
+        assert!(err.to_string().contains("Invalid POOL_MAX_CONNECTIONS"));
+    }
+
+    #[test]
+    fn pool_size_bounds_reject_min_above_max() {
+        let err = validate_pool_size_bounds(8, 4).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("POOL_MIN_CONNECTIONS (8) must be <= POOL_MAX_CONNECTIONS (4)")
+        );
+    }
+
+    #[test]
+    fn pool_size_bounds_reject_zero_max() {
+        let err = validate_pool_size_bounds(0, 0).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("POOL_MAX_CONNECTIONS must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn pool_size_bounds_accept_equal_min_and_max() {
+        validate_pool_size_bounds(4, 4).expect("equal pool bounds are valid");
+    }
 }
