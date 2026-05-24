@@ -32,17 +32,23 @@ pub(crate) fn parse_rpc_input_arg_names(
             .map(normalize_rpc_arg_name)
             .collect::<Vec<_>>()
     } else {
-        arg_names
-            .into_iter()
-            .zip(arg_modes)
-            .filter_map(
-                |(name, mode)| match mode.trim().to_ascii_lowercase().as_str() {
-                    // PostgreSQL marks callable inputs as IN, INOUT, or VARIADIC.
-                    "i" | "b" | "v" => Some(normalize_rpc_arg_name(name)),
-                    _ => None,
-                },
-            )
-            .collect::<Vec<_>>()
+        let mut names = Vec::new();
+        for (idx, mode) in arg_modes.into_iter().enumerate() {
+            let name = arg_names.get(idx).cloned().unwrap_or(None);
+            match mode.trim().to_ascii_lowercase().as_str() {
+                // PostgreSQL marks callable inputs as IN, INOUT, or VARIADIC.
+                "i" | "b" | "v" => names.push(normalize_rpc_arg_name(name)),
+                // OUT and TABLE modes are result-only arguments.
+                "o" | "t" => {}
+                other => {
+                    return Err(ApiError::internal(format!(
+                        "Invalid RPC arg mode metadata: unknown mode '{}'",
+                        other
+                    )));
+                }
+            }
+        }
+        names
     };
 
     if input_arg_names.len() < total_args {
@@ -315,6 +321,33 @@ mod tests {
                 Some("ids".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn input_arg_names_skip_table_result_modes() {
+        let names = parse_rpc_input_arg_names(
+            r#"["tenant_id","row_id","row_name"]"#,
+            r#"["i","t","t"]"#,
+            1,
+        )
+        .expect("parse input arg names");
+        assert_eq!(names, vec![Some("tenant_id".to_string())]);
+    }
+
+    #[test]
+    fn input_arg_names_reject_unknown_modes() {
+        let err =
+            parse_rpc_input_arg_names(r#"["tenant_id","limit"]"#, r#"["i","x"]"#, 2).unwrap_err();
+
+        assert_internal_error(err);
+    }
+
+    #[test]
+    fn input_arg_names_handle_missing_names_with_modes() {
+        let names = parse_rpc_input_arg_names(r#"[]"#, r#"["i","o","i"]"#, 2)
+            .expect("parse unnamed input arg names");
+
+        assert_eq!(names, vec![None, None]);
     }
 
     #[test]
