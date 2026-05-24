@@ -137,14 +137,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
     let left = expr_sql(&condition.left, generator);
     match condition.op {
         Operator::Fuzzy => {
-            let value = match &condition.value {
-                Value::String(value) => format!("'%{}%'", value.replace('\'', "''")),
-                Value::Param(index) => {
-                    let placeholder = generator.placeholder(*index);
-                    generator.string_concat(&["'%'", &placeholder, "'%'"])
-                }
-                value => format!("'%{}%'", value_sql(value, generator)),
-            };
+            let value = fuzzy_pattern_sql(&condition.value, generator);
             format!("{left} {} {value}", generator.fuzzy_operator())
         }
         Operator::IsNull => format!("{left} IS NULL"),
@@ -227,6 +220,20 @@ fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
         Value::Expr(expr) => expr_sql(expr, generator),
         Value::Subquery(query) => format!("({})", query.to_sql()),
         _ => value.to_string(),
+    }
+}
+
+fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
+    match value {
+        Value::String(value) => format!("'%{}%'", escape_sql_string_literal(value)),
+        Value::Param(index) => {
+            let placeholder = generator.placeholder(*index);
+            generator.string_concat(&["'%'", &placeholder, "'%'"])
+        }
+        value => format!(
+            "'%{}%'",
+            escape_sql_string_literal(&value_sql(value, generator))
+        ),
     }
 }
 

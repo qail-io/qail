@@ -172,6 +172,22 @@ fn test_string_literal_strips_nul_and_escapes_quotes() {
     );
 }
 
+#[test]
+fn test_fuzzy_fallback_escapes_rendered_value() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let cmd = Qail::get("users").filter(
+        "name",
+        Operator::Fuzzy,
+        Value::Function("x'; DROP TABLE users; --".to_string()),
+    );
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM users WHERE name ILIKE '%x''; DROP TABLE users; --%'"
+    );
+}
+
 // OR conditions - using manual Qail construction
 #[test]
 fn test_or_conditions() {

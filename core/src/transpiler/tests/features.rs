@@ -1377,6 +1377,30 @@ fn test_merge_postgres_preserves_special_condition_operators() {
     );
 }
 
+#[test]
+fn test_merge_postgres_fuzzy_fallback_escapes_rendered_value() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.name".to_string()),
+                op: Operator::Fuzzy,
+                value: Value::Function("x'; DROP TABLE users; --".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+         WHEN MATCHED AND users.name ILIKE '%x''; DROP TABLE users; --%' \
+         THEN UPDATE SET name = s.name"
+    );
+}
+
 // ============= JSON Tests =============
 
 #[test]

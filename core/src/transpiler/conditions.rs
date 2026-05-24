@@ -112,6 +112,17 @@ fn resolve_text_search_vector(
     }
 }
 
+fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
+    match value {
+        Value::String(s) => format!("'%{}%'", escape_sql_string_literal(s)),
+        Value::Param(n) => {
+            let p = generator.placeholder(*n);
+            generator.string_concat(&["'%'", &p, "'%'"])
+        }
+        v => format!("'%{}%'", escape_sql_string_literal(&v.to_string())),
+    }
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -169,14 +180,7 @@ impl ConditionToSql for Condition {
                 Operator::Lt => format!("_el < {}", self.to_value_sql(generator)),
                 Operator::Lte => format!("_el <= {}", self.to_value_sql(generator)),
                 Operator::Fuzzy => {
-                    let val = match &self.value {
-                        Value::String(s) => format!("'%{}%'", s.replace('\'', "''")),
-                        Value::Param(n) => {
-                            let p = generator.placeholder(*n);
-                            generator.string_concat(&["'%'", &p, "'%'"])
-                        }
-                        v => format!("'%{}%'", v),
-                    };
+                    let val = fuzzy_pattern_sql(&self.value, generator);
                     format!("_el {} {}", generator.fuzzy_operator(), val)
                 }
                 Operator::ArrayElemContainedInText => format!(
@@ -205,14 +209,7 @@ impl ConditionToSql for Condition {
         // Special operators that need custom handling
         match self.op {
             Operator::Fuzzy => {
-                let val = match &self.value {
-                    Value::String(s) => format!("'%{}%'", s.replace('\'', "''")),
-                    Value::Param(n) => {
-                        let p = generator.placeholder(*n);
-                        generator.string_concat(&["'%'", &p, "'%'"])
-                    }
-                    v => format!("'%{}%'", v),
-                };
+                let val = fuzzy_pattern_sql(&self.value, generator);
                 format!("{} {} {}", col, generator.fuzzy_operator(), val)
             }
             Operator::TextSearch => {
