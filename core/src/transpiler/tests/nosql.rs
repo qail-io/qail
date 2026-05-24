@@ -489,3 +489,105 @@ fn test_dynamo_json_and_expression_names_are_escaped() {
         "active\"yes"
     );
 }
+
+#[test]
+fn test_dynamo_rejects_non_finite_numbers() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let put = Qail {
+        action: Action::Add,
+        table: "users".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("score".to_string()),
+                op: Operator::Eq,
+                value: Value::Float(f64::INFINITY),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_dynamo();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&put).expect("dynamo error JSON must stay valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("non-finite")
+    );
+}
+
+#[test]
+fn test_dynamo_rejects_unsupported_filter_operator() {
+    use crate::ast::{Operator, Qail};
+
+    let get = Qail::get("users")
+        .filter("name", Operator::Like, "%ana%")
+        .to_dynamo();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&get).expect("dynamo error JSON must stay valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("unsupported DynamoDB filter operator")
+    );
+}
+
+#[test]
+fn test_dynamo_delete_without_key_filter_returns_error_json() {
+    use crate::ast::{Action, Qail};
+
+    let delete = Qail {
+        action: Action::Del,
+        table: "users".to_string(),
+        ..Default::default()
+    }
+    .to_dynamo();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&delete).expect("dynamo error JSON must stay valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("requires an equality key filter")
+    );
+}
+
+#[test]
+fn test_dynamo_preserves_array_payload_values() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let put = Qail {
+        action: Action::Add,
+        table: "users".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("tags".to_string()),
+                op: Operator::Eq,
+                value: Value::Array(vec![
+                    Value::String("blue".to_string()),
+                    Value::Bool(true),
+                    Value::Int(7),
+                ]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_dynamo();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&put).expect("dynamo put JSON must stay valid");
+    assert_eq!(parsed["Item"]["tags"]["L"][0]["S"], "blue");
+    assert_eq!(parsed["Item"]["tags"]["L"][1]["BOOL"], true);
+    assert_eq!(parsed["Item"]["tags"]["L"][2]["N"], "7");
+}

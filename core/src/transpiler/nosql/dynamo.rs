@@ -27,26 +27,34 @@ pub trait ToDynamo {
 
 impl ToDynamo for Qail {
     fn to_dynamo(&self) -> String {
-        match self.action {
+        let result = match self.action {
             Action::Get => build_get_item(self),
             Action::Add | Action::Put => build_put_item(self),
             Action::Set => build_update_item(self),
             Action::Del => build_delete_item(self),
-            Action::Make => build_create_table(self),
-            Action::Drop => format!("{{ \"TableName\": {} }}", json_string(&self.table)), // DeleteTable input
-            _ => format!(
-                "{{ \"error\": {} }}",
-                json_string(&format!("Action {:?} not supported", self.action))
-            ),
-        }
+            Action::Make => Ok(build_create_table(self)),
+            Action::Drop => Ok(format!("{{ \"TableName\": {} }}", json_string(&self.table))), // DeleteTable input
+            _ => {
+                return format!(
+                    "{{ \"error\": {} }}",
+                    json_string(&format!("Action {:?} not supported", self.action))
+                );
+            }
+        };
+
+        result.unwrap_or_else(|err| dynamo_error(&err))
     }
 }
 
-fn build_get_item(cmd: &Qail) -> String {
+fn dynamo_error(message: &str) -> String {
+    format!("{{ \"error\": {} }}", json_string(message))
+}
+
+fn build_get_item(cmd: &Qail) -> Result<String, String> {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": {}", json_string(&cmd.table)));
 
-    let mut filter = build_expression(cmd);
+    let mut filter = build_expression(cmd)?;
     if !filter.expression.is_empty() {
         parts.push(format!(
             "\"FilterExpression\": {}",
@@ -66,14 +74,15 @@ fn build_get_item(cmd: &Qail) -> String {
                         "gsi" | "index" => {
                             let index_name = match &cond.value {
                                 Value::String(s) => s.clone(),
-                                _ => cond.value.to_string().replace("'", ""),
+                                _ => {
+                                    return Err("DynamoDB index name must be provided as a string"
+                                        .to_string());
+                                }
                             };
                             parts.push(format!("\"IndexName\": {}", json_string(&index_name)));
                         }
                         "consistency" | "consistent" => {
-                            // STRONG -> true. EVENTUAL -> false.
-                            let val = cond.value.to_string().to_uppercase();
-                            if val.contains("STRONG") || val.contains("TRUE") {
+                            if consistent_read_value(&cond.value)? {
                                 parts.push("\"ConsistentRead\": true".to_string());
                             } else {
                                 parts.push("\"ConsistentRead\": false".to_string());
@@ -114,27 +123,27 @@ fn build_get_item(cmd: &Qail) -> String {
         parts.push(format!("\"Limit\": {}", n))
     }
 
-    format!("{{ {} }}", parts.join(", "))
+    Ok(format!("{{ {} }}", parts.join(", ")))
 }
 
-fn build_put_item(cmd: &Qail) -> String {
+fn build_put_item(cmd: &Qail) -> Result<String, String> {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": {}", json_string(&cmd.table)));
 
-    let item = build_item_json(cmd);
+    let item = build_item_json(cmd)?;
     parts.push(format!("\"Item\": {{ {} }}", item));
 
-    format!("{{ {} }}", parts.join(", "))
+    Ok(format!("{{ {} }}", parts.join(", ")))
 }
 
-fn build_update_item(cmd: &Qail) -> String {
+fn build_update_item(cmd: &Qail) -> Result<String, String> {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": {}", json_string(&cmd.table)));
 
-    let key = build_key_from_filter(cmd);
+    let key = build_key_from_filter(cmd)?;
     parts.push(format!("\"Key\": {{ {} }}", key));
 
-    let update = build_update_expression(cmd);
+    let update = build_update_expression(cmd)?;
     parts.push(format!(
         "\"UpdateExpression\": {}",
         json_string(&update.expression)
@@ -150,21 +159,21 @@ fn build_update_item(cmd: &Qail) -> String {
         ));
     }
 
-    format!("{{ {} }}", parts.join(", "))
+    Ok(format!("{{ {} }}", parts.join(", ")))
 }
 
-fn build_delete_item(cmd: &Qail) -> String {
+fn build_delete_item(cmd: &Qail) -> Result<String, String> {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": {}", json_string(&cmd.table)));
 
     // Key logic
-    let key = build_key_from_filter(cmd);
+    let key = build_key_from_filter(cmd)?;
     parts.push(format!("\"Key\": {{ {} }}", key));
 
-    format!("{{ {} }}", parts.join(", "))
+    Ok(format!("{{ {} }}", parts.join(", ")))
 }
 
-fn build_expression(cmd: &Qail) -> DynamoExpression {
+fn build_expression(cmd: &Qail) -> Result<DynamoExpression, String> {
     let mut expr_parts = Vec::new();
     let mut values_parts = Vec::new();
     let mut names = Vec::new();
@@ -173,13 +182,15 @@ fn build_expression(cmd: &Qail) -> DynamoExpression {
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
-                let col_name = match &cond.left {
-                    Expr::Named(name) => name.clone(),
-                    expr => expr.to_string(),
+                let Expr::Named(name) = &cond.left else {
+                    return Err(format!(
+                        "DynamoDB filters require named fields, got expression `{}`",
+                        cond.left
+                    ));
                 };
 
                 if matches!(
-                    col_name.as_str(),
+                    name.as_str(),
                     "gsi" | "index" | "consistency" | "consistent"
                 ) {
                     continue;
@@ -195,62 +206,85 @@ fn build_expression(cmd: &Qail) -> DynamoExpression {
                     Operator::Lt => "<",
                     Operator::Gte => ">=",
                     Operator::Lte => "<=",
-                    _ => "=",
+                    _ => {
+                        return Err(format!(
+                            "unsupported DynamoDB filter operator {:?}",
+                            cond.op
+                        ));
+                    }
                 };
 
                 expr_parts.push(format!("{} {} {}", name_placeholder, op, placeholder));
-                names.push((name_placeholder, col_name));
+                names.push((name_placeholder, name.clone()));
 
-                let val_json = value_to_dynamo(&cond.value);
+                let val_json = value_to_dynamo(&cond.value)?;
                 values_parts.push(format!("{}: {}", json_string(&placeholder), val_json));
             }
         }
     }
 
-    DynamoExpression {
+    Ok(DynamoExpression {
         expression: expr_parts.join(" AND "),
         values: values_parts.join(", "),
         names,
-    }
+    })
 }
 
-fn build_item_json(cmd: &Qail) -> String {
+fn build_item_json(cmd: &Qail) -> Result<String, String> {
     let mut parts = Vec::new();
     for cage in &cmd.cages {
         match cage.kind {
             CageKind::Payload | CageKind::Filter => {
                 for cond in &cage.conditions {
-                    let val = value_to_dynamo(&cond.value);
-                    let col_str = match &cond.left {
-                        Expr::Named(name) => name.clone(),
-                        expr => expr.to_string(),
+                    let val = value_to_dynamo(&cond.value)?;
+                    let Expr::Named(name) = &cond.left else {
+                        return Err(format!(
+                            "DynamoDB item fields must be named, got expression `{}`",
+                            cond.left
+                        ));
                     };
-                    parts.push(format!("{}: {}", json_string(&col_str), val));
+                    parts.push(format!("{}: {}", json_string(name), val));
                 }
             }
             _ => {}
         }
     }
-    parts.join(", ")
+
+    if parts.is_empty() {
+        return Err("DynamoDB put item requires at least one item field".to_string());
+    }
+
+    Ok(parts.join(", "))
 }
 
-fn build_key_from_filter(cmd: &Qail) -> String {
+fn build_key_from_filter(cmd: &Qail) -> Result<String, String> {
     for cage in &cmd.cages {
-        if let CageKind::Filter = cage.kind
-            && let Some(cond) = cage.conditions.first()
-        {
-            let val = value_to_dynamo(&cond.value);
-            let col_str = match &cond.left {
-                Expr::Named(name) => name.clone(),
-                expr => expr.to_string(),
-            };
-            return format!("{}: {}", json_string(&col_str), val);
+        if let CageKind::Filter = cage.kind {
+            for cond in &cage.conditions {
+                let Expr::Named(name) = &cond.left else {
+                    return Err(format!(
+                        "DynamoDB key fields must be named, got expression `{}`",
+                        cond.left
+                    ));
+                };
+                if matches!(
+                    name.as_str(),
+                    "gsi" | "index" | "consistency" | "consistent"
+                ) {
+                    continue;
+                }
+                if cond.op != Operator::Eq {
+                    return Err("DynamoDB key filters must use equality".to_string());
+                }
+                let val = value_to_dynamo(&cond.value)?;
+                return Ok(format!("{}: {}", json_string(name), val));
+            }
         }
     }
-    "\"pk\": { \"S\": \"unknown\" }".to_string()
+    Err("DynamoDB update/delete requires an equality key filter".to_string())
 }
 
-fn build_update_expression(cmd: &Qail) -> DynamoExpression {
+fn build_update_expression(cmd: &Qail) -> Result<DynamoExpression, String> {
     let mut sets = Vec::new();
     let mut vals = Vec::new();
     let mut names = Vec::new();
@@ -261,25 +295,31 @@ fn build_update_expression(cmd: &Qail) -> DynamoExpression {
             for cond in &cage.conditions {
                 counter += 1;
                 let placeholder = format!(":u{}", counter);
-                let col_str = match &cond.left {
-                    Expr::Named(name) => name.clone(),
-                    expr => expr.to_string(),
+                let Expr::Named(name) = &cond.left else {
+                    return Err(format!(
+                        "DynamoDB update fields must be named, got expression `{}`",
+                        cond.left
+                    ));
                 };
                 let name_placeholder = format!("#u{}", counter);
                 sets.push(format!("{} = {}", name_placeholder, placeholder));
-                names.push((name_placeholder, col_str));
+                names.push((name_placeholder, name.clone()));
 
-                let val = value_to_dynamo(&cond.value);
+                let val = value_to_dynamo(&cond.value)?;
                 vals.push(format!("{}: {}", json_string(&placeholder), val));
             }
         }
     }
 
-    DynamoExpression {
+    if sets.is_empty() {
+        return Err("DynamoDB update requires at least one payload field".to_string());
+    }
+
+    Ok(DynamoExpression {
         expression: format!("SET {}", sets.join(", ")),
         values: vals.join(", "),
         names,
-    }
+    })
 }
 
 fn get_limit(cmd: &Qail) -> Option<usize> {
@@ -332,13 +372,84 @@ fn build_create_table(cmd: &Qail) -> String {
     )
 }
 
-fn value_to_dynamo(v: &Value) -> String {
+fn consistent_read_value(value: &Value) -> Result<bool, String> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        Value::String(value) => match value.to_ascii_uppercase().as_str() {
+            "STRONG" | "TRUE" => Ok(true),
+            "EVENTUAL" | "FALSE" => Ok(false),
+            _ => Err("DynamoDB consistency must be STRONG, EVENTUAL, true, or false".to_string()),
+        },
+        other => Err(format!(
+            "DynamoDB consistency must be a bool or string, got {other}"
+        )),
+    }
+}
+
+fn value_to_dynamo(v: &Value) -> Result<String, String> {
     match v {
-        Value::String(s) => format!("{{ \"S\": {} }}", json_string(s)),
-        Value::Int(n) => format!("{{ \"N\": \"{}\" }}", n),
-        Value::Float(n) => format!("{{ \"N\": \"{}\" }}", n),
-        Value::Bool(b) => format!("{{ \"BOOL\": {} }}", b),
-        Value::Null => "{ \"NULL\": true }".to_string(),
-        _ => "{ \"S\": \"unknown\" }".to_string(),
+        Value::String(s) => Ok(format!("{{ \"S\": {} }}", json_string(s))),
+        Value::Int(n) => Ok(format!("{{ \"N\": \"{}\" }}", n)),
+        Value::Float(n) if n.is_finite() => Ok(format!("{{ \"N\": \"{}\" }}", n)),
+        Value::Float(_) => {
+            Err("non-finite floats cannot be encoded as DynamoDB numbers".to_string())
+        }
+        Value::Bool(b) => Ok(format!("{{ \"BOOL\": {} }}", b)),
+        Value::Null | Value::NullUuid => Ok("{ \"NULL\": true }".to_string()),
+        Value::Uuid(uuid) => Ok(format!("{{ \"S\": {} }}", json_string(&uuid.to_string()))),
+        Value::Timestamp(ts) => Ok(format!("{{ \"S\": {} }}", json_string(ts))),
+        Value::Array(values) => {
+            let values: Result<Vec<String>, String> = values.iter().map(value_to_dynamo).collect();
+            Ok(format!("{{ \"L\": [{}] }}", values?.join(", ")))
+        }
+        Value::Vector(values) => {
+            let values: Result<Vec<String>, String> = values
+                .iter()
+                .map(|value| {
+                    if value.is_finite() {
+                        Ok(format!("{{ \"N\": \"{}\" }}", value))
+                    } else {
+                        Err(
+                            "non-finite vector values cannot be encoded as DynamoDB numbers"
+                                .to_string(),
+                        )
+                    }
+                })
+                .collect();
+            Ok(format!("{{ \"L\": [{}] }}", values?.join(", ")))
+        }
+        Value::Json(json) => serde_json::from_str::<serde_json::Value>(json)
+            .map_err(|err| format!("invalid JSON value for DynamoDB attribute: {err}"))
+            .and_then(|value| json_value_to_dynamo(&value)),
+        other => Err(format!("unsupported DynamoDB attribute value: {other}")),
+    }
+}
+
+fn json_value_to_dynamo(value: &serde_json::Value) -> Result<String, String> {
+    match value {
+        serde_json::Value::Null => Ok("{ \"NULL\": true }".to_string()),
+        serde_json::Value::Bool(value) => Ok(format!("{{ \"BOOL\": {} }}", value)),
+        serde_json::Value::Number(value) => {
+            Ok(format!("{{ \"N\": {} }}", json_string(&value.to_string())))
+        }
+        serde_json::Value::String(value) => Ok(format!("{{ \"S\": {} }}", json_string(value))),
+        serde_json::Value::Array(values) => {
+            let values: Result<Vec<String>, String> =
+                values.iter().map(json_value_to_dynamo).collect();
+            Ok(format!("{{ \"L\": [{}] }}", values?.join(", ")))
+        }
+        serde_json::Value::Object(values) => {
+            let values: Result<Vec<String>, String> = values
+                .iter()
+                .map(|(key, value)| {
+                    Ok(format!(
+                        "{}: {}",
+                        json_string(key),
+                        json_value_to_dynamo(value)?
+                    ))
+                })
+                .collect();
+            Ok(format!("{{ \"M\": {{ {} }} }}", values?.join(", ")))
+        }
     }
 }
