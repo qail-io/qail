@@ -64,6 +64,29 @@ fn snapshot_column_label(row: &qail_pg::PgRow, idx: usize) -> String {
         .unwrap_or_else(|| "*".to_string())
 }
 
+fn snapshot_filename_component(raw: &str) -> String {
+    let mut safe = String::new();
+    let mut last_was_separator = false;
+
+    for ch in raw.chars() {
+        let is_safe = ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.');
+        if is_safe {
+            safe.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            safe.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    let safe = safe.trim_matches(|ch| matches!(ch, '_' | '-' | '.'));
+    if safe.is_empty() {
+        "unnamed".to_string()
+    } else {
+        safe.to_string()
+    }
+}
+
 /// Impact analysis result for a migration command
 #[derive(Debug, Default)]
 pub struct MigrationImpact {
@@ -378,7 +401,8 @@ fn ensure_snapshot_dir() -> Result<PathBuf> {
 pub async fn backup_table(driver: &mut PgDriver, table: &str) -> Result<PathBuf> {
     let snapshot_dir = ensure_snapshot_dir()?;
     let timestamp = crate::time::timestamp_filename();
-    let filename = format!("{}_{}.csv", timestamp, table);
+    let table_name = snapshot_filename_component(table);
+    let filename = format!("{}_{}.csv", timestamp, table_name);
     let path = snapshot_dir.join(&filename);
 
     // Use fetch_all for backup
@@ -411,8 +435,9 @@ pub async fn backup_columns(
 ) -> Result<PathBuf> {
     let snapshot_dir = ensure_snapshot_dir()?;
     let timestamp = crate::time::timestamp_filename();
-    let col_names = columns.join("_");
-    let filename = format!("{}_{}_{}.csv", timestamp, table, col_names);
+    let table_name = snapshot_filename_component(table);
+    let col_names = snapshot_filename_component(&columns.join("_"));
+    let filename = format!("{}_{}_{}.csv", timestamp, table_name, col_names);
     let path = snapshot_dir.join(&filename);
 
     // Assuming 'id' is common primary key - this is a simplification
@@ -893,8 +918,8 @@ mod tests {
     use super::{
         MigrationImpact, backup_row_tsv, columns_requiring_snapshot, escape_tsv_field,
         is_narrowing_type_change, normalize_type_for_cast, parse_count_text,
-        required_backup_row_string, snapshot_column_label, snapshot_json_string, snapshot_label,
-        snapshot_row_json,
+        required_backup_row_string, snapshot_column_label, snapshot_filename_component,
+        snapshot_json_string, snapshot_label, snapshot_row_json,
     };
 
     #[test]
@@ -957,6 +982,17 @@ mod tests {
             column_info: None,
         };
         assert!(required_backup_row_string(&empty, 0, "row_id").is_err());
+    }
+
+    #[test]
+    fn file_snapshot_names_sanitize_path_components() {
+        assert_eq!(snapshot_filename_component("users"), "users");
+        assert_eq!(snapshot_filename_component("public.users"), "public.users");
+        assert_eq!(
+            snapshot_filename_component("../../tenant/users\nemail"),
+            "tenant_users_email"
+        );
+        assert_eq!(snapshot_filename_component("..."), "unnamed");
     }
 
     #[test]
