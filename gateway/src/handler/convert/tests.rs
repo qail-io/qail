@@ -116,6 +116,18 @@ fn typed_array_oid_1007() {
 }
 
 #[test]
+fn typed_bool_array_oid_1000() {
+    assert_eq!(
+        text_to_json_typed("{t,f,TRUE,FALSE}", 1000),
+        serde_json::json!([true, false, true, false])
+    );
+    assert_eq!(
+        text_to_json_typed(r#"{"t","false"}"#, 1000),
+        serde_json::json!(["t", "false"])
+    );
+}
+
+#[test]
 fn typed_unknown_oid_falls_back_to_guess() {
     assert_eq!(text_to_json_typed("42", 0), serde_json::json!(42));
     assert_eq!(text_to_json_typed("hello", 0), serde_json::json!("hello"));

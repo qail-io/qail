@@ -389,6 +389,11 @@ fn finish_array_element(s: String, was_quoted: bool) -> serde_json::Value {
         if trimmed.eq_ignore_ascii_case("null") {
             return serde_json::Value::Null;
         }
+        match trimmed {
+            "t" | "T" | "true" | "TRUE" => return serde_json::Value::Bool(true),
+            "f" | "F" | "false" | "FALSE" => return serde_json::Value::Bool(false),
+            _ => {}
+        }
         if let Ok(n) = trimmed.parse::<i64>() {
             return serde_json::Value::Number(n.into());
         }
