@@ -175,6 +175,16 @@ queue notifications { provider sqs }
 }
 
 #[test]
+fn test_parse_schema_rejects_resource_without_name() {
+    let content = r#"
+bucket { provider s3 }
+"#;
+
+    let err = Schema::parse(content).expect_err("missing resource name must fail");
+    assert!(err.contains("Missing name for bucket declaration"));
+}
+
+#[test]
 fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
     let mut schema = Schema::parse(
         r#"

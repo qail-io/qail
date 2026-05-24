@@ -179,6 +179,9 @@ impl Schema {
 
                 // Extract name (before {
                 let name = rest.split('{').next().unwrap_or(rest).trim().to_string();
+                if name.is_empty() {
+                    return Err(format!("Missing name for {} declaration", kind));
+                }
                 let mut provider = None;
                 let mut properties = HashMap::new();
 
@@ -225,20 +228,18 @@ impl Schema {
                     }
                 }
 
-                if !name.is_empty() {
-                    if schema.resources.contains_key(&name) {
-                        return Err(format!("duplicate resource declaration '{}'", name));
-                    }
-                    schema.resources.insert(
-                        name.clone(),
-                        ResourceSchema {
-                            name,
-                            kind,
-                            provider,
-                            properties,
-                        },
-                    );
+                if schema.resources.contains_key(&name) {
+                    return Err(format!("duplicate resource declaration '{}'", name));
                 }
+                schema.resources.insert(
+                    name.clone(),
+                    ResourceSchema {
+                        name,
+                        kind,
+                        provider,
+                        properties,
+                    },
+                );
                 continue;
             }
 
