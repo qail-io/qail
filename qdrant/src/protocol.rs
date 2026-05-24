@@ -342,28 +342,70 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
         .as_array()
         .ok_or_else(|| crate::error::QdrantError::Decode("Missing 'result' array".to_string()))?;
 
-    let scored_points: Vec<ScoredPoint> = results
+    results
         .iter()
-        .filter_map(|item| {
-            let id = parse_point_id(&item["id"])?;
-            let score = item["score"].as_f64()? as f32;
-            let payload = parse_payload(&item["payload"]);
-            let vector = item["vector"].as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                    .collect()
-            });
+        .enumerate()
+        .map(|(idx, item)| {
+            let id = item.get("id").and_then(parse_point_id).ok_or_else(|| {
+                crate::error::QdrantError::Decode(format!("Missing point id at result index {idx}"))
+            })?;
+            let score = item
+                .get("score")
+                .and_then(JsonValue::as_f64)
+                .filter(|score| score.is_finite())
+                .ok_or_else(|| {
+                    crate::error::QdrantError::Decode(format!(
+                        "Invalid score at result index {idx}"
+                    ))
+                })?;
+            let payload = item.get("payload").map(parse_payload).unwrap_or_default();
+            let vector = decode_result_vector(item.get("vector"), idx)?;
 
-            Some(ScoredPoint {
+            Ok(ScoredPoint {
                 id,
-                score,
+                score: score as f32,
                 payload,
                 vector,
             })
         })
-        .collect();
+        .collect()
+}
 
-    Ok(scored_points)
+fn decode_result_vector(
+    value: Option<&JsonValue>,
+    result_idx: usize,
+) -> QdrantResult<Option<Vec<f32>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let arr = value.as_array().ok_or_else(|| {
+        crate::error::QdrantError::Decode(format!("Invalid vector at result index {result_idx}"))
+    })?;
+
+    let mut vector = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let value = item
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                crate::error::QdrantError::Decode(format!(
+                    "Invalid vector value at result index {result_idx}, vector index {idx}"
+                ))
+            })?;
+        let value = value as f32;
+        if !value.is_finite() {
+            return Err(crate::error::QdrantError::Decode(format!(
+                "Invalid vector value at result index {result_idx}, vector index {idx}"
+            )));
+        }
+        vector.push(value);
+    }
+
+    Ok(Some(vector))
 }
 
 /// Parse a point ID from JSON.
@@ -481,7 +523,7 @@ mod tests {
         let response = r#"{
             "result": [
                 {"id": "abc", "score": 0.95, "payload": {"name": "test"}},
-                {"id": 123, "score": 0.80, "payload": {}}
+                {"id": 123, "score": 0.80, "payload": {}, "vector": [0.1, 0.2]}
             ]
         }"#;
 
@@ -489,6 +531,28 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].score, 0.95);
         assert_eq!(results[1].score, 0.80);
+        assert_eq!(results[1].vector.as_deref(), Some(&[0.1, 0.2][..]));
+    }
+
+    #[test]
+    fn decode_search_response_rejects_malformed_results() {
+        let missing_id = r#"{
+            "result": [
+                {"score": 0.95, "payload": {"name": "test"}}
+            ]
+        }"#;
+        let err = decode_search_response(missing_id.as_bytes())
+            .expect_err("missing id should fail closed");
+        assert!(err.to_string().contains("Missing point id"));
+
+        let bad_vector = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {}, "vector": [0.1, "oops"]}
+            ]
+        }"#;
+        let err = decode_search_response(bad_vector.as_bytes())
+            .expect_err("bad vector should fail closed");
+        assert!(err.to_string().contains("Invalid vector value"));
     }
 
     #[test]
