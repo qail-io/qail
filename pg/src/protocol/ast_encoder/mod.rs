@@ -2304,6 +2304,28 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_policy_expression_fragments_are_sanitized() {
+        use qail_core::ast::Expr;
+        use qail_core::migrate::policy::RlsPolicy;
+
+        let policy = RlsPolicy::create("unsafe_policy", "users")
+            .for_all()
+            .using(Expr::Named(
+                "tenant_id = current_setting('app.tenant')::uuid; DROP TABLE users; --".to_string(),
+            ))
+            .with_check(Expr::Named("note = 'semi;inside'".to_string()));
+
+        let cmd = Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(policy),
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&cmd).unwrap().0;
+        assert!(sql.contains("USING (FALSE)"));
+        assert!(sql.contains("WITH CHECK (note = 'semi;inside')"));
+    }
+
+    #[test]
     fn test_encode_drop_policy() {
         let cmd = Qail {
             action: Action::DropPolicy,

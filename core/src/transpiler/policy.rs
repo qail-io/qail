@@ -8,6 +8,65 @@ use crate::migrate::policy::RlsPolicy;
 use crate::migrate::schema::CheckExpr;
 use crate::transpiler::traits::escape_identifier;
 
+fn contains_unquoted_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> String {
+    let expr = expr.to_string();
+    if expr.trim().is_empty() || contains_unquoted_statement_delimiter(&expr) {
+        "FALSE".to_string()
+    } else {
+        expr.replace('\0', "")
+    }
+}
+
 /// Transpile an `RlsPolicy` to a `CREATE POLICY` SQL statement.
 ///
 /// Expression nodes are transpiled via their `Display` impl —
@@ -49,12 +108,12 @@ pub fn create_policy_sql(policy: &RlsPolicy) -> String {
 
     // USING (expr)
     if let Some(expr) = &policy.using {
-        sql.push_str(&format!(" USING ({})", expr));
+        sql.push_str(&format!(" USING ({})", policy_expr_to_sql(expr)));
     }
 
     // WITH CHECK (expr)
     if let Some(expr) = &policy.with_check {
-        sql.push_str(&format!(" WITH CHECK ({})", expr));
+        sql.push_str(&format!(" WITH CHECK ({})", policy_expr_to_sql(expr)));
     }
 
     sql
@@ -332,6 +391,20 @@ mod tests {
         assert!(sql.contains("FOR SELECT"));
         assert!(sql.contains("TO"));
         assert!(sql.contains("app_user"));
+    }
+
+    #[test]
+    fn test_create_policy_expression_fragments_are_sanitized() {
+        let policy = RlsPolicy::create("unsafe_policy", "users")
+            .for_all()
+            .using(crate::ast::Expr::Named(
+                "tenant_id = current_setting('app.tenant')::uuid; DROP TABLE users; --".to_string(),
+            ))
+            .with_check(crate::ast::Expr::Named("note = 'semi;inside'".to_string()));
+
+        let sql = create_policy_sql(&policy);
+        assert!(sql.contains("USING (FALSE)"));
+        assert!(sql.contains("WITH CHECK (note = 'semi;inside')"));
     }
 
     #[test]

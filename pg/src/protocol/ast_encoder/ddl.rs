@@ -1271,12 +1271,12 @@ pub fn encode_create_policy(
 
     if let Some(expr) = &policy.using {
         buf.extend_from_slice(b" USING (");
-        buf.extend_from_slice(expr.to_string().as_bytes());
+        buf.extend_from_slice(sql_expr_fragment_to_sql(&expr.to_string(), "FALSE").as_bytes());
         buf.extend_from_slice(b")");
     }
     if let Some(expr) = &policy.with_check {
         buf.extend_from_slice(b" WITH CHECK (");
-        buf.extend_from_slice(expr.to_string().as_bytes());
+        buf.extend_from_slice(sql_expr_fragment_to_sql(&expr.to_string(), "FALSE").as_bytes());
         buf.extend_from_slice(b")");
     }
 
