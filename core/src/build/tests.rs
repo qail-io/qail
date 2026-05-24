@@ -110,6 +110,52 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_unknown_column_option() {
+    let content = r#"
+table users {
+  email TEXT uniq
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("unknown column option must fail");
+    assert!(err.contains("Unknown column option 'uniq' for column 'email' in table 'users'"));
+}
+
+#[test]
+fn test_parse_schema_tracks_references_column_option() {
+    let content = r#"
+table users {
+  id UUID
+}
+
+table posts {
+  id UUID
+  user_id UUID not_null references users(id) on_delete cascade
+}
+"#;
+
+    let schema = Schema::parse(content).expect("references syntax should parse");
+    let posts = schema.table("posts").expect("posts table should exist");
+    assert_eq!(posts.foreign_keys.len(), 1);
+    assert_eq!(posts.foreign_keys[0].column, "user_id");
+    assert_eq!(posts.foreign_keys[0].ref_table, "users");
+    assert_eq!(posts.foreign_keys[0].ref_column, "id");
+}
+
+#[test]
+fn test_parse_schema_allows_default_expression_options() {
+    let content = r#"
+table users {
+  id UUID primary_key default gen_random_uuid()
+  created_at timestamptz not_null default now()
+}
+"#;
+
+    let schema = Schema::parse(content).expect("default expressions should parse");
+    assert!(schema.table("users").unwrap().has_column("created_at"));
+}
+
+#[test]
 fn test_parse_schema_supports_declared_enum_column_type() {
     let content = r#"
 enum ticket_status { draft, active, cancelled }

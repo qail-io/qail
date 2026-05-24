@@ -379,9 +379,35 @@ impl Schema {
                     // Check for policies and foreign keys
                     let mut policy = "Public".to_string();
 
-                    for part in parts.iter().skip(2) {
-                        if *part == "protected" {
+                    let mut i = 2;
+                    while i < parts.len() {
+                        let part = parts[i];
+                        if part == "protected" {
                             policy = "Protected".to_string();
+                        } else if matches!(
+                            part,
+                            "primary_key"
+                                | "not_null"
+                                | "nullable"
+                                | "unique"
+                                | "generated_identity"
+                                | "generated_by_default_identity"
+                        ) {
+                            // Build-time validation only needs shape, type, policy, and relations.
+                        } else if part == "default" {
+                            if i + 1 >= parts.len() {
+                                return Err(format!(
+                                    "default requires a value for column '{}' in table '{}'",
+                                    col_name, table_name
+                                ));
+                            }
+                            break;
+                        } else if part.starts_with("default=")
+                            || part.starts_with("default:")
+                            || part.starts_with("generated_stored(")
+                            || part.starts_with("check(")
+                        {
+                            break;
                         } else if let Some(ref_spec) = part.strip_prefix("ref:") {
                             // Parse "table.column" or ">table.column"
                             let ref_spec = ref_spec.trim_start_matches('>');
@@ -392,7 +418,52 @@ impl Schema {
                                     ref_column: ref_col.to_string(),
                                 });
                             }
+                        } else if part == "references" {
+                            if i + 1 >= parts.len() {
+                                return Err(format!(
+                                    "foreign key reference target is required for column '{}' in table '{}'",
+                                    col_name, table_name
+                                ));
+                            }
+                            i += 1;
+                            let (ref_table, ref_column) =
+                                parse_build_references_target(parts[i], col_name, table_name)?;
+                            current_fks.push(ForeignKey {
+                                column: col_name.to_string(),
+                                ref_table,
+                                ref_column,
+                            });
+                        } else if let Some(ref_target) = part.strip_prefix("references") {
+                            let (ref_table, ref_column) =
+                                parse_build_references_target(ref_target, col_name, table_name)?;
+                            current_fks.push(ForeignKey {
+                                column: col_name.to_string(),
+                                ref_table,
+                                ref_column,
+                            });
+                        } else if matches!(part, "on_delete" | "on_update") {
+                            if i + 1 >= parts.len() {
+                                return Err(format!(
+                                    "{} requires a foreign key action for column '{}' in table '{}'",
+                                    part, col_name, table_name
+                                ));
+                            }
+                            i += 1;
+                        } else if part == "check_name" {
+                            if i + 1 >= parts.len() {
+                                return Err(format!(
+                                    "check_name requires a name for column '{}' in table '{}'",
+                                    col_name, table_name
+                                ));
+                            }
+                            i += 1;
+                        } else {
+                            return Err(format!(
+                                "Unknown column option '{}' for column '{}' in table '{}'",
+                                part, col_name, table_name
+                            ));
                         }
+                        i += 1;
                     }
                     current_policies.insert(col_name.to_string(), policy);
                 }
@@ -894,6 +965,36 @@ fn parse_build_enum_value(raw: &str) -> Result<String, String> {
     }
 
     Err(format!("invalid enum value token '{}'", trimmed))
+}
+
+fn parse_build_references_target(
+    target: &str,
+    col_name: &str,
+    table_name: &str,
+) -> Result<(String, String), String> {
+    let target = target.trim();
+    let (ref_table, ref_column) = target.split_once('(').ok_or_else(|| {
+        format!(
+            "Invalid foreign key reference target '{}' for column '{}' in table '{}'",
+            target, col_name, table_name
+        )
+    })?;
+    let ref_column = ref_column.strip_suffix(')').ok_or_else(|| {
+        format!(
+            "Invalid foreign key reference target '{}' for column '{}' in table '{}'",
+            target, col_name, table_name
+        )
+    })?;
+    let ref_table = ref_table.trim();
+    let ref_column = ref_column.trim();
+    if ref_table.is_empty() || ref_column.is_empty() {
+        return Err(format!(
+            "Invalid foreign key reference target '{}' for column '{}' in table '{}'",
+            target, col_name, table_name
+        ));
+    }
+
+    Ok((ref_table.to_string(), ref_column.to_string()))
 }
 
 fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {
