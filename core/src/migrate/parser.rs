@@ -1381,12 +1381,30 @@ struct HeaderWord {
 
 fn parse_function_header(header: &str) -> Result<(String, String, Option<String>), String> {
     let words = header_word_spans(header);
-    let returns_idx = words.iter().position(|word| {
-        word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("returns")
-    });
-    let language_idx = words.iter().position(|word| {
-        word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("language")
-    });
+    let returns_matches: Vec<usize> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, word)| {
+            (word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("returns"))
+                .then_some(idx)
+        })
+        .collect();
+    if returns_matches.len() > 1 {
+        return Err("function has duplicate returns clauses".to_string());
+    }
+    let language_matches: Vec<usize> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, word)| {
+            (word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("language"))
+                .then_some(idx)
+        })
+        .collect();
+    if language_matches.len() > 1 {
+        return Err("function has duplicate language clauses".to_string());
+    }
+    let returns_idx = returns_matches.first().copied();
+    let language_idx = language_matches.first().copied();
     let volatility_idx = words.iter().position(|word| {
         if word.depth != 0 {
             return false;
@@ -3105,6 +3123,23 @@ materialized view active_users $$ SELECT 2 $$
             ),
         ] {
             let err = parse_qail(input).expect_err("missing function header field should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_function_rejects_duplicate_header_fields() {
+        for (input, expected) in [
+            (
+                "function f() returns int returns text language sql $$ SELECT 1 $$",
+                "function has duplicate returns clauses",
+            ),
+            (
+                "function f() returns int language sql language plpgsql $$ SELECT 1 $$",
+                "function has duplicate language clauses",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("duplicate function header field should fail");
             assert!(err.contains(expected), "{err}");
         }
     }
