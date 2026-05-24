@@ -185,6 +185,14 @@ bucket { provider s3 }
 }
 
 #[test]
+fn test_parse_schema_rejects_trailing_resource_content_without_block() {
+    let content = "bucket avatars provider s3";
+
+    let err = Schema::parse(content).expect_err("trailing resource content must fail");
+    assert!(err.contains("Trailing content after bucket resource name"));
+}
+
+#[test]
 fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
     let mut schema = Schema::parse(
         r#"

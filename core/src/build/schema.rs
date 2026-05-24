@@ -178,15 +178,25 @@ impl Schema {
                 let rest = parts.get(1).copied().unwrap_or("").trim();
 
                 // Extract name (before {
-                let name = rest.split('{').next().unwrap_or(rest).trim().to_string();
+                let has_block = line.contains('{');
+                let (name, block_start) = if has_block {
+                    let (name, block) = rest.split_once('{').unwrap_or((rest, ""));
+                    (name.trim().to_string(), Some(block.to_string()))
+                } else {
+                    let mut parts = rest.split_whitespace();
+                    let name = parts.next().unwrap_or("").to_string();
+                    if parts.next().is_some() {
+                        return Err(format!("Trailing content after {} resource name", kind));
+                    }
+                    (name, None)
+                };
                 if name.is_empty() {
                     return Err(format!("Missing name for {} declaration", kind));
                 }
                 let mut provider = None;
                 let mut properties = HashMap::new();
 
-                if line.contains('{') {
-                    let mut block = rest.split('{').nth(1).unwrap_or("").to_string();
+                if let Some(mut block) = block_start {
                     let mut block_content = None;
                     while block_content.is_none() {
                         block_content = resource_block_content_before_closing(&block)?;
