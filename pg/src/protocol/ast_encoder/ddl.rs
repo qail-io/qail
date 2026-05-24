@@ -1504,18 +1504,33 @@ pub fn encode_drop_trigger(
 }
 
 /// Encode CREATE EXTENSION statement.
-pub fn encode_create_extension(cmd: &Qail, buf: &mut BytesMut) {
+pub fn encode_create_extension(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(b"CREATE EXTENSION IF NOT EXISTS ");
     buf.extend_from_slice(quote_double_string(&cmd.table).as_bytes());
 
     for col in &cmd.columns {
-        if let Expr::Named(opt) = col
-            && let Some(option) = extension_option_to_sql(opt)
-        {
-            buf.extend_from_slice(b" ");
-            buf.extend_from_slice(option.as_bytes());
+        match col {
+            Expr::Named(opt) => {
+                let Some(option) = extension_option_to_sql(opt) else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                        "invalid extension option: {opt:?}"
+                    )));
+                };
+                buf.extend_from_slice(b" ");
+                buf.extend_from_slice(option.as_bytes());
+            }
+            _ => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "extension options must be named expressions".to_string(),
+                ));
+            }
         }
     }
+
+    Ok(())
 }
 
 /// Encode DROP EXTENSION statement.
@@ -1582,18 +1597,33 @@ fn comment_target_to_sql(target: &str) -> String {
 }
 
 /// Encode CREATE SEQUENCE statement.
-pub fn encode_create_sequence(cmd: &Qail, buf: &mut BytesMut) {
+pub fn encode_create_sequence(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(b"CREATE SEQUENCE ");
     push_identifier(buf, &cmd.table);
 
     for col in &cmd.columns {
-        if let Expr::Named(opt) = col
-            && let Some(option) = sequence_option_to_sql(opt)
-        {
-            buf.extend_from_slice(b" ");
-            buf.extend_from_slice(option.as_bytes());
+        match col {
+            Expr::Named(opt) => {
+                let Some(option) = sequence_option_to_sql(opt) else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                        "invalid sequence option: {opt:?}"
+                    )));
+                };
+                buf.extend_from_slice(b" ");
+                buf.extend_from_slice(option.as_bytes());
+            }
+            _ => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "sequence options must be named expressions".to_string(),
+                ));
+            }
         }
     }
+
+    Ok(())
 }
 
 /// Encode DROP SEQUENCE statement.

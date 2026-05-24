@@ -888,11 +888,15 @@ pub fn build_create_extension(cmd: &Qail, dialect: Dialect) -> String {
     );
 
     for col in &cmd.columns {
-        if let Expr::Named(val) = col
-            && let Some(option) = extension_option_to_sql(val, generator.as_ref())
-        {
-            sql.push(' ');
-            sql.push_str(&option);
+        match col {
+            Expr::Named(val) => {
+                let Some(option) = extension_option_to_sql(val, generator.as_ref()) else {
+                    return "/* ERROR: Invalid extension option */".to_string();
+                };
+                sql.push(' ');
+                sql.push_str(&option);
+            }
+            _ => return "/* ERROR: Invalid extension option */".to_string(),
         }
     }
 
@@ -973,11 +977,15 @@ pub fn build_create_sequence(cmd: &Qail, dialect: Dialect) -> String {
     let mut sql = format!("CREATE SEQUENCE {}", generator.quote_identifier(&cmd.table));
 
     for col in &cmd.columns {
-        if let Expr::Named(opt) = col
-            && let Some(option) = sequence_option_to_sql(opt, generator.as_ref())
-        {
-            sql.push(' ');
-            sql.push_str(&option);
+        match col {
+            Expr::Named(opt) => {
+                let Some(option) = sequence_option_to_sql(opt, generator.as_ref()) else {
+                    return "/* ERROR: Invalid sequence option */".to_string();
+                };
+                sql.push(' ');
+                sql.push_str(&option);
+            }
+            _ => return "/* ERROR: Invalid sequence option */".to_string(),
         }
     }
 

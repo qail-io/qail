@@ -184,10 +184,10 @@ impl AstEncoder {
             Action::DropFunction => ddl::encode_drop_function(cmd, sql_buf),
             Action::CreateTrigger => ddl::encode_create_trigger(cmd, sql_buf)?,
             Action::DropTrigger => ddl::encode_drop_trigger(cmd, sql_buf)?,
-            Action::CreateExtension => ddl::encode_create_extension(cmd, sql_buf),
+            Action::CreateExtension => ddl::encode_create_extension(cmd, sql_buf)?,
             Action::DropExtension => ddl::encode_drop_extension(cmd, sql_buf),
             Action::CommentOn => ddl::encode_comment_on(cmd, sql_buf),
-            Action::CreateSequence => ddl::encode_create_sequence(cmd, sql_buf),
+            Action::CreateSequence => ddl::encode_create_sequence(cmd, sql_buf)?,
             Action::DropSequence => ddl::encode_drop_sequence(cmd, sql_buf),
             Action::CreateEnum => ddl::encode_create_enum(cmd, sql_buf),
             Action::DropEnum => ddl::encode_drop_enum(cmd, sql_buf),
@@ -270,10 +270,10 @@ impl AstEncoder {
             Action::DropFunction => ddl::encode_drop_function(cmd, &mut sql_buf),
             Action::CreateTrigger => ddl::encode_create_trigger(cmd, &mut sql_buf)?,
             Action::DropTrigger => ddl::encode_drop_trigger(cmd, &mut sql_buf)?,
-            Action::CreateExtension => ddl::encode_create_extension(cmd, &mut sql_buf),
+            Action::CreateExtension => ddl::encode_create_extension(cmd, &mut sql_buf)?,
             Action::DropExtension => ddl::encode_drop_extension(cmd, &mut sql_buf),
             Action::CommentOn => ddl::encode_comment_on(cmd, &mut sql_buf),
-            Action::CreateSequence => ddl::encode_create_sequence(cmd, &mut sql_buf),
+            Action::CreateSequence => ddl::encode_create_sequence(cmd, &mut sql_buf)?,
             Action::DropSequence => ddl::encode_drop_sequence(cmd, &mut sql_buf),
             Action::CreateEnum => ddl::encode_create_enum(cmd, &mut sql_buf),
             Action::DropEnum => ddl::encode_drop_enum(cmd, &mut sql_buf),
@@ -1977,7 +1977,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_ddl_option_fragments_are_sanitized() {
+    fn test_encode_ddl_options_reject_invalid_fragments() {
         use qail_core::ast::Expr;
 
         let extension = Qail {
@@ -1986,13 +1986,28 @@ mod tests {
             columns: vec![
                 Expr::Named("SCHEMA public; DROP TABLE users; --".to_string()),
                 Expr::Named("VERSION '1.1; DROP SCHEMA public; --'".to_string()),
-                Expr::Named("CASCADE; DROP TABLE users".to_string()),
             ],
             ..Default::default()
         };
         assert_eq!(
             AstEncoder::encode_cmd_sql(&extension).unwrap().0,
             "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" SCHEMA \"public; DROP TABLE users; --\" VERSION '1.1; DROP SCHEMA public; --'"
+        );
+
+        let invalid_extension = Qail {
+            action: Action::CreateExtension,
+            table: "uuid-ossp".to_string(),
+            columns: vec![
+                Expr::Named("SCHEMA public".to_string()),
+                Expr::Named("CASCADE; DROP TABLE users".to_string()),
+            ],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&invalid_extension)
+            .expect_err("invalid extension option must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid extension option")),
+            "unexpected error: {err}"
         );
 
         let sequence = Qail {
@@ -2002,13 +2017,28 @@ mod tests {
                 Expr::Named("start 1000".to_string()),
                 Expr::Named("increment by -1".to_string()),
                 Expr::Named("owned_by public.orders.id".to_string()),
-                Expr::Named("cache 10; DROP TABLE users".to_string()),
             ],
             ..Default::default()
         };
         assert_eq!(
             AstEncoder::encode_cmd_sql(&sequence).unwrap().0,
             "CREATE SEQUENCE order_seq START WITH 1000 INCREMENT BY -1 OWNED BY public.orders.id"
+        );
+
+        let invalid_sequence = Qail {
+            action: Action::CreateSequence,
+            table: "order_seq".to_string(),
+            columns: vec![
+                Expr::Named("start 1000".to_string()),
+                Expr::Named("cache 10; DROP TABLE users".to_string()),
+            ],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&invalid_sequence)
+            .expect_err("invalid sequence option must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid sequence option")),
+            "unexpected error: {err}"
         );
     }
 

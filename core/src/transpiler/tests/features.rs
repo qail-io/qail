@@ -174,20 +174,33 @@ fn test_drop_database_quotes_hyphenated_name() {
 }
 
 #[test]
-fn test_ddl_option_fragments_are_sanitized() {
+fn test_ddl_options_reject_invalid_fragments() {
     let extension = Qail {
         action: Action::CreateExtension,
         table: "uuid-ossp\0".to_string(),
         columns: vec![
             Expr::Named("SCHEMA public; DROP TABLE users; --".to_string()),
             Expr::Named("VERSION '1.1; DROP SCHEMA public; --'".to_string()),
-            Expr::Named("CASCADE; DROP TABLE users".to_string()),
         ],
         ..Default::default()
     };
     assert_eq!(
         extension.to_sql_with_dialect(Dialect::Postgres),
         "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" SCHEMA \"public; DROP TABLE users; --\" VERSION '1.1; DROP SCHEMA public; --'"
+    );
+
+    let invalid_extension = Qail {
+        action: Action::CreateExtension,
+        table: "uuid-ossp".to_string(),
+        columns: vec![
+            Expr::Named("SCHEMA public".to_string()),
+            Expr::Named("CASCADE; DROP TABLE users".to_string()),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_extension.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid extension option */"
     );
 
     let sequence = Qail {
@@ -197,13 +210,26 @@ fn test_ddl_option_fragments_are_sanitized() {
             Expr::Named("start 1000".to_string()),
             Expr::Named("increment by -1".to_string()),
             Expr::Named("owned_by public.orders.id".to_string()),
-            Expr::Named("cache 10; DROP TABLE users".to_string()),
         ],
         ..Default::default()
     };
     assert_eq!(
         sequence.to_sql_with_dialect(Dialect::Postgres),
         "CREATE SEQUENCE order_seq START WITH 1000 INCREMENT BY -1 OWNED BY public.orders.id"
+    );
+
+    let invalid_sequence = Qail {
+        action: Action::CreateSequence,
+        table: "order_seq".to_string(),
+        columns: vec![
+            Expr::Named("start 1000".to_string()),
+            Expr::Named("cache 10; DROP TABLE users".to_string()),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_sequence.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid sequence option */"
     );
 }
 
