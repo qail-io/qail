@@ -536,15 +536,21 @@ fn parse_transform(line: &str) -> Result<MigrationHint, String> {
     let rest = line
         .strip_prefix("transform ")
         .ok_or("Expected 'transform' prefix")?;
-    let parts: Vec<&str> = rest.split(" -> ").collect();
-
-    if parts.len() != 2 {
-        return Err(format!("Invalid transform: {}", line));
+    let (expression, target) = rest
+        .split_once("->")
+        .ok_or_else(|| format!("Invalid transform: {}", line))?;
+    let expression = expression.trim();
+    let target = target.trim();
+    if expression.is_empty() || target.is_empty() {
+        return Err(format!(
+            "transform requires non-empty expression and target: {}",
+            line
+        ));
     }
 
     Ok(MigrationHint::Transform {
-        expression: parts[0].trim().to_string(),
-        target: parts[1].trim().to_string(),
+        expression: expression.to_string(),
+        target: target.to_string(),
     })
 }
 
@@ -2211,6 +2217,14 @@ index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_co
         for input in ["rename users.username -> ", "rename  -> users.name"] {
             let err = parse_qail(input).expect_err("empty rename paths should fail");
             assert!(err.contains("rename requires non-empty source and target"));
+        }
+    }
+
+    #[test]
+    fn test_parse_transform_rejects_empty_parts() {
+        for input in ["transform age * 12 -> ", "transform  -> age_months"] {
+            let err = parse_qail(input).expect_err("empty transform parts should fail");
+            assert!(err.contains("transform requires non-empty expression and target"));
         }
     }
 
