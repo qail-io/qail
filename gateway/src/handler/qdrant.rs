@@ -587,7 +587,7 @@ fn extract_upsert_point_with_filter_fallback(
     cmd: &qail_core::ast::Qail,
     id_filter_cages: &[qail_core::ast::Cage],
 ) -> Result<qail_qdrant::Point, ApiError> {
-    use qail_core::ast::{CageKind, Expr};
+    use qail_core::ast::{CageKind, Expr, LogicalOp};
 
     let mut id = None;
     let mut vector = cmd.vector.clone();
@@ -638,6 +638,8 @@ fn extract_upsert_point_with_filter_fallback(
     }
 
     for cage in id_filter_cages {
+        let can_infer_identity =
+            matches!(cage.logical_op, LogicalOp::And) || cage.conditions.len() == 1;
         for cond in &cage.conditions {
             let field = match &cond.left {
                 Expr::Named(name) | Expr::Aliased { name, .. } => name.as_str(),
@@ -646,6 +648,15 @@ fn extract_upsert_point_with_filter_fallback(
 
             match field.rsplit('.').next().unwrap_or(field).trim_matches('"') {
                 "id" => {
+                    if !can_infer_identity {
+                        if id.is_none() {
+                            return Err(ApiError::bad_request(
+                                "AMBIGUOUS_POINT_ID",
+                                "Upsert point id cannot be inferred from a multi-condition OR filter",
+                            ));
+                        }
+                        continue;
+                    }
                     let next = point_id_from_value(&cond.value).ok_or_else(|| {
                         ApiError::bad_request(
                             "INVALID_POINT_ID",
@@ -655,6 +666,15 @@ fn extract_upsert_point_with_filter_fallback(
                     set_upsert_point_id(&mut id, next)?;
                 }
                 "vector" => {
+                    if !can_infer_identity {
+                        if vector.is_none() {
+                            return Err(ApiError::bad_request(
+                                "AMBIGUOUS_VECTOR",
+                                "Upsert vector cannot be inferred from a multi-condition OR filter",
+                            ));
+                        }
+                        continue;
+                    }
                     let next = vector_from_value(&cond.value).ok_or_else(|| {
                         ApiError::bad_request(
                             "INVALID_VECTOR",
@@ -1712,6 +1732,27 @@ mod tests {
     }
 
     #[test]
+    fn extract_upsert_point_rejects_or_filter_id_fallback() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            vector: Some(vec![0.1, 0.2]),
+            cages: vec![Cage {
+                kind: CageKind::Filter,
+                conditions: vec![value_cond("id", Value::Int(7)), cond("region", "west")],
+                logical_op: LogicalOp::Or,
+            }],
+            ..Default::default()
+        };
+        let request_filters = qdrant_upsert_filter_cages(&cmd);
+
+        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
+    }
+
+    #[test]
     fn extract_upsert_point_rejects_filter_id_that_conflicts_with_payload_id() {
         let cmd = Qail::upsert("embeddings")
             .set_value("id", 7)
@@ -1730,15 +1771,21 @@ mod tests {
         let cmd = Qail {
             action: Action::Upsert,
             table: "embeddings".to_string(),
-            cages: vec![Cage {
-                kind: CageKind::Filter,
-                conditions: vec![
-                    value_cond("id", Value::Int(7)),
-                    value_cond("vector", Value::Vector(vec![0.1, 0.2])),
-                    value_cond("vector", Value::Vector(vec![0.3, 0.4])),
-                ],
-                logical_op: LogicalOp::Or,
-            }],
+            cages: vec![
+                Cage {
+                    kind: CageKind::Payload,
+                    conditions: vec![value_cond("id", Value::Int(7))],
+                    logical_op: LogicalOp::And,
+                },
+                Cage {
+                    kind: CageKind::Filter,
+                    conditions: vec![
+                        value_cond("vector", Value::Vector(vec![0.1, 0.2])),
+                        value_cond("vector", Value::Vector(vec![0.3, 0.4])),
+                    ],
+                    logical_op: LogicalOp::Or,
+                },
+            ],
             ..Default::default()
         };
         let request_filters = qdrant_upsert_filter_cages(&cmd);
