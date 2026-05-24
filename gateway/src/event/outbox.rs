@@ -5,6 +5,7 @@ use std::time::Duration;
 use qail_pg::{PgError, PgPool, PgRow, PooledConnection};
 
 use super::delivery::{WebhookDeliveryResult, deliver_webhook_once};
+use super::ssrf::validate_webhook_url;
 use super::{MAX_WEBHOOK_RETRIES, WebhookPayload, retry_delay};
 
 const OUTBOX_TABLE: &str = "qail_webhook_outbox";
@@ -265,6 +266,11 @@ fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxIt
     let id = required_string(row, 0, "<missing>", "id")?;
     let trigger_name = required_string(row, 1, &id, "trigger_name")?;
     let webhook_url = required_string(row, 2, &id, "webhook_url")?;
+    validate_webhook_url(&webhook_url).map_err(|e| MalformedOutboxItem {
+        id: id.clone(),
+        reason: format!("invalid webhook_url: {}", e),
+        locked_at: row.get_string(7).unwrap_or_default(),
+    })?;
     let headers_raw = required_string(row, 3, &id, "headers")?;
     let headers: HashMap<String, String> =
         serde_json::from_str(&headers_raw).map_err(|e| MalformedOutboxItem {
@@ -491,6 +497,25 @@ mod tests {
         let err = parse_claimed_outbox_row(&row).expect_err("headers must be rejected");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("invalid headers JSON"));
+        assert_eq!(err.locked_at, "2026-01-01 00:00:00+00");
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_with_invalid_webhook_url() {
+        let row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("http://127.0.0.1/hook"),
+            Some("{}"),
+            Some(&payload_json()),
+            Some("3"),
+            Some("0"),
+            Some("2026-01-01 00:00:00+00"),
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("webhook_url must be SSRF-checked");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("invalid webhook_url"));
         assert_eq!(err.locked_at, "2026-01-01 00:00:00+00");
     }
 
