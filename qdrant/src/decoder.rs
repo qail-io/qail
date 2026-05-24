@@ -250,6 +250,11 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                 }
                 let bytes = [buf[0], buf[1], buf[2], buf[3]];
                 score = f32::from_le_bytes(bytes);
+                if !score.is_finite() {
+                    return Err(QdrantError::Decode(
+                        "Invalid non-finite score value".to_string(),
+                    ));
+                }
                 buf = &buf[4..];
             }
             SCORED_POINT_VECTORS => {
@@ -507,7 +512,12 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
             VALUE_NULL => {
                 // NullValue enum (varint)
                 if wire_type == WIRE_VARINT {
-                    decode_varint(&mut buf)?;
+                    let v = decode_varint(&mut buf)?;
+                    if v != 0 {
+                        return Err(QdrantError::Decode(format!(
+                            "Invalid payload null enum value: {v}"
+                        )));
+                    }
                 } else {
                     return Err(QdrantError::Decode(
                         "Invalid wire type for payload null value".to_string(),
@@ -571,6 +581,11 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                     ));
                 }
                 let v = decode_varint(&mut buf)?;
+                if v > 1 {
+                    return Err(QdrantError::Decode(format!(
+                        "Invalid payload bool value: {v}"
+                    )));
+                }
                 return Ok(PayloadValue::Bool(v != 0));
             }
             VALUE_STRUCT => {
@@ -942,6 +957,18 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_scored_point_rejects_non_finite_score() {
+        let nan = f32::NAN.to_le_bytes();
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x1D, nan[0], nan[1], nan[2], nan[3],
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("non-finite score"));
+    }
+
+    #[test]
     fn test_decode_scored_point_rejects_non_finite_vector() {
         let nan = f32::NAN.to_le_bytes();
         let data = &[
@@ -1038,6 +1065,14 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_value_rejects_malformed_bool_varint() {
+        let data = &[0x28, 0x02];
+
+        let err = decode_value(data).unwrap_err();
+        assert!(err.to_string().contains("Invalid payload bool value"));
+    }
+
+    #[test]
     fn test_decode_value_double() {
         // Value { double_value = 3.14 }
         // field 2, wire FIXED64: tag 0x11
@@ -1058,6 +1093,14 @@ mod tests {
         let data = &[0x08, 0x00];
         let val = decode_value(data).unwrap();
         assert_eq!(val, PayloadValue::Null);
+    }
+
+    #[test]
+    fn test_decode_value_rejects_malformed_null_enum() {
+        let data = &[0x08, 0x01];
+
+        let err = decode_value(data).unwrap_err();
+        assert!(err.to_string().contains("Invalid payload null enum value"));
     }
 
     #[test]
