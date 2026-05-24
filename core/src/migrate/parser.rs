@@ -856,15 +856,21 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
         Ok(Comment::on_raw(target_str, text))
     } else if target_str.contains('.') {
         let (table, column) = target_str
-            .split_once('.')
+            .rsplit_once('.')
             .ok_or_else(|| "invalid comment target".to_string())?;
         let table = table.trim();
         let column = column.trim();
         if table.is_empty() || column.is_empty() {
             return Err("invalid comment target".to_string());
         }
+        if !is_native_table_ref(table) || !is_native_identifier(column) {
+            return Err("invalid comment target".to_string());
+        }
         Ok(Comment::on_column(table, column, text))
     } else {
+        if !is_native_table_ref(target_str) {
+            return Err("invalid comment target".to_string());
+        }
         Ok(Comment::on_table(target_str, text))
     }
 }
@@ -2942,6 +2948,20 @@ rename users.username -> users.name
             let err = parse_qail(input).expect_err("empty comment target segment should fail");
             assert!(err.contains("invalid comment target"));
         }
+    }
+
+    #[test]
+    fn test_parse_comment_rejects_invalid_targets() {
+        for input in [
+            r#"comment on bad-table "bad table""#,
+            r#"comment on users.bad-column "bad column""#,
+        ] {
+            let err = parse_qail(input).expect_err("invalid comment target should fail");
+            assert!(err.contains("invalid comment target"), "{err}");
+        }
+
+        parse_qail(r#"comment on app.users.email "email""#)
+            .expect("schema-qualified comment target should parse");
     }
 
     #[test]
