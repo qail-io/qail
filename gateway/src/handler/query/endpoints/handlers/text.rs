@@ -38,14 +38,14 @@ fn build_export_tenant_violation_check(
     )
 }
 
-fn export_violation_count(row: &serde_json::Value) -> u64 {
+fn export_violation_count(row: &serde_json::Value) -> Result<u64, &'static str> {
     row.get("violation_count")
         .and_then(|value| match value {
             serde_json::Value::Number(n) => n.as_u64(),
             serde_json::Value::String(s) => s.parse::<u64>().ok(),
             _ => None,
         })
-        .unwrap_or(0)
+        .ok_or("export tenant guard returned a missing or invalid violation_count")
 }
 
 pub async fn execute_query(
@@ -176,12 +176,36 @@ pub async fn execute_query_export(
                 return Err(ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
             }
         };
-        let violation_count = guard_rows
-            .first()
-            .map(row_to_json)
-            .as_ref()
-            .map(export_violation_count)
-            .unwrap_or(0);
+        let violation_count = match guard_rows.first().map(row_to_json) {
+            Some(row) => match export_violation_count(&row) {
+                Ok(count) => count,
+                Err(reason) => {
+                    conn.release().await;
+                    tracing::error!(
+                        table = %cmd.table,
+                        endpoint = "qail_export",
+                        reason,
+                        "TENANT_BOUNDARY_VIOLATION - export preflight returned malformed guard count"
+                    );
+                    return Err(ApiError::with_code(
+                        "TENANT_BOUNDARY_VIOLATION",
+                        "Data integrity error",
+                    ));
+                }
+            },
+            None => {
+                conn.release().await;
+                tracing::error!(
+                    table = %cmd.table,
+                    endpoint = "qail_export",
+                    "TENANT_BOUNDARY_VIOLATION - export preflight returned no guard count row"
+                );
+                return Err(ApiError::with_code(
+                    "TENANT_BOUNDARY_VIOLATION",
+                    "Data integrity error",
+                ));
+            }
+        };
         if violation_count > 0 {
             conn.release().await;
             tracing::error!(
@@ -237,4 +261,30 @@ pub async fn execute_query_export(
         HeaderValue::from_static("application/octet-stream"),
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::export_violation_count;
+    use serde_json::json;
+
+    #[test]
+    fn export_violation_count_accepts_numeric_and_string_counts() {
+        assert_eq!(
+            export_violation_count(&json!({"violation_count": 0})).unwrap(),
+            0
+        );
+        assert_eq!(
+            export_violation_count(&json!({"violation_count": "12"})).unwrap(),
+            12
+        );
+    }
+
+    #[test]
+    fn export_violation_count_rejects_missing_or_malformed_counts() {
+        assert!(export_violation_count(&json!({})).is_err());
+        assert!(export_violation_count(&json!({"violation_count": null})).is_err());
+        assert!(export_violation_count(&json!({"violation_count": -1})).is_err());
+        assert!(export_violation_count(&json!({"violation_count": "oops"})).is_err());
+    }
 }
