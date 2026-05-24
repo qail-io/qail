@@ -58,6 +58,12 @@ fn backup_row_tsv(row: &qail_pg::PgRow, width: usize) -> String {
         .join("\t")
 }
 
+fn snapshot_column_label(row: &qail_pg::PgRow, idx: usize) -> String {
+    row.get_string(idx)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "*".to_string())
+}
+
 /// Impact analysis result for a migration command
 #[derive(Debug, Default)]
 pub struct MigrationImpact {
@@ -873,7 +879,7 @@ pub async fn list_snapshots(
     for row in rows {
         let version = required_backup_row_string(&row, 0, "migration_version")?;
         let table = required_backup_row_string(&row, 1, "table_name")?;
-        let column = required_backup_row_string(&row, 2, "column_name")?;
+        let column = snapshot_column_label(&row, 2);
         let count = parse_count_text(row.get_string(3), "snapshot")?;
 
         results.push((version, table, column, count));
@@ -887,7 +893,8 @@ mod tests {
     use super::{
         MigrationImpact, backup_row_tsv, columns_requiring_snapshot, escape_tsv_field,
         is_narrowing_type_change, normalize_type_for_cast, parse_count_text,
-        required_backup_row_string, snapshot_json_string, snapshot_label, snapshot_row_json,
+        required_backup_row_string, snapshot_column_label, snapshot_json_string, snapshot_label,
+        snapshot_row_json,
     };
 
     #[test]
@@ -950,6 +957,16 @@ mod tests {
             column_info: None,
         };
         assert!(required_backup_row_string(&empty, 0, "row_id").is_err());
+    }
+
+    #[test]
+    fn table_snapshot_column_label_defaults_to_star() {
+        let row = qail_pg::PgRow {
+            columns: vec![None],
+            column_info: None,
+        };
+
+        assert_eq!(snapshot_column_label(&row, 0), "*");
     }
 
     #[test]
