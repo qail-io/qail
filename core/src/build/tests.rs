@@ -108,6 +108,21 @@ table users audit {
 }
 
 #[test]
+fn test_parse_schema_rejects_table_before_closing_current_table() {
+    let content = r#"
+table users {
+  id UUID
+
+table posts {
+  id UUID
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("nested table declaration must fail");
+    assert!(err.contains("Table declaration encountered before closing table 'users'"));
+}
+
+#[test]
 fn test_parse_schema_tracks_views() {
     let content = r#"
 table users {
