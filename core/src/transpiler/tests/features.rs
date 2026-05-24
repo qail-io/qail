@@ -115,13 +115,11 @@ fn test_grant_sql() {
 }
 
 #[test]
-fn test_grant_privileges_are_sanitized() {
+fn test_grant_rejects_invalid_privileges() {
     let grant = Qail {
         action: Action::Grant,
         table: "users".to_string(),
         columns: vec![
-            Expr::Named("SELECT".to_string()),
-            Expr::Named("INSERT; DROP TABLE users; --".to_string()),
             Expr::Named("all privileges".to_string()),
             Expr::Named("temp".to_string()),
         ],
@@ -130,7 +128,22 @@ fn test_grant_privileges_are_sanitized() {
     };
     assert_eq!(
         grant.to_sql_with_dialect(Dialect::Postgres),
-        "GRANT SELECT, ALL PRIVILEGES, TEMPORARY ON users TO app_role"
+        "GRANT ALL PRIVILEGES, TEMPORARY ON users TO app_role"
+    );
+
+    let mixed_invalid = Qail {
+        action: Action::Grant,
+        table: "users".to_string(),
+        columns: vec![
+            Expr::Named("SELECT".to_string()),
+            Expr::Named("INSERT; DROP TABLE users; --".to_string()),
+        ],
+        payload: Some("app_role".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        mixed_invalid.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid privileges */"
     );
 
     let revoke = Qail {
@@ -446,17 +459,53 @@ fn test_create_function_with_args_sql() {
 }
 
 #[test]
-fn test_function_definition_fragments_are_sanitized() {
-    let cmd = Qail {
+fn test_function_definition_rejects_invalid_fragments() {
+    let invalid_arg = Qail {
+        action: Action::CreateFunction,
+        function_def: Some(FunctionDef {
+            name: "notice_boom".to_string(),
+            args: vec!["v int); DROP TABLE users; --".to_string()],
+            returns: "int".to_string(),
+            body: "BEGIN RETURN; END;".to_string(),
+            language: Some("plpgsql".to_string()),
+            volatility: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_arg.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid function arguments */"
+    );
+
+    let invalid_return = Qail {
         action: Action::CreateFunction,
         function_def: Some(FunctionDef {
             name: "notice_boom".to_string(),
             args: vec![
-                "v int); DROP TABLE users; --".to_string(),
                 "amount numeric(10,2)".to_string(),
                 "OUT result text".to_string(),
             ],
             returns: "int; DROP TABLE users".to_string(),
+            body: "BEGIN RETURN; END;".to_string(),
+            language: Some("plpgsql".to_string()),
+            volatility: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_return.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid function return type */"
+    );
+
+    let invalid_volatility = Qail {
+        action: Action::CreateFunction,
+        function_def: Some(FunctionDef {
+            name: "notice_boom".to_string(),
+            args: vec![
+                "amount numeric(10,2)".to_string(),
+                "OUT result text".to_string(),
+            ],
+            returns: "int".to_string(),
             body: "BEGIN RETURN; END;".to_string(),
             language: Some("plpgsql".to_string()),
             volatility: Some("stable; DROP TABLE users".to_string()),
@@ -464,8 +513,8 @@ fn test_function_definition_fragments_are_sanitized() {
         ..Default::default()
     };
     assert_eq!(
-        cmd.to_sql_with_dialect(Dialect::Postgres),
-        "CREATE OR REPLACE FUNCTION notice_boom(amount numeric(10,2), OUT result text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END; $$"
+        invalid_volatility.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid function volatility */"
     );
 
     let valid_drop = Qail {

@@ -2409,15 +2409,13 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_grant_privileges_are_sanitized() {
+    fn test_encode_grant_rejects_invalid_privileges() {
         use qail_core::ast::Expr;
 
         let grant = Qail {
             action: Action::Grant,
             table: "users".to_string(),
             columns: vec![
-                Expr::Named("SELECT".to_string()),
-                Expr::Named("INSERT; DROP TABLE users; --".to_string()),
                 Expr::Named("all privileges".to_string()),
                 Expr::Named("temp".to_string()),
             ],
@@ -2425,11 +2423,25 @@ mod tests {
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&grant).unwrap();
-        assert_eq!(
-            sql,
-            "GRANT SELECT, ALL PRIVILEGES, TEMPORARY ON users TO app_role"
-        );
+        assert_eq!(sql, "GRANT ALL PRIVILEGES, TEMPORARY ON users TO app_role");
         assert!(params.is_empty());
+
+        let mixed_invalid = Qail {
+            action: Action::Grant,
+            table: "users".to_string(),
+            columns: vec![
+                Expr::Named("SELECT".to_string()),
+                Expr::Named("INSERT; DROP TABLE users; --".to_string()),
+            ],
+            payload: Some("app_role".to_string()),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&mixed_invalid)
+            .expect_err("mixed invalid privileges must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid privilege")),
+            "unexpected error: {err}"
+        );
 
         let revoke = Qail {
             action: Action::Revoke,
@@ -2440,7 +2452,7 @@ mod tests {
         };
         let err = AstEncoder::encode_cmd_sql(&revoke).expect_err("invalid privileges must fail");
         assert!(
-            err.to_string().contains("Unsupported action Revoke"),
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid privilege")),
             "unexpected error: {err}"
         );
     }
@@ -2556,26 +2568,68 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_function_definition_fragments_are_sanitized() {
-        let cmd = Qail {
+    fn test_encode_function_definition_rejects_invalid_fragments() {
+        let invalid_arg = Qail {
+            action: Action::CreateFunction,
+            function_def: Some(qail_core::ast::FunctionDef {
+                name: "notice_boom".to_string(),
+                args: vec!["v int); DROP TABLE users; --".to_string()],
+                returns: "int".to_string(),
+                body: "BEGIN RETURN; END;".to_string(),
+                language: Some("plpgsql".to_string()),
+                volatility: None,
+            }),
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&invalid_arg).expect_err("invalid function arg must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid function argument")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_return = Qail {
             action: Action::CreateFunction,
             function_def: Some(qail_core::ast::FunctionDef {
                 name: "notice_boom".to_string(),
                 args: vec![
-                    "v int); DROP TABLE users; --".to_string(),
                     "amount numeric(10,2)".to_string(),
                     "OUT result text".to_string(),
                 ],
                 returns: "int; DROP TABLE users".to_string(),
                 body: "BEGIN RETURN; END;".to_string(),
                 language: Some("plpgsql".to_string()),
+                volatility: None,
+            }),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&invalid_return)
+            .expect_err("invalid function return type must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid function return type")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_volatility = Qail {
+            action: Action::CreateFunction,
+            function_def: Some(qail_core::ast::FunctionDef {
+                name: "notice_boom".to_string(),
+                args: vec![
+                    "amount numeric(10,2)".to_string(),
+                    "OUT result text".to_string(),
+                ],
+                returns: "int".to_string(),
+                body: "BEGIN RETURN; END;".to_string(),
+                language: Some("plpgsql".to_string()),
                 volatility: Some("stable; DROP TABLE users".to_string()),
             }),
             ..Default::default()
         };
-        assert_eq!(
-            AstEncoder::encode_cmd_sql(&cmd).unwrap().0,
-            "CREATE OR REPLACE FUNCTION notice_boom(amount numeric(10,2), OUT result text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END; $$"
+        let err = AstEncoder::encode_cmd_sql(&invalid_volatility)
+            .expect_err("invalid function volatility must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid function volatility")),
+            "unexpected error: {err}"
         );
 
         let valid_drop = Qail {

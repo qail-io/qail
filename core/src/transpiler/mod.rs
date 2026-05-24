@@ -265,20 +265,30 @@ impl ToSql for Qail {
             // Function and Trigger operations
             operators::Action::CreateFunction => {
                 if let Some(func) = &self.function_def {
+                    let Some(args) = function_args_to_sql(&func.args) else {
+                        return "/* ERROR: Invalid function arguments */".to_string();
+                    };
+                    if !is_safe_sql_type_fragment(&func.returns) {
+                        return "/* ERROR: Invalid function return type */".to_string();
+                    }
                     let lang = func.language.as_deref().unwrap_or("plpgsql");
-                    let args = function_args_to_sql(&func.args);
-                    let volatility = func
-                        .volatility
-                        .as_deref()
-                        .and_then(volatility_to_sql)
-                        .map(|v| format!(" {v}"))
-                        .unwrap_or_default();
+                    let volatility = if let Some(volatility) = func.volatility.as_deref() {
+                        if volatility.trim().is_empty() {
+                            String::new()
+                        } else if let Some(volatility) = volatility_to_sql(volatility) {
+                            format!(" {volatility}")
+                        } else {
+                            return "/* ERROR: Invalid function volatility */".to_string();
+                        }
+                    } else {
+                        String::new()
+                    };
                     let body = dollar_quote_block(&func.body);
                     format!(
                         "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{} AS {}",
                         escape_identifier(&func.name),
                         args,
-                        sql_type_fragment_to_sql(&func.returns, "void"),
+                        func.returns.trim(),
                         escape_identifier(lang),
                         volatility,
                         body
@@ -664,17 +674,17 @@ fn privilege_to_sql(privilege: &str) -> Option<&'static str> {
 }
 
 fn privileges_to_sql(columns: &[Expr]) -> Option<String> {
-    let privileges = columns
-        .iter()
-        .filter_map(|c| match c {
-            Expr::Named(p) => privilege_to_sql(p),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    if privileges.is_empty() {
+    if columns.is_empty() {
         None
     } else {
+        let mut privileges = Vec::with_capacity(columns.len());
+        for column in columns {
+            let Expr::Named(privilege) = column else {
+                return None;
+            };
+            let sql = privilege_to_sql(privilege)?;
+            privileges.push(sql);
+        }
         Some(privileges.join(", "))
     }
 }
@@ -696,15 +706,6 @@ fn is_safe_sql_type_fragment(fragment: &str) -> bool {
                     b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
                 )
         })
-}
-
-fn sql_type_fragment_to_sql(fragment: &str, fallback: &str) -> String {
-    let fragment = fragment.trim();
-    if is_safe_sql_type_fragment(fragment) {
-        fragment.to_string()
-    } else {
-        fallback.to_string()
-    }
 }
 
 fn volatility_to_sql(volatility: &str) -> Option<&'static str> {
@@ -755,11 +756,12 @@ fn function_arg_to_sql(arg: &str) -> Option<String> {
     Some(rendered)
 }
 
-fn function_args_to_sql(args: &[String]) -> String {
-    args.iter()
-        .filter_map(|arg| function_arg_to_sql(arg))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn function_args_to_sql(args: &[String]) -> Option<String> {
+    let mut rendered = Vec::with_capacity(args.len());
+    for arg in args {
+        rendered.push(function_arg_to_sql(arg)?);
+    }
+    Some(rendered.join(", "))
 }
 
 fn split_top_level_args(args: &str) -> Option<Vec<&str>> {

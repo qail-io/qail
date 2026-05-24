@@ -312,11 +312,17 @@ fn function_arg_to_sql(arg: &str) -> Option<String> {
     Some(rendered)
 }
 
-fn function_args_to_sql(args: &[String]) -> String {
-    args.iter()
-        .filter_map(|arg| function_arg_to_sql(arg))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn function_args_to_sql(args: &[String]) -> Result<String, crate::protocol::EncodeError> {
+    let mut rendered = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(sql) = function_arg_to_sql(arg) else {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "invalid function argument: {arg:?}"
+            )));
+        };
+        rendered.push(sql);
+    }
+    Ok(rendered.join(", "))
 }
 
 fn split_top_level_args(args: &str) -> Option<Vec<&str>> {
@@ -1193,8 +1199,8 @@ pub fn encode_grant(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
         return Err(super::super::EncodeError::UnsupportedAction(Action::Grant));
     };
 
-    let privs = privileges_to_sql(&cmd.columns);
-    if privs.is_empty() || cmd.table.trim().is_empty() || role.trim().is_empty() {
+    let privs = privileges_to_sql(&cmd.columns)?;
+    if cmd.table.trim().is_empty() || role.trim().is_empty() {
         return Err(super::super::EncodeError::UnsupportedAction(Action::Grant));
     }
 
@@ -1213,8 +1219,8 @@ pub fn encode_revoke(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super:
         return Err(super::super::EncodeError::UnsupportedAction(Action::Revoke));
     };
 
-    let privs = privileges_to_sql(&cmd.columns);
-    if privs.is_empty() || cmd.table.trim().is_empty() || role.trim().is_empty() {
+    let privs = privileges_to_sql(&cmd.columns)?;
+    if cmd.table.trim().is_empty() || role.trim().is_empty() {
         return Err(super::super::EncodeError::UnsupportedAction(Action::Revoke));
     }
 
@@ -1246,15 +1252,33 @@ fn privilege_to_sql(privilege: &str) -> Option<&'static str> {
     }
 }
 
-fn privileges_to_sql(columns: &[Expr]) -> String {
-    columns
-        .iter()
-        .filter_map(|c| match c {
-            Expr::Named(p) => privilege_to_sql(p),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+fn privileges_to_sql(columns: &[Expr]) -> Result<String, crate::protocol::EncodeError> {
+    if columns.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "privilege list cannot be empty".to_string(),
+        ));
+    }
+
+    let mut privileges = Vec::with_capacity(columns.len());
+    for column in columns {
+        match column {
+            Expr::Named(privilege) => {
+                let Some(sql) = privilege_to_sql(privilege) else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                        "invalid privilege: {privilege:?}"
+                    )));
+                };
+                privileges.push(sql);
+            }
+            _ => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "privileges must be named expressions".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(privileges.join(", "))
 }
 
 /// Encode CREATE POLICY statement.
@@ -1345,19 +1369,29 @@ pub fn encode_create_function(
     };
 
     let lang = func.language.as_deref().unwrap_or("plpgsql");
-    let args = function_args_to_sql(&func.args);
+    let args = function_args_to_sql(&func.args)?;
+    if !is_safe_sql_type_fragment(&func.returns) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid function return type: {:?}",
+            func.returns
+        )));
+    }
     buf.extend_from_slice(b"CREATE OR REPLACE FUNCTION ");
     push_identifier(buf, &func.name);
     buf.extend_from_slice(b"(");
     buf.extend_from_slice(args.as_bytes());
     buf.extend_from_slice(b") RETURNS ");
-    buf.extend_from_slice(sql_type_fragment_to_sql(&func.returns, "void").as_bytes());
+    buf.extend_from_slice(func.returns.trim().as_bytes());
     buf.extend_from_slice(b" LANGUAGE ");
     buf.extend_from_slice(escape_identifier(lang).as_bytes());
     if let Some(volatility) = &func.volatility
         && !volatility.trim().is_empty()
-        && let Some(volatility) = volatility_to_sql(volatility)
     {
+        let Some(volatility) = volatility_to_sql(volatility) else {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "invalid function volatility: {volatility:?}"
+            )));
+        };
         buf.extend_from_slice(b" ");
         buf.extend_from_slice(volatility.as_bytes());
     }
