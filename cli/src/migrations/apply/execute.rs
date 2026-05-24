@@ -16,7 +16,7 @@ use crate::migrations::{
 use crate::shadow::has_verified_shadow_receipt_with_driver;
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
-use qail_core::ast::{Action, Expr, JoinKind};
+use qail_core::ast::{Action, Constraint, Expr, JoinKind};
 use qail_core::prelude::Qail;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -839,10 +839,13 @@ async fn verify_applied_commands_effects(
 
     for cmd in cmds {
         match cmd.action {
-            Action::Make if !table_exists(pg, &cmd.table).await? => {
-                failures.push(format!("expected table '{}' to exist", cmd.table));
+            Action::Make => {
+                if !table_exists(pg, &cmd.table).await? {
+                    failures.push(format!("expected table '{}' to exist", cmd.table));
+                    continue;
+                }
+                verify_created_table_shape(pg, cmd, &mut failures).await?;
             }
-            Action::Make => {}
             Action::Alter => {
                 for column in extract_column_names(&cmd.columns) {
                     if !column_exists(pg, &cmd.table, &column).await? {
@@ -1060,6 +1063,179 @@ async fn column_exists(pg: &mut qail_pg::PgDriver, table: &str, column: &str) ->
         format!(
             "Failed column existence check for '{}.{}'",
             table_name, column
+        )
+    })?;
+    Ok(!rows.is_empty())
+}
+
+struct LiveColumnDefinition {
+    data_type: String,
+    udt_name: Option<String>,
+    nullable: bool,
+}
+
+async fn live_column_definition(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    column: &str,
+) -> Result<Option<LiveColumnDefinition>> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.columns")
+        .columns(["data_type", "udt_name", "is_nullable"])
+        .where_eq("table_schema", schema)
+        .where_eq("table_name", table_name)
+        .where_eq("column_name", column)
+        .limit(1);
+    let rows = pg.fetch_all(&cmd).await.with_context(|| {
+        format!(
+            "Failed column definition check for '{}.{}'",
+            table_name, column
+        )
+    })?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let data_type = row
+        .get_string(0)
+        .ok_or_else(|| anyhow!("Missing data_type for '{}.{}'", table, column))?;
+    let is_nullable = row
+        .get_string(2)
+        .ok_or_else(|| anyhow!("Missing is_nullable for '{}.{}'", table, column))?;
+    Ok(Some(LiveColumnDefinition {
+        data_type,
+        udt_name: row.get_string(1),
+        nullable: is_nullable.eq_ignore_ascii_case("YES"),
+    }))
+}
+
+async fn verify_created_table_shape(
+    pg: &mut qail_pg::PgDriver,
+    cmd: &Qail,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    for column in &cmd.columns {
+        let Expr::Def {
+            name,
+            data_type,
+            constraints,
+        } = column
+        else {
+            continue;
+        };
+
+        let Some(live) = live_column_definition(pg, &cmd.table, name).await? else {
+            failures.push(format!(
+                "expected column '{}.{}' to exist for adopted table",
+                cmd.table, name
+            ));
+            continue;
+        };
+
+        if !column_type_matches(data_type, &live) {
+            failures.push(format!(
+                "expected column '{}.{}' type '{}' but found '{}'",
+                cmd.table, name, data_type, live.data_type
+            ));
+        }
+
+        if !constraints
+            .iter()
+            .any(|constraint| matches!(constraint, Constraint::Nullable))
+            && live.nullable
+        {
+            failures.push(format!(
+                "expected column '{}.{}' to be NOT NULL",
+                cmd.table, name
+            ));
+        }
+
+        if constraints
+            .iter()
+            .any(|constraint| matches!(constraint, Constraint::PrimaryKey))
+            && !column_has_constraint_type(pg, &cmd.table, name, "PRIMARY KEY").await?
+        {
+            failures.push(format!(
+                "expected column '{}.{}' to be PRIMARY KEY",
+                cmd.table, name
+            ));
+        }
+
+        if constraints
+            .iter()
+            .any(|constraint| matches!(constraint, Constraint::Unique))
+            && !column_has_constraint_type(pg, &cmd.table, name, "UNIQUE").await?
+        {
+            failures.push(format!(
+                "expected column '{}.{}' to be UNIQUE",
+                cmd.table, name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
+    let live_type = if live.data_type.eq_ignore_ascii_case("USER-DEFINED") {
+        live.udt_name.as_deref().unwrap_or(live.data_type.as_str())
+    } else {
+        live.data_type.as_str()
+    };
+    normalize_column_type(expected) == normalize_column_type(live_type)
+}
+
+fn normalize_column_type(raw: &str) -> String {
+    let mut normalized = raw.trim().to_ascii_lowercase();
+    if let Some((prefix, _)) = normalized.split_once('(') {
+        normalized = prefix.trim().to_string();
+    }
+    normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    match normalized.as_str() {
+        "serial" | "serial4" => "integer",
+        "bigserial" | "serial8" => "bigint",
+        "smallserial" | "serial2" => "smallint",
+        "int" | "int4" => "integer",
+        "int8" => "bigint",
+        "int2" => "smallint",
+        "bool" => "boolean",
+        "varchar" => "character varying",
+        "decimal" => "numeric",
+        "float8" => "double precision",
+        "float4" => "real",
+        "timestamptz" => "timestamp with time zone",
+        "timestamp" => "timestamp without time zone",
+        other => other,
+    }
+    .to_string()
+}
+
+async fn column_has_constraint_type(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    column: &str,
+    constraint_type: &str,
+) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.table_constraints tc")
+        .column("1")
+        .join(
+            JoinKind::Inner,
+            "information_schema.key_column_usage kcu",
+            "kcu.constraint_name",
+            "tc.constraint_name",
+        )
+        .where_eq("tc.table_schema", schema)
+        .where_eq("tc.table_name", table_name)
+        .where_eq("tc.constraint_type", constraint_type)
+        .where_eq("kcu.table_schema", schema)
+        .where_eq("kcu.table_name", table_name)
+        .where_eq("kcu.column_name", column)
+        .limit(1);
+    let rows = pg.fetch_all(&cmd).await.with_context(|| {
+        format!(
+            "Failed {} constraint check for '{}.{}'",
+            constraint_type, table_name, column
         )
     })?;
     Ok(!rows.is_empty())
@@ -1569,9 +1745,10 @@ mod tests {
         ApplyDownContext, ApplyReceiptContext, apply_commands_and_record_receipt_atomic,
         apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
         enforce_apply_destructive_policy, enforce_apply_down_destructive_policy,
-        ensure_applied_checksum_matches, ensure_up_down_pairing, parse_qail_to_commands_strict,
-        parse_rename_expr, should_adopt_existing_error, should_run_apply_lock_risk_preflight,
-        split_schema_ident, strip_optional_if_exists_prefix, validate_receipts_against_local,
+        ensure_applied_checksum_matches, ensure_up_down_pairing, normalize_column_type,
+        parse_qail_to_commands_strict, parse_rename_expr, should_adopt_existing_error,
+        should_run_apply_lock_risk_preflight, split_schema_ident, strip_optional_if_exists_prefix,
+        validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::{MigrateDirection, MigrationPhase};
@@ -1665,6 +1842,17 @@ mod tests {
             Action::CreateSequence,
             "Query error [42501]: permission denied for schema public"
         ));
+    }
+
+    #[test]
+    fn adopt_existing_column_type_normalization_handles_postgres_aliases() {
+        assert_eq!(normalize_column_type("serial"), "integer");
+        assert_eq!(normalize_column_type("int4"), "integer");
+        assert_eq!(normalize_column_type("varchar(255)"), "character varying");
+        assert_eq!(
+            normalize_column_type("timestamptz"),
+            "timestamp with time zone"
+        );
     }
 
     #[test]
@@ -2028,6 +2216,97 @@ mod tests {
             !version_exists(&mut pg, migration_name.as_str()).await,
             "migration receipt should not be written when failpoint triggers"
         );
+    }
+
+    #[tokio::test]
+    async fn adopt_existing_rejects_partial_existing_table_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping adopt-existing shape DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let table = format!("adopt_existing_shape_{}", suffix);
+        let migration_name = format!("adopt_existing_shape_{}.up.qail", suffix);
+
+        let existing_cmd = Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![Expr::Def {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            }],
+            ..Default::default()
+        };
+        pg.execute(&existing_cmd)
+            .await
+            .expect("create partial existing table");
+
+        let planned_cmd = Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "email".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let err = apply_commands_and_record_receipt_atomic(
+            &mut pg,
+            &[planned_cmd],
+            true,
+            ApplyReceiptContext {
+                migration_name: &migration_name,
+                started_ms: crate::migrations::now_epoch_ms(),
+                executed_sql_for_receipt: "-- adopt existing shape".to_string(),
+                checksum_input: "-- adopt existing shape".to_string(),
+                risk_summary: "source=apply.adopt_existing.shape.test".to_string(),
+                affected_rows_est: None,
+                failpoint_override: None,
+            },
+        )
+        .await
+        .expect_err("partial existing table must not be adopted");
+
+        assert!(
+            err.to_string().contains("expected column")
+                && err.to_string().contains("email")
+                && err.to_string().contains("adopted table"),
+            "unexpected adopt-existing error: {err}"
+        );
+        assert!(
+            !version_exists(&mut pg, migration_name.as_str()).await,
+            "failed adoption must not write a migration receipt"
+        );
+
+        let _ = pg
+            .execute(&Qail {
+                action: Action::Drop,
+                table,
+                ..Default::default()
+            })
+            .await;
     }
 
     #[tokio::test]
