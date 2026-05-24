@@ -917,15 +917,11 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
 
     // Extract name and args
     let paren_start = rest.find('(').ok_or("function missing (")?;
-    let paren_end = rest.find(')').ok_or("function missing )")?;
+    let paren_end = find_matching_paren(rest, paren_start).ok_or("function missing )")?;
 
     let name = rest[..paren_start].trim();
     let args_str = &rest[paren_start + 1..paren_end];
-    let args: Vec<String> = if args_str.trim().is_empty() {
-        Vec::new()
-    } else {
-        args_str.split(',').map(|s| s.trim().to_string()).collect()
-    };
+    let args = split_function_args(args_str);
 
     let after_args = rest[paren_end + 1..].trim();
 
@@ -972,6 +968,83 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     func.volatility = volatility;
 
     Ok(func)
+}
+
+fn find_matching_paren(raw: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = raw[open_idx..].char_indices().peekable();
+
+    while let Some((relative_idx, ch)) = chars.next() {
+        let idx = open_idx + relative_idx;
+
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_function_args(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = args.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let arg = args[start..idx].trim();
+                if !arg.is_empty() {
+                    out.push(arg.to_string());
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let arg = args[start..].trim();
+    if !arg.is_empty() {
+        out.push(arg.to_string());
+    }
+
+    out
 }
 
 fn find_dollar_delimiter(raw: &str) -> Option<(usize, String)> {
@@ -1909,6 +1982,27 @@ $qail$
         assert_eq!(schema.functions.len(), 1);
         assert_eq!(schema.functions[0].name, "is_super_admin");
         assert_eq!(schema.functions[0].volatility.as_deref(), Some("stable"));
+    }
+
+    #[test]
+    fn test_parse_function_args_with_nested_type_parentheses() {
+        let input = r#"
+function normalize_amount(amount numeric(10,2), labels text[]) returns numeric language sql $$
+  SELECT amount
+$$
+"#;
+        let schema = parse_qail(input).unwrap();
+        let func = &schema.functions[0];
+
+        assert_eq!(
+            func.args,
+            vec![
+                "amount numeric(10,2)".to_string(),
+                "labels text[]".to_string()
+            ]
+        );
+        assert_eq!(func.returns, "numeric");
+        assert_eq!(func.language, "sql");
     }
 
     #[test]
