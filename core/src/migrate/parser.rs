@@ -310,6 +310,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let mut seen_default = false;
     let mut seen_unique = false;
     let mut seen_generated = false;
+    let mut seen_check = false;
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
@@ -470,6 +471,10 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 col = apply_fk_action_options(col, &parts, &mut i)?;
             }
             s if s.starts_with("check(") => {
+                if seen_check {
+                    return Err(format!("duplicate check expression for column '{}'", name));
+                }
+                seen_check = true;
                 // Parse check(expr) — expression may contain nested parens and spaces.
                 // Keep consuming tokens until the outer `check(` parenthesis is balanced.
                 let mut check_str = s.to_string();
@@ -510,6 +515,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
             "check_name" if i + 1 < parts.len() => {
                 i += 1;
                 if let Some(ref mut check) = col.check {
+                    if check.name.is_some() {
+                        return Err(format!("duplicate check_name for column '{}'", name));
+                    }
                     check.name = Some(parts[i].to_string());
                 } else {
                     return Err(format!(
@@ -3626,6 +3634,31 @@ table tickets {
             ),
         ] {
             let err = parse_qail(input).expect_err("invalid check name shape should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_check_rejects_duplicates() {
+        for (input, expected) in [
+            (
+                r#"
+table products {
+  score int check(score >= 0) check(score <= 100)
+}
+"#,
+                "duplicate check expression for column 'score'",
+            ),
+            (
+                r#"
+table products {
+  score int check(score >= 0) check_name score_min check_name score_min_again
+}
+"#,
+                "duplicate check_name for column 'score'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("duplicate check metadata should fail");
             assert!(err.contains(expected), "{err}");
         }
     }
