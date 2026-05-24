@@ -328,6 +328,21 @@ fn test_column_expression_fragments_reject_invalid_fragments() {
         "/* ERROR: Invalid column default expression */"
     );
 
+    let unsafe_nul_default = Qail {
+        action: Action::Make,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_nul_default".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Default("0\0".to_string())],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_nul_default.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid column default expression */"
+    );
+
     let unsafe_check = Qail {
         action: Action::Make,
         table: "events".to_string(),

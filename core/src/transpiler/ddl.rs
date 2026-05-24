@@ -192,7 +192,7 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
 
 fn checked_sql_expr_fragment(expr: &str, context: &str) -> Result<String, String> {
     let expr = expr.trim();
-    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
+    if expr.is_empty() || expr.contains('\0') || contains_unquoted_statement_delimiter(expr) {
         return Err(format!("/* ERROR: Invalid {context} */"));
     }
     Ok(expr.to_string())

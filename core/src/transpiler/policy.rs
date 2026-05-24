@@ -58,17 +58,16 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
     false
 }
 
-fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
+fn checked_sql_expr_fragment(expr: &str, context: &str) -> Result<String, String> {
     let expr = expr.trim();
-    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
-        fallback.to_string()
-    } else {
-        expr.replace('\0', "")
+    if expr.is_empty() || expr.contains('\0') || contains_unquoted_statement_delimiter(expr) {
+        return Err(format!("/* ERROR: Invalid {context} */"));
     }
+    Ok(expr.to_string())
 }
 
-fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> String {
-    sql_expr_fragment_to_sql(&expr.to_string(), "FALSE")
+fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> Result<String, String> {
+    checked_sql_expr_fragment(&expr.to_string(), "policy expression")
 }
 
 /// Transpile an `RlsPolicy` to a `CREATE POLICY` SQL statement.
@@ -112,12 +111,18 @@ pub fn create_policy_sql(policy: &RlsPolicy) -> String {
 
     // USING (expr)
     if let Some(expr) = &policy.using {
-        sql.push_str(&format!(" USING ({})", policy_expr_to_sql(expr)));
+        let Ok(expr) = policy_expr_to_sql(expr) else {
+            return "/* ERROR: Invalid policy expression */".to_string();
+        };
+        sql.push_str(&format!(" USING ({expr})"));
     }
 
     // WITH CHECK (expr)
     if let Some(expr) = &policy.with_check {
-        sql.push_str(&format!(" WITH CHECK ({})", policy_expr_to_sql(expr)));
+        let Ok(expr) = policy_expr_to_sql(expr) else {
+            return "/* ERROR: Invalid policy expression */".to_string();
+        };
+        sql.push_str(&format!(" WITH CHECK ({expr})"));
     }
 
     sql
@@ -133,56 +138,61 @@ pub fn drop_policy_sql(policy_name: &str, table: &str) -> String {
 }
 
 /// Convert a `CheckExpr` AST node to SQL.
-fn check_expr_to_sql(expr: &CheckExpr) -> String {
+fn check_expr_to_sql(expr: &CheckExpr) -> Result<String, String> {
     match expr {
         CheckExpr::GreaterThan { column, value } => {
-            format!("{} > {}", escape_identifier(column), value)
+            Ok(format!("{} > {}", escape_identifier(column), value))
         }
         CheckExpr::GreaterOrEqual { column, value } => {
-            format!("{} >= {}", escape_identifier(column), value)
+            Ok(format!("{} >= {}", escape_identifier(column), value))
         }
         CheckExpr::LessThan { column, value } => {
-            format!("{} < {}", escape_identifier(column), value)
+            Ok(format!("{} < {}", escape_identifier(column), value))
         }
         CheckExpr::LessOrEqual { column, value } => {
-            format!("{} <= {}", escape_identifier(column), value)
+            Ok(format!("{} <= {}", escape_identifier(column), value))
         }
-        CheckExpr::Between { column, low, high } => {
-            format!("{} BETWEEN {} AND {}", escape_identifier(column), low, high)
-        }
+        CheckExpr::Between { column, low, high } => Ok(format!(
+            "{} BETWEEN {} AND {}",
+            escape_identifier(column),
+            low,
+            high
+        )),
         CheckExpr::In { column, values } => {
             let vals: Vec<String> = values
                 .iter()
                 .map(|v| format!("'{}'", escape_sql_string_literal(v)))
                 .collect();
-            format!("{} IN ({})", escape_identifier(column), vals.join(", "))
-        }
-        CheckExpr::Regex { column, pattern } => {
-            format!(
-                "{} ~ '{}'",
+            Ok(format!(
+                "{} IN ({})",
                 escape_identifier(column),
-                escape_sql_string_literal(pattern)
-            )
+                vals.join(", ")
+            ))
         }
+        CheckExpr::Regex { column, pattern } => Ok(format!(
+            "{} ~ '{}'",
+            escape_identifier(column),
+            escape_sql_string_literal(pattern)
+        )),
         CheckExpr::MaxLength { column, max } => {
-            format!("LENGTH({}) <= {}", escape_identifier(column), max)
+            Ok(format!("LENGTH({}) <= {}", escape_identifier(column), max))
         }
         CheckExpr::MinLength { column, min } => {
-            format!("LENGTH({}) >= {}", escape_identifier(column), min)
+            Ok(format!("LENGTH({}) >= {}", escape_identifier(column), min))
         }
-        CheckExpr::NotNull { column } => format!("{} IS NOT NULL", escape_identifier(column)),
-        CheckExpr::And(left, right) => format!(
+        CheckExpr::NotNull { column } => Ok(format!("{} IS NOT NULL", escape_identifier(column))),
+        CheckExpr::And(left, right) => Ok(format!(
             "({} AND {})",
-            check_expr_to_sql(left),
-            check_expr_to_sql(right)
-        ),
-        CheckExpr::Or(left, right) => format!(
+            check_expr_to_sql(left)?,
+            check_expr_to_sql(right)?
+        )),
+        CheckExpr::Or(left, right) => Ok(format!(
             "({} OR {})",
-            check_expr_to_sql(left),
-            check_expr_to_sql(right)
-        ),
-        CheckExpr::Not(inner) => format!("NOT ({})", check_expr_to_sql(inner)),
-        CheckExpr::Sql(sql) => sql_expr_fragment_to_sql(sql, "FALSE"),
+            check_expr_to_sql(left)?,
+            check_expr_to_sql(right)?
+        )),
+        CheckExpr::Not(inner) => Ok(format!("NOT ({})", check_expr_to_sql(inner)?)),
+        CheckExpr::Sql(sql) => checked_sql_expr_fragment(sql, "check expression"),
     }
 }
 
@@ -289,12 +299,16 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                     new_type
                 );
                 if let Some(using_expr) = using {
-                    s.push_str(&format!(
-                        " USING {}",
-                        sql_expr_fragment_to_sql(using_expr, "NULL")
-                    ));
+                    match checked_sql_expr_fragment(using_expr, "USING expression") {
+                        Ok(using_expr) => {
+                            s.push_str(&format!(" USING {using_expr}"));
+                            s
+                        }
+                        Err(err) => err,
+                    }
+                } else {
+                    s
                 }
-                s
             }
             AlterOp::SetNotNull(col) => {
                 format!(
@@ -311,12 +325,14 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                 )
             }
             AlterOp::SetDefault { column, expr } => {
-                format!(
-                    "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
-                    table,
-                    escape_identifier(column),
-                    sql_expr_fragment_to_sql(expr, "NULL")
-                )
+                match checked_sql_expr_fragment(expr, "default expression") {
+                    Ok(expr) => format!(
+                        "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {expr}",
+                        table,
+                        escape_identifier(column)
+                    ),
+                    Err(err) => err,
+                }
             }
             AlterOp::DropDefault(col) => {
                 format!(
@@ -326,46 +342,55 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                 )
             }
             AlterOp::AddConstraint { name, constraint } => {
-                let constraint_sql = match constraint {
-                    crate::migrate::alter::TableConstraint::PrimaryKey(cols) => {
-                        format!("PRIMARY KEY ({})", quoted_column_list(cols))
+                if let crate::migrate::alter::TableConstraint::Check(expr) = constraint {
+                    match check_expr_to_sql(expr) {
+                        Ok(expr) => format!(
+                            "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
+                            table,
+                            escape_identifier(name)
+                        ),
+                        Err(err) => err,
                     }
-                    crate::migrate::alter::TableConstraint::Unique(cols) => {
-                        format!("UNIQUE ({})", quoted_column_list(cols))
-                    }
-                    crate::migrate::alter::TableConstraint::Check(expr) => {
-                        format!("CHECK ({})", check_expr_to_sql(expr))
-                    }
-                    crate::migrate::alter::TableConstraint::ForeignKey {
-                        columns,
-                        ref_table,
-                        ref_columns,
-                    } => {
-                        format!(
-                            "FOREIGN KEY ({}) REFERENCES {}({})",
-                            quoted_column_list(columns),
-                            escape_identifier(ref_table),
-                            quoted_column_list(ref_columns)
-                        )
-                    }
-                    crate::migrate::alter::TableConstraint::Exclude { method, elements } => {
-                        format!(
-                            "EXCLUDE USING {} ({})",
-                            exclude_method_to_sql(method),
-                            elements
-                                .iter()
-                                .map(|element| exclude_element_to_sql(element))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    }
-                };
-                format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} {}",
-                    table,
-                    escape_identifier(name),
-                    constraint_sql
-                )
+                } else {
+                    let constraint_sql = match constraint {
+                        crate::migrate::alter::TableConstraint::PrimaryKey(cols) => {
+                            format!("PRIMARY KEY ({})", quoted_column_list(cols))
+                        }
+                        crate::migrate::alter::TableConstraint::Unique(cols) => {
+                            format!("UNIQUE ({})", quoted_column_list(cols))
+                        }
+                        crate::migrate::alter::TableConstraint::Check(_) => unreachable!(),
+                        crate::migrate::alter::TableConstraint::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                        } => {
+                            format!(
+                                "FOREIGN KEY ({}) REFERENCES {}({})",
+                                quoted_column_list(columns),
+                                escape_identifier(ref_table),
+                                quoted_column_list(ref_columns)
+                            )
+                        }
+                        crate::migrate::alter::TableConstraint::Exclude { method, elements } => {
+                            format!(
+                                "EXCLUDE USING {} ({})",
+                                exclude_method_to_sql(method),
+                                elements
+                                    .iter()
+                                    .map(|element| exclude_element_to_sql(element))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    };
+                    format!(
+                        "ALTER TABLE {} ADD CONSTRAINT {} {}",
+                        table,
+                        escape_identifier(name),
+                        constraint_sql
+                    )
+                }
             }
             AlterOp::DropConstraint { name, cascade } => {
                 let cascade_str = if *cascade { " CASCADE" } else { "" };
@@ -444,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_policy_expression_fragments_are_sanitized() {
+    fn test_create_policy_expression_fragments_reject_invalid_fragments() {
         let policy = RlsPolicy::create("unsafe_policy", "users")
             .for_all()
             .using(crate::ast::Expr::Named(
@@ -453,7 +478,21 @@ mod tests {
             .with_check(crate::ast::Expr::Named("note = 'semi;inside'".to_string()));
 
         let sql = create_policy_sql(&policy);
-        assert!(sql.contains("USING (FALSE)"));
+        assert_eq!(sql, "/* ERROR: Invalid policy expression */");
+
+        let nul_policy =
+            RlsPolicy::create("nul_policy", "users")
+                .for_all()
+                .using(crate::ast::Expr::Named(
+                    "tenant_id = current_setting('app.tenant')::uuid\0".to_string(),
+                ));
+        let sql = create_policy_sql(&nul_policy);
+        assert_eq!(sql, "/* ERROR: Invalid policy expression */");
+
+        let safe_policy = RlsPolicy::create("safe_policy", "users")
+            .for_all()
+            .with_check(crate::ast::Expr::Named("note = 'semi;inside'".to_string()));
+        let sql = create_policy_sql(&safe_policy);
         assert!(sql.contains("WITH CHECK (note = 'semi;inside')"));
     }
 
@@ -502,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alter_table_expression_fragments_are_sanitized() {
+    fn test_alter_table_expression_fragments_reject_invalid_fragments() {
         use crate::migrate::alter::TableConstraint;
         use crate::migrate::schema::CheckExpr;
         use crate::migrate::types::ColumnType;
@@ -536,18 +575,9 @@ mod tests {
             );
 
         let stmts = alter_table_sql(&alter);
-        assert_eq!(
-            stmts[0],
-            "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL"
-        );
-        assert_eq!(
-            stmts[1],
-            "ALTER TABLE events ALTER COLUMN score TYPE TEXT USING NULL"
-        );
-        assert_eq!(
-            stmts[2],
-            "ALTER TABLE events ADD CONSTRAINT raw_check CHECK (FALSE)"
-        );
+        assert_eq!(stmts[0], "/* ERROR: Invalid default expression */");
+        assert_eq!(stmts[1], "/* ERROR: Invalid USING expression */");
+        assert_eq!(stmts[2], "/* ERROR: Invalid check expression */");
         assert_eq!(
             stmts[3],
             "ALTER TABLE events ADD CONSTRAINT kind_check CHECK (kind IN ('O''Brien'))"

@@ -2706,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_policy_expression_fragments_are_sanitized() {
+    fn test_encode_policy_expression_fragments_reject_invalid_fragments() {
         use qail_core::ast::Expr;
         use qail_core::migrate::policy::RlsPolicy;
 
@@ -2722,8 +2722,37 @@ mod tests {
             policy_def: Some(policy),
             ..Default::default()
         };
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("unsafe policy expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("policy expression")),
+            "unexpected error: {err}"
+        );
+
+        let nul_policy = RlsPolicy::create("nul_policy", "users")
+            .for_all()
+            .using(Expr::Named(
+                "tenant_id = current_setting('app.tenant')::uuid\0".to_string(),
+            ));
+        let cmd = Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(nul_policy),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("nul policy expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("policy expression")),
+            "unexpected error: {err}"
+        );
+
+        let safe_policy = RlsPolicy::create("safe_policy", "users")
+            .for_all()
+            .with_check(Expr::Named("note = 'semi;inside'".to_string()));
+        let cmd = Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(safe_policy),
+            ..Default::default()
+        };
         let sql = AstEncoder::encode_cmd_sql(&cmd).unwrap().0;
-        assert!(sql.contains("USING (FALSE)"));
         assert!(sql.contains("WITH CHECK (note = 'semi;inside')"));
     }
 

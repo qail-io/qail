@@ -447,21 +447,12 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
     false
 }
 
-fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
-    let expr = expr.trim();
-    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
-        fallback.to_string()
-    } else {
-        expr.replace('\0', "")
-    }
-}
-
 fn checked_sql_expr_fragment(
     expr: &str,
     context: &str,
 ) -> Result<String, crate::protocol::EncodeError> {
     let expr = expr.trim();
-    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
+    if expr.is_empty() || expr.contains('\0') || contains_unquoted_statement_delimiter(expr) {
         return Err(crate::protocol::EncodeError::InvalidAst(format!(
             "invalid {context}: {expr:?}"
         )));
@@ -1504,13 +1495,15 @@ pub fn encode_create_policy(
     }
 
     if let Some(expr) = &policy.using {
+        let expr = checked_sql_expr_fragment(&expr.to_string(), "policy expression")?;
         buf.extend_from_slice(b" USING (");
-        buf.extend_from_slice(sql_expr_fragment_to_sql(&expr.to_string(), "FALSE").as_bytes());
+        buf.extend_from_slice(expr.as_bytes());
         buf.extend_from_slice(b")");
     }
     if let Some(expr) = &policy.with_check {
+        let expr = checked_sql_expr_fragment(&expr.to_string(), "policy expression")?;
         buf.extend_from_slice(b" WITH CHECK (");
-        buf.extend_from_slice(sql_expr_fragment_to_sql(&expr.to_string(), "FALSE").as_bytes());
+        buf.extend_from_slice(expr.as_bytes());
         buf.extend_from_slice(b")");
     }
 
