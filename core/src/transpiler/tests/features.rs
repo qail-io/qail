@@ -547,6 +547,17 @@ fn test_view_payload_fragments_reject_invalid_fragments() {
         "/* ERROR: Invalid view query */"
     );
 
+    let unsafe_nul_view = Qail {
+        action: Action::CreateView,
+        table: "active_users".to_string(),
+        payload: Some("SELECT id FROM users\0".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_nul_view.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid view query */"
+    );
+
     let unsafe_materialized = Qail {
         action: Action::CreateMaterializedView,
         table: "booking_stats".to_string(),

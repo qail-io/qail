@@ -659,7 +659,7 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
 
 fn checked_sql_query_fragment(query: &str, context: &str) -> Result<String, String> {
     let query = query.trim();
-    if query.is_empty() || contains_unquoted_statement_delimiter(query) {
+    if query.is_empty() || query.contains('\0') || contains_unquoted_statement_delimiter(query) {
         return Err(format!("/* ERROR: Invalid {context} */"));
     }
     Ok(query.to_string())
