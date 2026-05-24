@@ -602,6 +602,11 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
         let (table, column) = target_str
             .split_once('.')
             .ok_or_else(|| "invalid comment target".to_string())?;
+        let table = table.trim();
+        let column = column.trim();
+        if table.is_empty() || column.is_empty() {
+            return Err("invalid comment target".to_string());
+        }
         Ok(Comment::on_column(table, column, text))
     } else {
         Ok(Comment::on_table(target_str, text))
@@ -2112,6 +2117,17 @@ rename users.username -> users.name
         let input = r#"comment on "orphaned comment""#;
         let err = parse_qail(input).expect_err("missing comment target should fail");
         assert!(err.contains("comment target is required"));
+    }
+
+    #[test]
+    fn test_parse_comment_rejects_empty_column_target_segments() {
+        for input in [
+            r#"comment on users. "missing column""#,
+            r#"comment on .email "missing table""#,
+        ] {
+            let err = parse_qail(input).expect_err("empty comment target segment should fail");
+            assert!(err.contains("invalid comment target"));
+        }
     }
 
     #[test]
