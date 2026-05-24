@@ -294,7 +294,7 @@ impl ConditionToSql for Condition {
     fn to_value_sql(&self, generator: &dyn SqlGenerator) -> String {
         match &self.value {
             Value::Param(n) => generator.placeholder(*n),
-            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            Value::String(s) => format!("'{}'", escape_sql_string_literal(s)),
             Value::Bool(b) => generator.bool_literal(*b),
             Value::Subquery(cmd) => {
                 // Use ToSql trait to generate subquery SQL

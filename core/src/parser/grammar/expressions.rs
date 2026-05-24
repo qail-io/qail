@@ -8,6 +8,7 @@
 //! - `special_funcs`: SUBSTRING, EXTRACT, TRIM with keyword syntax
 
 use super::base::{parse_identifier, parse_value};
+use crate::ast::values::escape_sql_literal_body;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -189,7 +190,7 @@ fn parse_literal(input: &str) -> IResult<&str, Expr> {
     map(parse_value, |v| match v {
         Value::NamedParam(name) => Expr::Named(format!(":{}", name)),
         Value::Param(n) => Expr::Named(format!("${}", n)),
-        Value::String(s) => Expr::Named(format!("'{}'", s)),
+        Value::String(s) => Expr::Named(format!("'{}'", escape_sql_literal_body(&s))),
         Value::Int(n) => Expr::Named(n.to_string()),
         Value::Float(f) => {
             // Ensure float always has decimal point (100.0 not 100)

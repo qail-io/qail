@@ -144,6 +144,34 @@ fn test_text_search_multiple_columns_to_sql() {
     );
 }
 
+#[test]
+fn test_timestamp_literal_escapes_quotes() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let cmd = Qail::get("events").filter(
+        "created_at",
+        Operator::Eq,
+        Value::Timestamp("2026-01-01'; DROP TABLE events; --".to_string()),
+    );
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM events WHERE created_at = '2026-01-01''; DROP TABLE events; --'"
+    );
+}
+
+#[test]
+fn test_string_literal_strips_nul_and_escapes_quotes() {
+    use crate::ast::{Operator, Qail};
+
+    let cmd = Qail::get("users").filter("name", Operator::Eq, "Ana\0 O'Reilly");
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM users WHERE name = 'Ana O''Reilly'"
+    );
+}
+
 // OR conditions - using manual Qail construction
 #[test]
 fn test_or_conditions() {

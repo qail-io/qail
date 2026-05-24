@@ -1,4 +1,5 @@
 use super::base::{parse_identifier, parse_value};
+use crate::ast::values::escape_sql_literal_body;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -172,7 +173,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
         nom::combinator::map(parse_value, |v| match v {
             Value::NamedParam(name) => Expr::Named(format!(":{}", name)),
             Value::Param(n) => Expr::Named(format!("${}", n)),
-            Value::String(s) => Expr::Named(format!("'{}'", s)),
+            Value::String(s) => Expr::Named(format!("'{}'", escape_sql_literal_body(&s))),
             Value::Int(n) => Expr::Named(n.to_string()),
             Value::Float(f) => Expr::Named(f.to_string()),
             Value::Bool(b) => Expr::Named(b.to_string()),
@@ -186,14 +187,16 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
             Value::Interval { amount, unit } => {
                 Expr::Named(format!("INTERVAL '{} {}'", amount, unit))
             }
-            Value::Timestamp(ts) => Expr::Named(format!("'{}'", ts)),
+            Value::Timestamp(ts) => Expr::Named(format!("'{}'", escape_sql_literal_body(&ts))),
             Value::Bytes(bytes) => {
                 let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 Expr::Named(format!("'\\x{}'", hex))
             }
             Value::Expr(expr) => (*expr).clone(),
             Value::Vector(v) => Expr::Named(format!("[{} floats]", v.len())),
-            Value::Json(json) => Expr::Named(format!("'{}'::jsonb", json.replace('\'', "''"))),
+            Value::Json(json) => {
+                Expr::Named(format!("'{}'::jsonb", escape_sql_literal_body(&json)))
+            }
         }),
         // Fall back to full expression parsing
         parse_expression,

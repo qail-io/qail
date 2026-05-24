@@ -63,3 +63,18 @@ fn test_set_mixed_and_or_rejected() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn test_conflict_update_escapes_triple_quoted_string_assignment() {
+    let cmd =
+        parse("add users values 1, \"Ana\" conflict (id) update name = '''O'Reilly'''").unwrap();
+
+    let on_conflict = cmd.on_conflict.unwrap();
+    match on_conflict.action {
+        ConflictAction::DoUpdate { assignments } => {
+            assert_eq!(assignments[0].0, "name");
+            assert_eq!(assignments[0].1, Expr::Named("'O''Reilly'".to_string()));
+        }
+        other => panic!("expected conflict update, got {other:?}"),
+    }
+}

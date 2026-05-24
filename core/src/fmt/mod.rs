@@ -581,7 +581,11 @@ impl Formatter {
             Value::Param(n) => write!(self.buffer, "${}", n)?,
             Value::Function(f) => write!(self.buffer, "{}", f)?,
             Value::Column(c) => write!(self.buffer, "{}", c)?,
-            Value::String(s) => write!(self.buffer, "'{}'", s)?, // Simple quoting, might need escaping
+            Value::String(s) => write!(
+                self.buffer,
+                "'{}'",
+                crate::ast::values::escape_sql_literal_body(s)
+            )?,
             // Value::Date and Value::Interval are not in AST, likely Strings
             // Value::Date(d) => write!(self.buffer, "'{}'", d)?,
             // Value::Interval(i) => write!(self.buffer, "interval '{}'", i)?,
@@ -601,7 +605,11 @@ impl Formatter {
             Value::Interval { amount, unit } => {
                 write!(self.buffer, "interval '{} {}'", amount, unit)?
             }
-            Value::Timestamp(ts) => write!(self.buffer, "'{}'", ts)?,
+            Value::Timestamp(ts) => write!(
+                self.buffer,
+                "'{}'",
+                crate::ast::values::escape_sql_literal_body(ts)
+            )?,
             Value::Bytes(bytes) => {
                 write!(self.buffer, "'\\x")?;
                 for byte in bytes {
@@ -625,7 +633,11 @@ impl Formatter {
                 }
                 write!(self.buffer, "]")?;
             }
-            Value::Json(json) => write!(self.buffer, "'{}'::jsonb", json.replace('\'', "''"))?,
+            Value::Json(json) => write!(
+                self.buffer,
+                "'{}'::jsonb",
+                crate::ast::values::escape_sql_literal_body(json)
+            )?,
         }
         Ok(())
     }

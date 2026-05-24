@@ -111,6 +111,35 @@ order by
 }
 
 #[test]
+fn test_fmt_escapes_single_quoted_literals() {
+    let mut cmd = Qail::get("events");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        logical_op: LogicalOp::And,
+        conditions: vec![
+            Condition {
+                left: Expr::Named("name".to_string()),
+                op: Operator::Eq,
+                value: Value::String("O'Reilly".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("created_at".to_string()),
+                op: Operator::Eq,
+                value: Value::Timestamp("2026-01-01'; DROP TABLE events; --".to_string()),
+                is_array_unnest: false,
+            },
+        ],
+    });
+
+    let formatter = Formatter::new();
+    let output = formatter.format(&cmd).unwrap();
+
+    assert!(output.contains("name = 'O''Reilly'"));
+    assert!(output.contains("created_at = '2026-01-01''; DROP TABLE events; --'"));
+}
+
+#[test]
 fn test_fmt_cte() {
     // with cte = get table
     // get cte

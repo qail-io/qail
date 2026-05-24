@@ -1,6 +1,11 @@
 use crate::ast::Qail;
 use uuid::Uuid;
 
+/// Escape content placed inside a SQL single-quoted string literal.
+pub(crate) fn escape_sql_literal_body(value: &str) -> String {
+    value.replace('\0', "").replace('\'', "''")
+}
+
 /// Time interval unit for duration expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IntervalUnit {
@@ -89,7 +94,7 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
             Value::Float(n) => write!(f, "{}", n),
-            Value::String(s) => write!(f, "'{}'", s.replace('\'', "''")),
+            Value::String(s) => write!(f, "'{}'", escape_sql_literal_body(s)),
             Value::Param(n) => write!(f, "${}", n),
             Value::NamedParam(name) => write!(f, ":{}", name),
             Value::Function(s) => write!(f, "{}", s),
@@ -108,7 +113,7 @@ impl std::fmt::Display for Value {
             Value::Uuid(u) => write!(f, "'{}'", u),
             Value::NullUuid => write!(f, "NULL"),
             Value::Interval { amount, unit } => write!(f, "INTERVAL '{} {}'", amount, unit),
-            Value::Timestamp(ts) => write!(f, "'{}'", ts),
+            Value::Timestamp(ts) => write!(f, "'{}'", escape_sql_literal_body(ts)),
             Value::Bytes(bytes) => {
                 write!(f, "'\\x")?;
                 for byte in bytes {
@@ -127,7 +132,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Json(json) => write!(f, "'{}'::jsonb", json.replace('\'', "''")),
+            Value::Json(json) => write!(f, "'{}'::jsonb", escape_sql_literal_body(json)),
         }
     }
 }
