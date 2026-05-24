@@ -7,6 +7,10 @@ use crate::error::QdrantResult;
 use crate::point::{PayloadValue, Point, PointId, ScoredPoint};
 use serde_json::{Value as JsonValue, json};
 
+fn serialize_json_request(request: &JsonValue) -> Vec<u8> {
+    serde_json::to_vec(request).expect("serializing serde_json::Value should not fail")
+}
+
 /// Encode a vector search request to JSON format.
 ///
 /// Generates JSON for POST /collections/{collection}/points/search
@@ -43,7 +47,7 @@ pub fn encode_search_request(
         request["score_threshold"] = json!(threshold);
     }
 
-    serde_json::to_vec(&request).unwrap_or_default()
+    serialize_json_request(&request)
 }
 
 /// Encode search request with filter conditions.
@@ -71,7 +75,7 @@ pub fn encode_search_request_with_filter(
         request["score_threshold"] = json!(threshold);
     }
 
-    serde_json::to_vec(&request).unwrap_or_default()
+    serialize_json_request(&request)
 }
 
 /// Encode an upsert (insert/update) request to JSON.
@@ -110,7 +114,7 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
         .collect();
 
     let request = json!({ "points": points_json });
-    serde_json::to_vec(&request).unwrap_or_default()
+    serialize_json_request(&request)
 }
 
 /// Encode an upsert request for multi-vector points (named vectors).
@@ -149,7 +153,7 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
         .collect();
 
     let request = json!({ "points": points_json });
-    serde_json::to_vec(&request).unwrap_or_default()
+    serialize_json_request(&request)
 }
 
 /// Encode a delete request to JSON.
@@ -170,7 +174,7 @@ pub fn encode_delete_request(ids: &[PointId]) -> Vec<u8> {
         .collect();
 
     let request = json!({ "points": ids_json });
-    serde_json::to_vec(&request).unwrap_or_default()
+    serialize_json_request(&request)
 }
 
 /// Encode create collection request.
@@ -186,7 +190,7 @@ pub fn encode_create_collection_request(
             "distance": distance,
         }
     });
-    serde_json::to_vec(&request).unwrap_or_default()
+    serialize_json_request(&request)
 }
 
 /// Convert QAIL conditions to Qdrant filter format.
