@@ -369,22 +369,7 @@ fn parse_index(line: &str) -> Result<Index, String> {
     let rest = parts[1];
 
     let paren_start = rest.find('(').ok_or("Missing ( in index")?;
-    let mut depth = 0_i32;
-    let mut paren_end = None;
-    for (idx, ch) in rest.char_indices().skip(paren_start) {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    paren_end = Some(idx);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let paren_end = paren_end.ok_or("Missing ) in index")?;
+    let paren_end = find_matching_paren(rest, paren_start).ok_or("Missing ) in index")?;
 
     let before_cols = rest[..paren_start].trim();
     let (table, method) = if let Some((tbl, method)) = before_cols.split_once(" using ") {
@@ -423,16 +408,35 @@ fn parse_index(line: &str) -> Result<Index, String> {
 fn split_top_level_csv(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut depth = 0_i32;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
 
-    for ch in s.chars() {
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                if chars.peek().is_some_and(|next| *next == q) {
+                    cur.push(ch);
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
         match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                cur.push(ch);
+            }
             '(' => {
                 depth += 1;
                 cur.push(ch);
             }
             ')' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 cur.push(ch);
             }
             ',' if depth == 0 => {
@@ -2057,6 +2061,22 @@ enum booking_status {
         assert_eq!(idx.name, "idx_users_email_lower");
         assert!(!idx.expressions.is_empty());
         assert_eq!(idx.expressions[0], "(lower(email))");
+    }
+
+    #[test]
+    fn test_parse_expression_index_ignores_commas_and_parens_inside_literals() {
+        let input = r#"
+index idx_docs_meta on docs (metadata->>'a,b', lower(title))
+index idx_docs_regex on docs (regexp_replace(title, ')', '', 'g'))
+"#;
+        let schema = parse_qail(input).unwrap();
+
+        assert_eq!(schema.indexes[0].expressions[0], "metadata->>'a,b'");
+        assert_eq!(schema.indexes[0].expressions[1], "lower(title)");
+        assert_eq!(
+            schema.indexes[1].expressions[0],
+            "regexp_replace(title, ')', '', 'g')"
+        );
     }
 
     #[test]
