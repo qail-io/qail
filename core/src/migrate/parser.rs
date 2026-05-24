@@ -305,17 +305,52 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let mut col = Column::new(&name, data_type);
 
     let mut i = 2;
+    let mut seen_primary_key = false;
+    let mut nullability_option: Option<&str> = None;
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
+                if seen_primary_key {
+                    return Err(format!(
+                        "duplicate primary_key option for column '{}'",
+                        name
+                    ));
+                }
+                if nullability_option == Some("nullable") {
+                    return Err(format!(
+                        "primary_key conflicts with nullable for column '{}'",
+                        name
+                    ));
+                }
+                seen_primary_key = true;
                 col = col
                     .try_primary_key()
                     .map_err(|e| format!("{} (column '{}')", e, name))?;
             }
             "not_null" => {
+                if let Some(existing) = nullability_option {
+                    return Err(format!(
+                        "conflicting nullability options '{}' and 'not_null' for column '{}'",
+                        existing, name
+                    ));
+                }
+                nullability_option = Some("not_null");
                 col.nullable = false;
             }
             "nullable" => {
+                if seen_primary_key {
+                    return Err(format!(
+                        "nullable conflicts with primary_key for column '{}'",
+                        name
+                    ));
+                }
+                if let Some(existing) = nullability_option {
+                    return Err(format!(
+                        "conflicting nullability options '{}' and 'nullable' for column '{}'",
+                        existing, name
+                    ));
+                }
+                nullability_option = Some("nullable");
                 col.nullable = true;
             }
             "unique" => {
@@ -3582,6 +3617,47 @@ table users {
 "#;
         let err = parse_qail(input).expect_err("unknown column option should fail");
         assert!(err.contains("unknown column option 'uniq' for column 'email'"));
+    }
+
+    #[test]
+    fn test_parse_column_rejects_conflicting_nullability() {
+        for (input, expected) in [
+            (
+                r#"
+table users {
+  email text not_null nullable
+}
+"#,
+                "conflicting nullability options 'not_null' and 'nullable' for column 'email'",
+            ),
+            (
+                r#"
+table users {
+  email text nullable not_null
+}
+"#,
+                "conflicting nullability options 'nullable' and 'not_null' for column 'email'",
+            ),
+            (
+                r#"
+table users {
+  id uuid primary_key nullable
+}
+"#,
+                "nullable conflicts with primary_key for column 'id'",
+            ),
+            (
+                r#"
+table users {
+  id uuid nullable primary_key
+}
+"#,
+                "primary_key conflicts with nullable for column 'id'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("conflicting nullability should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
