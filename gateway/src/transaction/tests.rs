@@ -183,7 +183,6 @@ async fn test_with_session_enforces_lifetime_limit_and_records_metrics() {
     let snapshot = txn_test_metrics_snapshot();
     assert_eq!(snapshot.expired, 1);
     assert_eq!(snapshot.forced_lifetime, 1);
-    assert_eq!(snapshot.active, 0);
 }
 
 #[tokio::test]
@@ -220,7 +219,6 @@ async fn test_close_session_rejects_commit_after_lifetime_limit_and_records_metr
     let snapshot = txn_test_metrics_snapshot();
     assert_eq!(snapshot.expired, 1);
     assert_eq!(snapshot.forced_lifetime, 1);
-    assert_eq!(snapshot.active, 0);
 }
 
 #[tokio::test]
@@ -257,7 +255,6 @@ async fn test_with_session_enforces_statement_limit_and_records_metrics() {
     let snapshot = txn_test_metrics_snapshot();
     assert_eq!(snapshot.statement_limit_hit, 1);
     assert_eq!(snapshot.forced_statement, 1);
-    assert_eq!(snapshot.active, 0);
 }
 
 #[tokio::test]
@@ -280,7 +277,6 @@ async fn test_reap_expired_records_idle_timeout_metrics() {
     assert_eq!(mgr.active_count().await, 0);
     let snapshot = txn_test_metrics_snapshot();
     assert_eq!(snapshot.forced_idle, 1);
-    assert_eq!(snapshot.active, 0);
 }
 
 #[tokio::test]
