@@ -261,7 +261,8 @@ struct TypeInfo {
 /// Parse column type with optional params and array suffix
 /// Handles: varchar(255), decimal(10,2), text[], serial, bigserial
 fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
-    let (input, type_name) = take_while1(|c: char| c.is_alphanumeric()).parse(input)?;
+    let (input, type_name) =
+        take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.').parse(input)?;
 
     let (input, params) = if input.starts_with('(') {
         let paren_start = 1;
@@ -1095,6 +1096,30 @@ mod tests {
 
         let code = items.find_column("code").expect("code not found");
         assert!(code.unique);
+    }
+
+    #[test]
+    fn test_custom_type_names_with_underscores_and_schema() {
+        let input = r#"
+            table bookings (
+                id uuid primary_key,
+                status booking_status not null,
+                gateway_state integrations.payment_state[]
+            )
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let bookings = &schema.tables[0];
+
+        let status = bookings.find_column("status").expect("status not found");
+        assert_eq!(status.typ, "booking_status");
+        assert!(!status.nullable);
+
+        let gateway_state = bookings
+            .find_column("gateway_state")
+            .expect("gateway_state not found");
+        assert_eq!(gateway_state.typ, "integrations.payment_state");
+        assert!(gateway_state.is_array);
     }
 
     #[test]
