@@ -1507,6 +1507,9 @@ fn parse_function_header(header: &str) -> Result<(String, String, Option<String>
         .map(|word| header[word.start..word.end].to_string())
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "function language clause requires a language".to_string())?;
+    if !is_native_identifier(&language) {
+        return Err(format!("invalid function language '{}'", language));
+    }
 
     let volatility =
         volatility_idx.map(|idx| header[words[idx].start..words[idx].end].to_ascii_lowercase());
@@ -3262,6 +3265,13 @@ materialized view active_users $$ SELECT 2 $$
             err.contains("unknown function header token 'security'"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn test_parse_function_rejects_invalid_language() {
+        let input = "function f() returns int language bad-lang $$ SELECT 1 $$";
+        let err = parse_qail(input).expect_err("invalid function language should fail");
+        assert!(err.contains("invalid function language 'bad-lang'"));
     }
 
     #[test]
