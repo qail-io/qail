@@ -451,6 +451,87 @@ mod tests {
             })
         }));
     }
+
+    #[test]
+    fn shadow_receipt_verification_requires_decodable_matching_payload() {
+        let diff_cmds = vec![Qail::get("users")];
+        let diff_json = qail_core::wire::encode_cmds_text(&diff_cmds);
+        let checksum = diff_cmds_checksum(&diff_cmds);
+
+        let valid = qail_pg::PgRow {
+            columns: vec![
+                Some(diff_json.as_bytes().to_vec()),
+                Some(checksum.as_bytes().to_vec()),
+            ],
+            column_info: None,
+        };
+        assert!(shadow_receipt_row_matches_expected(&valid, &checksum));
+
+        let malformed_payload = qail_pg::PgRow {
+            columns: vec![
+                Some(b"not qail wire text".to_vec()),
+                Some(checksum.as_bytes().to_vec()),
+            ],
+            column_info: None,
+        };
+        assert!(!shadow_receipt_row_matches_expected(
+            &malformed_payload,
+            &checksum
+        ));
+
+        let checksum_drift = qail_pg::PgRow {
+            columns: vec![
+                Some(diff_json.as_bytes().to_vec()),
+                Some(b"different-checksum".to_vec()),
+            ],
+            column_info: None,
+        };
+        assert!(!shadow_receipt_row_matches_expected(
+            &checksum_drift,
+            &checksum
+        ));
+    }
+
+    #[test]
+    fn shadow_receipt_lookup_uses_verified_status_only() {
+        let cmd = shadow_receipt_lookup_cmd();
+
+        assert!(cmd.cages.iter().any(|cage| {
+            cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, Expr::Named(name) if name == "status")
+                    && condition.value == qail_core::ast::Value::String("verified".to_string())
+            })
+        }));
+        assert!(!cmd.cages.iter().any(|cage| {
+            cage.conditions.iter().any(|condition| {
+                condition.value == qail_core::ast::Value::String("pending".to_string())
+            })
+        }));
+    }
+}
+
+fn shadow_receipt_lookup_cmd() -> Qail {
+    Qail::get("_qail_shadow_state")
+        .columns(["diff_cmds", "diff_checksum"])
+        .filter("status", qail_core::ast::Operator::Eq, "verified")
+        .limit(5)
+}
+
+fn shadow_receipt_row_matches_expected(row: &qail_pg::PgRow, expected_checksum: &str) -> bool {
+    let Some(diff_json) = row.get_string(0).filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    let Ok(diff_cmds) = qail_core::wire::decode_cmds_text(&diff_json) else {
+        return false;
+    };
+    if diff_cmds_checksum(&diff_cmds) != expected_checksum {
+        return false;
+    }
+
+    match row.get_string(1).filter(|value| !value.trim().is_empty()) {
+        Some(stored_checksum) => stored_checksum == expected_checksum,
+        None => true,
+    }
 }
 
 /// Verify an active shadow receipt by SQL checksum.
@@ -460,28 +541,15 @@ pub async fn has_verified_shadow_receipt_with_driver(
 ) -> Result<bool> {
     ensure_shadow_state_table(driver).await?;
 
-    for status in ["verified", "pending"] {
-        let cmd = Qail::get("_qail_shadow_state")
-            .columns(["diff_cmds", "diff_checksum"])
-            .filter("status", qail_core::ast::Operator::Eq, status)
-            .limit(5);
-        let rows = driver
-            .fetch_all(&cmd)
-            .await
-            .map_err(|e| anyhow!("Failed to query shadow receipts: {}", e))?;
+    let cmd = shadow_receipt_lookup_cmd();
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query shadow receipts: {}", e))?;
 
-        for row in rows {
-            if let Some(stored_checksum) = row.get_string(1)
-                && stored_checksum == expected_checksum
-            {
-                return Ok(true);
-            }
-            if let Some(diff_json) = row.get_string(0)
-                && let Ok(diff_cmds) = qail_core::wire::decode_cmds_text(&diff_json)
-                && diff_cmds_checksum(&diff_cmds) == expected_checksum
-            {
-                return Ok(true);
-            }
+    for row in rows {
+        if shadow_receipt_row_matches_expected(&row, expected_checksum) {
+            return Ok(true);
         }
     }
 
