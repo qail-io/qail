@@ -1215,15 +1215,18 @@ fn row_matches_search(row: &Value, search: Option<&str>, search_columns: Option<
 }
 
 fn compare_json_field(left: &Value, right: &Value, column: &str, desc: bool) -> std::cmp::Ordering {
-    let ordering = match (row_field(left, column), row_field(right, column)) {
+    let left = present_non_null_json(row_field(left, column));
+    let right = present_non_null_json(row_field(right, column));
+    let ordering = match (left, right) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
         (Some(Value::Number(left)), Some(Value::Number(right))) => left
             .as_f64()
             .and_then(|left| right.as_f64().and_then(|right| left.partial_cmp(&right)))
             .unwrap_or(std::cmp::Ordering::Equal),
         (Some(Value::String(left)), Some(Value::String(right))) => left.cmp(right),
         (Some(Value::Bool(left)), Some(Value::Bool(right))) => left.cmp(right),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Equal,
     };
     if desc { ordering.reverse() } else { ordering }
@@ -1503,6 +1506,61 @@ mod tests {
             vec![
                 json!({"id": 3, "status": "open"}),
                 json!({"id": 2, "status": "open"})
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_read_constraints_sorts_nulls_like_postgres_defaults() {
+        let mut asc_rows = vec![
+            json!({"id": 1, "score": null}),
+            json!({"id": 2, "score": 10}),
+            json!({"id": 3}),
+            json!({"id": 4, "score": 5}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut asc_rows,
+            BranchReadConstraintInput {
+                sort: Some("score:asc,id:asc"),
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            asc_rows,
+            vec![
+                json!({"id": 4, "score": 5}),
+                json!({"id": 2, "score": 10}),
+                json!({"id": 1, "score": null}),
+                json!({"id": 3}),
+            ]
+        );
+
+        let mut desc_rows = vec![
+            json!({"id": 2, "score": 10}),
+            json!({"id": 4, "score": 5}),
+            json!({"id": 1, "score": null}),
+            json!({"id": 3}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut desc_rows,
+            BranchReadConstraintInput {
+                sort: Some("score:desc,id:asc"),
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            desc_rows,
+            vec![
+                json!({"id": 1, "score": null}),
+                json!({"id": 3}),
+                json!({"id": 2, "score": 10}),
+                json!({"id": 4, "score": 5}),
             ]
         );
     }
