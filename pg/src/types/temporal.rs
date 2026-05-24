@@ -144,7 +144,7 @@ fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
     }
 
     let (year, month, day) = parse_date_components(parts[0])?;
-    let time_str = strip_timezone_suffix(parts[1]);
+    let (time_str, timezone_offset_usec) = split_timezone_suffix(parts[1]);
     let (hour, minute, second, usec) = parse_time_components(time_str)?;
     let days_since_epoch = days_from_ymd_checked(year, month, day)?;
 
@@ -154,7 +154,7 @@ fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
         + second as i64 * 1_000_000
         + usec;
 
-    Ok(Timestamp::from_pg_usec(total_usec))
+    Ok(Timestamp::from_pg_usec(total_usec - timezone_offset_usec))
 }
 
 fn parse_date_components(s: &str) -> Result<(i32, i32, i32), TypeError> {
@@ -169,20 +169,52 @@ fn parse_date_components(s: &str) -> Result<(i32, i32, i32), TypeError> {
     Ok((year, month, day))
 }
 
-fn strip_timezone_suffix(s: &str) -> &str {
+fn split_timezone_suffix(s: &str) -> (&str, i64) {
     let s = s.trim_end();
     if let Some(stripped) = s.strip_suffix('Z') {
-        return stripped;
+        return (stripped, 0);
     }
     if let Some(idx) = s
         .char_indices()
         .skip(1)
         .find_map(|(idx, c)| (c == '+' || c == '-').then_some(idx))
     {
-        &s[..idx]
+        let offset = parse_timezone_offset_usec(&s[idx..]).unwrap_or(0);
+        (&s[..idx], offset)
     } else {
-        s
+        (s, 0)
     }
+}
+
+fn parse_timezone_offset_usec(s: &str) -> Option<i64> {
+    let sign = match s.as_bytes().first()? {
+        b'+' => 1_i64,
+        b'-' => -1_i64,
+        _ => return None,
+    };
+    let raw = &s[1..];
+    if raw.is_empty() {
+        return None;
+    }
+
+    let (hours, minutes) = if let Some((hours, minutes)) = raw.split_once(':') {
+        (hours, minutes)
+    } else if raw.len() == 4 {
+        (&raw[..2], &raw[2..])
+    } else {
+        (raw, "0")
+    };
+
+    if hours.is_empty() || minutes.is_empty() {
+        return None;
+    }
+    let hours = hours.parse::<i64>().ok()?;
+    let minutes = minutes.parse::<i64>().ok()?;
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+
+    Some(sign * ((hours * 3_600 + minutes * 60) * 1_000_000))
 }
 
 fn parse_time_components(s: &str) -> Result<(i32, i32, i32, i64), TypeError> {
@@ -538,6 +570,19 @@ mod tests {
         let expected_usec =
             expected_days * 86_400_000_000 + 17 * 3_600_000_000 + 30 * 60_000_000 + 45 * 1_000_000;
         assert_eq!(ts.usec, expected_usec);
+    }
+
+    #[test]
+    fn test_timestamp_from_pg_text_applies_timezone_offset() {
+        let ts = parse_timestamp_text("2024-12-25 17:30:45+02:30").unwrap();
+        let expected_days = days_from_ymd_checked(2024, 12, 25).unwrap() as i64;
+        let expected_usec = expected_days * 86_400_000_000 + 15 * 3_600_000_000 + 45 * 1_000_000;
+        assert_eq!(ts.usec, expected_usec);
+
+        let negative = parse_timestamp_text("2024-12-25 17:30:45-0330").unwrap();
+        let negative_expected =
+            expected_days * 86_400_000_000 + 21 * 3_600_000_000 + 45 * 1_000_000;
+        assert_eq!(negative.usec, negative_expected);
     }
 
     #[test]
