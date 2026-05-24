@@ -21,10 +21,16 @@ fn build_branch_update_overlay_row(
     row_id: &str,
     tenant_column: &str,
     tenant_id: Option<&str>,
-) -> Value {
-    let mut overlay_obj = base_row
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+) -> Result<Value, ApiError> {
+    let mut overlay_obj = match base_row {
+        Some(Value::Object(obj)) => obj,
+        Some(_) => {
+            return Err(ApiError::internal(
+                "Branch update base row must be a JSON object",
+            ));
+        }
+        None => serde_json::Map::new(),
+    };
     for (key, value) in obj {
         overlay_obj.insert(key.clone(), value.clone());
     }
@@ -32,7 +38,7 @@ fn build_branch_update_overlay_row(
     if let Some(tid) = tenant_id {
         overlay_obj.insert(tenant_column.to_string(), Value::String(tid.to_string()));
     }
-    Value::Object(overlay_obj)
+    Ok(Value::Object(overlay_obj))
 }
 
 pub(crate) async fn update_handler(
@@ -232,7 +238,7 @@ pub(crate) async fn update_handler(
                 .as_deref()
                 .unwrap_or(&state.config.tenant_column),
             auth.tenant_id.as_deref(),
-        );
+        )?;
         let overlay_result = redirect_to_overlay(
             &mut conn,
             branch_name,
@@ -346,7 +352,8 @@ mod tests {
         obj.insert("name".to_string(), json!("new-name"));
 
         let row =
-            build_branch_update_overlay_row(None, &obj, "id", "42", "tenant_id", Some("tenant-a"));
+            build_branch_update_overlay_row(None, &obj, "id", "42", "tenant_id", Some("tenant-a"))
+                .unwrap();
         assert_eq!(row.get("id"), Some(&json!("42")));
         assert_eq!(row.get("tenant_id"), Some(&json!("tenant-a")));
         assert_eq!(row.get("name"), Some(&json!("new-name")));
@@ -369,7 +376,8 @@ mod tests {
             "order-1",
             "tenant_id",
             Some("tenant-a"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             row,
@@ -395,9 +403,28 @@ mod tests {
             "path-id",
             "tenant_id",
             Some("auth-tenant"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(row.get("id"), Some(&json!("path-id")));
         assert_eq!(row.get("tenant_id"), Some(&json!("auth-tenant")));
+    }
+
+    #[test]
+    fn build_branch_update_overlay_row_rejects_non_object_base_row() {
+        let mut obj = Map::new();
+        obj.insert("status".to_string(), json!("paid"));
+
+        let err = build_branch_update_overlay_row(
+            Some(json!(["not", "an", "object"])),
+            &obj,
+            "id",
+            "path-id",
+            "tenant_id",
+            Some("tenant-a"),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "INTERNAL_ERROR");
     }
 }
