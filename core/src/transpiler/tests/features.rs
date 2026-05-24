@@ -314,6 +314,27 @@ fn test_function_definition_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_create_trigger_renders_update_of_columns() {
+    let cmd = Qail {
+        action: Action::CreateTrigger,
+        trigger_def: Some(TriggerDef {
+            name: "trg_touch_email".to_string(),
+            table: "users".to_string(),
+            timing: TriggerTiming::Before,
+            events: vec![TriggerEvent::Update],
+            update_columns: vec!["email".to_string(), "display-name".to_string()],
+            for_each_row: true,
+            execute_function: "touch_updated_at".to_string(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE TRIGGER trg_touch_email BEFORE UPDATE OF email, \"display-name\" ON users FOR EACH ROW EXECUTE FUNCTION touch_updated_at()"
+    );
+}
+
+#[test]
 fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
     let do_cmd = Qail {
         action: Action::Do,

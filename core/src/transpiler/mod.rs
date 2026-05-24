@@ -307,14 +307,24 @@ impl ToSql for Qail {
                         crate::ast::TriggerTiming::After => "AFTER",
                         crate::ast::TriggerTiming::InsteadOf => "INSTEAD OF",
                     };
-                    let events: Vec<&str> = trig
+                    let events: Vec<String> = trig
                         .events
                         .iter()
                         .map(|e| match e {
-                            crate::ast::TriggerEvent::Insert => "INSERT",
-                            crate::ast::TriggerEvent::Update => "UPDATE",
-                            crate::ast::TriggerEvent::Delete => "DELETE",
-                            crate::ast::TriggerEvent::Truncate => "TRUNCATE",
+                            crate::ast::TriggerEvent::Insert => "INSERT".to_string(),
+                            crate::ast::TriggerEvent::Update if !trig.update_columns.is_empty() => {
+                                format!(
+                                    "UPDATE OF {}",
+                                    trig.update_columns
+                                        .iter()
+                                        .map(|column| escape_identifier(column))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            }
+                            crate::ast::TriggerEvent::Update => "UPDATE".to_string(),
+                            crate::ast::TriggerEvent::Delete => "DELETE".to_string(),
+                            crate::ast::TriggerEvent::Truncate => "TRUNCATE".to_string(),
                         })
                         .collect();
                     let for_each = if trig.for_each_row {
