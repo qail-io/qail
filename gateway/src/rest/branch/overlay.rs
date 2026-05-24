@@ -79,21 +79,6 @@ pub(crate) async fn read_branch_overlay_rows(
         .map_err(|e| ApiError::internal(format!("Branch overlay read failed: {}", e)))
 }
 
-fn overlay_row_pk_and_operation(row: &qail_pg::PgRow) -> (String, String) {
-    let row_pk = row
-        .try_get_by_name::<String>("row_pk")
-        .ok()
-        .or_else(|| row.get_string(0))
-        .unwrap_or_default();
-    let operation = row
-        .try_get_by_name::<String>("operation")
-        .ok()
-        .or_else(|| row.get_string(1))
-        .unwrap_or_default();
-
-    (row_pk, operation)
-}
-
 fn required_overlay_string(
     row: &qail_pg::PgRow,
     name: &str,
@@ -121,6 +106,7 @@ fn overlay_row_pk_and_operation_checked(
     Ok((row_pk, operation))
 }
 
+#[cfg(test)]
 fn branch_overlay_row_state_from_ops<'a>(
     operations: impl IntoIterator<Item = (&'a str, &'a str)>,
     row_pk: &str,
@@ -145,13 +131,28 @@ fn branch_overlay_row_state_from_ops<'a>(
 pub(crate) fn branch_overlay_row_state(
     rows: &[qail_pg::PgRow],
     row_pk: &str,
-) -> BranchOverlayRowState {
-    let ops: Vec<(String, String)> = rows.iter().map(overlay_row_pk_and_operation).collect();
-    branch_overlay_row_state_from_ops(
-        ops.iter()
-            .map(|(row_pk, operation)| (row_pk.as_str(), operation.as_str())),
-        row_pk,
-    )
+) -> Result<BranchOverlayRowState, ApiError> {
+    let mut state = BranchOverlayRowState::Absent;
+
+    for row in rows {
+        let (overlay_pk, operation) = overlay_row_pk_and_operation_checked(row)?;
+        if overlay_pk != row_pk {
+            continue;
+        }
+
+        state = match operation.as_str() {
+            "insert" | "update" => BranchOverlayRowState::Visible,
+            "delete" => BranchOverlayRowState::Deleted,
+            _ => {
+                return Err(ApiError::internal(format!(
+                    "Unknown branch overlay operation '{}'",
+                    operation
+                )));
+            }
+        };
+    }
+
+    Ok(state)
 }
 
 fn upsert_overlay_row(
@@ -528,8 +529,25 @@ mod tests {
         ];
 
         assert_eq!(
-            branch_overlay_row_state(&rows, "order-1"),
+            branch_overlay_row_state(&rows, "order-1").unwrap(),
             BranchOverlayRowState::Deleted
         );
+    }
+
+    #[test]
+    fn branch_overlay_row_state_rejects_malformed_pg_rows() {
+        let missing_operation = vec![qail_pg::PgRow {
+            columns: vec![Some(b"order-1".to_vec()), None],
+            column_info: None,
+        }];
+        let err = branch_overlay_row_state(&missing_operation, "order-1").unwrap_err();
+        assert_eq!(err.code, "INTERNAL_ERROR");
+
+        let unknown_operation = vec![qail_pg::PgRow {
+            columns: vec![Some(b"order-1".to_vec()), Some(b"replace".to_vec())],
+            column_info: None,
+        }];
+        let err = branch_overlay_row_state(&unknown_operation, "order-1").unwrap_err();
+        assert_eq!(err.code, "INTERNAL_ERROR");
     }
 }

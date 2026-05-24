@@ -189,10 +189,14 @@ pub(crate) async fn update_handler(
                 return Err(e);
             }
         };
-        match branch_overlay_write_needs_base_lookup(
-            branch_overlay_row_state(&overlay_rows, &id),
-            &id,
-        ) {
+        let overlay_state = match branch_overlay_row_state(&overlay_rows, &id) {
+            Ok(state) => state,
+            Err(e) => {
+                conn.release().await;
+                return Err(e);
+            }
+        };
+        match branch_overlay_write_needs_base_lookup(overlay_state, &id) {
             Ok(true) => {
                 let mut exists_cmd = qail_core::ast::Qail::get(&table_name)
                     .filter(&pk, Operator::Eq, QailValue::String(id.clone()))
