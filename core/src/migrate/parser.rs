@@ -366,6 +366,9 @@ fn parse_index(line: &str) -> Result<Index, String> {
     }
 
     let name = parts[0].trim().to_string();
+    if name.is_empty() {
+        return Err("index name is required".to_string());
+    }
     let rest = parts[1];
 
     let paren_start = rest.find('(').ok_or("Missing ( in index")?;
@@ -377,8 +380,14 @@ fn parse_index(line: &str) -> Result<Index, String> {
     } else {
         (before_cols.to_string(), None)
     };
+    if table.trim().is_empty() {
+        return Err("index table is required".to_string());
+    }
     let cols_str = &rest[paren_start + 1..paren_end];
     let columns: Vec<String> = split_top_level_csv(cols_str);
+    if columns.is_empty() {
+        return Err("index columns are required".to_string());
+    }
 
     // Detect expression indexes: columns contain parentheses like "(lower(email))"
     let has_expressions = columns
@@ -2053,6 +2062,24 @@ table users {
         assert_eq!(schema.indexes.len(), 1);
         assert!(schema.indexes[0].unique);
         assert_eq!(schema.indexes[0].name, "idx_users_email");
+    }
+
+    #[test]
+    fn test_parse_index_rejects_missing_shape_parts() {
+        for (input, expected) in [
+            ("index  on users (email)", "index name is required"),
+            (
+                "index idx_users_email on  (email)",
+                "index table is required",
+            ),
+            (
+                "index idx_users_email on users ()",
+                "index columns are required",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid index should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
