@@ -123,7 +123,13 @@ where
     let rest = first_line
         .strip_prefix("table ")
         .ok_or("Expected 'table' prefix")?;
-    let name = rest.trim_end_matches('{').trim().to_string();
+    let (name_part, after_open) = rest
+        .split_once('{')
+        .ok_or_else(|| "table declaration requires an opening '{'".to_string())?;
+    if !after_open.trim().is_empty() {
+        return Err("trailing content after table opening brace".to_string());
+    }
+    let name = name_part.trim().to_string();
 
     if name.is_empty() {
         return Err("Table name required".to_string());
@@ -131,12 +137,17 @@ where
 
     let mut table = Table::new(&name);
     let mut consumed = 0;
+    let mut found_closing_brace = false;
 
     for line in lines.by_ref() {
         consumed += 1;
         let line = line.trim();
 
-        if line == "}" || line.starts_with('}') {
+        if let Some(after_close) = line.strip_prefix('}') {
+            if !after_close.trim().is_empty() {
+                return Err("trailing content after table closing brace".to_string());
+            }
+            found_closing_brace = true;
             break;
         }
 
@@ -163,6 +174,10 @@ where
 
         let col = parse_column(line, enum_types)?;
         table.columns.push(col);
+    }
+
+    if !found_closing_brace {
+        return Err(format!("Unclosed table definition '{}'", name));
     }
 
     Ok((table, consumed))
@@ -2155,6 +2170,30 @@ table users {
         assert!(table.columns[0].primary_key);
         assert!(!table.columns[1].nullable);
         assert!(table.columns[2].unique);
+    }
+
+    #[test]
+    fn test_parse_table_rejects_malformed_braces() {
+        let cases = [
+            ("table users\n  id serial primary_key\n}", "opening"),
+            (
+                "table users {\n  id serial primary_key",
+                "Unclosed table definition 'users'",
+            ),
+            (
+                "table users { id serial primary_key }",
+                "trailing content after table opening brace",
+            ),
+            (
+                "table users {\n  id serial primary_key\n} trailing",
+                "trailing content after table closing brace",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let err = parse_qail(input).expect_err("malformed table braces should fail");
+            assert!(err.contains(expected), "expected '{expected}' in '{err}'");
+        }
     }
 
     #[test]
