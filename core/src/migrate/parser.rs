@@ -954,13 +954,16 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
         let tokens: Vec<&str> = tokens_str.split_whitespace().collect();
 
         let mut i = 0;
+        let mut seen_options = HashSet::new();
         while i < tokens.len() {
             match tokens[i] {
                 "start" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "start")?;
                     seq.start = Some(tokens[i + 1].parse().map_err(|_| "invalid start value")?);
                     i += 2;
                 }
                 "increment" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "increment")?;
                     seq.increment = Some(
                         tokens[i + 1]
                             .parse()
@@ -969,26 +972,32 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
                     i += 2;
                 }
                 "minvalue" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "minvalue")?;
                     seq.min_value = Some(tokens[i + 1].parse().map_err(|_| "invalid minvalue")?);
                     i += 2;
                 }
                 "maxvalue" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "maxvalue")?;
                     seq.max_value = Some(tokens[i + 1].parse().map_err(|_| "invalid maxvalue")?);
                     i += 2;
                 }
                 "cache" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "cache")?;
                     seq.cache = Some(tokens[i + 1].parse().map_err(|_| "invalid cache value")?);
                     i += 2;
                 }
                 "cycle" => {
+                    record_sequence_option(&mut seen_options, "cycle")?;
                     seq.cycle = true;
                     i += 1;
                 }
                 "owned_by" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "owned_by")?;
                     seq.owned_by = Some(tokens[i + 1].to_string());
                     i += 2;
                 }
                 "as" if i + 1 < tokens.len() => {
+                    record_sequence_option(&mut seen_options, "as")?;
                     seq.data_type = Some(tokens[i + 1].to_string());
                     i += 2;
                 }
@@ -1000,6 +1009,16 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
     } else {
         Ok(Sequence::new(rest))
     }
+}
+
+fn record_sequence_option(
+    seen_options: &mut HashSet<&'static str>,
+    option: &'static str,
+) -> Result<(), String> {
+    if !seen_options.insert(option) {
+        return Err(format!("duplicate sequence option: {option}"));
+    }
+    Ok(())
 }
 
 /// Parse a standalone ENUM type definition.
@@ -2945,6 +2964,27 @@ sequence order_ids { start 100 }
         let input = "sequence order_seq { start 1 } }";
         let err = parse_qail(input).expect_err("extra sequence content should fail");
         assert!(err.contains("trailing content after sequence block"));
+    }
+
+    #[test]
+    fn test_parse_sequence_rejects_duplicate_options() {
+        for (input, expected) in [
+            (
+                "sequence order_seq { start 1 start 2 }",
+                "duplicate sequence option: start",
+            ),
+            (
+                "sequence order_seq { cycle cycle }",
+                "duplicate sequence option: cycle",
+            ),
+            (
+                "sequence order_seq { owned_by users.id owned_by orders.id }",
+                "duplicate sequence option: owned_by",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("duplicate sequence option should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
