@@ -15,6 +15,7 @@ pub const MAX_CMD_BINARY_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_AST_DEPTH: usize = 64;
 const MAX_AST_NODES: usize = 16_384;
 const MAX_AST_COLLECTION_LEN: usize = 2_048;
+const MAX_CMD_TEXT_BATCH_COMMANDS: usize = MAX_AST_COLLECTION_LEN;
 const MAX_AST_STRING_LEN: usize = 32 * 1024;
 const MAX_AST_VECTOR_LEN: usize = 8_192;
 const MAX_AST_BINARY_VALUE_LEN: usize = 32 * 1024;
@@ -88,6 +89,11 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
 
     let count_line = read_line(bytes, &mut idx)?;
     let count = parse_usize("command count", count_line)?;
+    if count > MAX_CMD_TEXT_BATCH_COMMANDS {
+        return Err(format!(
+            "command count exceeds limit: {count} > {MAX_CMD_TEXT_BATCH_COMMANDS}"
+        ));
+    }
     let mut out = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -932,12 +938,15 @@ fn parse_usize(field: &str, line: &str) -> Result<usize, String> {
 }
 
 fn read_exact_utf8<'a>(bytes: &'a [u8], idx: &mut usize, len: usize) -> Result<&'a str, String> {
-    if *idx + len > bytes.len() {
+    let end = (*idx)
+        .checked_add(len)
+        .ok_or_else(|| "payload length overflow".to_string())?;
+    if end > bytes.len() {
         return Err("payload truncated".to_string());
     }
     let start = *idx;
-    *idx += len;
-    std::str::from_utf8(&bytes[start..start + len]).map_err(|_| "payload is not UTF-8".to_string())
+    *idx = end;
+    std::str::from_utf8(&bytes[start..end]).map_err(|_| "payload is not UTF-8".to_string())
 }
 
 #[cfg(test)]
@@ -1118,5 +1127,21 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c.kind, crate::ast::CageKind::Limit(1)))
         );
+    }
+
+    #[test]
+    fn cmd_text_rejects_overflowing_payload_length_without_panic() {
+        let input = format!("{CMD_TEXT_MAGIC}\n{}\n", usize::MAX);
+
+        let err = decode_cmd_text(&input).expect_err("oversized length should fail closed");
+        assert!(err.contains("payload length overflow") || err.contains("payload truncated"));
+    }
+
+    #[test]
+    fn cmds_text_rejects_oversized_command_count_without_allocation() {
+        let input = format!("{CMDS_TEXT_MAGIC}\n{}\n", MAX_CMD_TEXT_BATCH_COMMANDS + 1);
+
+        let err = decode_cmds_text(&input).expect_err("oversized command count should fail closed");
+        assert!(err.contains("command count exceeds limit"));
     }
 }
