@@ -309,6 +309,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let mut nullability_option: Option<&str> = None;
     let mut seen_default = false;
     let mut seen_unique = false;
+    let mut seen_generated = false;
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
@@ -382,12 +383,24 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 return Err(format!("default requires a value for column '{}'", name));
             }
             "generated_identity" => {
+                if seen_generated {
+                    return Err(format!("duplicate generated option for column '{}'", name));
+                }
+                seen_generated = true;
                 col.generated = Some(Generated::AlwaysIdentity);
             }
             "generated_by_default_identity" => {
+                if seen_generated {
+                    return Err(format!("duplicate generated option for column '{}'", name));
+                }
+                seen_generated = true;
                 col.generated = Some(Generated::ByDefaultIdentity);
             }
             s if s.starts_with("generated_stored(") => {
+                if seen_generated {
+                    return Err(format!("duplicate generated option for column '{}'", name));
+                }
+                seen_generated = true;
                 let mut generated_str = s.to_string();
                 let mut depth: i32 = s.chars().fold(0, |acc, ch| match ch {
                     '(' => acc + 1,
@@ -3704,6 +3717,17 @@ table users {
             let err = parse_qail(input).expect_err("duplicate key option should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_column_rejects_duplicate_generated_options() {
+        let input = r#"
+table users {
+  id bigint generated_identity generated_by_default_identity
+}
+"#;
+        let err = parse_qail(input).expect_err("duplicate generated option should fail");
+        assert!(err.contains("duplicate generated option for column 'id'"));
     }
 
     #[test]
