@@ -924,6 +924,9 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
         if name.is_empty() {
             return Err("sequence name is missing before '{'".to_string());
         }
+        if !is_native_table_ref(name) {
+            return Err(format!("invalid sequence name '{}'", name));
+        }
         let mut seq = Sequence::new(name);
 
         let mut tokens_str = rest.split('{').nth(1).unwrap_or("").to_string();
@@ -1007,6 +1010,12 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
 
         Ok(seq)
     } else {
+        if rest.is_empty() {
+            return Err("sequence name is required".to_string());
+        }
+        if !is_native_table_ref(rest) {
+            return Err(format!("invalid sequence name '{}'", rest));
+        }
         Ok(Sequence::new(rest))
     }
 }
@@ -2947,6 +2956,23 @@ sequence order_seq {
         let input = "sequence { start 1 }";
         let err = parse_qail(input).expect_err("missing sequence name should fail");
         assert!(err.contains("sequence name is missing before '{'"));
+    }
+
+    #[test]
+    fn test_parse_sequence_rejects_invalid_name() {
+        for (input, expected) in [
+            ("sequence bad-name", "invalid sequence name 'bad-name'"),
+            (
+                "sequence bad name { start 1 }",
+                "invalid sequence name 'bad name'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid sequence name should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+
+        parse_qail("sequence billing.order_ids { start 1 }")
+            .expect("schema-qualified sequence names should parse");
     }
 
     #[test]
