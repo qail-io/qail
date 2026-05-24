@@ -408,7 +408,13 @@ fn parse_index(line: &str) -> Result<Index, String> {
 
     let trailing = rest[paren_end + 1..].trim();
     if let Some(pred) = trailing.strip_prefix("where ") {
-        index.where_clause = Some(CheckExpr::Sql(pred.trim().to_string()));
+        let pred = pred.trim();
+        if pred.is_empty() {
+            return Err("index where clause is empty".to_string());
+        }
+        index.where_clause = Some(CheckExpr::Sql(pred.to_string()));
+    } else if !trailing.is_empty() {
+        return Err("trailing content after index definition".to_string());
     }
 
     Ok(index)
@@ -2080,6 +2086,13 @@ table users {
             let err = parse_qail(input).expect_err("invalid index should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_index_rejects_trailing_content() {
+        let input = "index idx_users_email on users (email) garbage";
+        let err = parse_qail(input).expect_err("trailing index content should fail");
+        assert!(err.contains("trailing content after index definition"));
     }
 
     #[test]
