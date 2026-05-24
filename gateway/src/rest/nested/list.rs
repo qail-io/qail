@@ -22,6 +22,29 @@ fn parse_nested_search_columns(input: Option<&str>) -> Result<String, String> {
     Ok(cols.join(","))
 }
 
+fn nested_parent_probe_cmd(
+    parent_table: &str,
+    parent_pk_col: &str,
+    parent_id: &str,
+    tenant_scope: Option<(&str, &str)>,
+) -> qail_core::ast::Qail {
+    let mut cmd = qail_core::ast::Qail::get(parent_table)
+        .filter(
+            parent_pk_col,
+            Operator::Eq,
+            QailValue::String(parent_id.to_string()),
+        )
+        .limit(1);
+    if let Some((scope_column, tenant_id)) = tenant_scope {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.to_string()),
+        );
+    }
+    cmd
+}
+
 /// GET /api/{parent}/:id/{child} — list child rows filtered by parent FK
 ///
 /// Example: `GET /api/users/123/orders` → `get orders[user_id = 123]`
@@ -69,7 +92,7 @@ pub(crate) async fn nested_list_handler(
     }
 
     // Look up FK relation: child → parent
-    let (fk_col, _pk_col) = state
+    let (fk_col, pk_col) = state
         .schema
         .relation_for(&child_table, &parent_table)
         .ok_or_else(|| {
@@ -77,6 +100,8 @@ pub(crate) async fn nested_list_handler(
         })?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let parent_tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &parent_table);
     let tenant_scope =
         crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &child_table);
     let tenant_scope_column = tenant_scope.as_ref().map(|(col, _)| col.as_str());
@@ -85,11 +110,20 @@ pub(crate) async fn nested_list_handler(
         .bounded_limit_offset(state.config.max_result_rows)
         .map_err(ApiError::parse_error)?;
 
+    let mut parent_cmd = nested_parent_probe_cmd(
+        &parent_table,
+        pk_col,
+        &parent_id,
+        parent_tenant_scope
+            .as_ref()
+            .map(|(scope_column, tenant_id)| (scope_column.as_str(), tenant_id.as_str())),
+    );
+
     // Build: get child[fk_col = parent_id]
     let mut cmd = qail_core::ast::Qail::get(&child_table).filter(
         fk_col,
         Operator::Eq,
-        QailValue::String(parent_id),
+        QailValue::String(parent_id.clone()),
     );
     let mut strip_tenant_scope_column = false;
 
@@ -145,14 +179,34 @@ pub(crate) async fn nested_list_handler(
     // Apply RLS
     state
         .policy_engine
+        .apply_policies(&auth, &mut parent_cmd)
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    state
+        .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    state.optimize_qail_for_execution(&mut parent_cmd);
     state.optimize_qail_for_execution(&mut cmd);
 
-    // Execute — single query, no N+1
+    // Execute — parent proof first, then the child query.
     let mut conn = state
         .acquire_with_auth_rls_guarded(&auth, Some(&child_table))
         .await?;
+
+    let parent_rows = match conn.fetch_all_uncached(&parent_cmd).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            conn.release().await;
+            return Err(ApiError::from_pg_driver_error(&e, Some(&parent_table)));
+        }
+    };
+    if parent_rows.is_empty() {
+        conn.release().await;
+        return Err(ApiError::not_found(format!(
+            "{}/{}",
+            parent_table, parent_id
+        )));
+    }
 
     let rows = conn
         .fetch_all_uncached(&cmd)
@@ -196,7 +250,8 @@ pub(crate) async fn nested_list_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_nested_search_columns;
+    use super::{nested_parent_probe_cmd, parse_nested_search_columns};
+    use qail_core::ast::{Expr, Operator, Value as QailValue};
 
     #[test]
     fn nested_search_columns_accept_csv_and_default() {
@@ -212,5 +267,26 @@ mod tests {
         assert!(parse_nested_search_columns(Some("")).is_err());
         assert!(parse_nested_search_columns(Some("name,")).is_err());
         assert!(parse_nested_search_columns(Some("name,bad-col")).is_err());
+    }
+
+    #[test]
+    fn nested_parent_probe_filters_parent_id_and_tenant_scope() {
+        let cmd = nested_parent_probe_cmd("users", "id", "user-1", Some(("tenant_id", "tenant-a")));
+
+        assert_eq!(cmd.table, "users");
+        assert!(cmd.cages.iter().any(|cage| {
+            cage.conditions.iter().any(|condition| {
+                condition.left == Expr::Named("id".to_string())
+                    && condition.op == Operator::Eq
+                    && condition.value == QailValue::String("user-1".to_string())
+            })
+        }));
+        assert!(cmd.cages.iter().any(|cage| {
+            cage.conditions.iter().any(|condition| {
+                condition.left == Expr::Named("tenant_id".to_string())
+                    && condition.op == Operator::Eq
+                    && condition.value == QailValue::String("tenant-a".to_string())
+            })
+        }));
     }
 }
