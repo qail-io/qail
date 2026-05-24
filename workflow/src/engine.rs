@@ -431,6 +431,42 @@ fn restore_for_each_item(ctx: &mut WorkflowContext, previous_item: Option<Value>
     ctx.updated_at = Utc::now();
 }
 
+fn log_value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn resolve_log_message(ctx: &WorkflowContext, message: &str) -> String {
+    let mut resolved = String::with_capacity(message.len());
+    let mut rest = message;
+
+    while let Some(start) = rest.find('{') {
+        resolved.push_str(&rest[..start]);
+        let after_open = &rest[start + 1..];
+        let Some(end) = after_open.find('}') else {
+            resolved.push_str(&rest[start..]);
+            return resolved;
+        };
+
+        let key = &after_open[..end];
+        if !key.is_empty()
+            && let Some(value) = ctx.get(key)
+        {
+            resolved.push_str(&log_value_to_string(value));
+        } else {
+            resolved.push('{');
+            resolved.push_str(key);
+            resolved.push('}');
+        }
+        rest = &after_open[end + 1..];
+    }
+
+    resolved.push_str(rest);
+    resolved
+}
+
 fn execute_steps<'a, E: WorkflowExecutor>(
     executor: &'a E,
     steps: &'a [WorkflowStep],
@@ -689,14 +725,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
 
             WorkflowStep::Log { message } => {
                 ensure_no_child_cursor("Log", cursor_frames)?;
-                // Replace {key} placeholders with context values
-                let mut resolved = message.clone();
-                for (key, value) in &ctx.data {
-                    let placeholder = format!("{{{}}}", key);
-                    if let Some(s) = value.as_str() {
-                        resolved = resolved.replace(&placeholder, s);
-                    }
-                }
+                let resolved = resolve_log_message(ctx, message);
                 // Engine logging — consumers can override via tracing subscriber
                 eprintln!("[workflow:{}] {}", ctx.workflow_id, resolved);
             }
@@ -1188,6 +1217,31 @@ mod tests {
 
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "resolved");
+    }
+
+    #[test]
+    fn log_message_resolves_nested_context_placeholders() {
+        let mut ctx = WorkflowContext::new("wf-log", "running");
+        ctx.set(
+            "item",
+            serde_json::json!({
+                "name": "Captain A",
+                "phone": "+628111",
+            }),
+        );
+        ctx.set("attempt", serde_json::json!(2));
+
+        assert_eq!(
+            resolve_log_message(
+                &ctx,
+                "Processing {item.name} via {item.phone} attempt {attempt}"
+            ),
+            "Processing Captain A via +628111 attempt 2"
+        );
+        assert_eq!(
+            resolve_log_message(&ctx, "Missing {item.email} stays"),
+            "Missing {item.email} stays"
+        );
     }
 
     #[tokio::test]
