@@ -1351,6 +1351,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         }
         events.push(chunk.join(" ").to_uppercase());
     }
+    if events.is_empty() {
+        return Err("trigger requires at least one event".to_string());
+    }
 
     let func_name = parts
         .get(exec_idx + 1)
@@ -2521,6 +2524,13 @@ $qail$
         assert_eq!(schema.triggers[0].timing, "BEFORE");
         assert_eq!(schema.triggers[0].events, vec!["UPDATE"]);
         assert_eq!(schema.triggers[0].execute_function, "set_updated_at");
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_missing_event() {
+        let input = "trigger trg_updated_at on users before execute set_updated_at";
+        let err = parse_qail(input).expect_err("missing trigger event should fail");
+        assert!(err.contains("trigger requires at least one event"));
     }
 
     #[test]
