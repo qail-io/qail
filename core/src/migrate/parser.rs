@@ -272,16 +272,14 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     i += 1;
                     parts[i]
                 } else {
-                    ""
+                    return Err(format!(
+                        "foreign key reference target is required for column '{}'",
+                        name
+                    ));
                 };
 
-                if let Some(paren_start) = fk_str.find('(')
-                    && let Some(paren_end) = fk_str.find(')')
-                {
-                    let table = &fk_str[..paren_start];
-                    let column = &fk_str[paren_start + 1..paren_end];
-                    col = col.references(table, column);
-                }
+                let (table, column) = parse_fk_reference_target(fk_str)?;
+                col = col.references(table, column);
 
                 // Check for on_delete / on_update after references
                 while i + 1 < parts.len() {
@@ -1488,6 +1486,29 @@ fn parse_fk_action_str(s: &str) -> Result<FkAction, String> {
         "no_action" => Ok(FkAction::NoAction),
         other => Err(format!("unknown foreign key action: {other}")),
     }
+}
+
+fn parse_fk_reference_target(raw: &str) -> Result<(&str, &str), String> {
+    let paren_start = raw
+        .find('(')
+        .ok_or_else(|| format!("invalid foreign key reference target: {raw}"))?;
+    let paren_end = raw[paren_start + 1..]
+        .find(')')
+        .map(|idx| paren_start + 1 + idx)
+        .ok_or_else(|| format!("invalid foreign key reference target: {raw}"))?;
+    if !raw[paren_end + 1..].trim().is_empty() {
+        return Err(format!(
+            "trailing content in foreign key reference target: {raw}"
+        ));
+    }
+
+    let table = raw[..paren_start].trim();
+    let column = raw[paren_start + 1..paren_end].trim();
+    if table.is_empty() || column.is_empty() {
+        return Err(format!("invalid foreign key reference target: {raw}"));
+    }
+
+    Ok((table, column))
 }
 
 fn parse_index_method_str(s: &str) -> Result<IndexMethod, String> {
@@ -2776,6 +2797,42 @@ table orders {
 "#;
         let err = parse_qail(input).expect_err("missing foreign key action should fail");
         assert!(err.contains("on_delete requires a foreign key action"));
+    }
+
+    #[test]
+    fn test_parse_fk_rejects_invalid_reference_target() {
+        for (input, expected) in [
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references
+}
+"#,
+                "foreign key reference target is required",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users
+}
+"#,
+                "invalid foreign key reference target: users",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users()
+}
+"#,
+                "invalid foreign key reference target: users()",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid foreign key target should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
