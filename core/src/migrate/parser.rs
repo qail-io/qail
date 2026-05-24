@@ -1858,6 +1858,11 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
                 } else {
                     properties.insert(key.to_string(), value.to_string());
                 }
+            } else {
+                return Err(format!(
+                    "Resource property '{}' in '{}' requires a value",
+                    key, name
+                ));
             }
         }
     }
@@ -3497,6 +3502,17 @@ bucket avatars {
         let err = parse_qail("bucket avatars provider s3")
             .expect_err("resource trailing content should fail");
         assert!(err.contains("Trailing content after bucket resource name"));
+    }
+
+    #[test]
+    fn test_parse_resource_rejects_property_without_value() {
+        let input = r#"
+bucket avatars {
+  provider
+}
+"#;
+        let err = parse_qail(input).expect_err("resource property without value should fail");
+        assert!(err.contains("Resource property 'provider' in 'avatars' requires a value"));
     }
 
     #[test]
