@@ -378,6 +378,65 @@ fn contains_statement_delimiter(value: &str) -> bool {
         || value.contains("*/")
 }
 
+fn contains_unquoted_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
+    let expr = expr.trim();
+    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
+        fallback.to_string()
+    } else {
+        expr.replace('\0', "")
+    }
+}
+
 fn parse_fk_action(tokens: &[&str], index: usize) -> Option<(String, usize)> {
     match tokens.get(index)?.to_ascii_uppercase().as_str() {
         "CASCADE" => Some(("CASCADE".to_string(), index + 1)),
@@ -526,7 +585,11 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
             .starts_with("CONSTRAINT ")
     {
         buf.extend_from_slice(b" ");
-        buf.extend_from_slice(vals[0].as_bytes());
+        if contains_unquoted_statement_delimiter(&vals[0]) {
+            buf.extend_from_slice(b"CHECK (FALSE)");
+        } else {
+            buf.extend_from_slice(vals[0].as_bytes());
+        }
         return;
     }
 
@@ -538,16 +601,7 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
 
     if looks_like_expr {
         buf.extend_from_slice(b" CHECK (");
-        if vals.len() == 1 {
-            buf.extend_from_slice(vals[0].as_bytes());
-        } else {
-            for (i, v) in vals.iter().enumerate() {
-                if i > 0 {
-                    buf.extend_from_slice(b" ");
-                }
-                buf.extend_from_slice(v.as_bytes());
-            }
-        }
+        buf.extend_from_slice(sql_expr_fragment_to_sql(&vals.join(" "), "FALSE").as_bytes());
         buf.extend_from_slice(b")");
     } else {
         buf.extend_from_slice(b" CHECK (");
@@ -610,9 +664,9 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
                 if let Constraint::Default(val) = constraint {
                     buf.extend_from_slice(b" DEFAULT ");
                     let sql_default = match val.as_str() {
-                        "uuid()" => "gen_random_uuid()",
-                        "now()" => "NOW()",
-                        other => other,
+                        "uuid()" => "gen_random_uuid()".to_string(),
+                        "now()" => "NOW()".to_string(),
+                        other => sql_expr_fragment_to_sql(other, "NULL"),
                     };
                     buf.extend_from_slice(sql_default.as_bytes());
                 }
@@ -626,12 +680,16 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
                         }
                         ColumnGeneration::Stored(expr) => {
                             buf.extend_from_slice(b" GENERATED ALWAYS AS (");
-                            buf.extend_from_slice(expr.as_bytes());
+                            buf.extend_from_slice(
+                                sql_expr_fragment_to_sql(expr, "NULL").as_bytes(),
+                            );
                             buf.extend_from_slice(b") STORED");
                         }
                         ColumnGeneration::Virtual(expr) => {
                             buf.extend_from_slice(b" GENERATED ALWAYS AS (");
-                            buf.extend_from_slice(expr.as_bytes());
+                            buf.extend_from_slice(
+                                sql_expr_fragment_to_sql(expr, "NULL").as_bytes(),
+                            );
                             buf.extend_from_slice(b")");
                         }
                     }
@@ -777,9 +835,9 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
                 if let Constraint::Default(val) = constraint {
                     buf.extend_from_slice(b" DEFAULT ");
                     let sql_default = match val.as_str() {
-                        "uuid()" => "gen_random_uuid()",
-                        "now()" => "NOW()",
-                        other => other,
+                        "uuid()" => "gen_random_uuid()".to_string(),
+                        "now()" => "NOW()".to_string(),
+                        other => sql_expr_fragment_to_sql(other, "NULL"),
                     };
                     buf.extend_from_slice(sql_default.as_bytes());
                 }

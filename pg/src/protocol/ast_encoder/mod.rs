@@ -2047,6 +2047,48 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_column_expression_fragments_are_sanitized() {
+        use qail_core::ast::{ColumnGeneration, Constraint, Expr};
+
+        let cmd = Qail {
+            action: Action::Make,
+            table: "events".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "safe_note".to_string(),
+                    data_type: "str".to_string(),
+                    constraints: vec![Constraint::Default("'semi;inside'".to_string())],
+                },
+                Expr::Def {
+                    name: "unsafe_default".to_string(),
+                    data_type: "int".to_string(),
+                    constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
+                },
+                Expr::Def {
+                    name: "unsafe_check".to_string(),
+                    data_type: "int".to_string(),
+                    constraints: vec![Constraint::Check(vec![
+                        "unsafe_check > 0; DROP TABLE users; --".to_string(),
+                    ])],
+                },
+                Expr::Def {
+                    name: "unsafe_generated".to_string(),
+                    data_type: "str".to_string(),
+                    constraints: vec![Constraint::Generated(ColumnGeneration::Stored(
+                        "lower(safe_note); DROP TABLE users; --".to_string(),
+                    ))],
+                },
+            ],
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&cmd).unwrap().0;
+        assert!(sql.contains("DEFAULT 'semi;inside'"));
+        assert!(sql.contains("unsafe_default INT NOT NULL DEFAULT NULL"));
+        assert!(sql.contains("unsafe_check INT NOT NULL CHECK (FALSE)"));
+        assert!(sql.contains("unsafe_generated TEXT NOT NULL GENERATED ALWAYS AS (NULL) STORED"));
+    }
+
+    #[test]
     fn test_encode_savepoint_commands() {
         let savepoint = Qail {
             action: Action::Savepoint,
