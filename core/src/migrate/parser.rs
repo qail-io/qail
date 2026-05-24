@@ -706,23 +706,20 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
 
         let mut values_str = rest.split('{').nth(1).unwrap_or("").to_string();
 
-        if !values_str.contains('}') {
+        if enum_body_before_closing_brace(&values_str).is_none() {
             for line in lines.by_ref() {
                 let line = line.trim();
                 values_str.push(' ');
                 values_str.push_str(line);
-                if line.contains('}') {
+                if enum_body_before_closing_brace(&values_str).is_some() {
                     break;
                 }
             }
         }
 
-        let values_str = values_str.replace('}', "");
-        let values: Vec<String> = values_str
-            .split(',')
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let values_str = enum_body_before_closing_brace(&values_str)
+            .ok_or_else(|| format!("enum '{}' is missing closing '}}'", name))?;
+        let values = parse_enum_values(values_str)?;
 
         if values.is_empty() {
             return Err(format!("enum '{}' must have at least one value", name));
@@ -732,6 +729,106 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
     } else {
         Err("enum definition requires { values }".to_string())
     }
+}
+
+fn enum_body_before_closing_brace(raw: &str) -> Option<&str> {
+    let mut quote: Option<char> = None;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '}' => return Some(&raw[..idx]),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_enum_values(raw: &str) -> Result<Vec<String>, String> {
+    let mut values = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ',' => {
+                push_enum_value(&mut values, &raw[start..idx])?;
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    push_enum_value(&mut values, &raw[start..])?;
+    Ok(values)
+}
+
+fn push_enum_value(values: &mut Vec<String>, raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+
+    let value = parse_enum_value(raw)?;
+    values.push(value);
+    Ok(())
+}
+
+fn parse_enum_value(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let Some(quote) = trimmed.chars().next().filter(|ch| matches!(ch, '\'' | '"')) else {
+        return Ok(trimmed.to_string());
+    };
+
+    let mut value = String::new();
+    let mut chars = trimmed.char_indices();
+    chars.next();
+    let mut chars = chars.peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if ch == quote {
+            if chars.peek().is_some_and(|(_, next)| *next == quote) {
+                value.push(quote);
+                chars.next();
+                continue;
+            }
+
+            let after = idx + ch.len_utf8();
+            if !trimmed[after..].trim().is_empty() {
+                return Err(format!("invalid enum value token '{}'", trimmed));
+            }
+            return Ok(value);
+        }
+
+        value.push(ch);
+    }
+
+    Err(format!("unterminated quoted enum value '{}'", trimmed))
 }
 
 /// Parse a table-level multi-column foreign key.
@@ -1620,6 +1717,37 @@ comment on users.name "Full name"
         assert_eq!(
             schema.enums[0].values,
             vec!["active", "inactive", "pending"]
+        );
+    }
+
+    #[test]
+    fn test_parse_enum_quoted_values_with_commas_and_quotes() {
+        let input =
+            r#"enum status { "needs review", "card,bank", "quote "" ok", 'single '' ok', "" }"#;
+        let schema = parse_qail(input).unwrap();
+
+        assert_eq!(
+            schema.enums[0].values,
+            vec![
+                "needs review".to_string(),
+                "card,bank".to_string(),
+                "quote \" ok".to_string(),
+                "single ' ok".to_string(),
+                String::new(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_enum_to_qail_string_round_trips_quoted_values() {
+        let input = r#"enum status { "needs review", "card,bank", "quote "" ok", plain }"#;
+        let schema = parse_qail(input).unwrap();
+        let output = super::super::schema::to_qail_string(&schema);
+        let reparsed = parse_qail(&output).unwrap();
+
+        assert_eq!(reparsed.enums[0].values, schema.enums[0].values);
+        assert!(
+            output.contains(r#"enum status { "needs review", "card,bank", "quote "" ok", plain }"#)
         );
     }
 

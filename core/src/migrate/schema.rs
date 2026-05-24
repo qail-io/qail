@@ -1308,6 +1308,19 @@ fn check_expr_str(expr: &CheckExpr) -> String {
     }
 }
 
+fn format_enum_value(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, ',' | '{' | '}' | '\'' | '"'));
+
+    if needs_quotes {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 /// Serialize a `Schema` back to a QAIL-format string.
 pub fn to_qail_string(schema: &Schema) -> String {
     let mut output = String::new();
@@ -1334,7 +1347,7 @@ pub fn to_qail_string(schema: &Schema) -> String {
         let values = enum_type
             .values
             .iter()
-            .map(|v| v.as_str())
+            .map(|v| format_enum_value(v))
             .collect::<Vec<_>>()
             .join(", ");
         output.push_str(&format!("enum {} {{ {} }}\n", enum_type.name, values));
