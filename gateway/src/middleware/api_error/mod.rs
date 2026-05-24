@@ -308,6 +308,8 @@ impl ApiError {
             | "MISSING_POINT_ID"
             | "INVALID_POINT_ID"
             | "INVALID_VECTOR"
+            | "AMBIGUOUS_POINT_ID"
+            | "AMBIGUOUS_VECTOR"
             | "INVALID_SCORE_THRESHOLD"
             | "INVALID_QDRANT_FILTER"
             | "INVALID_QDRANT_PAYLOAD"

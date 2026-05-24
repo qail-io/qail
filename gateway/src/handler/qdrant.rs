@@ -142,10 +142,6 @@ pub(super) async fn execute_qdrant_cmd(
         }
 
         Action::Upsert => {
-            let mut point = extract_upsert_point(&cmd)?;
-            if let Some(tenant_id) = auth.tenant_id.as_deref() {
-                prepare_tenant_scoped_qdrant_upsert_point(&mut point, tenant_id);
-            }
             let upsert_filter_cages = qdrant_upsert_filter_cages(&cmd);
             validate_qdrant_upsert_filter_cages(&upsert_filter_cages)?;
             let create_policy_filter_cages = state
@@ -158,6 +154,10 @@ pub(super) async fn execute_qdrant_cmd(
                 .map_err(|e| ApiError::with_code("POLICY_DENIED", e.to_string()))?;
             let request_filter_cages =
                 qdrant_request_filter_cages(&upsert_filter_cages, &update_policy_filter_cages);
+            let mut point = extract_upsert_point_with_filter_fallback(&cmd, &request_filter_cages)?;
+            if let Some(tenant_id) = auth.tenant_id.as_deref() {
+                prepare_tenant_scoped_qdrant_upsert_point(&mut point, tenant_id);
+            }
 
             if auth.tenant_id.is_some()
                 || qdrant_upsert_filter_cages_have_enforceable_conditions(&request_filter_cages)?
@@ -557,7 +557,35 @@ fn prepare_tenant_scoped_qdrant_upsert_point(point: &mut qail_qdrant::Point, ten
     point.id = tenant_scoped_qdrant_point_id(&original_id, tenant_id);
 }
 
-fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point, ApiError> {
+fn set_upsert_point_id(
+    id: &mut Option<qail_qdrant::PointId>,
+    next: qail_qdrant::PointId,
+) -> Result<(), ApiError> {
+    if id.as_ref().is_some_and(|existing| existing != &next) {
+        return Err(ApiError::bad_request(
+            "AMBIGUOUS_POINT_ID",
+            "Qdrant upsert received conflicting point id values",
+        ));
+    }
+    *id = Some(next);
+    Ok(())
+}
+
+fn set_upsert_vector(vector: &mut Option<Vec<f32>>, next: Vec<f32>) -> Result<(), ApiError> {
+    if vector.as_ref().is_some_and(|existing| existing != &next) {
+        return Err(ApiError::bad_request(
+            "AMBIGUOUS_VECTOR",
+            "Qdrant upsert received conflicting vector values",
+        ));
+    }
+    *vector = Some(next);
+    Ok(())
+}
+
+fn extract_upsert_point_with_filter_fallback(
+    cmd: &qail_core::ast::Qail,
+    id_filter_cages: &[qail_core::ast::Cage],
+) -> Result<qail_qdrant::Point, ApiError> {
     use qail_core::ast::{CageKind, Expr};
 
     let mut id = None;
@@ -567,43 +595,75 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
     for cage in cmd
         .cages
         .iter()
-        .filter(|c| matches!(c.kind, CageKind::Payload | CageKind::Filter))
+        .filter(|c| matches!(c.kind, CageKind::Payload))
     {
-        let is_payload_cage = matches!(cage.kind, CageKind::Payload);
         for cond in &cage.conditions {
             let field = match &cond.left {
                 Expr::Named(name) => name.as_str(),
                 Expr::Aliased { name, .. } => name.as_str(),
-                _ if is_payload_cage => {
+                _ => {
                     return Err(ApiError::bad_request(
                         "INVALID_QDRANT_PAYLOAD",
                         "Qdrant payload fields must be named",
                     ));
                 }
-                _ => continue,
             };
 
             match field {
                 "id" => {
-                    id = Some(point_id_from_value(&cond.value).ok_or_else(|| {
+                    let next = point_id_from_value(&cond.value).ok_or_else(|| {
                         ApiError::bad_request(
                             "INVALID_POINT_ID",
                             "Upsert point id must be integer or string UUID",
                         )
-                    })?);
+                    })?;
+                    set_upsert_point_id(&mut id, next)?;
                 }
                 "vector" => {
-                    vector = Some(vector_from_value(&cond.value).ok_or_else(|| {
+                    let next = vector_from_value(&cond.value).ok_or_else(|| {
                         ApiError::bad_request(
                             "INVALID_VECTOR",
                             "Upsert vector must be an array of numeric values",
                         )
-                    })?);
+                    })?;
+                    set_upsert_vector(&mut vector, next)?;
                 }
-                _ if is_payload_cage && field == ORIGINAL_POINT_ID_PAYLOAD_KEY => {}
-                _ if is_payload_cage => {
+                field if field == ORIGINAL_POINT_ID_PAYLOAD_KEY => {}
+                _ => {
                     payload.insert(field.to_string(), payload_value_from_ast(&cond.value)?);
                 }
+            }
+        }
+    }
+
+    for cage in id_filter_cages {
+        for cond in &cage.conditions {
+            let field = match &cond.left {
+                Expr::Named(name) | Expr::Aliased { name, .. } => name.as_str(),
+                _ => continue,
+            };
+
+            match field.rsplit('.').next().unwrap_or(field).trim_matches('"') {
+                "id" if id.is_none() => {
+                    let next = point_id_from_value(&cond.value).ok_or_else(|| {
+                        ApiError::bad_request(
+                            "INVALID_POINT_ID",
+                            "Upsert point id filter must be integer or string UUID",
+                        )
+                    })?;
+                    set_upsert_point_id(&mut id, next)?;
+                }
+                "id" => {}
+                "vector" if vector.is_none() => {
+                    let next = vector_from_value(&cond.value).ok_or_else(|| {
+                        ApiError::bad_request(
+                            "INVALID_VECTOR",
+                            "Upsert vector filter must be an array of numeric values",
+                        )
+                    })?;
+                    set_upsert_vector(&mut vector, next)?;
+                }
+                "vector" => {}
                 _ => {}
             }
         }
@@ -633,6 +693,12 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
         vector,
         payload,
     })
+}
+
+#[cfg(test)]
+fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point, ApiError> {
+    let filter_cages = qdrant_upsert_filter_cages(cmd);
+    extract_upsert_point_with_filter_fallback(cmd, &filter_cages)
 }
 
 fn ensure_qdrant_vector_finite(vector: &[f32]) -> Result<(), ApiError> {
@@ -1230,11 +1296,12 @@ mod tests {
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
         ensure_qdrant_conditions_finite, ensure_qdrant_score_threshold_finite,
         ensure_qdrant_vector_finite, extract_upsert_point,
-        prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
-        qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
-        qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd,
-        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
-        tenant_scoped_qdrant_point_id, verify_existing_qdrant_points_tenant_boundary,
+        extract_upsert_point_with_filter_fallback, prepare_tenant_scoped_qdrant_upsert_point,
+        qdrant_limit_from_cmd, qdrant_payload_matches_filter_cages, qdrant_point_id_to_json,
+        qdrant_request_filter_cages, qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata,
+        qdrant_scroll_offset_from_cmd, qdrant_upsert_filter_cages, scored_point_to_json,
+        split_filter_conditions, tenant_scoped_qdrant_point_id,
+        verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
     use qail_core::ast::{
@@ -1492,6 +1559,48 @@ mod tests {
 
         assert!(point.payload.contains_key("tenant_id"));
         assert!(!point.payload.contains_key("region"));
+    }
+
+    #[test]
+    fn extract_upsert_point_uses_request_filter_id_only_as_fallback() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .filter("id", Operator::Eq, 7);
+        let request_filters = qdrant_upsert_filter_cages(&cmd);
+
+        let point = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap();
+
+        assert_eq!(point.id, qail_qdrant::PointId::Num(7));
+    }
+
+    #[test]
+    fn extract_upsert_point_does_not_let_policy_filter_retarget_payload_id() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", "client-id")
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .filter("id", Operator::Eq, "policy-id");
+        let all_filters = qdrant_upsert_filter_cages(&cmd);
+        let request_filters = qdrant_request_filter_cages(&all_filters, &all_filters);
+
+        let point = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap();
+
+        assert_eq!(
+            point.id,
+            qail_qdrant::PointId::Uuid("client-id".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_conflicting_payload_ids() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("id", 8)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]));
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
     }
 
     #[test]
