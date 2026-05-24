@@ -38,6 +38,25 @@ fn encode_ndjson_rows(data: &[Value]) -> Result<String, ApiError> {
     Ok(body)
 }
 
+fn attach_rest_list_debug_headers(
+    response: &mut Response,
+    debug: bool,
+    table_name: &str,
+    cmd: &qail_core::ast::Qail,
+) {
+    if !debug {
+        return;
+    }
+
+    let hdrs = response.headers_mut();
+    if let Ok(val) = HeaderValue::from_str(&debug_sql(cmd)) {
+        hdrs.insert("x-qail-sql", val);
+    }
+    if let Ok(val) = HeaderValue::from_str(table_name) {
+        hdrs.insert("x-qail-table", val);
+    }
+}
+
 fn projection_json_column_name(expr: &Expr) -> Result<Option<String>, ApiError> {
     match expr {
         Expr::Star => Ok(None),
@@ -487,6 +506,7 @@ pub(crate) async fn list_handler(
     // SECURITY (E1): Include tenant_id to prevent cross-tenant cache poisoning.
     let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
     let cache_key = rest_list_cache_key(tenant, &table_name, &auth, request.uri(), &cmd);
+    let debug = is_debug_request(&headers);
 
     // Check cache for simple read queries
     if can_cache && let Some(cached) = state.cache.get(&cache_key) {
@@ -498,6 +518,7 @@ pub(crate) async fn list_handler(
         response
             .headers_mut()
             .insert("x-cache", HeaderValue::from_static("HIT"));
+        attach_rest_list_debug_headers(&mut response, debug, &table_name, &cmd);
         return Ok(response);
     }
 
@@ -753,9 +774,6 @@ pub(crate) async fn list_handler(
         offset,
     };
 
-    let debug = is_debug_request(&headers);
-    let debug_sql_str = if debug { Some(debug_sql(&cmd)) } else { None };
-
     // Store in cache for simple queries
     if can_cache && let Ok(json) = serde_json::to_string(&response_body) {
         let cache_table_refs: Vec<&str> = cache_tables.iter().map(String::as_str).collect();
@@ -765,17 +783,7 @@ pub(crate) async fn list_handler(
     }
 
     let mut response = Json(response_body).into_response();
-
-    // Attach debug headers if X-Qail-Debug was requested
-    if let Some(sql) = debug_sql_str {
-        let hdrs = response.headers_mut();
-        if let Ok(val) = axum::http::HeaderValue::from_str(&sql) {
-            hdrs.insert("x-qail-sql", val);
-        }
-        if let Ok(val) = axum::http::HeaderValue::from_str(&table_name) {
-            hdrs.insert("x-qail-table", val);
-        }
-    }
+    attach_rest_list_debug_headers(&mut response, debug, &table_name, &cmd);
 
     Ok(response)
 }
@@ -1285,14 +1293,15 @@ fn apply_branch_distinct(data: &mut Vec<Value>, distinct_columns: &[String]) {
 mod tests {
     use super::{
         BranchReadConstraintInput, apply_branch_distinct, apply_branch_read_constraints,
-        apply_list_distinct, branch_base_fetch_limit, branch_projection_columns_from_cmd,
-        encode_ndjson_rows, ensure_nested_parent_key_columns_projected,
-        project_rows_to_selected_columns, rest_list_cache_key, row_matches_policy_filter_cages,
-        split_expand_relations,
+        apply_list_distinct, attach_rest_list_debug_headers, branch_base_fetch_limit,
+        branch_projection_columns_from_cmd, encode_ndjson_rows,
+        ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
+        rest_list_cache_key, row_matches_policy_filter_cages, split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
     use crate::schema::SchemaRegistry;
+    use axum::{body::Body, http::StatusCode};
     use qail_core::ast::{
         Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value as QailValue,
     };
@@ -1385,6 +1394,30 @@ mod tests {
         assert_eq!(
             body,
             "{\"id\":1,\"status\":\"ready\"}\n{\"id\":2,\"status\":\"queued\"}\n"
+        );
+    }
+
+    #[test]
+    fn debug_headers_attach_to_cached_and_uncached_rest_list_responses() {
+        let cmd = qail_core::ast::Qail::get("orders").columns(["id"]);
+        let mut response = axum::response::Response::new(Body::empty());
+        *response.status_mut() = StatusCode::OK;
+
+        attach_rest_list_debug_headers(&mut response, true, "orders", &cmd);
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-qail-table")
+                .and_then(|value| value.to_str().ok()),
+            Some("orders")
+        );
+        assert!(
+            response
+                .headers()
+                .get("x-qail-sql")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|sql| sql.contains("orders"))
         );
     }
 
