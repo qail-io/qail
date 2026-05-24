@@ -18,9 +18,7 @@ impl Gateway {
         }
 
         let bind = &self.config.bind_address;
-        let is_local = bind.starts_with("127.0.0.1")
-            || bind.starts_with("localhost")
-            || bind.starts_with("[::1]");
+        let is_local = is_local_bind_address(bind);
 
         if !is_local {
             return Err(GatewayError::Config(format!(
@@ -121,6 +119,23 @@ impl Gateway {
     }
 }
 
+fn is_local_bind_address(bind: &str) -> bool {
+    let bind = bind.trim();
+    let host = if let Some(rest) = bind.strip_prefix('[') {
+        let Some((host, after_bracket)) = rest.split_once(']') else {
+            return false;
+        };
+        if !(after_bracket.is_empty() || after_bracket.starts_with(':')) {
+            return false;
+        }
+        host
+    } else {
+        bind.rsplit_once(':').map(|(host, _)| host).unwrap_or(bind)
+    };
+
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +218,37 @@ mod tests {
         };
         let gw = Gateway::new(cfg);
         assert!(gw.check_dev_mode_safety().is_ok());
+    }
+
+    #[test]
+    fn local_bind_detection_requires_exact_loopback_host() {
+        assert!(is_local_bind_address("127.0.0.1:8080"));
+        assert!(is_local_bind_address("localhost:8080"));
+        assert!(is_local_bind_address("[::1]:8080"));
+
+        assert!(!is_local_bind_address("127.0.0.10:8080"));
+        assert!(!is_local_bind_address("localhost.evil.example:8080"));
+        assert!(!is_local_bind_address("[::1]evil:8080"));
+    }
+
+    #[test]
+    fn dev_mode_rejects_loopback_prefix_spoof() {
+        let _lock = env_lock();
+        let _dev = EnvGuard::set("QAIL_DEV_MODE", "1");
+        let _jwt = EnvGuard::set("JWT_SECRET", "dev-test-secret");
+
+        let cfg = crate::config::GatewayConfig {
+            bind_address: "127.0.0.10:8080".to_string(),
+            ..crate::config::GatewayConfig::default()
+        };
+        let gw = Gateway::new(cfg);
+        let err = gw.check_dev_mode_safety().unwrap_err();
+
+        match err {
+            GatewayError::Config(msg) => {
+                assert!(msg.contains("not localhost"));
+            }
+            other => panic!("expected GatewayError::Config, got {other:?}"),
+        }
     }
 }
