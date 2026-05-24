@@ -740,6 +740,18 @@ fn merge_policy_auth() -> AuthContext {
     }
 }
 
+fn add_unrestricted_merge_source_read_policy(engine: &mut PolicyEngine) {
+    engine.add_policy(PolicyDef {
+        name: "staging_users_read".to_string(),
+        table: "staging_users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+}
+
 #[test]
 fn test_merge_requires_create_and_update_policies_for_insert_update_merge() {
     let mut engine = PolicyEngine::new();
@@ -752,6 +764,7 @@ fn test_merge_requires_create_and_update_policies_for_insert_update_merge() {
         allowed_columns: vec![],
         denied_columns: vec![],
     });
+    add_unrestricted_merge_source_read_policy(&mut engine);
 
     let mut cmd = test_merge_command();
     let err = engine
@@ -782,6 +795,7 @@ fn test_merge_rejects_filtered_policy_that_cannot_be_injected() {
         allowed_columns: vec![],
         denied_columns: vec![],
     });
+    add_unrestricted_merge_source_read_policy(&mut engine);
 
     let mut cmd = test_merge_command();
     let err = engine
@@ -815,6 +829,7 @@ fn test_merge_enforces_column_policies_for_actions() {
         allowed_columns: vec!["email".into()],
         denied_columns: vec![],
     });
+    add_unrestricted_merge_source_read_policy(&mut engine);
 
     let mut cmd = test_merge_command();
     let err = engine
@@ -841,6 +856,7 @@ fn test_merge_delete_requires_delete_policy() {
             denied_columns: vec![],
         });
     }
+    add_unrestricted_merge_source_read_policy(&mut engine);
 
     let mut cmd = test_merge_command();
     let merge = cmd.merge.as_mut().expect("merge spec");
@@ -855,6 +871,101 @@ fn test_merge_delete_requires_delete_policy() {
         .unwrap_err();
 
     assert!(err.to_string().contains("Delete"));
+}
+
+#[test]
+fn test_merge_table_source_requires_read_policy() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let mut cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(err.to_string().contains("Read"));
+    assert!(err.to_string().contains("staging_users"));
+}
+
+#[test]
+fn test_merge_table_source_injects_filtered_read_policy_into_on() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "staging_region_read".to_string(),
+        table: "staging_users".to_string(),
+        filter: Some("region = 'west'".to_string()),
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let mut cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+    engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap();
+
+    let merge = cmd.merge.as_ref().expect("merge spec");
+    assert_eq!(merge.on.len(), 2);
+    let condition = &merge.on[1];
+    assert_eq!(condition.left, Expr::Named("s.region".to_string()));
+    assert_eq!(condition.value, Value::String("west".to_string()));
+}
+
+#[test]
+fn test_merge_table_source_rejects_column_restricted_read_policy() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "staging_read_limited".to_string(),
+        table: "staging_users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["id".to_string()],
+        denied_columns: vec![],
+    });
+
+    let mut cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(err.to_string().contains("column policies"));
 }
 
 #[test]

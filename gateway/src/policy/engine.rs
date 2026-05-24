@@ -509,6 +509,64 @@ impl PolicyEngine {
         Ok(())
     }
 
+    fn enforce_merge_source_table_policies(
+        &self,
+        auth: &AuthContext,
+        cmd: &mut Qail,
+        cte_names: &[String],
+    ) -> Result<(), GatewayError> {
+        if cmd.action != Action::Merge {
+            return Ok(());
+        }
+
+        let Some(merge) = cmd.merge.as_ref() else {
+            return Ok(());
+        };
+        let (source_table, source_qualifier) = match &merge.source {
+            MergeSource::Table { name, alias } => {
+                let table = name.trim_matches('"').to_string();
+                if cte_names.iter().any(|cte_name| cte_name == &table) {
+                    return Ok(());
+                }
+                let qualifier = alias
+                    .as_deref()
+                    .unwrap_or(name)
+                    .trim_matches('"')
+                    .to_string();
+                (table, qualifier)
+            }
+            MergeSource::Query { .. } => return Ok(()),
+        };
+
+        let policies = self.applicable_policies(auth, &source_table, OperationType::Read)?;
+        if policies
+            .iter()
+            .any(|policy| Self::policy_restricts_columns(policy))
+        {
+            return Err(GatewayError::AccessDenied(format!(
+                "MERGE source table '{}' has column policies that cannot be enforced safely; use a policy-checked query source",
+                source_table
+            )));
+        }
+
+        let (mut source_filters, has_unrestricted_policy) =
+            self.policy_filters_for(auth, &policies, &source_qualifier, true)?;
+        if has_unrestricted_policy || source_filters.is_empty() {
+            return Ok(());
+        }
+        if source_filters.len() > 1 {
+            return Err(GatewayError::AccessDenied(format!(
+                "MERGE source table '{}' has multiple filtered read policies that cannot be represented safely",
+                source_table
+            )));
+        }
+
+        if let Some(merge) = cmd.merge.as_mut() {
+            merge.on.append(&mut source_filters);
+        }
+        Ok(())
+    }
+
     fn enforce_merge_column_policies(
         cmd: &Qail,
         policies: &[&PolicyDef],
@@ -1080,6 +1138,7 @@ impl PolicyEngine {
         if self.policies.is_empty() {
             return Ok(());
         }
+        self.enforce_merge_source_table_policies(auth, cmd, &cte_names)?;
 
         if command_reads_cte_alias(cmd) {
             return Ok(());
