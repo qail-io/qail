@@ -1269,7 +1269,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
         return Err("function name is required".to_string());
     }
     let args_str = &rest[paren_start + 1..paren_end];
-    let args = split_function_args(args_str);
+    let args = split_function_args(args_str)?;
 
     let after_args = rest[paren_end + 1..].trim();
 
@@ -1330,7 +1330,7 @@ fn find_matching_paren(raw: &str, open_idx: usize) -> Option<usize> {
     None
 }
 
-fn split_function_args(args: &str) -> Vec<String> {
+fn split_function_args(args: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut depth = 0usize;
@@ -1352,24 +1352,40 @@ fn split_function_args(args: &str) -> Vec<String> {
         match ch {
             '\'' | '"' => quote = Some(ch),
             '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
+            ')' => {
+                if depth == 0 {
+                    return Err("unbalanced parentheses in function arguments".to_string());
+                }
+                depth -= 1;
+            }
             ',' if depth == 0 => {
                 let arg = args[start..idx].trim();
-                if !arg.is_empty() {
-                    out.push(arg.to_string());
+                if arg.is_empty() {
+                    return Err("empty function argument".to_string());
                 }
+                out.push(arg.to_string());
                 start = idx + ch.len_utf8();
             }
             _ => {}
         }
     }
 
+    if quote.is_some() {
+        return Err("unterminated quote in function arguments".to_string());
+    }
+    if depth != 0 {
+        return Err("unbalanced parentheses in function arguments".to_string());
+    }
     let arg = args[start..].trim();
-    if !arg.is_empty() {
+    if arg.is_empty() {
+        if !args.trim().is_empty() {
+            return Err("empty function argument".to_string());
+        }
+    } else {
         out.push(arg.to_string());
     }
 
-    out
+    Ok(out)
 }
 
 #[derive(Debug)]
@@ -3176,6 +3192,18 @@ $$
         );
         assert_eq!(func.returns, "numeric");
         assert_eq!(func.language, "sql");
+    }
+
+    #[test]
+    fn test_parse_function_rejects_empty_args() {
+        for input in [
+            "function f(a int,) returns int language sql $$ SELECT a $$",
+            "function f(,a int) returns int language sql $$ SELECT a $$",
+            "function f(a int,,b int) returns int language sql $$ SELECT a $$",
+        ] {
+            let err = parse_qail(input).expect_err("empty function arg should fail");
+            assert!(err.contains("empty function argument"), "{err}");
+        }
     }
 
     #[test]
