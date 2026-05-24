@@ -33,20 +33,26 @@ fn callable_rpc_allow_list_key(schema_name: &str, function_name: &str) -> Option
     ))
 }
 
-fn normalize_contract_arg_types(raw_arg_types_json: &str, total_args: usize) -> Vec<String> {
-    let mut arg_types: Vec<String> = serde_json::from_str(raw_arg_types_json).unwrap_or_default();
-    arg_types = arg_types
+fn normalize_contract_arg_types(
+    raw_arg_types_json: &str,
+    total_args: usize,
+) -> Result<Vec<String>, ApiError> {
+    let arg_types: Vec<String> = serde_json::from_str(raw_arg_types_json)
+        .map_err(|e| ApiError::internal(format!("Invalid RPC arg type metadata: {}", e)))?;
+    let arg_types: Vec<String> = arg_types
         .into_iter()
         .map(|t| normalize_pg_type_name(&t))
         .collect();
 
-    if arg_types.len() < total_args {
-        arg_types.resize(total_args, "unknown".to_string());
-    } else if arg_types.len() > total_args {
-        arg_types.truncate(total_args);
+    if arg_types.len() != total_args {
+        return Err(ApiError::internal(format!(
+            "Invalid RPC arg type metadata length: expected {}, got {}",
+            total_args,
+            arg_types.len()
+        )));
     }
 
-    arg_types
+    Ok(arg_types)
 }
 
 fn rpc_contract_allow_list_names(rpc_allow_list: &HashSet<String>) -> Vec<String> {
@@ -122,6 +128,110 @@ fn rpc_contract_catalog_cmd(allowed_rpc_names: &[String]) -> Qail {
         .limit(rpc_contract_catalog_row_limit(allowed_rpc_names.len()))
 }
 
+fn required_non_negative_usize(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<usize, ApiError> {
+    let value = row
+        .try_get_by_name::<i32>(name)
+        .ok()
+        .or_else(|| row.get_i32(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))?;
+    usize::try_from(value)
+        .map_err(|_| ApiError::internal(format!("Invalid negative RPC {} metadata", label)))
+}
+
+fn required_bool(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<bool, ApiError> {
+    row.try_get_by_name::<bool>(name)
+        .ok()
+        .or_else(|| row.get_bool(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))
+}
+
+fn required_string(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<String, ApiError> {
+    row.try_get_by_name::<String>(name)
+        .ok()
+        .or_else(|| row.get_string(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))
+}
+
+fn rpc_contract_from_row(
+    row: &qail_pg::PgRow,
+    rpc_allow_list: &HashSet<String>,
+) -> Result<Option<Value>, ApiError> {
+    let schema_name = required_string(row, "schema_name", 0, "schema_name")?;
+    let function_name = required_string(row, "function_name", 1, "function_name")?;
+    let Some(canonical_name) = callable_rpc_allow_list_key(&schema_name, &function_name) else {
+        return Ok(None);
+    };
+    if !rpc_allow_list.contains(&canonical_name) {
+        return Ok(None);
+    }
+
+    let total_args = required_non_negative_usize(row, "total_args", 2, "total_args")?;
+    let default_args = required_non_negative_usize(row, "default_args", 3, "default_args")?;
+    if default_args > total_args {
+        return Err(ApiError::internal(
+            "Invalid RPC contract metadata: default_args exceeds total_args",
+        ));
+    }
+    let variadic = required_bool(row, "is_variadic", 4, "is_variadic")?;
+    let identity_args = required_string(row, "identity_args", 8, "identity_args")?;
+    let result_type = required_string(row, "result_type", 9, "result_type")?;
+    let required_args = minimum_required_rpc_args(total_args, default_args, variadic);
+
+    let raw_arg_names_json = required_string(row, "arg_names_json", 5, "arg_names_json")?;
+    let raw_arg_modes_json = required_string(row, "arg_modes_json", 6, "arg_modes_json")?;
+    let arg_names =
+        parse_rpc_input_arg_names(&raw_arg_names_json, &raw_arg_modes_json, total_args)?;
+    let raw_arg_types_json = required_string(row, "arg_types_json", 7, "arg_types_json")?;
+    let arg_types = normalize_contract_arg_types(&raw_arg_types_json, total_args)?;
+
+    let mut args_json: Vec<Value> = Vec::with_capacity(total_args);
+    for idx in 0..total_args {
+        let name = arg_names
+            .get(idx)
+            .and_then(|v| v.as_ref())
+            .map(|v| v.to_ascii_lowercase());
+        let arg_type = arg_types
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| ApiError::internal("Missing RPC arg type after metadata validation"))?;
+        args_json.push(json!({
+            "position": idx + 1,
+            "name": name,
+            "type": arg_type,
+            "required": idx < required_args,
+            "variadic": variadic && idx + 1 == total_args,
+        }));
+    }
+
+    Ok(Some(json!({
+        "schema": schema_name,
+        "function": function_name,
+        "name": canonical_name,
+        "identity_args": identity_args,
+        "result_type": result_type,
+        "total_args": total_args,
+        "required_args": required_args,
+        "default_args": default_args,
+        "variadic": variadic,
+        "args": args_json,
+    })))
+}
+
 /// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
 ///
 /// Returns schema-qualified function signatures, argument defaults, and result types.
@@ -167,102 +277,9 @@ pub(crate) async fn rpc_contracts_handler(
 
     let mut functions: Vec<Value> = Vec::with_capacity(rows.len());
     for row in &rows {
-        let schema_name = row
-            .try_get_by_name::<String>("schema_name")
-            .ok()
-            .or_else(|| row.get_string(0))
-            .unwrap_or_default();
-        let function_name = row
-            .try_get_by_name::<String>("function_name")
-            .ok()
-            .or_else(|| row.get_string(1))
-            .unwrap_or_default();
-        let Some(canonical_name) = callable_rpc_allow_list_key(&schema_name, &function_name) else {
-            continue;
-        };
-        if !rpc_allow_list.contains(&canonical_name) {
-            continue;
+        if let Some(function) = rpc_contract_from_row(row, rpc_allow_list)? {
+            functions.push(function);
         }
-        let total_args = row
-            .try_get_by_name::<i32>("total_args")
-            .ok()
-            .or_else(|| row.get_i32(2))
-            .unwrap_or(0)
-            .max(0) as usize;
-        let default_args = row
-            .try_get_by_name::<i32>("default_args")
-            .ok()
-            .or_else(|| row.get_i32(3))
-            .unwrap_or(0)
-            .max(0) as usize;
-        let variadic = row
-            .try_get_by_name::<bool>("is_variadic")
-            .ok()
-            .or_else(|| row.get_bool(4))
-            .unwrap_or(false);
-        let identity_args = row
-            .try_get_by_name::<String>("identity_args")
-            .ok()
-            .or_else(|| row.get_string(8))
-            .unwrap_or_default();
-        let result_type = row
-            .try_get_by_name::<String>("result_type")
-            .ok()
-            .or_else(|| row.get_string(9))
-            .unwrap_or_default();
-        let required_args = minimum_required_rpc_args(total_args, default_args, variadic);
-
-        let arg_names: Vec<Option<String>> = parse_rpc_input_arg_names(
-            &row.try_get_by_name::<String>("arg_names_json")
-                .ok()
-                .or_else(|| row.get_string(5))
-                .unwrap_or_else(|| "[]".to_string()),
-            &row.try_get_by_name::<String>("arg_modes_json")
-                .ok()
-                .or_else(|| row.get_string(6))
-                .unwrap_or_else(|| "[]".to_string()),
-            total_args,
-        )
-        .unwrap_or_default();
-        let arg_types = normalize_contract_arg_types(
-            &row.try_get_by_name::<String>("arg_types_json")
-                .ok()
-                .or_else(|| row.get_string(7))
-                .unwrap_or_else(|| "[]".to_string()),
-            total_args,
-        );
-
-        let mut args_json: Vec<Value> = Vec::with_capacity(total_args);
-        for idx in 0..total_args {
-            let name = arg_names
-                .get(idx)
-                .and_then(|v| v.as_ref())
-                .map(|v| v.to_ascii_lowercase());
-            let arg_type = arg_types
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            args_json.push(json!({
-                "position": idx + 1,
-                "name": name,
-                "type": arg_type,
-                "required": idx < required_args,
-                "variadic": variadic && idx + 1 == total_args,
-            }));
-        }
-
-        functions.push(json!({
-            "schema": schema_name,
-            "function": function_name,
-            "name": canonical_name,
-            "identity_args": identity_args,
-            "result_type": result_type,
-            "total_args": total_args,
-            "required_args": required_args,
-            "default_args": default_args,
-            "variadic": variadic,
-            "args": args_json,
-        }));
     }
 
     Ok(Json(json!({
@@ -275,11 +292,47 @@ pub(crate) async fn rpc_contracts_handler(
 mod tests {
     use super::{
         callable_rpc_allow_list_key, normalize_contract_arg_types, rpc_contract_allow_list_names,
-        rpc_contract_catalog_cmd, rpc_contract_catalog_row_limit,
+        rpc_contract_catalog_cmd, rpc_contract_catalog_row_limit, rpc_contract_from_row,
     };
+    use crate::middleware::ApiError;
     use crate::rest::handlers::minimum_required_rpc_args;
     use qail_core::ast::{CageKind, Operator, Value as AstValue};
+    use qail_pg::PgRow;
     use std::collections::HashSet;
+
+    fn rpc_contract_row(values: &[Option<&str>]) -> PgRow {
+        PgRow {
+            columns: values
+                .iter()
+                .map(|value| value.map(|value| value.as_bytes().to_vec()))
+                .collect(),
+            column_info: None,
+        }
+    }
+
+    fn valid_rpc_contract_row() -> PgRow {
+        rpc_contract_row(&[
+            Some("api"),
+            Some("search_orders"),
+            Some("2"),
+            Some("1"),
+            Some("f"),
+            Some(r#"["tenant_id","limit"]"#),
+            Some("[]"),
+            Some(r#"["text","integer"]"#),
+            Some("tenant_id text, limit integer DEFAULT 10"),
+            Some("jsonb"),
+        ])
+    }
+
+    fn rpc_allow_list() -> HashSet<String> {
+        HashSet::from(["api.search_orders".to_string()])
+    }
+
+    fn assert_internal_error(err: ApiError) {
+        assert_eq!(err.code, "INTERNAL_ERROR");
+        assert_eq!(err.message, "An internal error occurred.");
+    }
 
     #[test]
     fn callable_rpc_allow_list_key_normalizes_safe_identifiers() {
@@ -297,8 +350,56 @@ mod tests {
 
     #[test]
     fn normalize_contract_arg_types_matches_runtime_type_canonicalization() {
-        let arg_types = normalize_contract_arg_types(r#"["UUID","\"Api\".\"My_Enum\""]"#, 2);
+        let arg_types =
+            normalize_contract_arg_types(r#"["UUID","\"Api\".\"My_Enum\""]"#, 2).unwrap();
         assert_eq!(arg_types, vec!["uuid", "api.my_enum"]);
+    }
+
+    #[test]
+    fn normalize_contract_arg_types_rejects_malformed_or_mismatched_metadata() {
+        let err = normalize_contract_arg_types("not-json", 1).unwrap_err();
+        assert_internal_error(err);
+
+        let err = normalize_contract_arg_types(r#"["text"]"#, 2).unwrap_err();
+        assert_internal_error(err);
+    }
+
+    #[test]
+    fn rpc_contract_from_row_accepts_complete_metadata() {
+        let contract = rpc_contract_from_row(&valid_rpc_contract_row(), &rpc_allow_list())
+            .unwrap()
+            .unwrap();
+        assert_eq!(contract["name"], "api.search_orders");
+        assert_eq!(contract["total_args"], 2);
+        assert_eq!(contract["required_args"], 1);
+        assert_eq!(contract["args"][0]["type"], "text");
+        assert_eq!(contract["args"][1]["type"], "integer");
+    }
+
+    #[test]
+    fn rpc_contract_from_row_rejects_bad_required_metadata() {
+        let mut row = valid_rpc_contract_row();
+        row.columns[2] = Some(b"nope".to_vec());
+        let err = rpc_contract_from_row(&row, &rpc_allow_list()).unwrap_err();
+        assert_internal_error(err);
+
+        let mut row = valid_rpc_contract_row();
+        row.columns[3] = Some(b"3".to_vec());
+        let err = rpc_contract_from_row(&row, &rpc_allow_list()).unwrap_err();
+        assert_internal_error(err);
+    }
+
+    #[test]
+    fn rpc_contract_from_row_rejects_arg_metadata_drift() {
+        let mut row = valid_rpc_contract_row();
+        row.columns[5] = Some(b"not-json".to_vec());
+        let err = rpc_contract_from_row(&row, &rpc_allow_list()).unwrap_err();
+        assert_eq!(err.code, "INTERNAL_ERROR");
+
+        let mut row = valid_rpc_contract_row();
+        row.columns[7] = Some(br#"["text"]"#.to_vec());
+        let err = rpc_contract_from_row(&row, &rpc_allow_list()).unwrap_err();
+        assert_internal_error(err);
     }
 
     #[test]
