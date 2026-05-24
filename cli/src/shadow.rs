@@ -22,6 +22,23 @@ use crate::introspection::{
 };
 use crate::util::{parse_pg_url, redact_url};
 
+fn required_shadow_metadata_string(
+    row: &qail_pg::PgRow,
+    idx: usize,
+    label: &str,
+) -> Result<String> {
+    row.get_string(idx)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("Invalid shadow introspection metadata: missing {}", label))
+}
+
+fn required_shadow_metadata_i32(row: &qail_pg::PgRow, idx: usize, label: &str) -> Result<i32> {
+    let value = required_shadow_metadata_string(row, idx, label)?;
+    value
+        .parse::<i32>()
+        .map_err(|_| anyhow!("Invalid shadow introspection metadata: malformed {}", label))
+}
+
 /// Shadow database state
 #[derive(Debug, Clone)]
 pub struct ShadowState {
@@ -386,6 +403,31 @@ mod tests {
         );
         assert_ne!(parse_column_type("ltree", None), ColumnType::Text);
     }
+
+    #[test]
+    fn shadow_metadata_parsing_fails_closed() {
+        let valid = qail_pg::PgRow {
+            columns: vec![Some(b"7".to_vec())],
+            column_info: None,
+        };
+        assert_eq!(
+            required_shadow_metadata_i32(&valid, 0, "ordinal_position").unwrap(),
+            7
+        );
+
+        let missing = qail_pg::PgRow {
+            columns: vec![None],
+            column_info: None,
+        };
+        assert!(required_shadow_metadata_string(&missing, 0, "column_name").is_err());
+        assert!(required_shadow_metadata_i32(&missing, 0, "ordinal_position").is_err());
+
+        let malformed = qail_pg::PgRow {
+            columns: vec![Some(b"not-an-int".to_vec())],
+            column_info: None,
+        };
+        assert!(required_shadow_metadata_i32(&malformed, 0, "ordinal_position").is_err());
+    }
 }
 
 /// Verify an active shadow receipt by SQL checksum.
@@ -481,9 +523,9 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
 
         let mut columns = Vec::new();
         for row in &col_rows {
-            let col_name = row.get_string(0).unwrap_or_default();
-            let data_type_str = row.get_string(1).unwrap_or_default();
-            let is_nullable = row.get_string(2).map(|s| s == "YES").unwrap_or(true);
+            let col_name = required_shadow_metadata_string(row, 0, "column_name")?;
+            let data_type_str = required_shadow_metadata_string(row, 1, "data_type")?;
+            let is_nullable = required_shadow_metadata_string(row, 2, "is_nullable")? == "YES";
             let raw_default = row.get_string(3);
             // is_identity: 'YES' for identity columns (GENERATED ALWAYS/BY DEFAULT AS IDENTITY)
             let is_identity = row.get_string(4).map(|s| s == "YES").unwrap_or(false);
@@ -556,9 +598,9 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     schema.indexes.extend(unique_constraint_indexes);
 
     for row in &idx_rows {
-        let idx_name = row.get_string(0).unwrap_or_default();
-        let table_name = row.get_string(1).unwrap_or_default();
-        let indexdef = row.get_string(2).unwrap_or_default();
+        let idx_name = required_shadow_metadata_string(row, 0, "indexname")?;
+        let table_name = required_shadow_metadata_string(row, 1, "tablename")?;
+        let indexdef = required_shadow_metadata_string(row, 2, "indexdef")?;
 
         // Skip primary key indexes (they're implicit)
         if idx_name.ends_with("_pkey") {
@@ -606,8 +648,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     let mut fk_ref_candidates: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for row in fk_ref_rows {
-        let fk_name = row.text(0);
-        let ref_name = row.text(1);
+        let fk_name = required_shadow_metadata_string(&row, 0, "constraint_name")?;
+        let ref_name = required_shadow_metadata_string(&row, 1, "unique_constraint_name")?;
         fk_ref_candidates.entry(fk_name).or_default().push(ref_name);
     }
 
@@ -634,12 +676,17 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
 
     let mut fk_catalog_metadata = Vec::new();
     for row in fk_catalog_rows {
+        let constraint_name = required_shadow_metadata_string(&row, 0, "constraint_name")?;
+        let source_table = required_shadow_metadata_string(&row, 1, "source_table")?;
+        let ref_table = required_shadow_metadata_string(&row, 2, "referenced_table")?;
+        let on_delete = required_shadow_metadata_string(&row, 3, "delete_action")?;
+        let on_update = required_shadow_metadata_string(&row, 4, "update_action")?;
         fk_catalog_metadata.push((
-            row.text(0),
-            row.text(1),
-            row.text(2),
-            parse_pg_constraint_fk_action(&row.text(3)),
-            parse_pg_constraint_fk_action(&row.text(4)),
+            constraint_name,
+            source_table,
+            ref_table,
+            parse_pg_constraint_fk_action(&on_delete),
+            parse_pg_constraint_fk_action(&on_update),
         ));
     }
 
@@ -663,13 +710,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         Vec<IntrospectedKeyColumn>,
     > = std::collections::HashMap::new();
     for row in &kcu_rows {
-        let table = row.text(0);
-        let column = row.text(1);
-        let constraint = row.text(2);
-        let ordinal_position = row
-            .get_string(3)
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0);
+        let table = required_shadow_metadata_string(row, 0, "table_name")?;
+        let column = required_shadow_metadata_string(row, 1, "column_name")?;
+        let constraint = required_shadow_metadata_string(row, 2, "constraint_name")?;
+        let ordinal_position = required_shadow_metadata_i32(row, 3, "ordinal_position")?;
         constraint_cols
             .entry(IntrospectedConstraintIdentity::new(
                 table.clone(),
@@ -776,11 +820,14 @@ async fn introspect_primary_key_columns(
 
     let mut pk_constraints = std::collections::HashSet::new();
     for row in &pk_rows {
-        let table = row.text(0);
+        let table = required_shadow_metadata_string(row, 0, "table_name")?;
         if table.starts_with("_qail") {
             continue;
         }
-        pk_constraints.insert((table, row.text(1)));
+        pk_constraints.insert((
+            table,
+            required_shadow_metadata_string(row, 1, "constraint_name")?,
+        ));
     }
 
     if pk_constraints.is_empty() {
@@ -806,13 +853,10 @@ async fn introspect_primary_key_columns(
         Vec<IntrospectedKeyColumn>,
     > = std::collections::HashMap::new();
     for row in &kcu_rows {
-        let table = row.text(0);
-        let column = row.text(1);
-        let constraint = row.text(2);
-        let ordinal_position = row
-            .get_string(3)
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0);
+        let table = required_shadow_metadata_string(row, 0, "table_name")?;
+        let column = required_shadow_metadata_string(row, 1, "column_name")?;
+        let constraint = required_shadow_metadata_string(row, 2, "constraint_name")?;
+        let ordinal_position = required_shadow_metadata_i32(row, 3, "ordinal_position")?;
         constraint_columns
             .entry((table.clone(), constraint))
             .or_default()
@@ -878,13 +922,10 @@ async fn introspect_unique_constraints(
     let mut constraint_columns: std::collections::HashMap<String, Vec<IntrospectedKeyColumn>> =
         std::collections::HashMap::new();
     for row in &kcu_rows {
-        let table = row.text(0);
-        let column = row.text(1);
-        let constraint = row.text(2);
-        let ordinal_position = row
-            .get_string(3)
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0);
+        let table = required_shadow_metadata_string(row, 0, "table_name")?;
+        let column = required_shadow_metadata_string(row, 1, "column_name")?;
+        let constraint = required_shadow_metadata_string(row, 2, "constraint_name")?;
+        let ordinal_position = required_shadow_metadata_i32(row, 3, "ordinal_position")?;
         constraint_columns
             .entry(constraint)
             .or_default()
@@ -897,8 +938,8 @@ async fn introspect_unique_constraints(
     let mut unique_constraint_names = std::collections::HashSet::new();
 
     for row in unique_rows {
-        let constraint_name = row.text(0);
-        let table_name = row.text(1);
+        let constraint_name = required_shadow_metadata_string(&row, 0, "constraint_name")?;
+        let table_name = required_shadow_metadata_string(&row, 1, "table_name")?;
         if table_name.starts_with("_qail") {
             continue;
         }
