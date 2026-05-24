@@ -137,44 +137,15 @@ fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
     // Format: "2024-12-25 17:30:00" or "2024-12-25 17:30:00.123456"
     // This is a simplified parser - production would use chrono or time crate
 
-    let parts: Vec<&str> = s.split(&[' ', 'T'][..]).collect();
-    if parts.len() < 2 {
+    let parts: Vec<&str> = s.splitn(2, &[' ', 'T'][..]).collect();
+    if parts.len() != 2 {
         return Err(TypeError::InvalidData(format!("Invalid timestamp: {}", s)));
     }
 
-    let date_parts: Vec<i32> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
-
-    if date_parts.len() != 3 {
-        return Err(TypeError::InvalidData(format!(
-            "Invalid date: {}",
-            parts[0]
-        )));
-    }
-
-    let time_str =
-        parts[1].trim_end_matches(|c: char| c == '+' || c == '-' || c.is_ascii_digit() || c == ':');
-    let time_parts: Vec<&str> = time_str.split(':').collect();
-
-    let hour: i32 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let minute: i32 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let second_str = time_parts.get(2).unwrap_or(&"0");
-    let sec_parts: Vec<&str> = second_str.split('.').collect();
-    let second: i32 = sec_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let usec: i64 = sec_parts
-        .get(1)
-        .map(|s| {
-            let padded = format!("{:0<6}", s);
-            padded[..6].parse::<i64>().unwrap_or(0)
-        })
-        .unwrap_or(0);
-
-    // Calculate days since 2000-01-01
-    let year = date_parts[0];
-    let month = date_parts[1];
-    let day = date_parts[2];
-
-    // Simplified calculation (not accounting for all leap years correctly)
-    let days_since_epoch = days_from_ymd(year, month, day);
+    let (year, month, day) = parse_date_components(parts[0])?;
+    let time_str = strip_timezone_suffix(parts[1]);
+    let (hour, minute, second, usec) = parse_time_components(time_str)?;
+    let days_since_epoch = days_from_ymd_checked(year, month, day)?;
 
     let total_usec = days_since_epoch as i64 * 86_400_000_000
         + hour as i64 * 3_600_000_000
@@ -185,32 +156,148 @@ fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
     Ok(Timestamp::from_pg_usec(total_usec))
 }
 
-/// Calculate days since 2000-01-01
-fn days_from_ymd(year: i32, month: i32, day: i32) -> i32 {
-    // Days from 2000-01-01 to given date
-    let mut days = 0;
-
-    // Years
-    for y in 2000..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
+fn parse_date_components(s: &str) -> Result<(i32, i32, i32), TypeError> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return Err(TypeError::InvalidData(format!("Invalid date: {}", s)));
     }
-    for y in year..2000 {
-        days -= if is_leap_year(y) { 366 } else { 365 };
+    let year = parse_i32_part(parts[0], "year")?;
+    let month = parse_i32_part(parts[1], "month")?;
+    let day = parse_i32_part(parts[2], "day")?;
+    validate_ymd(year, month, day)?;
+    Ok((year, month, day))
+}
+
+fn strip_timezone_suffix(s: &str) -> &str {
+    let s = s.trim_end();
+    if let Some(stripped) = s.strip_suffix('Z') {
+        return stripped;
+    }
+    if let Some(idx) = s
+        .char_indices()
+        .skip(1)
+        .find_map(|(idx, c)| (c == '+' || c == '-').then_some(idx))
+    {
+        &s[..idx]
+    } else {
+        s
+    }
+}
+
+fn parse_time_components(s: &str) -> Result<(i32, i32, i32, i64), TypeError> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return Err(TypeError::InvalidData(format!("Invalid time: {}", s)));
     }
 
-    // Months
-    let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    for m in 1..month {
-        days += days_in_month[(m - 1) as usize];
-        if m == 2 && is_leap_year(year) {
-            days += 1;
-        }
+    let hour = parse_i32_part(parts[0], "hour")?;
+    let minute = parse_i32_part(parts[1], "minute")?;
+    let (second, usec) = if let Some(second_part) = parts.get(2) {
+        parse_second_usec(second_part)?
+    } else {
+        (0, 0)
+    };
+
+    validate_time_components(hour, minute, second, usec)?;
+    Ok((hour, minute, second, usec))
+}
+
+fn parse_second_usec(s: &str) -> Result<(i32, i64), TypeError> {
+    let (second, fraction) = match s.split_once('.') {
+        Some((second, fraction)) => (second, Some(fraction)),
+        None => (s, None),
+    };
+    let second = parse_i32_part(second, "second")?;
+    let usec = match fraction {
+        Some(fraction) => parse_usec_fraction(fraction)?,
+        None => 0,
+    };
+    Ok((second, usec))
+}
+
+fn parse_usec_fraction(s: &str) -> Result<i64, TypeError> {
+    if s.is_empty() || s.len() > 6 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(TypeError::InvalidData(
+            "Invalid microsecond fraction".to_string(),
+        ));
     }
+    let padded = format!("{:0<6}", s);
+    padded
+        .parse::<i64>()
+        .map_err(|_| TypeError::InvalidData("Invalid microsecond fraction".to_string()))
+}
 
-    // Days
-    days += day - 1;
+fn parse_i32_part(s: &str, label: &str) -> Result<i32, TypeError> {
+    if s.is_empty() {
+        return Err(TypeError::InvalidData(format!("Invalid {}", label)));
+    }
+    s.parse()
+        .map_err(|_| TypeError::InvalidData(format!("Invalid {}", label)))
+}
 
-    days
+fn validate_ymd(year: i32, month: i32, day: i32) -> Result<(), TypeError> {
+    if !(1..=12).contains(&month) {
+        return Err(TypeError::InvalidData("Invalid month".to_string()));
+    }
+    let max_day = days_in_month(year, month);
+    if !(1..=max_day).contains(&day) {
+        return Err(TypeError::InvalidData("Invalid day".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_time_components(
+    hour: i32,
+    minute: i32,
+    second: i32,
+    usec: i64,
+) -> Result<(), TypeError> {
+    if !(0..=23).contains(&hour) {
+        return Err(TypeError::InvalidData("Invalid hour".to_string()));
+    }
+    if !(0..=59).contains(&minute) {
+        return Err(TypeError::InvalidData("Invalid minute".to_string()));
+    }
+    if !(0..=59).contains(&second) {
+        return Err(TypeError::InvalidData("Invalid second".to_string()));
+    }
+    if !(0..=999_999).contains(&usec) {
+        return Err(TypeError::InvalidData("Invalid microsecond".to_string()));
+    }
+    Ok(())
+}
+
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Calculate days since 2000-01-01.
+fn days_from_ymd_checked(year: i32, month: i32, day: i32) -> Result<i32, TypeError> {
+    validate_ymd(year, month, day)?;
+    let epoch_days = days_from_civil(2000, 1, 1);
+    let days = days_from_civil(year, month, day)
+        .checked_sub(epoch_days)
+        .ok_or_else(|| TypeError::InvalidData("Date out of range".to_string()))?;
+    i32::try_from(days).map_err(|_| TypeError::InvalidData("Date out of range".to_string()))
+}
+
+fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
+    let mut year = year as i64;
+    let month = month as i64;
+    let day = day as i64;
+    year -= (month <= 2) as i64;
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_adjusted = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_adjusted + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era
 }
 
 fn is_leap_year(year: i32) -> bool {
@@ -246,12 +333,9 @@ impl FromPg for Date {
             // Text format: YYYY-MM-DD
             let s =
                 std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
-            let parts: Vec<i32> = s.split('-').filter_map(|p| p.parse().ok()).collect();
-            if parts.len() != 3 {
-                return Err(TypeError::InvalidData(format!("Invalid date: {}", s)));
-            }
+            let (year, month, day) = parse_date_components(s)?;
             Ok(Date {
-                days: days_from_ymd(parts[0], parts[1], parts[2]),
+                days: days_from_ymd_checked(year, month, day)?,
             })
         }
     }
@@ -346,35 +430,13 @@ impl ToPg for Time {
 
 /// Parse PostgreSQL text time format
 fn parse_time_text(s: &str) -> Result<Time, TypeError> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() < 2 {
-        return Err(TypeError::InvalidData(format!("Invalid time: {}", s)));
-    }
-
-    let hour: i64 = parts[0]
-        .parse()
-        .map_err(|_| TypeError::InvalidData("Invalid hour".to_string()))?;
-    let minute: i64 = parts[1]
-        .parse()
-        .map_err(|_| TypeError::InvalidData("Invalid minute".to_string()))?;
-
-    let (second, usec) = if parts.len() > 2 {
-        let sec_parts: Vec<&str> = parts[2].split('.').collect();
-        let sec: i64 = sec_parts[0].parse().unwrap_or(0);
-        let us: i64 = sec_parts
-            .get(1)
-            .map(|s| {
-                let padded = format!("{:0<6}", s);
-                padded[..6].parse::<i64>().unwrap_or(0)
-            })
-            .unwrap_or(0);
-        (sec, us)
-    } else {
-        (0, 0)
-    };
+    let (hour, minute, second, usec) = parse_time_components(s)?;
 
     Ok(Time {
-        usec: hour * 3_600_000_000 + minute * 60_000_000 + second * 1_000_000 + usec,
+        usec: hour as i64 * 3_600_000_000
+            + minute as i64 * 60_000_000
+            + second as i64 * 1_000_000
+            + usec,
     })
 }
 
@@ -428,6 +490,52 @@ mod tests {
         assert_eq!(time.hour(), 14);
         assert_eq!(time.minute(), 30);
         assert_eq!(time.second(), 0);
+    }
+
+    #[test]
+    fn test_timestamp_from_pg_text_preserves_time_components() {
+        let ts = parse_timestamp_text("2024-12-25 17:30:45.123456").unwrap();
+        let expected_days = days_from_ymd_checked(2024, 12, 25).unwrap() as i64;
+        let expected_usec = expected_days * 86_400_000_000
+            + 17 * 3_600_000_000
+            + 30 * 60_000_000
+            + 45 * 1_000_000
+            + 123_456;
+        assert_eq!(ts.usec, expected_usec);
+    }
+
+    #[test]
+    fn test_timestamp_from_pg_text_rejects_invalid_components() {
+        assert!(parse_timestamp_text("2024-12-25 xx:30:00").is_err());
+        assert!(parse_timestamp_text("2024-12-25 17:bad:00").is_err());
+        assert!(parse_timestamp_text("2024-12-25 17:30:bad").is_err());
+        assert!(parse_timestamp_text("2024-13-25 17:30:00").is_err());
+        assert!(parse_timestamp_text("2024-02-30 17:30:00").is_err());
+    }
+
+    #[test]
+    fn test_timestamp_from_pg_text_ignores_timezone_suffix_without_trimming_time() {
+        let ts = parse_timestamp_text("2024-12-25 17:30:45+00").unwrap();
+        let expected_days = days_from_ymd_checked(2024, 12, 25).unwrap() as i64;
+        let expected_usec =
+            expected_days * 86_400_000_000 + 17 * 3_600_000_000 + 30 * 60_000_000 + 45 * 1_000_000;
+        assert_eq!(ts.usec, expected_usec);
+    }
+
+    #[test]
+    fn test_date_from_pg_text_rejects_invalid_components() {
+        assert!(Date::from_pg(b"2024-13-01", oid::DATE, 0).is_err());
+        assert!(Date::from_pg(b"2024-aa-01", oid::DATE, 0).is_err());
+        assert!(Date::from_pg(b"2024-02-30", oid::DATE, 0).is_err());
+    }
+
+    #[test]
+    fn test_time_from_pg_text_rejects_invalid_components() {
+        assert!(parse_time_text("24:00:00").is_err());
+        assert!(parse_time_text("14:60:00").is_err());
+        assert!(parse_time_text("14:30:bad").is_err());
+        assert!(parse_time_text("14:30:00.bad").is_err());
+        assert!(parse_time_text("14:30:00.1234567").is_err());
     }
 
     #[cfg(feature = "chrono")]
