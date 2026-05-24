@@ -149,11 +149,21 @@ fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
         );
         base
     } else {
-        let origins: Vec<HeaderValue> = config
-            .cors_allowed_origins
-            .iter()
-            .filter_map(|o| o.parse::<HeaderValue>().ok())
-            .collect();
+        let mut origins = Vec::with_capacity(config.cors_allowed_origins.len());
+        for origin in &config.cors_allowed_origins {
+            match origin.parse::<HeaderValue>() {
+                Ok(value) => origins.push(value),
+                Err(e) => {
+                    tracing::error!(
+                        origin = %origin,
+                        error = %e,
+                        "SECURITY: invalid cors_allowed_origins entry. \
+                         Applying fail-closed CORS (no allowed origins)."
+                    );
+                    return base;
+                }
+            }
+        }
 
         if origins.is_empty() {
             tracing::error!(
@@ -169,5 +179,75 @@ fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
             );
             base.allow_origin(AllowOrigin::list(origins))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    async fn ok() -> &'static str {
+        "ok"
+    }
+
+    async fn cors_preflight(config: crate::config::GatewayConfig) -> axum::response::Response {
+        Router::new()
+            .route("/", get(ok))
+            .layer(build_cors_layer(&config))
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/")
+                    .header(header::ORIGIN, "https://app.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should execute")
+    }
+
+    #[tokio::test]
+    async fn cors_allows_configured_valid_origin() {
+        let config = crate::config::GatewayConfig {
+            cors_allowed_origins: vec!["https://app.example".to_string()],
+            ..crate::config::GatewayConfig::default()
+        };
+
+        let response = cors_preflight(config).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_fails_closed_when_any_configured_origin_is_invalid() {
+        let config = crate::config::GatewayConfig {
+            cors_allowed_origins: vec![
+                "https://app.example".to_string(),
+                "https://bad.example\r\nx: injected".to_string(),
+            ],
+            ..crate::config::GatewayConfig::default()
+        };
+
+        let response = cors_preflight(config).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
+            "invalid CORS config must not leave the valid subset enabled"
+        );
     }
 }
