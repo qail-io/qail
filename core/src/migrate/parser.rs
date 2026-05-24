@@ -1602,12 +1602,14 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
     if has_block {
         // Collect content until closing brace
         let mut block_content = rest.trim_start_matches('{').to_string();
+        let mut found_closing_brace = block_content.contains('}');
 
         // If no closing brace on same line, read until we find it
-        if !block_content.contains('}') {
+        if !found_closing_brace {
             for next_line in lines.by_ref() {
                 let next_line = next_line.trim();
                 if next_line == "}" || next_line.ends_with('}') {
+                    found_closing_brace = true;
                     let trimmed = next_line.trim_end_matches('}').trim();
                     if !trimmed.is_empty() {
                         block_content.push(' ');
@@ -1618,6 +1620,9 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
                 block_content.push(' ');
                 block_content.push_str(next_line);
             }
+        }
+        if !found_closing_brace {
+            return Err(format!("Unclosed {} resource block '{}'", keyword, name));
         }
 
         // Parse key-value pairs from block content
@@ -2766,6 +2771,18 @@ policy docs_select on docs
         assert_eq!(policy.target, PolicyTarget::Select);
         assert_eq!(policy.role.as_deref(), Some("app_user"));
         assert_eq!(policy.permissiveness, PolicyPermissiveness::Restrictive);
+    }
+
+    #[test]
+    fn test_parse_rejects_unclosed_resource_block() {
+        let input = r#"
+bucket avatars {
+  provider s3
+  region "ap-southeast-1"
+"#;
+
+        let err = parse_qail(input).expect_err("unclosed resource block should be rejected");
+        assert!(err.contains("Unclosed bucket resource block"));
     }
 
     #[test]
