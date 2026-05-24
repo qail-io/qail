@@ -1268,6 +1268,9 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     if name.is_empty() {
         return Err("function name is required".to_string());
     }
+    if !is_native_table_ref(name) {
+        return Err(format!("invalid function name '{}'", name));
+    }
     let args_str = &rest[paren_start + 1..paren_end];
     let args = split_function_args(args_str)?;
     validate_function_args(&args)?;
@@ -3197,6 +3200,16 @@ materialized view active_users $$ SELECT 2 $$
         let input = "function () returns int language sql $$ SELECT 1 $$";
         let err = parse_qail(input).expect_err("missing function name should fail");
         assert!(err.contains("function name is required"));
+    }
+
+    #[test]
+    fn test_parse_function_rejects_invalid_name() {
+        let input = "function bad-name() returns int language sql $$ SELECT 1 $$";
+        let err = parse_qail(input).expect_err("invalid function name should fail");
+        assert!(err.contains("invalid function name 'bad-name'"));
+
+        parse_qail("function util.normalize_email(email text) returns text language sql $$ SELECT lower(email) $$")
+            .expect("schema-qualified function names should parse");
     }
 
     #[test]
