@@ -230,15 +230,61 @@ async fn fetch_table_stats(driver: &mut PgDriver, table: &str) -> Result<TableSt
         .map_err(|e| anyhow!("Failed lock-risk stats query for table '{}': {}", table, e))?;
 
     if let Some(row) = rows.first() {
-        let est_rows = row.get_f64(0).unwrap_or(0.0).max(0.0).round() as i64;
-        let total_bytes = row.get_i64(1).unwrap_or(0);
-        return Ok(TableStats {
-            est_rows,
-            total_bytes,
-        });
+        return table_stats_from_row(row, table);
     }
 
     Ok(TableStats::default())
+}
+
+fn table_stats_from_row(row: &qail_pg::PgRow, table: &str) -> Result<TableStats> {
+    let est_rows = required_f64_metadata(row, 0, "reltuples", table)?
+        .max(0.0)
+        .round() as i64;
+    let total_bytes = required_i64_metadata(row, 1, "total relation size", table)?.max(0);
+    Ok(TableStats {
+        est_rows,
+        total_bytes,
+    })
+}
+
+fn required_f64_metadata(
+    row: &qail_pg::PgRow,
+    idx: usize,
+    label: &str,
+    table: &str,
+) -> Result<f64> {
+    let raw = row
+        .get_string(idx)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("Missing lock-risk {} metadata for '{}'", label, table))?;
+    raw.parse::<f64>().map_err(|e| {
+        anyhow!(
+            "Invalid lock-risk {} metadata for '{}': {}",
+            label,
+            table,
+            e
+        )
+    })
+}
+
+fn required_i64_metadata(
+    row: &qail_pg::PgRow,
+    idx: usize,
+    label: &str,
+    table: &str,
+) -> Result<i64> {
+    let raw = row
+        .get_string(idx)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("Missing lock-risk {} metadata for '{}'", label, table))?;
+    raw.parse::<i64>().map_err(|e| {
+        anyhow!(
+            "Invalid lock-risk {} metadata for '{}': {}",
+            label,
+            table,
+            e
+        )
+    })
 }
 
 fn format_compact_count(n: i64) -> String {
@@ -267,7 +313,9 @@ fn format_bytes(n: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LockLevel, TableStats, lock_level_for_action, risk_reason, risk_score};
+    use super::{
+        LockLevel, TableStats, lock_level_for_action, risk_reason, risk_score, table_stats_from_row,
+    };
     use qail_core::ast::Action;
 
     #[test]
@@ -301,5 +349,28 @@ mod tests {
         };
         let score = risk_score(LockLevel::AccessExclusive, stats);
         assert!(risk_reason(LockLevel::AccessExclusive, stats, score, 90).is_none());
+    }
+
+    #[test]
+    fn lock_risk_stats_metadata_fails_closed_when_malformed() {
+        let valid = qail_pg::PgRow {
+            columns: vec![Some(b"123.7".to_vec()), Some(b"4096".to_vec())],
+            column_info: None,
+        };
+        let stats = table_stats_from_row(&valid, "users").expect("valid stats");
+        assert_eq!(stats.est_rows, 124);
+        assert_eq!(stats.total_bytes, 4096);
+
+        let missing = qail_pg::PgRow {
+            columns: vec![None, Some(b"4096".to_vec())],
+            column_info: None,
+        };
+        assert!(table_stats_from_row(&missing, "users").is_err());
+
+        let malformed = qail_pg::PgRow {
+            columns: vec![Some(b"not-a-float".to_vec()), Some(b"4096".to_vec())],
+            column_info: None,
+        };
+        assert!(table_stats_from_row(&malformed, "users").is_err());
     }
 }
