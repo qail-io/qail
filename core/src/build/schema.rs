@@ -184,7 +184,12 @@ impl Schema {
 
                 if line.contains('{') {
                     let mut block = rest.split('{').nth(1).unwrap_or("").to_string();
-                    while !block.contains('}') {
+                    let mut block_content = None;
+                    while block_content.is_none() {
+                        block_content = resource_block_content_before_closing(&block)?;
+                        if block_content.is_some() {
+                            break;
+                        }
                         let Some(next_line) = lines.next() else {
                             return Err(format!(
                                 "Unclosed {} resource definition for '{}': expected closing '}}'",
@@ -195,15 +200,15 @@ impl Schema {
                         block.push(' ');
                         block.push_str(inner);
                     }
-                    let block = block.split('}').next().unwrap_or("").trim();
-                    let mut tokens = block.split_whitespace();
+                    let block = block_content.unwrap_or_default();
+                    let tokens = split_resource_tokens(block.trim())?;
+                    let mut tokens = tokens.iter();
                     while let Some(key) = tokens.next() {
                         if let Some(val) = tokens.next() {
-                            let val = val.trim_matches('"').to_string();
                             if key == "provider" {
-                                provider = Some(val);
+                                provider = Some(val.to_string());
                             } else {
-                                properties.insert(key.to_string(), val);
+                                properties.insert(key.to_string(), val.to_string());
                             }
                         }
                     }
@@ -664,6 +669,83 @@ impl Schema {
 
         changes
     }
+}
+
+fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, ch) in content.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some(q) => match ch {
+                '\\' => escaped = true,
+                c if c == q => quote = None,
+                _ => {}
+            },
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                '}' => {
+                    let rest = &content[idx + ch.len_utf8()..];
+                    if !rest.trim().is_empty() {
+                        return Err("Trailing content after resource definition".to_string());
+                    }
+                    return Ok(Some(content[..idx].trim().to_string()));
+                }
+                _ => {}
+            },
+        }
+    }
+
+    Ok(None)
+}
+
+fn split_resource_tokens(content: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in content.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some(q) => match ch {
+                '\\' => escaped = true,
+                c if c == q => quote = None,
+                c => current.push(c),
+            },
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            },
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err("Unterminated quoted resource value".to_string());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
 }
 
 fn parse_explicit_alter_add_column_line(

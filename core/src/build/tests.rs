@@ -106,6 +106,28 @@ table files {
 }
 
 #[test]
+fn test_parse_schema_preserves_quoted_resource_values() {
+    let content = r#"
+bucket avatars {
+  provider aws
+  display_name "Profile } Images"
+  region 'ap southeast 1'
+}
+"#;
+
+    let schema = Schema::parse(content).unwrap();
+    let bucket = schema.resources.get("avatars").expect("bucket missing");
+    assert_eq!(
+        bucket.properties.get("display_name").map(String::as_str),
+        Some("Profile } Images")
+    );
+    assert_eq!(
+        bucket.properties.get("region").map(String::as_str),
+        Some("ap southeast 1")
+    );
+}
+
+#[test]
 fn test_parse_schema_rejects_unclosed_resource_blocks() {
     let content = r#"
 queue jobs {
