@@ -51,6 +51,132 @@ fn push_identifier(buf: &mut BytesMut, ident: &str) {
     buf.extend_from_slice(escape_identifier(ident).as_bytes());
 }
 
+fn quote_double_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\0', "").replace('"', "\"\""))
+}
+
+fn strip_option_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        if (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+        {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+fn extension_option_to_sql(opt: &str) -> Option<String> {
+    let trimmed = opt.trim();
+    let (keyword, rest) = trimmed.split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    match keyword.to_ascii_uppercase().as_str() {
+        "SCHEMA" => Some(format!(
+            "SCHEMA {}",
+            escape_identifier(strip_option_quotes(rest))
+        )),
+        "VERSION" => Some(format!(
+            "VERSION '{}'",
+            escape_sql_string_literal(strip_option_quotes(rest))
+        )),
+        _ => None,
+    }
+}
+
+fn parse_sequence_i64(value: &str) -> Option<i64> {
+    value.trim().parse::<i64>().ok()
+}
+
+fn sequence_type_to_sql(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "smallint" | "int2" => Some("SMALLINT"),
+        "integer" | "int" | "int4" => Some("INTEGER"),
+        "bigint" | "int8" => Some("BIGINT"),
+        _ => None,
+    }
+}
+
+fn sequence_owned_by_to_sql(parts: &[&str]) -> Option<String> {
+    if parts.len() == 1 && parts[0].eq_ignore_ascii_case("none") {
+        return Some("OWNED BY NONE".to_string());
+    }
+
+    let dotted_parts;
+    let ident_parts = if parts.len() == 1 {
+        dotted_parts = parts[0].split('.').collect::<Vec<_>>();
+        dotted_parts.as_slice()
+    } else {
+        parts
+    };
+    if !(2..=3).contains(&ident_parts.len()) {
+        return None;
+    }
+
+    Some(format!(
+        "OWNED BY {}",
+        ident_parts
+            .iter()
+            .map(|part| escape_identifier(part))
+            .collect::<Vec<_>>()
+            .join(".")
+    ))
+}
+
+fn sequence_option_to_sql(opt: &str) -> Option<String> {
+    let parts: Vec<&str> = opt.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    match parts[0].to_ascii_lowercase().as_str() {
+        "as" if parts.len() == 2 => sequence_type_to_sql(parts[1]).map(|t| format!("AS {t}")),
+        "start" => {
+            let value = match parts.as_slice() {
+                [_, value] => *value,
+                [_, with, value] if with.eq_ignore_ascii_case("with") => *value,
+                _ => return None,
+            };
+            parse_sequence_i64(value).map(|n| format!("START WITH {n}"))
+        }
+        "increment" => {
+            let value = match parts.as_slice() {
+                [_, value] => *value,
+                [_, by, value] if by.eq_ignore_ascii_case("by") => *value,
+                _ => return None,
+            };
+            parse_sequence_i64(value).map(|n| format!("INCREMENT BY {n}"))
+        }
+        "minvalue" if parts.len() == 2 => {
+            parse_sequence_i64(parts[1]).map(|n| format!("MINVALUE {n}"))
+        }
+        "maxvalue" if parts.len() == 2 => {
+            parse_sequence_i64(parts[1]).map(|n| format!("MAXVALUE {n}"))
+        }
+        "cache" if parts.len() == 2 => parse_sequence_i64(parts[1]).map(|n| format!("CACHE {n}")),
+        "cycle" if parts.len() == 1 => Some("CYCLE".to_string()),
+        "owned_by" => sequence_owned_by_to_sql(&parts[1..]),
+        "owned" if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("by") => {
+            sequence_owned_by_to_sql(&parts[2..])
+        }
+        "no" if parts.len() == 2 && parts[1].eq_ignore_ascii_case("minvalue") => {
+            Some("NO MINVALUE".to_string())
+        }
+        "no" if parts.len() == 2 && parts[1].eq_ignore_ascii_case("maxvalue") => {
+            Some("NO MAXVALUE".to_string())
+        }
+        "no" if parts.len() == 2 && parts[1].eq_ignore_ascii_case("cycle") => {
+            Some("NO CYCLE".to_string())
+        }
+        _ => None,
+    }
+}
+
 fn push_index_column(buf: &mut BytesMut, column: &str) {
     if column.contains('(') {
         buf.extend_from_slice(column.as_bytes());
@@ -986,23 +1112,23 @@ pub fn encode_drop_trigger(
 
 /// Encode CREATE EXTENSION statement.
 pub fn encode_create_extension(cmd: &Qail, buf: &mut BytesMut) {
-    buf.extend_from_slice(b"CREATE EXTENSION IF NOT EXISTS \"");
-    buf.extend_from_slice(cmd.table.replace('"', "\"\"").as_bytes());
-    buf.extend_from_slice(b"\"");
+    buf.extend_from_slice(b"CREATE EXTENSION IF NOT EXISTS ");
+    buf.extend_from_slice(quote_double_string(&cmd.table).as_bytes());
 
     for col in &cmd.columns {
-        if let Expr::Named(opt) = col {
+        if let Expr::Named(opt) = col
+            && let Some(option) = extension_option_to_sql(opt)
+        {
             buf.extend_from_slice(b" ");
-            buf.extend_from_slice(opt.as_bytes());
+            buf.extend_from_slice(option.as_bytes());
         }
     }
 }
 
 /// Encode DROP EXTENSION statement.
 pub fn encode_drop_extension(cmd: &Qail, buf: &mut BytesMut) {
-    buf.extend_from_slice(b"DROP EXTENSION IF EXISTS \"");
-    buf.extend_from_slice(cmd.table.replace('"', "\"\"").as_bytes());
-    buf.extend_from_slice(b"\"");
+    buf.extend_from_slice(b"DROP EXTENSION IF EXISTS ");
+    buf.extend_from_slice(quote_double_string(&cmd.table).as_bytes());
 }
 
 /// Encode COMMENT ON TABLE/COLUMN statement.
@@ -1058,9 +1184,11 @@ pub fn encode_create_sequence(cmd: &Qail, buf: &mut BytesMut) {
     push_identifier(buf, &cmd.table);
 
     for col in &cmd.columns {
-        if let Expr::Named(opt) = col {
+        if let Expr::Named(opt) = col
+            && let Some(option) = sequence_option_to_sql(opt)
+        {
             buf.extend_from_slice(b" ");
-            buf.extend_from_slice(opt.as_bytes());
+            buf.extend_from_slice(option.as_bytes());
         }
     }
 }

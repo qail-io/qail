@@ -1977,6 +1977,42 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_ddl_option_fragments_are_sanitized() {
+        use qail_core::ast::Expr;
+
+        let extension = Qail {
+            action: Action::CreateExtension,
+            table: "uuid-ossp\0".to_string(),
+            columns: vec![
+                Expr::Named("SCHEMA public; DROP TABLE users; --".to_string()),
+                Expr::Named("VERSION '1.1; DROP SCHEMA public; --'".to_string()),
+                Expr::Named("CASCADE; DROP TABLE users".to_string()),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&extension).unwrap().0,
+            "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" SCHEMA \"public; DROP TABLE users; --\" VERSION '1.1; DROP SCHEMA public; --'"
+        );
+
+        let sequence = Qail {
+            action: Action::CreateSequence,
+            table: "order_seq".to_string(),
+            columns: vec![
+                Expr::Named("start 1000".to_string()),
+                Expr::Named("increment by -1".to_string()),
+                Expr::Named("owned_by public.orders.id".to_string()),
+                Expr::Named("cache 10; DROP TABLE users".to_string()),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&sequence).unwrap().0,
+            "CREATE SEQUENCE order_seq START WITH 1000 INCREMENT BY -1 OWNED BY public.orders.id"
+        );
+    }
+
+    #[test]
     fn test_encode_savepoint_commands() {
         let savepoint = Qail {
             action: Action::Savepoint,

@@ -2,6 +2,136 @@ use super::dialect::Dialect;
 use super::traits::SqlGenerator;
 use crate::ast::*;
 
+fn quote_double_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\0', "").replace('"', "\"\""))
+}
+
+fn escape_single_string(value: &str) -> String {
+    value.replace('\0', "").replace('\'', "''")
+}
+
+fn strip_option_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        if (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+        {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+fn extension_option_to_sql(opt: &str, generator: &dyn SqlGenerator) -> Option<String> {
+    let trimmed = opt.trim();
+    let (keyword, rest) = trimmed.split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    match keyword.to_ascii_uppercase().as_str() {
+        "SCHEMA" => Some(format!(
+            "SCHEMA {}",
+            generator.quote_identifier(strip_option_quotes(rest))
+        )),
+        "VERSION" => Some(format!(
+            "VERSION '{}'",
+            escape_single_string(strip_option_quotes(rest))
+        )),
+        _ => None,
+    }
+}
+
+fn parse_sequence_i64(value: &str) -> Option<i64> {
+    value.trim().parse::<i64>().ok()
+}
+
+fn sequence_type_to_sql(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "smallint" | "int2" => Some("SMALLINT"),
+        "integer" | "int" | "int4" => Some("INTEGER"),
+        "bigint" | "int8" => Some("BIGINT"),
+        _ => None,
+    }
+}
+
+fn sequence_owned_by_to_sql(parts: &[&str], generator: &dyn SqlGenerator) -> Option<String> {
+    if parts.len() == 1 && parts[0].eq_ignore_ascii_case("none") {
+        return Some("OWNED BY NONE".to_string());
+    }
+
+    let dotted_parts;
+    let ident_parts = if parts.len() == 1 {
+        dotted_parts = parts[0].split('.').collect::<Vec<_>>();
+        dotted_parts.as_slice()
+    } else {
+        parts
+    };
+    if !(2..=3).contains(&ident_parts.len()) {
+        return None;
+    }
+
+    Some(format!(
+        "OWNED BY {}",
+        ident_parts
+            .iter()
+            .map(|part| generator.quote_identifier(part))
+            .collect::<Vec<_>>()
+            .join(".")
+    ))
+}
+
+fn sequence_option_to_sql(opt: &str, generator: &dyn SqlGenerator) -> Option<String> {
+    let parts: Vec<&str> = opt.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    match parts[0].to_ascii_lowercase().as_str() {
+        "as" if parts.len() == 2 => sequence_type_to_sql(parts[1]).map(|t| format!("AS {t}")),
+        "start" => {
+            let value = match parts.as_slice() {
+                [_, value] => *value,
+                [_, with, value] if with.eq_ignore_ascii_case("with") => *value,
+                _ => return None,
+            };
+            parse_sequence_i64(value).map(|n| format!("START WITH {n}"))
+        }
+        "increment" => {
+            let value = match parts.as_slice() {
+                [_, value] => *value,
+                [_, by, value] if by.eq_ignore_ascii_case("by") => *value,
+                _ => return None,
+            };
+            parse_sequence_i64(value).map(|n| format!("INCREMENT BY {n}"))
+        }
+        "minvalue" if parts.len() == 2 => {
+            parse_sequence_i64(parts[1]).map(|n| format!("MINVALUE {n}"))
+        }
+        "maxvalue" if parts.len() == 2 => {
+            parse_sequence_i64(parts[1]).map(|n| format!("MAXVALUE {n}"))
+        }
+        "cache" if parts.len() == 2 => parse_sequence_i64(parts[1]).map(|n| format!("CACHE {n}")),
+        "cycle" if parts.len() == 1 => Some("CYCLE".to_string()),
+        "owned_by" => sequence_owned_by_to_sql(&parts[1..], generator),
+        "owned" if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("by") => {
+            sequence_owned_by_to_sql(&parts[2..], generator)
+        }
+        "no" if parts.len() == 2 && parts[1].eq_ignore_ascii_case("minvalue") => {
+            Some("NO MINVALUE".to_string())
+        }
+        "no" if parts.len() == 2 && parts[1].eq_ignore_ascii_case("maxvalue") => {
+            Some("NO MAXVALUE".to_string())
+        }
+        "no" if parts.len() == 2 && parts[1].eq_ignore_ascii_case("cycle") => {
+            Some("NO CYCLE".to_string())
+        }
+        _ => None,
+    }
+}
+
 fn quoted_column_list(cols: &[String], generator: &dyn SqlGenerator) -> String {
     cols.iter()
         .map(|c| generator.quote_identifier(c))
@@ -509,22 +639,21 @@ pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
 // ============================================================================
 
 /// Generate CREATE EXTENSION IF NOT EXISTS SQL.
-pub fn build_create_extension(cmd: &Qail, _dialect: Dialect) -> String {
+pub fn build_create_extension(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+
     // table field holds extension name, columns[0] may hold schema, columns[1] may hold version
     let mut sql = format!(
-        "CREATE EXTENSION IF NOT EXISTS \"{}\"",
-        cmd.table.replace('"', "\"\"")
+        "CREATE EXTENSION IF NOT EXISTS {}",
+        quote_double_string(&cmd.table)
     );
 
     for col in &cmd.columns {
-        match col {
-            Expr::Named(val) if val.starts_with("SCHEMA ") => {
-                sql.push_str(&format!(" {}", val));
-            }
-            Expr::Named(val) if val.starts_with("VERSION ") => {
-                sql.push_str(&format!(" {}", val));
-            }
-            _ => {}
+        if let Expr::Named(val) = col
+            && let Some(option) = extension_option_to_sql(val, generator.as_ref())
+        {
+            sql.push(' ');
+            sql.push_str(&option);
         }
     }
 
@@ -534,8 +663,8 @@ pub fn build_create_extension(cmd: &Qail, _dialect: Dialect) -> String {
 /// Generate DROP EXTENSION IF EXISTS SQL.
 pub fn build_drop_extension(cmd: &Qail, _dialect: Dialect) -> String {
     format!(
-        "DROP EXTENSION IF EXISTS \"{}\"",
-        cmd.table.replace('"', "\"\"")
+        "DROP EXTENSION IF EXISTS {}",
+        quote_double_string(&cmd.table)
     )
 }
 
@@ -598,9 +727,11 @@ pub fn build_create_sequence(cmd: &Qail, dialect: Dialect) -> String {
     let mut sql = format!("CREATE SEQUENCE {}", generator.quote_identifier(&cmd.table));
 
     for col in &cmd.columns {
-        if let Expr::Named(opt) = col {
+        if let Expr::Named(opt) = col
+            && let Some(option) = sequence_option_to_sql(opt, generator.as_ref())
+        {
             sql.push(' ');
-            sql.push_str(opt);
+            sql.push_str(&option);
         }
     }
 
