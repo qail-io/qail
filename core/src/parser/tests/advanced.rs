@@ -26,6 +26,57 @@ fn test_parse_do_command_with_language() {
 }
 
 #[test]
+fn test_parse_preserves_comment_markers_inside_quoted_literals() {
+    let cmd = parse(r#"get docs fields id where body = "alpha -- beta /* gamma */""#).unwrap();
+    assert_eq!(cmd.action, Action::Get);
+    assert_eq!(cmd.table, "docs");
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::String("alpha -- beta /* gamma */".to_string())
+    );
+}
+
+#[test]
+fn test_parse_preserves_comment_markers_inside_triple_quoted_literals() {
+    let cmd = parse("get docs fields id where body = '''alpha -- beta /* gamma */'''").unwrap();
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::String("alpha -- beta /* gamma */".to_string())
+    );
+}
+
+#[test]
+fn test_parse_strips_comments_outside_literals() {
+    let cmd = parse(
+        "get docs -- outside line comment\n\
+         fields id /* outside block comment */ where active = true",
+    )
+    .unwrap();
+
+    assert_eq!(cmd.action, Action::Get);
+    assert_eq!(cmd.table, "docs");
+    assert_eq!(cmd.columns, vec![Expr::Named("id".to_string())]);
+    assert_eq!(
+        cmd.cages[0].conditions[0].left,
+        Expr::Named("active".to_string())
+    );
+}
+
+#[test]
+fn test_parse_do_preserves_comment_markers_inside_dollar_body() {
+    let cmd = parse(
+        "do $$ BEGIN RAISE NOTICE '-- not a comment /* still body */'; END; $$ language plpgsql",
+    )
+    .unwrap();
+
+    assert_eq!(cmd.action, Action::Do);
+    assert_eq!(
+        cmd.payload.as_deref(),
+        Some(" BEGIN RAISE NOTICE '-- not a comment /* still body */'; END; ")
+    );
+}
+
+#[test]
 fn test_parse_session_commands() {
     let set_cmd = parse("session set statement_timeout = '5000'").unwrap();
     assert_eq!(set_cmd.action, Action::SessionSet);

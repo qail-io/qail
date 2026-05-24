@@ -327,40 +327,156 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
 /// Strip SQL comments from input (both -- line comments and /* */ block comments)
 fn strip_sql_comments(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut raw_delimiter: Option<String> = None;
 
-    while let Some(c) = chars.next() {
-        if c == '-' && chars.peek() == Some(&'-') {
-            // Line comment: skip until end of line
-            chars.next(); // consume second -
-            while let Some(&nc) = chars.peek() {
-                if nc == '\n' {
-                    result.push('\n'); // preserve newline
-                    chars.next();
+    while i < input.len() {
+        if let Some(ref delimiter) = raw_delimiter {
+            if input[i..].starts_with(delimiter) {
+                result.push_str(delimiter);
+                i += delimiter.len();
+                raw_delimiter = None;
+            } else {
+                push_char_at(input, &mut result, &mut i);
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            if bytes[i] == b'\'' {
+                result.push('\'');
+                i += 1;
+                if i < input.len() && bytes[i] == b'\'' {
+                    result.push('\'');
+                    i += 1;
+                } else {
+                    in_single_quote = false;
+                }
+            } else {
+                push_char_at(input, &mut result, &mut i);
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            if bytes[i] == b'"' {
+                result.push('"');
+                i += 1;
+                if i < input.len() && bytes[i] == b'"' {
+                    result.push('"');
+                    i += 1;
+                } else {
+                    in_double_quote = false;
+                }
+            } else {
+                push_char_at(input, &mut result, &mut i);
+            }
+            continue;
+        }
+
+        if input[i..].starts_with("'''") || input[i..].starts_with("\"\"\"") {
+            let delimiter = &input[i..i + 3];
+            result.push_str(delimiter);
+            raw_delimiter = Some(delimiter.to_string());
+            i += 3;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single_quote = true;
+            result.push('\'');
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'"' {
+            in_double_quote = true;
+            result.push('"');
+            i += 1;
+            continue;
+        }
+
+        if let Some(delimiter_len) = dollar_quote_delimiter_len(bytes, i) {
+            let delimiter = &input[i..i + delimiter_len];
+            result.push_str(delimiter);
+            raw_delimiter = Some(delimiter.to_string());
+            i += delimiter_len;
+            continue;
+        }
+
+        if bytes[i] == b'-' && i + 1 < input.len() && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < input.len() {
+                let ch = input[i..].chars().next().expect("valid char boundary");
+                i += ch.len_utf8();
+                if ch == '\n' {
+                    result.push('\n');
                     break;
                 }
-                chars.next();
             }
-        } else if c == '/' && chars.peek() == Some(&'*') {
-            // Block comment: skip until */
-            chars.next(); // consume *
+        } else if bytes[i] == b'/' && i + 1 < input.len() && bytes[i + 1] == b'*' {
+            i += 2;
             let mut closed = false;
-            while let Some(nc) = chars.next() {
-                if nc == '*' && chars.peek() == Some(&'/') {
-                    chars.next(); // consume /
+            while i < input.len() {
+                if bytes[i] == b'*' && i + 1 < input.len() && bytes[i + 1] == b'/' {
+                    i += 2;
                     result.push(' '); // replace with space to preserve separation
                     closed = true;
                     break;
                 }
+                advance_char(input, &mut i);
             }
             if !closed {
                 // Unclosed block comment — preserve raw text so parser reports error
                 result.push_str("/*");
             }
         } else {
-            result.push(c);
+            push_char_at(input, &mut result, &mut i);
         }
     }
 
     result
+}
+
+fn push_char_at(input: &str, output: &mut String, index: &mut usize) {
+    let ch = input[*index..].chars().next().expect("valid char boundary");
+    output.push(ch);
+    *index += ch.len_utf8();
+}
+
+fn advance_char(input: &str, index: &mut usize) {
+    let ch = input[*index..].chars().next().expect("valid char boundary");
+    *index += ch.len_utf8();
+}
+
+fn dollar_quote_delimiter_len(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+
+    let mut end = start + 1;
+    if bytes.get(end) == Some(&b'$') {
+        return Some(2);
+    }
+
+    let first = *bytes.get(end)?;
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return None;
+    }
+    end += 1;
+
+    while let Some(&byte) = bytes.get(end) {
+        if byte == b'$' {
+            return Some(end - start + 1);
+        }
+        if !byte.is_ascii_alphanumeric() && byte != b'_' {
+            return None;
+        }
+        end += 1;
+    }
+
+    None
 }
