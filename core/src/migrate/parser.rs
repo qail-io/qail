@@ -1658,14 +1658,24 @@ fn apply_fk_action_options(
     parts: &[&str],
     i: &mut usize,
 ) -> Result<Column, String> {
+    let mut seen_on_delete = false;
+    let mut seen_on_update = false;
     while *i + 1 < parts.len() {
         match parts[*i + 1] {
             "on_delete" if *i + 2 < parts.len() => {
+                if seen_on_delete {
+                    return Err("duplicate on_delete action".to_string());
+                }
+                seen_on_delete = true;
                 let action = parse_fk_action_str(parts[*i + 2])?;
                 col = col.on_delete(action);
                 *i += 2;
             }
             "on_update" if *i + 2 < parts.len() => {
+                if seen_on_update {
+                    return Err("duplicate on_update action".to_string());
+                }
+                seen_on_update = true;
                 let action = parse_fk_action_str(parts[*i + 2])?;
                 col = col.on_update(action);
                 *i += 2;
@@ -3225,6 +3235,33 @@ table orders {
 "#;
         let err = parse_qail(input).expect_err("missing foreign key action should fail");
         assert!(err.contains("on_delete requires a foreign key action"));
+    }
+
+    #[test]
+    fn test_parse_fk_rejects_duplicate_actions() {
+        for (input, expected) in [
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users(id) on_delete cascade on_delete restrict
+}
+"#,
+                "duplicate on_delete action",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users(id) on_update cascade on_update restrict
+}
+"#,
+                "duplicate on_update action",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("duplicate foreign key action should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
