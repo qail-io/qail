@@ -577,10 +577,7 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
         .find('"')
         .ok_or_else(|| "comment text must be quoted".to_string())?;
     let target_str = rest[..quote_start].trim();
-    let text = rest[quote_start + 1..]
-        .strip_suffix('"')
-        .ok_or_else(|| "unterminated comment text".to_string())?
-        .to_string();
+    let text = parse_comment_text(&rest[quote_start..])?;
 
     if is_comment_raw_target(target_str) {
         Ok(Comment::on_raw(target_str, text))
@@ -592,6 +589,34 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
     } else {
         Ok(Comment::on_table(target_str, text))
     }
+}
+
+fn parse_comment_text(raw: &str) -> Result<String, String> {
+    let mut chars = raw.char_indices().peekable();
+    match chars.next() {
+        Some((_, '"')) => {}
+        _ => return Err("comment text must be quoted".to_string()),
+    }
+
+    let mut text = String::new();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '"' {
+            if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                text.push('"');
+                chars.next();
+                continue;
+            }
+
+            let after = idx + ch.len_utf8();
+            if !raw[after..].trim().is_empty() {
+                return Err("trailing content after comment text".to_string());
+            }
+            return Ok(text);
+        }
+        text.push(ch);
+    }
+
+    Err("unterminated comment text".to_string())
 }
 
 fn is_comment_raw_target(target: &str) -> bool {
@@ -2043,6 +2068,19 @@ rename users.username -> users.name
         let schema = parse_qail(input).unwrap();
         assert_eq!(schema.comments.len(), 1);
         assert_eq!(schema.comments[0].text, "Primary contact email");
+    }
+
+    #[test]
+    fn test_parse_comment_round_trips_doubled_quotes() {
+        let input = r#"comment on users "He said ""hello""""#;
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.comments[0].text, r#"He said "hello""#);
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        assert!(rendered.contains(r#"comment on users "He said ""hello""""#));
+
+        let reparsed = parse_qail(&rendered).unwrap();
+        assert_eq!(reparsed.comments[0].text, schema.comments[0].text);
     }
 
     #[test]

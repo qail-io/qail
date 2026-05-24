@@ -1671,23 +1671,25 @@ pub fn to_qail_string(schema: &Schema) -> String {
 
     // Comments last (tables must exist first)
     for comment in &schema.comments {
+        let text = quote_qail_string(&comment.text);
         match &comment.target {
             CommentTarget::Table(t) => {
-                output.push_str(&format!("comment on {} \"{}\"\n", t, comment.text));
+                output.push_str(&format!("comment on {} {}\n", t, text));
             }
             CommentTarget::Column { table, column } => {
-                output.push_str(&format!(
-                    "comment on {}.{} \"{}\"\n",
-                    table, column, comment.text
-                ));
+                output.push_str(&format!("comment on {}.{} {}\n", table, column, text));
             }
             CommentTarget::Raw(target) => {
-                output.push_str(&format!("comment on {} \"{}\"\n", target, comment.text));
+                output.push_str(&format!("comment on {} {}\n", target, text));
             }
         }
     }
 
     output
+}
+
+fn quote_qail_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 /// Convert a Schema to a list of Qail commands (CREATE TABLE, CREATE INDEX).
