@@ -549,6 +549,44 @@ fn is_canonical_uuid(value: &str) -> bool {
     })
 }
 
+fn queue_item_from_row(row: &qail_pg::PgRow) -> Result<QueueItem> {
+    let id = row
+        .get_i64_by_name("id")
+        .ok_or_else(|| anyhow::anyhow!("Queue row is missing id"))?;
+    if id <= 0 {
+        anyhow::bail!("Queue row has invalid id: {id}");
+    }
+
+    let ref_table = required_queue_text(row, "ref_table")?;
+    let ref_id = required_queue_text(row, "ref_id")?;
+    let operation = required_queue_text(row, "operation")?;
+    let payload = match row.get_json_by_name("payload") {
+        Some(raw) => Some(
+            serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("Queue row {id} has invalid payload JSON: {e}"))?,
+        ),
+        None => None,
+    };
+
+    Ok(QueueItem {
+        id,
+        ref_table,
+        ref_id,
+        operation,
+        payload,
+    })
+}
+
+fn required_queue_text(row: &qail_pg::PgRow, column: &str) -> Result<String> {
+    let value = row
+        .get_string_by_name(column)
+        .ok_or_else(|| anyhow::anyhow!("Queue row is missing {column}"))?;
+    if value.is_empty() {
+        anyhow::bail!("Queue row has empty {column}");
+    }
+    Ok(value)
+}
+
 async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<Vec<QueueItem>> {
     // Atomic claim using UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING ...
     // This prevents worker races under concurrent consumers.
@@ -574,16 +612,8 @@ async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<V
 
     let items: Vec<QueueItem> = rows
         .iter()
-        .map(|row| QueueItem {
-            id: row.get_i64_by_name("id").unwrap_or(0),
-            ref_table: row.get_string_by_name("ref_table").unwrap_or_default(),
-            ref_id: row.get_string_by_name("ref_id").unwrap_or_default(),
-            operation: row.get_string_by_name("operation").unwrap_or_default(),
-            payload: row
-                .get_json_by_name("payload")
-                .and_then(|s| serde_json::from_str(&s).ok()),
-        })
-        .collect();
+        .map(queue_item_from_row)
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(items)
 }
@@ -707,7 +737,86 @@ async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_grpc_url, parse_postgres_url, parse_queue_ref_point_id};
+    use super::{
+        parse_grpc_url, parse_postgres_url, parse_queue_ref_point_id, queue_item_from_row,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn queue_row(values: &[(&str, Option<&str>)]) -> qail_pg::PgRow {
+        let mut name_to_index = HashMap::new();
+        let mut columns = Vec::with_capacity(values.len());
+
+        for (idx, (name, value)) in values.iter().enumerate() {
+            name_to_index.insert((*name).to_string(), idx);
+            columns.push(value.map(|v| v.as_bytes().to_vec()));
+        }
+
+        qail_pg::PgRow {
+            columns,
+            column_info: Some(Arc::new(qail_pg::driver::ColumnInfo {
+                name_to_index,
+                oids: vec![0; values.len()],
+                formats: vec![0; values.len()],
+            })),
+        }
+    }
+
+    #[test]
+    fn queue_item_from_row_decodes_required_fields() {
+        let row = queue_row(&[
+            ("id", Some("7")),
+            ("ref_table", Some("products")),
+            ("ref_id", Some("42")),
+            ("operation", Some("UPSERT")),
+            ("payload", Some(r#"{"name":"chair"}"#)),
+        ]);
+
+        let item = queue_item_from_row(&row).expect("decode queue row");
+        assert_eq!(item.id, 7);
+        assert_eq!(item.ref_table, "products");
+        assert_eq!(item.ref_id, "42");
+        assert_eq!(item.operation, "UPSERT");
+        assert_eq!(
+            item.payload,
+            Some(serde_json::json!({
+                "name": "chair"
+            }))
+        );
+    }
+
+    #[test]
+    fn queue_item_from_row_rejects_missing_required_fields() {
+        let row = queue_row(&[
+            ("id", Some("0")),
+            ("ref_table", Some("products")),
+            ("ref_id", Some("42")),
+            ("operation", Some("UPSERT")),
+            ("payload", None),
+        ]);
+        let err = queue_item_from_row(&row).expect_err("id zero must fail");
+        assert!(err.to_string().contains("invalid id"));
+
+        let row = queue_row(&[
+            ("id", Some("7")),
+            ("ref_table", None),
+            ("ref_id", Some("42")),
+            ("operation", Some("UPSERT")),
+            ("payload", None),
+        ]);
+        let err = queue_item_from_row(&row).expect_err("null table must fail");
+        assert!(err.to_string().contains("ref_table"));
+
+        let row = queue_row(&[
+            ("id", Some("7")),
+            ("ref_table", Some("products")),
+            ("ref_id", Some("42")),
+            ("operation", Some("UPSERT")),
+            ("payload", Some("{")),
+        ]);
+        let err = queue_item_from_row(&row).expect_err("bad payload must fail");
+        assert!(err.to_string().contains("invalid payload JSON"));
+    }
 
     #[test]
     fn parse_queue_ref_point_id_accepts_numeric_and_uuid_ids() {
