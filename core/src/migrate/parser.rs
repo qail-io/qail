@@ -355,9 +355,16 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 i += 1;
                 if let Some(ref mut check) = col.check {
                     check.name = Some(parts[i].to_string());
+                } else {
+                    return Err(format!(
+                        "check_name requires a preceding check expression for column '{}'",
+                        name
+                    ));
                 }
             }
-            "check_name" => {}
+            "check_name" => {
+                return Err(format!("check_name requires a name for column '{}'", name));
+            }
             _ => {
                 // Unknown constraint, might be part of default value
             }
@@ -3047,6 +3054,33 @@ table tickets {
             ),
         ] {
             let err = parse_qail(input).expect_err("invalid check expression should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_check_name_rejects_invalid_shape() {
+        for (input, expected) in [
+            (
+                r#"
+table tickets {
+  id uuid primary_key
+  score int check_name positive_score
+}
+"#,
+                "check_name requires a preceding check expression",
+            ),
+            (
+                r#"
+table tickets {
+  id uuid primary_key
+  score int check(score >= 0) check_name
+}
+"#,
+                "check_name requires a name",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid check name shape should fail");
             assert!(err.contains(expected), "{err}");
         }
     }
