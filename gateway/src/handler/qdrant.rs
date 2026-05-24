@@ -5,6 +5,7 @@
 
 use axum::response::Json;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{QueryResponse, ResponseMetadata};
@@ -823,7 +824,7 @@ fn payload_value_from_ast(
         )),
         Value::String(s) => Ok(qail_qdrant::PayloadValue::String(s.clone())),
         Value::Uuid(u) => Ok(qail_qdrant::PayloadValue::String(u.to_string())),
-        Value::Json(s) => Ok(qail_qdrant::PayloadValue::String(s.clone())),
+        Value::Json(s) => payload_value_from_json_str(s),
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
@@ -835,6 +836,44 @@ fn payload_value_from_ast(
             "INVALID_QDRANT_PAYLOAD",
             "Qdrant payload values support only null, bool, number, string, UUID, JSON string, and arrays",
         )),
+    }
+}
+
+fn payload_value_from_json_str(json: &str) -> Result<qail_qdrant::PayloadValue, ApiError> {
+    let value = serde_json::from_str::<serde_json::Value>(json).map_err(|err| {
+        ApiError::bad_request(
+            "INVALID_QDRANT_PAYLOAD",
+            format!("Qdrant JSON payload value is invalid: {err}"),
+        )
+    })?;
+    Ok(payload_value_from_json(value))
+}
+
+fn payload_value_from_json(value: serde_json::Value) -> qail_qdrant::PayloadValue {
+    match value {
+        serde_json::Value::Null => qail_qdrant::PayloadValue::Null,
+        serde_json::Value::Bool(value) => qail_qdrant::PayloadValue::Bool(value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                qail_qdrant::PayloadValue::Integer(value)
+            } else if let Some(value) = value.as_u64().and_then(|value| i64::try_from(value).ok()) {
+                qail_qdrant::PayloadValue::Integer(value)
+            } else if let Some(value) = value.as_f64() {
+                qail_qdrant::PayloadValue::Float(value)
+            } else {
+                qail_qdrant::PayloadValue::String(value.to_string())
+            }
+        }
+        serde_json::Value::String(value) => qail_qdrant::PayloadValue::String(value),
+        serde_json::Value::Array(values) => qail_qdrant::PayloadValue::List(
+            values.into_iter().map(payload_value_from_json).collect(),
+        ),
+        serde_json::Value::Object(values) => qail_qdrant::PayloadValue::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, payload_value_from_json(value)))
+                .collect::<HashMap<_, _>>(),
+        ),
     }
 }
 
@@ -932,9 +971,9 @@ fn validate_qdrant_upsert_filter_value(value: &qail_core::ast::Value) -> Result<
         | Value::Int(_)
         | Value::Float(_)
         | Value::String(_)
-        | Value::Json(_)
         | Value::Timestamp(_)
         | Value::Uuid(_) => Ok(()),
+        Value::Json(json) => payload_value_from_json_str(json).map(|_| ()),
         Value::Array(items) => {
             for item in items {
                 validate_qdrant_upsert_filter_value(item)?;
@@ -1006,9 +1045,10 @@ fn ast_value_matches_qdrant_payload(
             PayloadValue::Integer(actual) => (*actual as f64 - *expected).abs() < f64::EPSILON,
             _ => false,
         },
-        Value::String(expected) | Value::Json(expected) | Value::Timestamp(expected) => {
+        Value::String(expected) | Value::Timestamp(expected) => {
             matches!(actual, PayloadValue::String(actual) if actual == expected)
         }
+        Value::Json(expected) => payload_value_from_json_str(expected)? == *actual,
         Value::Uuid(expected) => {
             matches!(actual, PayloadValue::String(actual) if actual == &expected.to_string())
         }
@@ -1557,6 +1597,82 @@ mod tests {
 
         assert!(point.payload.contains_key("tenant_id"));
         assert!(!point.payload.contains_key("region"));
+    }
+
+    #[test]
+    fn extract_upsert_point_preserves_json_payload_objects() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value(
+                "metadata",
+                Value::Json(r#"{"source":"web","score":3,"flags":["hot",true]}"#.to_string()),
+            );
+
+        let point = extract_upsert_point(&cmd).unwrap();
+        let metadata = point.payload.get("metadata").expect("metadata payload");
+        let qail_qdrant::PayloadValue::Object(metadata) = metadata else {
+            panic!("metadata should remain a nested Qdrant object: {metadata:?}");
+        };
+
+        assert_eq!(
+            metadata.get("source"),
+            Some(&qail_qdrant::PayloadValue::String("web".to_string()))
+        );
+        assert_eq!(
+            metadata.get("score"),
+            Some(&qail_qdrant::PayloadValue::Integer(3))
+        );
+        assert!(matches!(
+            metadata.get("flags"),
+            Some(qail_qdrant::PayloadValue::List(items))
+                if items
+                    == &vec![
+                        qail_qdrant::PayloadValue::String("hot".to_string()),
+                        qail_qdrant::PayloadValue::Bool(true),
+                    ]
+        ));
+    }
+
+    #[test]
+    fn qdrant_json_payload_filter_matches_nested_object() {
+        use std::collections::HashMap;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("web".to_string()),
+        );
+        metadata.insert("score".to_string(), qail_qdrant::PayloadValue::Integer(3));
+
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata".to_string(),
+            qail_qdrant::PayloadValue::Object(metadata),
+        );
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![value_cond(
+                "metadata",
+                Value::Json(r#"{"source":"web","score":3}"#.to_string()),
+            )],
+            logical_op: LogicalOp::And,
+        }];
+
+        enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing").unwrap();
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_invalid_json_payload() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value("metadata", Value::Json("{bad".to_string()));
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
     }
 
     #[test]
