@@ -512,15 +512,21 @@ fn parse_rename(line: &str) -> Result<MigrationHint, String> {
     let rest = line
         .strip_prefix("rename ")
         .ok_or("Expected 'rename' prefix")?;
-    let parts: Vec<&str> = rest.split(" -> ").collect();
-
-    if parts.len() != 2 {
-        return Err(format!("Invalid rename: {}", line));
+    let (from, to) = rest
+        .split_once("->")
+        .ok_or_else(|| format!("Invalid rename: {}", line))?;
+    let from = from.trim();
+    let to = to.trim();
+    if from.is_empty() || to.is_empty() {
+        return Err(format!(
+            "rename requires non-empty source and target: {}",
+            line
+        ));
     }
 
     Ok(MigrationHint::Rename {
-        from: parts[0].trim().to_string(),
-        to: parts[1].trim().to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
     })
 }
 
@@ -2198,6 +2204,14 @@ index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_co
             &schema.migrations[0],
             MigrationHint::Rename { from, to } if from == "users.username" && to == "users.name"
         ));
+    }
+
+    #[test]
+    fn test_parse_rename_rejects_empty_paths() {
+        for input in ["rename users.username -> ", "rename  -> users.name"] {
+            let err = parse_qail(input).expect_err("empty rename paths should fail");
+            assert!(err.contains("rename requires non-empty source and target"));
+        }
     }
 
     #[test]
