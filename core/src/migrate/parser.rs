@@ -565,6 +565,9 @@ fn parse_index(line: &str) -> Result<Index, String> {
     if name.is_empty() {
         return Err("index name is required".to_string());
     }
+    if !is_native_table_ref(&name) {
+        return Err(format!("invalid index name '{}'", name));
+    }
     let rest = parts[1];
 
     let paren_start = rest.find('(').ok_or("Missing ( in index")?;
@@ -581,6 +584,9 @@ fn parse_index(line: &str) -> Result<Index, String> {
     };
     if table.trim().is_empty() {
         return Err("index table is required".to_string());
+    }
+    if !is_native_table_ref(&table) {
+        return Err(format!("invalid index table '{}'", table));
     }
     let cols_str = &rest[paren_start + 1..paren_end];
     let columns: Vec<String> = split_top_level_csv(cols_str)?;
@@ -2642,6 +2648,26 @@ table users {
             let err = parse_qail(input).expect_err("invalid index should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_index_rejects_invalid_identifiers() {
+        for (input, expected) in [
+            (
+                "index bad-name on users (email)",
+                "invalid index name 'bad-name'",
+            ),
+            (
+                "index idx_users_email on bad-table (email)",
+                "invalid index table 'bad-table'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid index identifier should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+
+        parse_qail("index reporting.idx_users_email on app.users (email)")
+            .expect("schema-qualified index refs should parse");
     }
 
     #[test]
