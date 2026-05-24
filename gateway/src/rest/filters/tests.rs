@@ -81,6 +81,15 @@ fn test_parse_filters_checked_rejects_empty_in_lists() {
 }
 
 #[test]
+fn test_parse_filters_checked_rejects_non_finite_numbers() {
+    let err = parse_filters_checked("score.gt=NaN").unwrap_err();
+    assert!(err.contains("non-finite numeric value"));
+
+    let err = parse_filters_checked("score=in.(1,inf)").unwrap_err();
+    assert!(err.contains("non-finite numeric value"));
+}
+
+#[test]
 fn test_parse_filters_in() {
     let filters = parse_filters("status.in=active,pending,closed");
     assert_eq!(filters.len(), 1);

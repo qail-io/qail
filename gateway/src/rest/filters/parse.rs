@@ -255,11 +255,28 @@ fn parse_filters_impl(
                 }
             ));
         }
+        if qail_value_contains_non_finite_number(&qail_value) {
+            if fail_on_invalid_identifier {
+                return Err(format!(
+                    "Filter '{}' contains a non-finite numeric value",
+                    column
+                ));
+            }
+            continue;
+        }
 
         filters.push((column.to_string(), op, qail_value));
     }
 
     Ok(filters)
+}
+
+fn qail_value_contains_non_finite_number(value: &QailValue) -> bool {
+    match value {
+        QailValue::Float(value) => !value.is_finite(),
+        QailValue::Array(items) => items.iter().any(qail_value_contains_non_finite_number),
+        _ => false,
+    }
 }
 
 /// Parse a scalar value, attempting type detection (bool → int → float → uuid → string).
