@@ -234,13 +234,14 @@ fn required_string(
     idx: usize,
     id: &str,
     field: &str,
+    locked_at: &str,
 ) -> Result<String, MalformedOutboxItem> {
     row.get_string(idx)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| MalformedOutboxItem {
             id: id.to_string(),
             reason: format!("missing {}", field),
-            locked_at: row.get_string(7).unwrap_or_default(),
+            locked_at: locked_at.to_string(),
         })
 }
 
@@ -249,45 +250,57 @@ fn required_non_negative_u32(
     idx: usize,
     id: &str,
     field: &str,
+    locked_at: &str,
 ) -> Result<u32, MalformedOutboxItem> {
     let value = row.get_i32(idx).ok_or_else(|| MalformedOutboxItem {
         id: id.to_string(),
         reason: format!("invalid {}", field),
-        locked_at: row.get_string(7).unwrap_or_default(),
+        locked_at: locked_at.to_string(),
     })?;
     u32::try_from(value).map_err(|_| MalformedOutboxItem {
         id: id.to_string(),
         reason: format!("invalid negative {}", field),
-        locked_at: row.get_string(7).unwrap_or_default(),
+        locked_at: locked_at.to_string(),
     })
 }
 
 fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxItem> {
-    let id = required_string(row, 0, "<missing>", "id")?;
-    let trigger_name = required_string(row, 1, &id, "trigger_name")?;
-    let webhook_url = required_string(row, 2, &id, "webhook_url")?;
+    let missing_id_lock_token = row
+        .get_string(7)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "<missing>".to_string());
+    let id = required_string(row, 0, "<missing>", "id", &missing_id_lock_token)?;
+    let locked_at = row
+        .get_string(7)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| MalformedOutboxItem {
+            id: id.clone(),
+            reason: "missing locked_at".to_string(),
+            locked_at: "<missing>".to_string(),
+        })?;
+    let trigger_name = required_string(row, 1, &id, "trigger_name", &locked_at)?;
+    let webhook_url = required_string(row, 2, &id, "webhook_url", &locked_at)?;
     validate_webhook_url(&webhook_url).map_err(|e| MalformedOutboxItem {
         id: id.clone(),
         reason: format!("invalid webhook_url: {}", e),
-        locked_at: row.get_string(7).unwrap_or_default(),
+        locked_at: locked_at.clone(),
     })?;
-    let headers_raw = required_string(row, 3, &id, "headers")?;
+    let headers_raw = required_string(row, 3, &id, "headers", &locked_at)?;
     let headers: HashMap<String, String> =
         serde_json::from_str(&headers_raw).map_err(|e| MalformedOutboxItem {
             id: id.clone(),
             reason: format!("invalid headers JSON: {}", e),
-            locked_at: row.get_string(7).unwrap_or_default(),
+            locked_at: locked_at.clone(),
         })?;
-    let payload_raw = required_string(row, 4, &id, "payload")?;
+    let payload_raw = required_string(row, 4, &id, "payload", &locked_at)?;
     let payload =
         serde_json::from_str::<WebhookPayload>(&payload_raw).map_err(|e| MalformedOutboxItem {
             id: id.clone(),
             reason: format!("invalid payload JSON: {}", e),
-            locked_at: row.get_string(7).unwrap_or_default(),
+            locked_at: locked_at.clone(),
         })?;
-    let retry_count = required_non_negative_u32(row, 5, &id, "retry_count")?;
-    let attempts = required_non_negative_u32(row, 6, &id, "attempts")?;
-    let locked_at = required_string(row, 7, &id, "locked_at")?;
+    let retry_count = required_non_negative_u32(row, 5, &id, "retry_count", &locked_at)?;
+    let attempts = required_non_negative_u32(row, 6, &id, "attempts", &locked_at)?;
 
     Ok(OutboxItem {
         id,
@@ -535,6 +548,26 @@ mod tests {
         let err = parse_claimed_outbox_row(&row).expect_err("locked_at must be required");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("missing locked_at"));
+        assert_eq!(err.locked_at, "<missing>");
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_without_lock_token_before_payload_validation() {
+        let row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("{}"),
+            Some("{bad-json"),
+            Some("3"),
+            Some("0"),
+            None,
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("locked_at must be required first");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("missing locked_at"));
+        assert_eq!(err.locked_at, "<missing>");
     }
 
     #[test]
