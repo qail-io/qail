@@ -16,47 +16,6 @@ fn apply_branch_single_row_constraints(
     Ok(true)
 }
 
-fn ensure_overlay_pk(row: &mut Value, pk_column: &str, id: &str) {
-    if let Some(obj) = row.as_object_mut() {
-        obj.entry(pk_column.to_string())
-            .or_insert_with(|| Value::String(id.to_string()));
-    }
-}
-
-fn apply_branch_single_row_overlay(
-    data: &mut Option<Value>,
-    operation: &str,
-    mut overlay: Value,
-    pk_column: &str,
-    id: &str,
-) {
-    ensure_overlay_pk(&mut overlay, pk_column, id);
-    match operation {
-        "delete" => {
-            *data = None;
-        }
-        "insert" => {
-            *data = Some(overlay);
-        }
-        "update" => {
-            if let Some(existing) = data.as_mut() {
-                if let (Some(existing_obj), Some(patch_obj)) =
-                    (existing.as_object_mut(), overlay.as_object())
-                {
-                    for (k, v) in patch_obj {
-                        existing_obj.insert(k.clone(), v.clone());
-                    }
-                } else {
-                    *existing = overlay;
-                }
-            } else {
-                *data = Some(overlay);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub(crate) async fn get_by_id_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -165,42 +124,7 @@ pub(crate) async fn get_by_id_handler(
                 return Err(err);
             }
         };
-        for orow in &overlay_rows {
-            let row_pk = orow
-                .try_get_by_name::<String>("row_pk")
-                .ok()
-                .or_else(|| orow.get_string(0))
-                .unwrap_or_default();
-            if row_pk == id {
-                let operation = orow
-                    .try_get_by_name::<String>("operation")
-                    .ok()
-                    .or_else(|| orow.get_string(1))
-                    .unwrap_or_default();
-                match operation.as_str() {
-                    "delete" => {
-                        apply_branch_single_row_overlay(&mut data, "delete", Value::Null, pk, &id);
-                    }
-                    "update" | "insert" => {
-                        let row_data_str = orow
-                            .try_get_by_name::<String>("row_data")
-                            .ok()
-                            .or_else(|| orow.get_string(2))
-                            .unwrap_or_default();
-                        if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                            apply_branch_single_row_overlay(
-                                &mut data,
-                                operation.as_str(),
-                                val,
-                                pk,
-                                &id,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        data = apply_branch_overlay_to_single_row(&overlay_rows, data, pk, &id)?;
     }
 
     conn.release().await;
@@ -246,11 +170,11 @@ pub(crate) async fn get_by_id_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_branch_single_row_constraints, apply_branch_single_row_overlay};
+    use super::apply_branch_single_row_constraints;
     use qail_core::ast::{
         Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value as QailValue,
     };
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     fn policy_cage(column: &str, op: Operator, value: QailValue) -> Cage {
         Cage {
@@ -307,43 +231,5 @@ mod tests {
         let visible = apply_branch_single_row_constraints(&mut row, &cages, None).unwrap();
 
         assert!(!visible);
-    }
-
-    #[test]
-    fn branch_single_row_overlay_patches_base_row_chronologically() {
-        let mut data = Some(json!({
-            "id": "order-1",
-            "status": "main",
-            "region": "west"
-        }));
-
-        apply_branch_single_row_overlay(
-            &mut data,
-            "update",
-            json!({"status": "branch"}),
-            "id",
-            "order-1",
-        );
-
-        assert_eq!(
-            data,
-            Some(json!({"id": "order-1", "status": "branch", "region": "west"}))
-        );
-    }
-
-    #[test]
-    fn branch_single_row_overlay_insert_after_delete_reappears() {
-        let mut data = Some(json!({"id": "order-1", "status": "main"}));
-
-        apply_branch_single_row_overlay(&mut data, "delete", Value::Null, "id", "order-1");
-        apply_branch_single_row_overlay(
-            &mut data,
-            "insert",
-            json!({"status": "new"}),
-            "id",
-            "order-1",
-        );
-
-        assert_eq!(data, Some(json!({"id": "order-1", "status": "new"})));
     }
 }

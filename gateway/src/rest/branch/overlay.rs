@@ -219,7 +219,7 @@ fn parse_overlay_row_data(row: &qail_pg::PgRow, row_pk: &str) -> Result<Value, A
     Ok(value)
 }
 
-fn apply_branch_overlay_rows(
+pub(crate) fn apply_branch_overlay_rows(
     overlay_rows: &[qail_pg::PgRow],
     data: &mut Vec<Value>,
     pk_column: &str,
@@ -286,6 +286,21 @@ fn apply_branch_overlay_rows(
     Ok(())
 }
 
+pub(crate) fn apply_branch_overlay_to_single_row(
+    overlay_rows: &[qail_pg::PgRow],
+    data: Option<Value>,
+    pk_column: &str,
+    row_pk: &str,
+) -> Result<Option<Value>, ApiError> {
+    let mut rows: Vec<Value> = data.into_iter().collect();
+    apply_branch_overlay_rows(overlay_rows, &mut rows, pk_column)?;
+    Ok(rows.into_iter().find(|row| {
+        row.get(pk_column)
+            .and_then(json_value_to_pk)
+            .is_some_and(|pk| pk == row_pk)
+    }))
+}
+
 /// Apply branch overlay to main table data (CoW Read).
 ///
 /// When a branch is active, reads from `_qail_branch_rows` and merges:
@@ -332,9 +347,9 @@ pub(crate) async fn redirect_to_overlay(
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchOverlayRowState, apply_branch_overlay_rows, branch_overlay_row_state,
-        branch_overlay_row_state_from_ops, patch_overlay_row, project_rows_to_selected_columns,
-        upsert_overlay_row,
+        BranchOverlayRowState, apply_branch_overlay_rows, apply_branch_overlay_to_single_row,
+        branch_overlay_row_state, branch_overlay_row_state_from_ops, patch_overlay_row,
+        project_rows_to_selected_columns, upsert_overlay_row,
     };
     use crate::middleware::ApiError;
     use serde_json::json;
@@ -445,6 +460,64 @@ mod tests {
                 json!({"id": "order-2", "status": "draft"}),
             ]
         );
+    }
+
+    #[test]
+    fn apply_branch_overlay_to_single_row_replays_valid_rows() {
+        let overlay_rows = vec![
+            overlay_row(
+                Some("order-2"),
+                Some("insert"),
+                Some(r#"{"status":"other"}"#),
+            ),
+            overlay_row(
+                Some("order-1"),
+                Some("update"),
+                Some(r#"{"status":"branch"}"#),
+            ),
+        ];
+        let data = Some(json!({
+            "id": "order-1",
+            "status": "main",
+            "region": "west"
+        }));
+
+        let row = apply_branch_overlay_to_single_row(&overlay_rows, data, "id", "order-1")
+            .expect("overlay replay should succeed");
+
+        assert_eq!(
+            row,
+            Some(json!({"id": "order-1", "status": "branch", "region": "west"}))
+        );
+    }
+
+    #[test]
+    fn apply_branch_overlay_to_single_row_filters_other_overlay_inserts() {
+        let overlay_rows = vec![overlay_row(
+            Some("order-2"),
+            Some("insert"),
+            Some(r#"{"status":"other"}"#),
+        )];
+
+        let row = apply_branch_overlay_to_single_row(&overlay_rows, None, "id", "order-1")
+            .expect("overlay replay should succeed");
+
+        assert_eq!(row, None);
+    }
+
+    #[test]
+    fn apply_branch_overlay_to_single_row_fails_closed_on_malformed_replay() {
+        let overlay_rows = vec![overlay_row(
+            Some("order-2"),
+            Some("insert"),
+            Some("{bad-json"),
+        )];
+        let data = Some(json!({"id": "order-1", "status": "main"}));
+
+        let err =
+            apply_branch_overlay_to_single_row(&overlay_rows, data, "id", "order-1").unwrap_err();
+
+        assert_internal_error(err);
     }
 
     #[test]
