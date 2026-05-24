@@ -644,7 +644,7 @@ fn extract_upsert_point_with_filter_fallback(
             };
 
             match field.rsplit('.').next().unwrap_or(field).trim_matches('"') {
-                "id" if id.is_none() => {
+                "id" => {
                     let next = point_id_from_value(&cond.value).ok_or_else(|| {
                         ApiError::bad_request(
                             "INVALID_POINT_ID",
@@ -653,8 +653,7 @@ fn extract_upsert_point_with_filter_fallback(
                     })?;
                     set_upsert_point_id(&mut id, next)?;
                 }
-                "id" => {}
-                "vector" if vector.is_none() => {
+                "vector" => {
                     let next = vector_from_value(&cond.value).ok_or_else(|| {
                         ApiError::bad_request(
                             "INVALID_VECTOR",
@@ -663,7 +662,6 @@ fn extract_upsert_point_with_filter_fallback(
                     })?;
                     set_upsert_vector(&mut vector, next)?;
                 }
-                "vector" => {}
                 _ => {}
             }
         }
@@ -1571,6 +1569,68 @@ mod tests {
         let point = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap();
 
         assert_eq!(point.id, qail_qdrant::PointId::Num(7));
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_ambiguous_filter_fallback_ids() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            vector: Some(vec![0.1, 0.2]),
+            cages: vec![Cage {
+                kind: CageKind::Filter,
+                conditions: vec![
+                    value_cond("id", Value::Int(7)),
+                    value_cond("id", Value::Int(8)),
+                ],
+                logical_op: LogicalOp::Or,
+            }],
+            ..Default::default()
+        };
+        let request_filters = qdrant_upsert_filter_cages(&cmd);
+
+        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_filter_id_that_conflicts_with_payload_id() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .filter("id", Operator::Eq, 8);
+        let request_filters = qdrant_upsert_filter_cages(&cmd);
+
+        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_ambiguous_filter_fallback_vectors() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            cages: vec![Cage {
+                kind: CageKind::Filter,
+                conditions: vec![
+                    value_cond("id", Value::Int(7)),
+                    value_cond("vector", Value::Vector(vec![0.1, 0.2])),
+                    value_cond("vector", Value::Vector(vec![0.3, 0.4])),
+                ],
+                logical_op: LogicalOp::Or,
+            }],
+            ..Default::default()
+        };
+        let request_filters = qdrant_upsert_filter_cages(&cmd);
+
+        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_VECTOR");
     }
 
     #[test]
