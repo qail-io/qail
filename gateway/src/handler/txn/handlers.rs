@@ -261,34 +261,33 @@ pub async fn txn_query(
     if let (Some(tenant_id_str), Some(plan)) =
         (auth.tenant_id.as_deref(), tenant_guard_plan.as_ref())
         && plan.verify_rows
-    {
-        if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+        && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
             &rows,
             tenant_id_str,
             &plan.column,
             &cmd_table,
             "txn_query",
-        ) {
-            tracing::error!("{}", v);
-            if let Err(e) = state
-                .transaction_manager
-                .close_session(
-                    &txn_id,
-                    &tenant_id,
-                    Some(auth.user_id.as_str()),
-                    &auth_fingerprint,
-                    false,
-                )
-                .await
-            {
-                tracing::error!(
-                    error = %e,
-                    txn_id = %txn_id,
-                    "Failed to rollback transaction after tenant boundary violation"
-                );
-            }
-            return Err(ApiError::internal("Data integrity error"));
+        )
+    {
+        tracing::error!("{}", v);
+        if let Err(e) = state
+            .transaction_manager
+            .close_session(
+                &txn_id,
+                &tenant_id,
+                Some(auth.user_id.as_str()),
+                &auth_fingerprint,
+                false,
+            )
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                txn_id = %txn_id,
+                "Failed to rollback transaction after tenant boundary violation"
+            );
         }
+        return Err(ApiError::internal("Data integrity error"));
     }
 
     if let Some(plan) = tenant_guard_plan.as_ref()

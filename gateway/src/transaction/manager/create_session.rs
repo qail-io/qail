@@ -12,6 +12,7 @@ impl TransactionSessionManager {
     /// Acquires a connection from the pool. The RLS checkout already opens
     /// the transaction that pins tenant-local settings for the session.
     /// Returns the session ID (UUID v4).
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_session(
         &self,
         pool: &PgPool,

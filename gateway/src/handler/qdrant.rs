@@ -424,7 +424,7 @@ fn qdrant_limit_from_cmd(
             _ => None,
         })
         .unwrap_or(10);
-    if requested <= 0 {
+    if requested == 0 {
         return Err(ApiError::parse_error(
             "Qdrant limit must be greater than zero",
         ));
@@ -838,11 +838,9 @@ fn qdrant_upsert_filter_target(
 fn qdrant_upsert_filter_cages_have_enforceable_conditions(
     cages: &[qail_core::ast::Cage],
 ) -> Result<bool, ApiError> {
-    for cage in cages {
-        for condition in &cage.conditions {
-            qdrant_upsert_filter_target(condition)?;
-            return Ok(true);
-        }
+    if let Some(condition) = cages.iter().flat_map(|cage| cage.conditions.iter()).next() {
+        qdrant_upsert_filter_target(condition)?;
+        return Ok(true);
     }
     Ok(false)
 }

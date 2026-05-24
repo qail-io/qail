@@ -61,12 +61,10 @@ fn write_canonical_json_value(value: &serde_json::Value, out: &mut String) {
         serde_json::Value::Null
         | serde_json::Value::Bool(_)
         | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {
-            out.push_str(
-                &serde_json::to_string(value)
-                    .expect("serializing scalar serde_json::Value should not fail"),
-            );
-        }
+        | serde_json::Value::String(_) => match serde_json::to_string(value) {
+            Ok(serialized) => out.push_str(&serialized),
+            Err(_) => out.push_str("null"),
+        },
         serde_json::Value::Array(items) => {
             out.push('[');
             for (idx, item) in items.iter().enumerate() {
@@ -85,15 +83,16 @@ fn write_canonical_json_value(value: &serde_json::Value, out: &mut String) {
                 if idx > 0 {
                     out.push(',');
                 }
-                out.push_str(
-                    &serde_json::to_string(key)
-                        .expect("serializing JSON object key should not fail"),
-                );
+                match serde_json::to_string(key) {
+                    Ok(serialized) => out.push_str(&serialized),
+                    Err(_) => out.push_str("\"\""),
+                }
                 out.push(':');
-                write_canonical_json_value(
-                    map.get(key).expect("key collected from map must exist"),
-                    out,
-                );
+                if let Some(value) = map.get(key) {
+                    write_canonical_json_value(value, out);
+                } else {
+                    out.push_str("null");
+                }
             }
             out.push('}');
         }

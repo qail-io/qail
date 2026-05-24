@@ -263,18 +263,18 @@ impl Qail {
 
     fn scope_nested_rls(mut self, ctx: &RlsContext) -> QailBuildResult<Self> {
         for cte in &mut self.ctes {
-            cte.base_query = Box::new(cte.base_query.as_ref().clone().with_rls(ctx)?);
+            *cte.base_query = cte.base_query.as_ref().clone().with_rls(ctx)?;
             if let Some(ref mut recursive_query) = cte.recursive_query {
-                *recursive_query = Box::new(recursive_query.as_ref().clone().with_rls(ctx)?);
+                **recursive_query = recursive_query.as_ref().clone().with_rls(ctx)?;
             }
         }
 
         if let Some(ref mut source_query) = self.source_query {
-            *source_query = Box::new(source_query.as_ref().clone().with_rls(ctx)?);
+            **source_query = source_query.as_ref().clone().with_rls(ctx)?;
         }
 
         for (_, set_query) in &mut self.set_ops {
-            *set_query = Box::new(set_query.as_ref().clone().with_rls(ctx)?);
+            **set_query = set_query.as_ref().clone().with_rls(ctx)?;
         }
 
         Ok(self)
@@ -530,7 +530,7 @@ impl Qail {
             &target_table,
             &source_tenant_col,
         )?;
-        *query = Box::new(scoped_query);
+        **query = scoped_query;
         Ok(())
     }
 

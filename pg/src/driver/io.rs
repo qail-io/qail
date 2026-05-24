@@ -1958,7 +1958,7 @@ mod tests {
 
     fn push_data_row_frame(conn: &mut PgConnection, payload: &[u8]) {
         let msg_len = payload.len() + 4;
-        conn.buffer.extend_from_slice(&[b'D']);
+        conn.buffer.extend_from_slice(b"D");
         conn.buffer
             .extend_from_slice(&(msg_len as u32).to_be_bytes());
         conn.buffer.extend_from_slice(payload);

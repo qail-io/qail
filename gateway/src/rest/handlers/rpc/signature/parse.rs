@@ -152,7 +152,7 @@ pub(super) fn parse_rpc_signatures(
                 arg_type_oids.len()
             )));
         }
-        if arg_type_oids.iter().any(|oid| *oid == 0) {
+        if arg_type_oids.contains(&0) {
             return Err(ApiError::internal(
                 "Invalid RPC arg type OID metadata: OID 0 is not allowed",
             ));

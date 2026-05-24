@@ -217,9 +217,7 @@ fn index_column_to_sql(column: &str, generator: &dyn SqlGenerator) -> Result<Str
     if column.is_empty() || column.contains('\0') {
         return Err("/* ERROR: Invalid index column */".to_string());
     }
-    if is_simple_identifier(column) {
-        Ok(generator.quote_identifier(column))
-    } else if contains_unquoted_statement_delimiter(column) {
+    if is_simple_identifier(column) || contains_unquoted_statement_delimiter(column) {
         Ok(generator.quote_identifier(column))
     } else {
         Ok(column.to_string())
@@ -509,12 +507,11 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
             }
 
             for constraint in constraints {
-                if let Constraint::Check(vals) = constraint {
-                    if let Err(err) =
+                if let Constraint::Check(vals) = constraint
+                    && let Err(err) =
                         append_column_check_sql(&mut line, name, vals, generator.as_ref())
-                    {
-                        return err;
-                    }
+                {
+                    return err;
                 }
                 if let Constraint::References(target) = constraint {
                     line.push_str(" REFERENCES ");
@@ -876,12 +873,11 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
                 col_def.push_str(" REFERENCES ");
                 col_def.push_str(&references_target_to_sql(target, generator.as_ref()));
             }
-            if let Constraint::Check(vals) = constraint {
-                if let Err(err) =
+            if let Constraint::Check(vals) = constraint
+                && let Err(err) =
                     append_column_check_sql(&mut col_def, name, vals, generator.as_ref())
-                {
-                    return err;
-                }
+            {
+                return err;
             }
         }
 

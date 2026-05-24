@@ -8,7 +8,10 @@ use crate::point::{PayloadValue, Point, PointId, ScoredPoint};
 use serde_json::{Value as JsonValue, json};
 
 fn serialize_json_request(request: &JsonValue) -> Vec<u8> {
-    serde_json::to_vec(request).expect("serializing serde_json::Value should not fail")
+    match serde_json::to_vec(request) {
+        Ok(bytes) => bytes,
+        Err(_) => b"{}".to_vec(),
+    }
 }
 
 /// Encode a vector search request to JSON format.

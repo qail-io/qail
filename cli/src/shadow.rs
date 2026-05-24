@@ -303,6 +303,7 @@ async fn update_shadow_state_status(driver: &mut PgDriver, new_status: &str) -> 
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

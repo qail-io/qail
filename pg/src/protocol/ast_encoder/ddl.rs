@@ -193,9 +193,7 @@ fn push_index_column(buf: &mut BytesMut, column: &str) -> Result<(), crate::prot
             "invalid index column: {column:?}"
         )));
     }
-    if is_simple_identifier(column) {
-        push_identifier(buf, column);
-    } else if contains_unquoted_statement_delimiter(column) {
+    if is_simple_identifier(column) || contains_unquoted_statement_delimiter(column) {
         push_identifier(buf, column);
     } else {
         buf.extend_from_slice(column.as_bytes());

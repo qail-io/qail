@@ -85,10 +85,9 @@ pub fn rewrite_url_host(url: &str, new_host: &str, new_port: u16) -> Result<Stri
 pub fn redact_url(url: &str) -> String {
     if let Ok(mut parsed) = Url::parse(url)
         && parsed.password().is_some()
+        && parsed.set_password(Some("***")).is_ok()
     {
-        if parsed.set_password(Some("***")).is_ok() {
-            return parsed.to_string();
-        }
+        return parsed.to_string();
     }
 
     // Find the scheme separator

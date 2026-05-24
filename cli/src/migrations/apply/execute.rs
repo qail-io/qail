@@ -368,27 +368,25 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
             continue;
         }
 
-        if matches!(direction, MigrateDirection::Up) && !cmds.is_empty() {
-            if enforce_shadow_receipt {
-                let planned_checksum = stable_cmds_checksum(&cmds);
-                let has_receipt =
-                    has_verified_shadow_receipt_with_driver(&mut pg, &planned_checksum).await?;
-                if !has_receipt {
-                    bail!(
-                        "Migration blocked: no verified shadow receipt for '{}'.\n\
-                         Expected checksum: {}.\n\
-                         Run 'qail migrate shadow <old.qail:new.qail> --url <db>' first, \
-                         or re-run apply with --allow-no-shadow-receipt.",
-                        mig.display_name,
-                        planned_checksum
-                    );
-                }
-                println!(
-                    "  {} Verified shadow receipt checksum: {}",
-                    "✓".green(),
-                    planned_checksum.cyan()
+        if matches!(direction, MigrateDirection::Up) && !cmds.is_empty() && enforce_shadow_receipt {
+            let planned_checksum = stable_cmds_checksum(&cmds);
+            let has_receipt =
+                has_verified_shadow_receipt_with_driver(&mut pg, &planned_checksum).await?;
+            if !has_receipt {
+                bail!(
+                    "Migration blocked: no verified shadow receipt for '{}'.\n\
+                     Expected checksum: {}.\n\
+                     Run 'qail migrate shadow <old.qail:new.qail> --url <db>' first, \
+                     or re-run apply with --allow-no-shadow-receipt.",
+                    mig.display_name,
+                    planned_checksum
                 );
             }
+            println!(
+                "  {} Verified shadow receipt checksum: {}",
+                "✓".green(),
+                planned_checksum.cyan()
+            );
         }
 
         if should_run_apply_lock_risk_preflight(direction, &cmds) {

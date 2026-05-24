@@ -473,11 +473,11 @@ fn encode_column_expr_inner(
         Expr::Mod { kind, col } => match kind {
             ModKind::Add => {
                 buf.extend_from_slice(b"ADD COLUMN ");
-                encode_column_expr_inner(col, buf, params.as_deref_mut())?;
+                encode_column_expr_inner(col, buf, params)?;
             }
             ModKind::Drop => {
                 buf.extend_from_slice(b"DROP COLUMN ");
-                encode_column_expr_inner(col, buf, params.as_deref_mut())?;
+                encode_column_expr_inner(col, buf, params)?;
             }
         },
     }
