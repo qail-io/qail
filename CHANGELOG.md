@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-05-24
+
+### Fixed
+- **PostgreSQL live migration introspection:** Hardened CLI schema pulls and shadow verification against generated columns, identity defaults, expression indexes, enum extensions, and composite foreign-key drift.
+- **PostgreSQL migration replay safety:** Tightened migration risk and verification paths so live post-apply checks compare constraints, defaults, generated expressions, indexes, and extension dependencies against the real database state.
+- **Branch overlay and merge coverage:** Restored live PostgreSQL audit paths for merge/set-operation/recursive-CTE behavior and verified bad overlay replays fail closed instead of silently applying invalid rows.
+
 ## [1.1.0] - 2026-05-23
 
 ### Added

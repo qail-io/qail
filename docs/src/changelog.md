@@ -4,7 +4,7 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v1.1.0)
+## Current Highlights (v1.1.1)
 
 - **Workflow engine hardening**: fixed nested loop context preservation, wait-event resume validation, timeout fallbacks, and transition checkpointing.
 - **Gateway security hardening**: tightened tenant guards, RLS policy injection, write-side column policies, idempotency, transaction paths, branch overlays, and REST mutation/event semantics.

@@ -86,8 +86,8 @@ This shows the exact protocol-byte path used by the driver.
 
 ```toml
 [dependencies]
-qail-pg = "1.1.0"
-qail-core = "1.1.0"
+qail-pg = "1.1.1"
+qail-core = "1.1.1"
 ```
 
 `qail-pg` is AST-only. Raw SQL helper APIs were removed.
