@@ -100,50 +100,26 @@ pub(super) fn parse_rpc_signatures(
 ) -> Result<Vec<RpcCallableSignature>, ApiError> {
     let mut signatures = Vec::with_capacity(rows.len());
     for row in rows {
-        let total_args = row
-            .try_get_by_name::<i32>("total_args")
-            .ok()
-            .or_else(|| row.get_i32(0))
-            .unwrap_or(0)
-            .max(0) as usize;
-        let default_args = row
-            .try_get_by_name::<i32>("default_args")
-            .ok()
-            .or_else(|| row.get_i32(1))
-            .unwrap_or(0)
-            .max(0) as usize;
-        let variadic = row
-            .try_get_by_name::<bool>("is_variadic")
-            .ok()
-            .or_else(|| row.get_bool(2))
-            .unwrap_or(false);
+        let total_args = required_non_negative_usize(row, "total_args", 0, "total_args")?;
+        let default_args = required_non_negative_usize(row, "default_args", 1, "default_args")?;
+        if default_args > total_args {
+            return Err(ApiError::internal(
+                "Invalid RPC signature metadata: default_args exceeds total_args",
+            ));
+        }
+        let variadic = required_bool(row, "is_variadic", 2, "is_variadic")?;
 
-        let raw_arg_names_json = row
-            .try_get_by_name::<String>("arg_names_json")
-            .ok()
-            .or_else(|| row.get_string(4))
-            .unwrap_or_else(|| "[]".to_string());
-        let raw_arg_modes_json = row
-            .try_get_by_name::<String>("arg_modes_json")
-            .ok()
-            .or_else(|| row.get_string(5))
-            .unwrap_or_else(|| "[]".to_string());
+        let raw_arg_names_json = required_string(row, "arg_names_json", 4, "arg_names_json")?;
+        let raw_arg_modes_json = required_string(row, "arg_modes_json", 5, "arg_modes_json")?;
         let mut arg_names =
             parse_rpc_input_arg_names(&raw_arg_names_json, &raw_arg_modes_json, total_args)?;
 
-        let raw_arg_type_oids = row
-            .try_get_by_name::<String>("arg_type_oids_json")
-            .ok()
-            .or_else(|| row.get_string(6))
-            .unwrap_or_else(|| "[]".to_string());
-        let mut arg_type_oids: Vec<u32> = serde_json::from_str(&raw_arg_type_oids)
+        let raw_arg_type_oids =
+            required_string(row, "arg_type_oids_json", 6, "arg_type_oids_json")?;
+        let arg_type_oids: Vec<u32> = serde_json::from_str(&raw_arg_type_oids)
             .map_err(|e| ApiError::internal(format!("Invalid RPC arg type OID metadata: {}", e)))?;
 
-        let raw_arg_types = row
-            .try_get_by_name::<String>("arg_types_json")
-            .ok()
-            .or_else(|| row.get_string(7))
-            .unwrap_or_else(|| "[]".to_string());
+        let raw_arg_types = required_string(row, "arg_types_json", 7, "arg_types_json")?;
         let mut arg_types: Vec<String> = serde_json::from_str(&raw_arg_types)
             .map_err(|e| ApiError::internal(format!("Invalid RPC arg type metadata: {}", e)))?;
         arg_types = arg_types
@@ -156,15 +132,27 @@ pub(super) fn parse_rpc_signatures(
         } else if arg_names.len() > total_args {
             arg_names.truncate(total_args);
         }
-        if arg_types.len() < total_args {
-            arg_types.resize(total_args, "anyelement".to_string());
-        } else if arg_types.len() > total_args {
-            arg_types.truncate(total_args);
+        if arg_types.len() != total_args {
+            return Err(ApiError::internal(format!(
+                "Invalid RPC arg type metadata length: expected {}, got {}",
+                total_args,
+                arg_types.len()
+            )));
         }
-        if arg_type_oids.len() < total_args {
-            arg_type_oids.resize(total_args, 0);
-        } else if arg_type_oids.len() > total_args {
-            arg_type_oids.truncate(total_args);
+        if arg_type_oids.len() != total_args {
+            return Err(ApiError::internal(format!(
+                "Invalid RPC arg type OID metadata length: expected {}, got {}",
+                total_args,
+                arg_type_oids.len()
+            )));
+        }
+
+        let variadic_element_oid =
+            optional_u32(row, "variadic_element_oid", 3, "variadic_element_oid")?;
+        if variadic && variadic_element_oid.is_none() {
+            return Err(ApiError::internal(
+                "Invalid RPC signature metadata: variadic function is missing element OID",
+            ));
         }
 
         signatures.push(RpcCallableSignature {
@@ -174,30 +162,107 @@ pub(super) fn parse_rpc_signatures(
             arg_names,
             arg_types,
             arg_type_oids,
-            variadic_element_oid: row
-                .try_get_by_name::<i64>("variadic_element_oid")
-                .ok()
-                .or_else(|| row.get_i64(3))
-                .and_then(|oid| u32::try_from(oid).ok()),
-            identity_args: row
-                .try_get_by_name::<String>("identity_args")
-                .ok()
-                .or_else(|| row.get_string(8))
-                .unwrap_or_default(),
-            result_type: row
-                .try_get_by_name::<String>("result_type")
-                .ok()
-                .or_else(|| row.get_string(9))
-                .unwrap_or_default(),
+            variadic_element_oid,
+            identity_args: required_string(row, "identity_args", 8, "identity_args")?,
+            result_type: required_string(row, "result_type", 9, "result_type")?,
         });
     }
 
     Ok(signatures)
 }
 
+fn required_non_negative_usize(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<usize, ApiError> {
+    let value = row
+        .try_get_by_name::<i32>(name)
+        .ok()
+        .or_else(|| row.get_i32(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))?;
+    usize::try_from(value)
+        .map_err(|_| ApiError::internal(format!("Invalid negative RPC {} metadata", label)))
+}
+
+fn required_bool(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<bool, ApiError> {
+    row.try_get_by_name::<bool>(name)
+        .ok()
+        .or_else(|| row.get_bool(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))
+}
+
+fn required_string(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<String, ApiError> {
+    row.try_get_by_name::<String>(name)
+        .ok()
+        .or_else(|| row.get_string(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))
+}
+
+fn optional_u32(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+    label: &str,
+) -> Result<Option<u32>, ApiError> {
+    if row.is_null(idx) {
+        return Ok(None);
+    }
+    let value = row
+        .try_get_by_name::<i64>(name)
+        .ok()
+        .or_else(|| row.get_i64(idx))
+        .ok_or_else(|| ApiError::internal(format!("Invalid RPC {} metadata", label)))?;
+    u32::try_from(value)
+        .map(Some)
+        .map_err(|_| ApiError::internal(format!("Invalid RPC {} metadata", label)))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_rpc_input_arg_names;
+    use super::{parse_rpc_input_arg_names, parse_rpc_signatures};
+    use qail_pg::PgRow;
+
+    fn rpc_signature_row(values: &[Option<&str>]) -> PgRow {
+        PgRow {
+            columns: values
+                .iter()
+                .map(|value| value.map(|value| value.as_bytes().to_vec()))
+                .collect(),
+            column_info: None,
+        }
+    }
+
+    fn valid_rpc_signature_row() -> PgRow {
+        rpc_signature_row(&[
+            Some("2"),
+            Some("1"),
+            Some("f"),
+            None,
+            Some(r#"["tenant_id","limit"]"#),
+            Some("[]"),
+            Some("[25,23]"),
+            Some(r#"["text","integer"]"#),
+            Some("tenant_id text, limit integer DEFAULT 10"),
+            Some("jsonb"),
+        ])
+    }
+
+    fn assert_internal_error(err: crate::middleware::ApiError) {
+        assert_eq!(err.code, "INTERNAL_ERROR");
+        assert_eq!(err.message, "An internal error occurred.");
+    }
 
     #[test]
     fn input_arg_names_fall_back_to_pronargs_slice_for_all_in_functions() {
@@ -240,5 +305,50 @@ mod tests {
                 Some("ids".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn parse_rpc_signatures_accepts_complete_metadata() {
+        let signatures = parse_rpc_signatures(&[valid_rpc_signature_row()]).unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].total_args, 2);
+        assert_eq!(signatures[0].default_args, 1);
+        assert_eq!(signatures[0].arg_types, vec!["text", "integer"]);
+        assert_eq!(signatures[0].arg_type_oids, vec![25, 23]);
+    }
+
+    #[test]
+    fn parse_rpc_signatures_rejects_bad_required_counts() {
+        let mut row = valid_rpc_signature_row();
+        row.columns[0] = Some(b"not-an-int".to_vec());
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
+
+        let mut row = valid_rpc_signature_row();
+        row.columns[1] = Some(b"3".to_vec());
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
+    }
+
+    #[test]
+    fn parse_rpc_signatures_rejects_type_metadata_length_mismatch() {
+        let mut row = valid_rpc_signature_row();
+        row.columns[6] = Some(b"[25]".to_vec());
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
+
+        let mut row = valid_rpc_signature_row();
+        row.columns[7] = Some(br#"["text"]"#.to_vec());
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
+    }
+
+    #[test]
+    fn parse_rpc_signatures_rejects_missing_variadic_element_oid() {
+        let mut row = valid_rpc_signature_row();
+        row.columns[2] = Some(b"t".to_vec());
+        row.columns[3] = None;
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
     }
 }
