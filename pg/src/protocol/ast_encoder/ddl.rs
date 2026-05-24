@@ -1023,7 +1023,7 @@ pub fn encode_alter_set_default(cmd: &Qail, buf: &mut BytesMut) {
         push_identifier(buf, col);
         buf.extend_from_slice(b" SET DEFAULT ");
         let default_expr = cmd.payload.as_deref().unwrap_or("NULL");
-        buf.extend_from_slice(default_expr.as_bytes());
+        buf.extend_from_slice(sql_expr_fragment_to_sql(default_expr, "NULL").as_bytes());
     }
 }
 

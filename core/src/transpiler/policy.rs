@@ -6,7 +6,7 @@
 use crate::migrate::alter::{AlterOp, AlterTable};
 use crate::migrate::policy::RlsPolicy;
 use crate::migrate::schema::CheckExpr;
-use crate::transpiler::traits::escape_identifier;
+use crate::transpiler::traits::{escape_identifier, escape_sql_string_literal};
 
 fn contains_unquoted_statement_delimiter(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -58,13 +58,17 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
     false
 }
 
-fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> String {
-    let expr = expr.to_string();
-    if expr.trim().is_empty() || contains_unquoted_statement_delimiter(&expr) {
-        "FALSE".to_string()
+fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
+    let expr = expr.trim();
+    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
+        fallback.to_string()
     } else {
         expr.replace('\0', "")
     }
+}
+
+fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> String {
+    sql_expr_fragment_to_sql(&expr.to_string(), "FALSE")
 }
 
 /// Transpile an `RlsPolicy` to a `CREATE POLICY` SQL statement.
@@ -147,11 +151,18 @@ fn check_expr_to_sql(expr: &CheckExpr) -> String {
             format!("{} BETWEEN {} AND {}", escape_identifier(column), low, high)
         }
         CheckExpr::In { column, values } => {
-            let vals: Vec<String> = values.iter().map(|v| format!("'{}'", v)).collect();
+            let vals: Vec<String> = values
+                .iter()
+                .map(|v| format!("'{}'", escape_sql_string_literal(v)))
+                .collect();
             format!("{} IN ({})", escape_identifier(column), vals.join(", "))
         }
         CheckExpr::Regex { column, pattern } => {
-            format!("{} ~ '{}'", escape_identifier(column), pattern)
+            format!(
+                "{} ~ '{}'",
+                escape_identifier(column),
+                escape_sql_string_literal(pattern)
+            )
         }
         CheckExpr::MaxLength { column, max } => {
             format!("LENGTH({}) <= {}", escape_identifier(column), max)
@@ -171,7 +182,7 @@ fn check_expr_to_sql(expr: &CheckExpr) -> String {
             check_expr_to_sql(right)
         ),
         CheckExpr::Not(inner) => format!("NOT ({})", check_expr_to_sql(inner)),
-        CheckExpr::Sql(sql) => sql.clone(),
+        CheckExpr::Sql(sql) => sql_expr_fragment_to_sql(sql, "FALSE"),
     }
 }
 
@@ -250,7 +261,10 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                     new_type
                 );
                 if let Some(using_expr) = using {
-                    s.push_str(&format!(" USING {}", using_expr));
+                    s.push_str(&format!(
+                        " USING {}",
+                        sql_expr_fragment_to_sql(using_expr, "NULL")
+                    ));
                 }
                 s
             }
@@ -273,7 +287,7 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                     "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
                     table,
                     escape_identifier(column),
-                    expr
+                    sql_expr_fragment_to_sql(expr, "NULL")
                 )
             }
             AlterOp::DropDefault(col) => {
@@ -449,6 +463,63 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("DISABLE ROW LEVEL SECURITY"));
         assert!(stmts[1].contains("NO FORCE ROW LEVEL SECURITY"));
+    }
+
+    #[test]
+    fn test_alter_table_expression_fragments_are_sanitized() {
+        use crate::migrate::alter::TableConstraint;
+        use crate::migrate::schema::CheckExpr;
+        use crate::migrate::types::ColumnType;
+
+        let alter = AlterTable::new("events")
+            .set_default("score", "0; DROP TABLE events; --")
+            .set_type_using(
+                "score",
+                ColumnType::Text,
+                "score::text; DROP TABLE events; --",
+            )
+            .add_constraint(
+                "raw_check",
+                TableConstraint::Check(CheckExpr::Sql(
+                    "score > 0; DROP TABLE events; --".to_string(),
+                )),
+            )
+            .add_constraint(
+                "kind_check",
+                TableConstraint::Check(CheckExpr::In {
+                    column: "kind".to_string(),
+                    values: vec!["O'Brien".to_string()],
+                }),
+            )
+            .add_constraint(
+                "pattern_check",
+                TableConstraint::Check(CheckExpr::Regex {
+                    column: "kind".to_string(),
+                    pattern: "^[a-z']+$".to_string(),
+                }),
+            );
+
+        let stmts = alter_table_sql(&alter);
+        assert_eq!(
+            stmts[0],
+            "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL"
+        );
+        assert_eq!(
+            stmts[1],
+            "ALTER TABLE events ALTER COLUMN score TYPE TEXT USING NULL"
+        );
+        assert_eq!(
+            stmts[2],
+            "ALTER TABLE events ADD CONSTRAINT raw_check CHECK (FALSE)"
+        );
+        assert_eq!(
+            stmts[3],
+            "ALTER TABLE events ADD CONSTRAINT kind_check CHECK (kind IN ('O''Brien'))"
+        );
+        assert_eq!(
+            stmts[4],
+            "ALTER TABLE events ADD CONSTRAINT pattern_check CHECK (kind ~ '^[a-z'']+$')"
+        );
     }
 
     #[test]

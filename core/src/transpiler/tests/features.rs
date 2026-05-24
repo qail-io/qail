@@ -292,6 +292,33 @@ fn test_column_data_type_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_alter_set_default_fragments_are_sanitized() {
+    let safe = Qail {
+        action: Action::AlterSetDefault,
+        table: "events".to_string(),
+        columns: vec![Expr::Named("note".to_string())],
+        payload: Some("'semi;inside'".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        safe.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE events ALTER COLUMN note SET DEFAULT 'semi;inside'"
+    );
+
+    let unsafe_default = Qail {
+        action: Action::AlterSetDefault,
+        table: "events".to_string(),
+        columns: vec![Expr::Named("score".to_string())],
+        payload: Some("0; DROP TABLE events; --".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_default.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL"
+    );
+}
+
+#[test]
 fn test_revoke_sql() {
     let cmd = Qail {
         action: Action::Revoke,

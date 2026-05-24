@@ -2185,6 +2185,37 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_alter_set_default_fragments_are_sanitized() {
+        use qail_core::ast::Expr;
+
+        let safe = Qail {
+            action: Action::AlterSetDefault,
+            table: "events".to_string(),
+            columns: vec![Expr::Named("note".to_string())],
+            payload: Some("'semi;inside'".to_string()),
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&safe).unwrap().0;
+        assert_eq!(
+            sql,
+            "ALTER TABLE events ALTER COLUMN note SET DEFAULT 'semi;inside'"
+        );
+
+        let unsafe_default = Qail {
+            action: Action::AlterSetDefault,
+            table: "events".to_string(),
+            columns: vec![Expr::Named("score".to_string())],
+            payload: Some("0; DROP TABLE events; --".to_string()),
+            ..Default::default()
+        };
+        let sql = AstEncoder::encode_cmd_sql(&unsafe_default).unwrap().0;
+        assert_eq!(
+            sql,
+            "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL"
+        );
+    }
+
+    #[test]
     fn test_encode_savepoint_commands() {
         let savepoint = Qail {
             action: Action::Savepoint,

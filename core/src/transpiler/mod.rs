@@ -401,7 +401,7 @@ impl ToSql for Qail {
                         "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
                         escape_identifier(&self.table),
                         escape_identifier(col),
-                        default_expr
+                        sql_expr_fragment_to_sql(default_expr, "NULL")
                     )
                 } else {
                     format!(
@@ -586,6 +586,65 @@ fn call_target_to_sql(target: &str) -> String {
         }
         None => escape_identifier(target),
         _ => escape_identifier(target),
+    }
+}
+
+fn contains_unquoted_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
+    let expr = expr.trim();
+    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
+        fallback.to_string()
+    } else {
+        expr.replace('\0', "")
     }
 }
 
