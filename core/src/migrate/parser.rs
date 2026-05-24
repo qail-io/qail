@@ -25,7 +25,7 @@ use super::schema::{
 };
 use super::types::ColumnType;
 use crate::ast::Expr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Parse a .qail file into a Schema.
 pub fn parse_qail(input: &str) -> Result<Schema, String> {
@@ -912,6 +912,12 @@ fn parse_enum_values(raw: &str) -> Result<Vec<String>, String> {
     }
 
     push_enum_value(&mut values, &raw[start..])?;
+    let mut seen = HashSet::new();
+    for value in &values {
+        if !seen.insert(value) {
+            return Err(format!("duplicate enum value '{}'", value));
+        }
+    }
     Ok(values)
 }
 
@@ -2426,6 +2432,13 @@ comment on users.name "Full name"
         let input = "enum { active }";
         let err = parse_qail(input).expect_err("missing enum name should fail");
         assert!(err.contains("enum name is missing before '{'"));
+    }
+
+    #[test]
+    fn test_parse_enum_rejects_duplicate_values() {
+        let input = "enum order_status { pending, paid, pending }";
+        let err = parse_qail(input).expect_err("duplicate enum values should fail");
+        assert!(err.contains("duplicate enum value 'pending'"));
     }
 
     #[test]
