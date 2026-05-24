@@ -319,6 +319,42 @@ fn test_alter_set_default_fragments_are_sanitized() {
 }
 
 #[test]
+fn test_view_payload_fragments_are_sanitized() {
+    let safe = Qail {
+        action: Action::CreateView,
+        table: "notes_view".to_string(),
+        payload: Some("SELECT 'semi;inside' AS note".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        safe.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE VIEW notes_view AS SELECT 'semi;inside' AS note"
+    );
+
+    let unsafe_view = Qail {
+        action: Action::CreateView,
+        table: "active_users".to_string(),
+        payload: Some("SELECT id FROM users; DROP TABLE users; --".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_view.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE VIEW active_users AS SELECT NULL WHERE FALSE"
+    );
+
+    let unsafe_materialized = Qail {
+        action: Action::CreateMaterializedView,
+        table: "booking_stats".to_string(),
+        payload: Some("SELECT COUNT(*) FROM bookings; DROP TABLE bookings; --".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_materialized.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE"
+    );
+}
+
+#[test]
 fn test_revoke_sql() {
     let cmd = Qail {
         action: Action::Revoke,

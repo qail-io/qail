@@ -2274,6 +2274,45 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_view_payload_fragments_are_sanitized() {
+        let safe = Qail {
+            action: Action::CreateView,
+            table: "notes_view".to_string(),
+            payload: Some("SELECT 'semi;inside' AS note".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&safe).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE VIEW notes_view AS SELECT 'semi;inside' AS note"
+        );
+        assert!(params.is_empty());
+
+        let unsafe_view = Qail {
+            action: Action::CreateView,
+            table: "active_users".to_string(),
+            payload: Some("SELECT id FROM users; DROP TABLE users; --".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&unsafe_view).unwrap();
+        assert_eq!(sql, "CREATE VIEW active_users AS SELECT NULL WHERE FALSE");
+        assert!(params.is_empty());
+
+        let unsafe_materialized = Qail {
+            action: Action::CreateMaterializedView,
+            table: "booking_stats".to_string(),
+            payload: Some("SELECT COUNT(*) FROM bookings; DROP TABLE bookings; --".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&unsafe_materialized).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn test_encode_create_view_rejects_mutating_source_query() {
         let cmd = Qail {
             action: Action::CreateView,

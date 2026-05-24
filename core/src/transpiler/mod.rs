@@ -150,7 +150,7 @@ impl ToSql for Qail {
                     format!(
                         "CREATE MATERIALIZED VIEW {} AS {}",
                         escape_identifier(&self.table),
-                        query
+                        sql_query_fragment_to_sql(query)
                     )
                 } else {
                     format!(
@@ -238,7 +238,7 @@ impl ToSql for Qail {
                     format!(
                         "CREATE VIEW {} AS {}",
                         escape_identifier(&self.table),
-                        query
+                        sql_query_fragment_to_sql(query)
                     )
                 } else {
                     format!(
@@ -646,6 +646,10 @@ fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
     } else {
         expr.replace('\0', "")
     }
+}
+
+fn sql_query_fragment_to_sql(query: &str) -> String {
+    sql_expr_fragment_to_sql(query, "SELECT NULL WHERE FALSE")
 }
 
 fn is_safe_sql_type_fragment(fragment: &str) -> bool {
