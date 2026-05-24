@@ -210,13 +210,17 @@ fn index_method_to_sql(method: &str) -> Option<&'static str> {
     }
 }
 
-fn index_column_to_sql(column: &str, generator: &dyn SqlGenerator) -> String {
+fn index_column_to_sql(column: &str, generator: &dyn SqlGenerator) -> Result<String, String> {
+    let column = column.trim();
+    if column.is_empty() || column.contains('\0') {
+        return Err("/* ERROR: Invalid index column */".to_string());
+    }
     if is_simple_identifier(column) {
-        generator.quote_identifier(column)
+        Ok(generator.quote_identifier(column))
     } else if contains_unquoted_statement_delimiter(column) {
-        generator.quote_identifier(column)
+        Ok(generator.quote_identifier(column))
     } else {
-        column.trim().to_string()
+        Ok(column.to_string())
     }
 }
 
@@ -638,12 +642,14 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
                 return "/* ERROR: CREATE INDEX requires at least one column */".to_string();
             }
             let unique = if idx.unique { "UNIQUE " } else { "" };
-            let cols = idx
-                .columns
-                .iter()
-                .map(|c| index_column_to_sql(c, generator.as_ref()))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let mut cols = Vec::with_capacity(idx.columns.len());
+            for column in &idx.columns {
+                let Ok(column) = index_column_to_sql(column, generator.as_ref()) else {
+                    return "/* ERROR: Invalid index column */".to_string();
+                };
+                cols.push(column);
+            }
+            let cols = cols.join(", ");
             let mut sql = format!(
                 "CREATE {}INDEX {} ON {}",
                 unique,
@@ -664,6 +670,7 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
             sql.push(')');
             if let Some(where_clause) = &idx.where_clause {
                 if where_clause.trim().is_empty()
+                    || where_clause.contains('\0')
                     || contains_unquoted_statement_delimiter(where_clause)
                 {
                     return "/* ERROR: Invalid index predicate */".to_string();

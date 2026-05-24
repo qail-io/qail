@@ -186,7 +186,13 @@ fn sequence_option_to_sql(opt: &str) -> Option<String> {
     }
 }
 
-fn push_index_column(buf: &mut BytesMut, column: &str) {
+fn push_index_column(buf: &mut BytesMut, column: &str) -> Result<(), crate::protocol::EncodeError> {
+    let column = column.trim();
+    if column.is_empty() || column.contains('\0') {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid index column: {column:?}"
+        )));
+    }
     if column.contains('(') {
         if contains_unquoted_statement_delimiter(column) {
             push_identifier(buf, column);
@@ -196,6 +202,7 @@ fn push_index_column(buf: &mut BytesMut, column: &str) {
     } else {
         push_identifier(buf, column);
     }
+    Ok(())
 }
 
 fn dollar_quote_block(body: &str) -> String {
@@ -842,11 +849,14 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        push_index_column(buf, col);
+        push_index_column(buf, col)?;
     }
     buf.extend_from_slice(b")");
     if let Some(where_clause) = &idx.where_clause {
-        if where_clause.trim().is_empty() || contains_unquoted_statement_delimiter(where_clause) {
+        if where_clause.trim().is_empty()
+            || where_clause.contains('\0')
+            || contains_unquoted_statement_delimiter(where_clause)
+        {
             return Err(crate::protocol::EncodeError::InvalidAst(format!(
                 "invalid index predicate: {where_clause:?}"
             )));

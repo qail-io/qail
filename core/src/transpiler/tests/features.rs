@@ -58,6 +58,23 @@ fn test_index_fragments_validate_method_and_predicate() {
         "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\")"
     );
 
+    let invalid_column = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_bad".to_string(),
+            table: "users".to_string(),
+            columns: vec!["lower(email)\0".to_string()],
+            unique: false,
+            index_type: None,
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_column.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid index column */"
+    );
+
     let invalid_method = Qail {
         action: Action::Index,
         index_def: Some(IndexDef {
@@ -89,6 +106,23 @@ fn test_index_fragments_validate_method_and_predicate() {
     };
     assert_eq!(
         invalid_predicate.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid index predicate */"
+    );
+
+    let invalid_nul_predicate = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_bad".to_string(),
+            table: "users".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            index_type: Some("btree".to_string()),
+            where_clause: Some("active = true\0".to_string()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_nul_predicate.to_sql_with_dialect(Dialect::Postgres),
         "/* ERROR: Invalid index predicate */"
     );
 }

@@ -2080,6 +2080,25 @@ mod tests {
             "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\")"
         );
 
+        let invalid_column = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_bad".to_string(),
+                table: "users".to_string(),
+                columns: vec!["lower(email)\0".to_string()],
+                unique: false,
+                index_type: None,
+                where_clause: None,
+            }),
+            ..Default::default()
+        };
+        let err =
+            AstEncoder::encode_cmd_sql(&invalid_column).expect_err("nul index column must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid index column")),
+            "unexpected error: {err}"
+        );
+
         let invalid_method = Qail {
             action: Action::Index,
             index_def: Some(IndexDef {
@@ -2113,6 +2132,25 @@ mod tests {
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_predicate)
             .expect_err("invalid index predicate must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid index predicate")),
+            "unexpected error: {err}"
+        );
+
+        let invalid_nul_predicate = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_bad".to_string(),
+                table: "users".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                index_type: Some("btree".to_string()),
+                where_clause: Some("active = true\0".to_string()),
+            }),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&invalid_nul_predicate)
+            .expect_err("nul index predicate must fail");
         assert!(
             matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid index predicate")),
             "unexpected error: {err}"
