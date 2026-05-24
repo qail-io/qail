@@ -251,7 +251,7 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let vec_data = read_submessage(&mut buf)?;
-                vector = decode_vectors(vec_data);
+                vector = decode_vectors(vec_data)?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -389,7 +389,7 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let vec_data = read_submessage(&mut buf)?;
-                vector = decode_vectors(vec_data);
+                vector = decode_vectors(vec_data)?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -657,61 +657,75 @@ fn decode_list_values_with_depth(data: &[u8], depth: usize) -> Vec<PayloadValue>
 ///   repeated float data = 1;
 /// }
 /// ```
-fn decode_vectors(data: &[u8]) -> Option<Vec<f32>> {
+fn decode_vectors(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
     let mut buf = data;
 
     while !buf.is_empty() {
-        let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
             1 => {
                 // Vector message
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
+                    skip_field(&mut buf, wire_type)?;
                     continue;
                 }
-                let vec_data = read_submessage(&mut buf).ok()?;
+                let vec_data = read_submessage(&mut buf)?;
                 return decode_vector_data(vec_data);
             }
             _ => {
-                skip_field(&mut buf, wire_type).ok()?;
+                skip_field(&mut buf, wire_type)?;
             }
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// Decode Vector.data (packed repeated float).
-fn decode_vector_data(data: &[u8]) -> Option<Vec<f32>> {
+fn decode_vector_data(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
     let mut buf = data;
 
     while !buf.is_empty() {
-        let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
             1 => {
                 // data (packed repeated float)
                 if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type).ok()?;
+                    skip_field(&mut buf, wire_type)?;
                     continue;
                 }
-                let float_data = read_submessage(&mut buf).ok()?;
+                let float_data = read_submessage(&mut buf)?;
+                if float_data.len() % 4 != 0 {
+                    return Err(QdrantError::Decode(
+                        "Invalid vector data length".to_string(),
+                    ));
+                }
                 // Each f32 = 4 bytes, little-endian
                 let count = float_data.len() / 4;
                 let mut result = Vec::with_capacity(count);
                 for i in 0..count {
                     let offset = i * 4;
-                    let bytes: [u8; 4] = float_data[offset..offset + 4].try_into().ok()?;
-                    result.push(f32::from_le_bytes(bytes));
+                    let bytes: [u8; 4] =
+                        float_data[offset..offset + 4].try_into().map_err(|_| {
+                            QdrantError::Decode("Invalid vector data length".to_string())
+                        })?;
+                    let value = f32::from_le_bytes(bytes);
+                    if !value.is_finite() {
+                        return Err(QdrantError::Decode(
+                            "Invalid non-finite vector value".to_string(),
+                        ));
+                    }
+                    result.push(value);
                 }
-                return Some(result);
+                return Ok(Some(result));
             }
             _ => {
-                skip_field(&mut buf, wire_type).ok()?;
+                skip_field(&mut buf, wire_type)?;
             }
         }
     }
 
-    None
+    Ok(None)
 }
 
 // ============================================================================
@@ -834,6 +848,35 @@ mod tests {
         let point = decode_scored_point(data).unwrap();
         assert_eq!(point.id, PointId::Num(1));
         assert!((point.score - 0.5).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_malformed_vector() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x22, 0x07, // vectors message length
+            0x0A, 0x05, // vector message length
+            0x0A, 0x03, // packed float data length is not divisible by 4
+            0x00, 0x00, 0x00,
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("Invalid vector data length"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_non_finite_vector() {
+        let nan = f32::NAN.to_le_bytes();
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x22, 0x08, // vectors message length
+            0x0A, 0x06, // vector message length
+            0x0A, 0x04, // packed float data length
+            nan[0], nan[1], nan[2], nan[3],
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("non-finite vector value"));
     }
 
     #[test]
