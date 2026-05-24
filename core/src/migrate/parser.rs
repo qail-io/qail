@@ -534,6 +534,9 @@ fn parse_extension(line: &str) -> Result<Extension, String> {
             _ => current.push(ch),
         }
     }
+    if in_quotes {
+        return Err("unterminated quoted extension token".to_string());
+    }
     if !current.is_empty() {
         parts.push(current);
     }
@@ -2017,6 +2020,13 @@ rename users.username -> users.name
         let input = "extension pgcrypto";
         let schema = parse_qail(input).unwrap();
         assert_eq!(schema.extensions[0].name, "pgcrypto");
+    }
+
+    #[test]
+    fn test_parse_extension_rejects_unterminated_quote() {
+        let input = r#"extension "uuid-ossp"#;
+        let err = parse_qail(input).expect_err("unterminated extension quote should fail");
+        assert!(err.contains("unterminated quoted extension token"));
     }
 
     #[test]
