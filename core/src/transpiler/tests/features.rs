@@ -1298,6 +1298,48 @@ fn test_merge_postgres_renders_complex_action_expressions() {
 }
 
 #[test]
+fn test_merge_postgres_sanitizes_raw_expression_fragments() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[(
+            "name",
+            Expr::Named("lower(s.name); DROP TABLE users; --".to_string()),
+        )]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+         WHEN MATCHED THEN UPDATE SET name = \"lower(s\".\"name); DROP TABLE users; --\""
+    );
+}
+
+#[test]
+fn test_merge_postgres_rejects_invalid_cast_target_type() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[(
+            "name",
+            Expr::Cast {
+                expr: Box::new(Expr::Named("s.name".to_string())),
+                target_type: "text; DROP TABLE users; --".to_string(),
+                alias: None,
+            },
+        )]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+         WHEN MATCHED THEN UPDATE SET name = /* ERROR: Invalid cast target type */"
+    );
+}
+
+#[test]
 fn test_merge_postgres_preserves_special_condition_operators() {
     let cmd = Qail::merge_into("users")
         .target_alias("u")

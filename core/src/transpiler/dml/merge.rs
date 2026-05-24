@@ -322,6 +322,9 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
         Expr::Cast {
             expr, target_type, ..
         } => {
+            let Some(target_type) = checked_sql_type_fragment(target_type) else {
+                return "/* ERROR: Invalid cast target type */".to_string();
+            };
             let inner = expr_sql(expr, generator);
             if matches!(expr.as_ref(), Expr::JsonAccess { .. } | Expr::Case { .. }) {
                 format!("({inner})::{target_type}")
@@ -350,6 +353,10 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
 }
 
 fn render_named_expr(name: &str, generator: &dyn SqlGenerator) -> String {
+    if contains_unquoted_statement_delimiter(name) {
+        return generator.quote_identifier(name);
+    }
+
     if name == "*"
         || name.contains('(')
         || name.starts_with('\'')
@@ -365,6 +372,80 @@ fn render_named_expr(name: &str, generator: &dyn SqlGenerator) -> String {
     } else {
         generator.quote_identifier(name)
     }
+}
+
+fn checked_sql_type_fragment(fragment: &str) -> Option<String> {
+    let fragment = fragment.trim();
+    if fragment.is_empty()
+        || fragment.contains('\0')
+        || fragment.contains(';')
+        || fragment.contains('\'')
+        || fragment.contains('"')
+        || fragment.contains("--")
+        || fragment.contains("/*")
+        || fragment.contains("*/")
+        || !fragment.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+                )
+        })
+    {
+        None
+    } else {
+        Some(fragment.to_string())
+    }
+}
+
+fn contains_unquoted_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
 }
 
 fn validate_merge_shape(merge: &Merge) -> Option<String> {
