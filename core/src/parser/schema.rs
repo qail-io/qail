@@ -302,19 +302,36 @@ fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
 /// Parse constraint text until comma or closing paren (handling nested parens)
 fn constraint_text(input: &str) -> IResult<&str, &str> {
     let mut paren_depth = 0;
+    let mut in_single = false;
+    let mut in_double = false;
     let mut end = 0;
+    let mut iter = input.char_indices().peekable();
 
-    for (i, c) in input.char_indices() {
+    while let Some((i, c)) = iter.next() {
         match c {
-            '(' => paren_depth += 1,
-            ')' => {
+            '\'' if !in_double => {
+                if in_single && matches!(iter.peek(), Some((_, '\''))) {
+                    iter.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(iter.peek(), Some((_, '"'))) {
+                    iter.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => paren_depth += 1,
+            ')' if !in_single && !in_double => {
                 if paren_depth == 0 {
                     break; // End at column-level closing paren
                 }
                 paren_depth -= 1;
             }
-            ',' if paren_depth == 0 => break,
-            '\n' | '\r' if paren_depth == 0 => break,
+            ',' if !in_single && !in_double && paren_depth == 0 => break,
+            '\n' | '\r' if !in_single && !in_double && paren_depth == 0 => break,
             _ => {}
         }
         end = i + c.len_utf8();
@@ -328,6 +345,42 @@ fn constraint_text(input: &str) -> IResult<&str, &str> {
     } else {
         Ok((&input[end..], &input[..end]))
     }
+}
+
+fn check_expr_end(rest: &str) -> usize {
+    let mut depth = 1usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut iter = rest.char_indices().peekable();
+
+    while let Some((idx, ch)) = iter.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && matches!(iter.peek(), Some((_, '\''))) {
+                    iter.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && matches!(iter.peek(), Some((_, '"'))) {
+                    iter.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 {
+                    return idx;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    rest.len()
 }
 
 fn starts_constraint_keyword(input: &str) -> bool {
@@ -446,22 +499,7 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
 
         if let Some(idx) = lower.find("check(") {
             let rest = &constraints[idx + 6..];
-            // Find matching closing paren
-            let mut depth = 1;
-            let mut end = rest.len();
-            for (i, c) in rest.char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = i;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            let end = check_expr_end(rest);
             col.check = Some(rest[..end].to_string());
         }
     }
@@ -1102,6 +1140,35 @@ mod tests {
         assert_eq!(
             expires_at.default_value,
             Some("(now() + interval '1 day')".to_string())
+        );
+    }
+
+    #[test]
+    fn test_constraints_handle_quoted_commas_and_parens() {
+        let input = r#"
+            table messages (
+                id uuid primary_key,
+                title text default 'hello, world' not null,
+                tag text check(tag in ('a,b', 'c)')),
+                note text default 'paren ) and comma, still literal'
+            )
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let messages = &schema.tables[0];
+        assert_eq!(messages.columns.len(), 4);
+
+        let title = messages.find_column("title").expect("title not found");
+        assert_eq!(title.default_value, Some("'hello, world'".to_string()));
+        assert!(!title.nullable);
+
+        let tag = messages.find_column("tag").expect("tag not found");
+        assert_eq!(tag.check, Some("tag in ('a,b', 'c)')".to_string()));
+
+        let note = messages.find_column("note").expect("note not found");
+        assert_eq!(
+            note.default_value,
+            Some("'paren ) and comma, still literal'".to_string())
         );
     }
 
