@@ -1465,6 +1465,31 @@ fn parse_function_header(header: &str) -> Result<(String, String, Option<String>
     let volatility =
         volatility_idx.map(|idx| header[words[idx].start..words[idx].end].to_ascii_lowercase());
 
+    let mut covered = vec![false; words.len()];
+    covered[returns_idx] = true;
+    for (idx, word) in words.iter().enumerate() {
+        if word.start >= start && word.end <= end {
+            covered[idx] = true;
+        }
+    }
+    covered[language_idx] = true;
+    if let Some(language_value_idx) = language_idx.checked_add(1)
+        && language_value_idx < covered.len()
+    {
+        covered[language_value_idx] = true;
+    }
+    if let Some(idx) = volatility_idx {
+        covered[idx] = true;
+    }
+    for (idx, word) in words.iter().enumerate() {
+        if !covered[idx] {
+            return Err(format!(
+                "unknown function header token '{}'",
+                &header[word.start..word.end]
+            ));
+        }
+    }
+
     Ok((returns.to_string(), language, volatility))
 }
 
@@ -3171,6 +3196,16 @@ materialized view active_users $$ SELECT 2 $$
             let err = parse_qail(input).expect_err("duplicate function header field should fail");
             assert!(err.contains(expected), "{err}");
         }
+    }
+
+    #[test]
+    fn test_parse_function_rejects_unknown_header_tokens() {
+        let input = "function f() returns int language sql security definer $$ SELECT 1 $$";
+        let err = parse_qail(input).expect_err("unknown function header token should fail");
+        assert!(
+            err.contains("unknown function header token 'security'"),
+            "{err}"
+        );
     }
 
     #[test]
