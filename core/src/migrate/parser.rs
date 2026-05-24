@@ -1232,6 +1232,9 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
         if name.is_empty() {
             return Err("view name is required".to_string());
         }
+        if !is_native_table_ref(name) {
+            return Err(format!("invalid view name '{}'", name));
+        }
         let body = collect_dollar_body(
             &rest[dollar_pos + delimiter.len()..],
             lines,
@@ -3166,6 +3169,16 @@ $qail$
         let input = "view $$ SELECT 1 $$";
         let err = parse_qail(input).expect_err("missing view name should fail");
         assert!(err.contains("view name is required"));
+    }
+
+    #[test]
+    fn test_parse_view_rejects_invalid_name() {
+        let input = "materialized view bad-name $$ SELECT 1 $$";
+        let err = parse_qail(input).expect_err("invalid view name should fail");
+        assert!(err.contains("invalid view name 'bad-name'"));
+
+        parse_qail("view reporting.active_users $$ SELECT 1 $$")
+            .expect("schema-qualified view names should parse");
     }
 
     #[test]
