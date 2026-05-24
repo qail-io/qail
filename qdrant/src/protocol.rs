@@ -362,7 +362,10 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
                         "Invalid score at result index {idx}"
                     ))
                 })?;
-            let payload = item.get("payload").map(parse_payload).unwrap_or_default();
+            let payload = match item.get("payload") {
+                Some(payload) => parse_payload_checked(payload, idx)?,
+                None => crate::point::Payload::new(),
+            };
             let vector = decode_result_vector(item.get("vector"), idx)?;
 
             Ok(ScoredPoint {
@@ -423,17 +426,31 @@ pub fn parse_point_id(value: &JsonValue) -> Option<PointId> {
 
 /// Parse payload from JSON object.
 pub fn parse_payload(value: &JsonValue) -> crate::point::Payload {
+    parse_payload_checked(value, 0).unwrap_or_default()
+}
+
+fn parse_payload_checked(
+    value: &JsonValue,
+    result_idx: usize,
+) -> QdrantResult<crate::point::Payload> {
     let mut payload = crate::point::Payload::new();
 
-    if let Some(obj) = value.as_object() {
-        for (k, v) in obj {
-            if let Some(pv) = json_to_payload_value(v) {
-                payload.insert(k.clone(), pv);
+    match value {
+        JsonValue::Null => Ok(payload),
+        JsonValue::Object(obj) => {
+            for (key, value) in obj {
+                let payload_value = json_to_payload_value_checked(
+                    value,
+                    &format!("result[{result_idx}].payload.{key}"),
+                )?;
+                payload.insert(key.clone(), payload_value);
             }
+            Ok(payload)
         }
+        _ => Err(crate::error::QdrantError::Decode(format!(
+            "Invalid payload object at result index {result_idx}"
+        ))),
     }
-
-    payload
 }
 
 /// Convert PayloadValue to JSON.
@@ -455,29 +472,52 @@ fn payload_value_to_json(value: &PayloadValue) -> JsonValue {
     }
 }
 
-/// Convert JSON to PayloadValue.
-fn json_to_payload_value(value: &JsonValue) -> Option<PayloadValue> {
+fn json_to_payload_value_checked(value: &JsonValue, path: &str) -> QdrantResult<PayloadValue> {
     match value {
-        JsonValue::Null => Some(PayloadValue::Null),
-        JsonValue::Bool(b) => Some(PayloadValue::Bool(*b)),
+        JsonValue::Null => Ok(PayloadValue::Null),
+        JsonValue::Bool(b) => Ok(PayloadValue::Bool(*b)),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Some(PayloadValue::Integer(i))
+                Ok(PayloadValue::Integer(i))
+            } else if let Some(u) = n.as_u64() {
+                let i = i64::try_from(u).map_err(|_| {
+                    crate::error::QdrantError::Decode(format!(
+                        "Payload integer out of range at {path}"
+                    ))
+                })?;
+                Ok(PayloadValue::Integer(i))
             } else {
-                n.as_f64().map(PayloadValue::Float)
+                let f = n
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| {
+                        crate::error::QdrantError::Decode(format!(
+                            "Invalid payload number at {path}"
+                        ))
+                    })?;
+                Ok(PayloadValue::Float(f))
             }
         }
-        JsonValue::String(s) => Some(PayloadValue::String(s.clone())),
+        JsonValue::String(s) => Ok(PayloadValue::String(s.clone())),
         JsonValue::Array(arr) => {
-            let items: Vec<PayloadValue> = arr.iter().filter_map(json_to_payload_value).collect();
-            Some(PayloadValue::List(items))
+            let mut items = Vec::with_capacity(arr.len());
+            for (idx, value) in arr.iter().enumerate() {
+                items.push(json_to_payload_value_checked(
+                    value,
+                    &format!("{path}[{idx}]"),
+                )?);
+            }
+            Ok(PayloadValue::List(items))
         }
         JsonValue::Object(obj) => {
-            let map: std::collections::HashMap<String, PayloadValue> = obj
-                .iter()
-                .filter_map(|(k, v)| json_to_payload_value(v).map(|pv| (k.clone(), pv)))
-                .collect();
-            Some(PayloadValue::Object(map))
+            let mut map = std::collections::HashMap::with_capacity(obj.len());
+            for (key, value) in obj {
+                map.insert(
+                    key.clone(),
+                    json_to_payload_value_checked(value, &format!("{path}.{key}"))?,
+                );
+            }
+            Ok(PayloadValue::Object(map))
         }
     }
 }
@@ -557,6 +597,27 @@ mod tests {
         let err = decode_search_response(bad_vector.as_bytes())
             .expect_err("bad vector should fail closed");
         assert!(err.to_string().contains("Invalid vector value"));
+    }
+
+    #[test]
+    fn decode_search_response_rejects_malformed_payload() {
+        let payload_array = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": ["not", "an", "object"]}
+            ]
+        }"#;
+        let err = decode_search_response(payload_array.as_bytes())
+            .expect_err("payload array should fail closed");
+        assert!(err.to_string().contains("Invalid payload object"));
+
+        let oversized_integer = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {"too_big": 18446744073709551615}}
+            ]
+        }"#;
+        let err = decode_search_response(oversized_integer.as_bytes())
+            .expect_err("payload integer overflow should fail closed");
+        assert!(err.to_string().contains("Payload integer out of range"));
     }
 
     #[test]
