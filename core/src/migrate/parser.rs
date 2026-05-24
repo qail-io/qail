@@ -405,7 +405,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 let (table, column) = inner
                     .split_once('.')
                     .ok_or_else(|| format!("invalid foreign key reference target: {}", s))?;
-                if table.trim().is_empty() || column.trim().is_empty() {
+                if !is_native_table_ref(table.trim()) || !is_native_identifier(column.trim()) {
                     return Err(format!("invalid foreign key reference target: {}", s));
                 }
                 col = col.references(table.trim(), column.trim());
@@ -1696,11 +1696,26 @@ fn parse_fk_reference_target(raw: &str) -> Result<(&str, &str), String> {
 
     let table = raw[..paren_start].trim();
     let column = raw[paren_start + 1..paren_end].trim();
-    if table.is_empty() || column.is_empty() {
+    if !is_native_table_ref(table) || !is_native_identifier(column) {
         return Err(format!("invalid foreign key reference target: {raw}"));
     }
 
     Ok((table, column))
+}
+
+fn is_native_table_ref(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    !first.is_empty() && is_native_identifier(first) && parts.all(is_native_identifier)
+}
+
+fn is_native_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn parse_index_method_str(s: &str) -> Result<IndexMethod, String> {
@@ -3250,6 +3265,33 @@ table orders {
 }
 "#,
                 "invalid foreign key reference target: users()",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users(i-d)
+}
+"#,
+                "invalid foreign key reference target: users(i-d)",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references bad-table(id)
+}
+"#,
+                "invalid foreign key reference target: bad-table(id)",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references(users.i-d)
+}
+"#,
+                "invalid foreign key reference target: references(users.i-d)",
             ),
         ] {
             let err = parse_qail(input).expect_err("invalid foreign key target should fail");
