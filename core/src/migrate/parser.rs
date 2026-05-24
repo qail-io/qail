@@ -1178,6 +1178,11 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     if local_cols.is_empty() || local_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key local columns are required".to_string());
     }
+    for col in &local_cols {
+        if !is_native_identifier(col) {
+            return Err(format!("invalid foreign_key local column '{}'", col));
+        }
+    }
 
     // After first ) find "references"
     let after_locals = rest[local_end + 1..].trim();
@@ -1194,6 +1199,12 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     if ref_table.is_empty() {
         return Err("foreign_key referenced table is required".to_string());
     }
+    if !is_native_table_ref(&ref_table) {
+        return Err(format!(
+            "invalid foreign_key referenced table '{}'",
+            ref_table
+        ));
+    }
     let ref_cols: Vec<String> = ref_part[ref_paren_start + 1..ref_paren_end]
         .split(',')
         .map(|s| s.trim().to_string())
@@ -1204,6 +1215,11 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     }
     if ref_cols.is_empty() || ref_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key referenced columns are required".to_string());
+    }
+    for col in &ref_cols {
+        if !is_native_identifier(col) {
+            return Err(format!("invalid foreign_key referenced column '{}'", col));
+        }
     }
     if local_cols.len() != ref_cols.len() {
         return Err("foreign_key local/ref column counts must match".to_string());
@@ -3124,6 +3140,18 @@ table audits {
             (
                 "table bookings {\n  foreign_key (route_id,) references schedules(id)\n}",
                 "foreign_key local columns are required",
+            ),
+            (
+                "table bookings {\n  foreign_key (route-id) references schedules(id)\n}",
+                "invalid foreign_key local column 'route-id'",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id) references bad-table(id)\n}",
+                "invalid foreign_key referenced table 'bad-table'",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id) references schedules(bad-id)\n}",
+                "invalid foreign_key referenced column 'bad-id'",
             ),
             (
                 "table bookings {\n  foreign_key (route_id, schedule_id) references schedules(id)\n}",
