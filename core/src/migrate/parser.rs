@@ -2514,8 +2514,9 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
             } else {
                 policy.with_check = Some(expr);
             }
+        } else {
+            return Err(format!("Unknown policy continuation line: {}", trimmed));
         }
-        // Unknown indented lines are already consumed above
     }
 
     Ok(policy)
@@ -4673,6 +4674,16 @@ policy docs_select on docs
         assert_eq!(policy.target, PolicyTarget::Select);
         assert_eq!(policy.role.as_deref(), Some("app_user"));
         assert_eq!(policy.permissiveness, PolicyPermissiveness::Restrictive);
+    }
+
+    #[test]
+    fn test_parse_policy_rejects_unknown_continuation_lines() {
+        let input = r#"
+policy docs_select on docs
+  usng $$ true $$
+"#;
+        let err = parse_qail(input).expect_err("unknown policy continuation should fail");
+        assert!(err.contains("Unknown policy continuation line: usng $$ true $$"));
     }
 
     #[test]
