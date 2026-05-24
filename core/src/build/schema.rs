@@ -412,11 +412,13 @@ impl Schema {
                             // Parse "table.column" or ">table.column"
                             let (ref_table, ref_column) =
                                 parse_build_ref_spec(ref_spec, col_name, table_name)?;
-                            current_fks.push(ForeignKey {
-                                column: col_name.to_string(),
+                            push_build_foreign_key(
+                                &mut current_fks,
+                                col_name,
                                 ref_table,
                                 ref_column,
-                            });
+                                table_name,
+                            )?;
                         } else if part == "references" {
                             if i + 1 >= parts.len() {
                                 return Err(format!(
@@ -427,19 +429,23 @@ impl Schema {
                             i += 1;
                             let (ref_table, ref_column) =
                                 parse_build_references_target(parts[i], col_name, table_name)?;
-                            current_fks.push(ForeignKey {
-                                column: col_name.to_string(),
+                            push_build_foreign_key(
+                                &mut current_fks,
+                                col_name,
                                 ref_table,
                                 ref_column,
-                            });
+                                table_name,
+                            )?;
                         } else if let Some(ref_target) = part.strip_prefix("references") {
                             let (ref_table, ref_column) =
                                 parse_build_references_target(ref_target, col_name, table_name)?;
-                            current_fks.push(ForeignKey {
-                                column: col_name.to_string(),
+                            push_build_foreign_key(
+                                &mut current_fks,
+                                col_name,
                                 ref_table,
                                 ref_column,
-                            });
+                                table_name,
+                            )?;
                         } else if matches!(part, "on_delete" | "on_update") {
                             if i + 1 >= parts.len() {
                                 return Err(format!(
@@ -1016,6 +1022,31 @@ fn parse_build_ref_spec(
     }
 
     Ok((ref_table.trim().to_string(), ref_column.trim().to_string()))
+}
+
+fn push_build_foreign_key(
+    foreign_keys: &mut Vec<ForeignKey>,
+    column: &str,
+    ref_table: String,
+    ref_column: String,
+    table_name: &str,
+) -> Result<(), String> {
+    if foreign_keys
+        .iter()
+        .any(|fk| fk.column == column && fk.ref_table == ref_table && fk.ref_column == ref_column)
+    {
+        return Err(format!(
+            "duplicate foreign key '{}.{} -> {}.{}'",
+            table_name, column, ref_table, ref_column
+        ));
+    }
+
+    foreign_keys.push(ForeignKey {
+        column: column.to_string(),
+        ref_table,
+        ref_column,
+    });
+    Ok(())
 }
 
 fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {

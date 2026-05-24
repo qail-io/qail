@@ -168,6 +168,18 @@ table posts {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_foreign_keys() {
+    let content = r#"
+table posts {
+  user_id UUID ref:users.id references users(id)
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("duplicate foreign keys must fail");
+    assert!(err.contains("duplicate foreign key 'posts.user_id -> users.id'"));
+}
+
+#[test]
 fn test_parse_schema_allows_default_expression_options() {
     let content = r#"
 table users {
