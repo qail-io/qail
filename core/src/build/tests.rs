@@ -85,6 +85,18 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_column_without_type() {
+    let content = r#"
+table users {
+  id
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("missing column type must fail");
+    assert!(err.contains("Missing type for column 'id' in table 'users'"));
+}
+
+#[test]
 fn test_parse_schema_rejects_malformed_table_headers() {
     let missing_name = r#"
 table {

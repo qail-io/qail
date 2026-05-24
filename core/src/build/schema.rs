@@ -342,8 +342,13 @@ impl Schema {
                             col_name, table_name
                         ));
                     }
-                    // Second word is the type (default to TEXT if missing)
-                    let col_type_str = parts.get(1).copied().unwrap_or("text");
+                    let table_name = current_table.as_deref().unwrap_or("<unknown>");
+                    let Some(col_type_str) = parts.get(1).copied() else {
+                        return Err(format!(
+                            "Missing type for column '{}' in table '{}'",
+                            col_name, table_name
+                        ));
+                    };
                     let col_type = col_type_str
                         .parse::<ColumnType>()
                         .unwrap_or(ColumnType::Text);
