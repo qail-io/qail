@@ -1132,6 +1132,10 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+    let trailing = ref_part[ref_paren_end + 1..].trim();
+    if !trailing.is_empty() {
+        return Err("trailing content after foreign_key definition".to_string());
+    }
     if ref_cols.is_empty() || ref_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key referenced columns are required".to_string());
     }
@@ -2810,6 +2814,10 @@ table bookings {
             (
                 "table bookings {\n  foreign_key (route_id, schedule_id) references schedules(id)\n}",
                 "foreign_key local/ref column counts must match",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id) references schedules(id) on_delete cascade\n}",
+                "trailing content after foreign_key definition",
             ),
         ] {
             let err = parse_qail(input).expect_err("invalid multi-column fk should fail");
