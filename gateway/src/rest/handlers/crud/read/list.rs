@@ -252,7 +252,6 @@ pub(crate) async fn list_handler(
     let mut strip_nested_parent_key_columns = Vec::new();
 
     // Build Qail AST
-    let page_limit_cap = state.config.max_result_rows.min(1000) as i64;
     let (limit, offset) = params
         .bounded_limit_offset(state.config.max_result_rows)
         .map_err(ApiError::parse_error)?;
@@ -418,7 +417,6 @@ pub(crate) async fn list_handler(
         cmd = cmd.limit(branch_base_fetch_limit(
             offset,
             limit,
-            page_limit_cap,
             state.config.max_result_rows,
         )?);
     } else {
@@ -646,6 +644,14 @@ pub(crate) async fn list_handler(
         Ok(rows) => rows.iter().map(row_to_json).collect(),
         Err(_) => Vec::new(),
     };
+    let mut branch_base_has_more = false;
+    if has_branch {
+        let materialization_cap = state.config.max_result_rows.max(1);
+        if data.len() > materialization_cap {
+            branch_base_has_more = true;
+            data.truncate(materialization_cap);
+        }
+    }
 
     // Branch overlay merge (CoW Read)
     if let Some(branch_name) = branch_ctx.branch_name() {
@@ -668,6 +674,8 @@ pub(crate) async fn list_handler(
                 default_sort_column,
                 offset,
                 limit,
+                base_has_more: branch_base_has_more,
+                materialization_cap: state.config.max_result_rows,
             },
         ) {
             conn.release().await;
@@ -771,6 +779,8 @@ struct BranchReadConstraintInput<'a> {
     default_sort_column: &'a str,
     offset: i64,
     limit: i64,
+    base_has_more: bool,
+    materialization_cap: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -891,6 +901,18 @@ fn apply_branch_read_constraints(
         }
     }
     *data = filtered;
+
+    let required_window =
+        (input.offset.max(0) as usize).saturating_add(input.limit.max(0) as usize);
+    if input.base_has_more && data.len() < required_window {
+        return Err(ApiError::bad_request(
+            "BRANCH_REPLAY_WINDOW_TOO_LARGE",
+            format!(
+                "Branch replay cannot materialize the requested page within configured max_result_rows ({}) after overlay operations",
+                input.materialization_cap.max(1)
+            ),
+        ));
+    }
 
     let sort_keys = branch_sort_keys(input.sort, input.default_sort_column)?;
     let primary_sort = sort_keys.first().ok_or_else(|| {
@@ -1151,12 +1173,10 @@ fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailVa
 fn branch_base_fetch_limit(
     offset: i64,
     requested_limit: i64,
-    page_limit_cap: i64,
     materialization_cap: usize,
 ) -> Result<i64, ApiError> {
     let offset = offset.max(0);
     let requested_limit = requested_limit.max(1);
-    let page_limit_cap = page_limit_cap.max(requested_limit).max(1);
     let materialization_cap = i64::try_from(materialization_cap.max(1)).unwrap_or(i64::MAX);
     let required_window = offset.saturating_add(requested_limit);
     if required_window > materialization_cap {
@@ -1168,9 +1188,7 @@ fn branch_base_fetch_limit(
         ));
     }
 
-    Ok(offset
-        .saturating_add(page_limit_cap)
-        .min(materialization_cap))
+    Ok(materialization_cap.saturating_add(1))
 }
 
 fn row_matches_filters(row: &Value, filters: &[(String, Operator, QailValue)]) -> bool {
@@ -1254,6 +1272,22 @@ mod tests {
         }
     }
 
+    fn branch_constraint_input<'a>() -> BranchReadConstraintInput<'a> {
+        BranchReadConstraintInput {
+            filters: &[],
+            policy_filter_cages: &[],
+            search: None,
+            search_columns: None,
+            cursor: None,
+            sort: None,
+            default_sort_column: "id",
+            offset: 0,
+            limit: 50,
+            base_has_more: false,
+            materialization_cap: 10_000,
+        }
+    }
+
     #[test]
     fn branch_read_constraints_apply_policy_equality_to_overlay_rows() {
         let mut rows = vec![
@@ -1269,15 +1303,8 @@ mod tests {
         apply_branch_read_constraints(
             &mut rows,
             BranchReadConstraintInput {
-                filters: &[],
                 policy_filter_cages: &cages,
-                search: None,
-                search_columns: None,
-                cursor: None,
-                sort: None,
-                default_sort_column: "id",
-                offset: 0,
-                limit: 50,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1346,14 +1373,7 @@ mod tests {
             &mut rows,
             BranchReadConstraintInput {
                 filters: &filters,
-                policy_filter_cages: &[],
-                search: None,
-                search_columns: None,
-                cursor: None,
-                sort: None,
-                default_sort_column: "id",
-                offset: 0,
-                limit: 50,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1382,14 +1402,7 @@ mod tests {
             &mut rows,
             BranchReadConstraintInput {
                 filters: &filters,
-                policy_filter_cages: &[],
-                search: None,
-                search_columns: None,
-                cursor: None,
-                sort: None,
-                default_sort_column: "id",
-                offset: 0,
-                limit: 50,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1415,14 +1428,7 @@ mod tests {
             &mut rows,
             BranchReadConstraintInput {
                 filters: &filters,
-                policy_filter_cages: &[],
-                search: None,
-                search_columns: None,
-                cursor: None,
-                sort: None,
-                default_sort_column: "id",
-                offset: 0,
-                limit: 50,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1440,14 +1446,7 @@ mod tests {
             &mut rows,
             BranchReadConstraintInput {
                 filters: &filters,
-                policy_filter_cages: &[],
-                search: None,
-                search_columns: None,
-                cursor: None,
-                sort: None,
-                default_sort_column: "id",
-                offset: 0,
-                limit: 50,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1473,14 +1472,7 @@ mod tests {
             &mut rows,
             BranchReadConstraintInput {
                 filters: &filters,
-                policy_filter_cages: &[],
-                search: None,
-                search_columns: None,
-                cursor: None,
-                sort: None,
-                default_sort_column: "id",
-                offset: 0,
-                limit: 50,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1499,15 +1491,9 @@ mod tests {
         apply_branch_read_constraints(
             &mut rows,
             BranchReadConstraintInput {
-                filters: &[],
-                policy_filter_cages: &[],
-                search: None,
-                search_columns: None,
-                cursor: None,
                 sort: Some("status:asc,id:desc"),
-                default_sort_column: "id",
-                offset: 0,
                 limit: 2,
+                ..branch_constraint_input()
             },
         )
         .unwrap();
@@ -1522,23 +1508,33 @@ mod tests {
     }
 
     #[test]
-    fn branch_base_fetch_limit_includes_requested_offset_window() {
-        let fetch_limit =
-            branch_base_fetch_limit(1_500, 50, 1_000, 10_000).expect("window fits cap");
+    fn branch_base_fetch_limit_fetches_full_window_with_sentinel() {
+        let fetch_limit = branch_base_fetch_limit(1_500, 50, 10_000).expect("window fits cap");
 
-        assert_eq!(fetch_limit, 2_500);
+        assert_eq!(fetch_limit, 10_001);
     }
 
     #[test]
-    fn branch_base_fetch_limit_preserves_initial_overlay_cushion() {
-        let fetch_limit = branch_base_fetch_limit(0, 50, 1_000, 10_000).expect("window fits cap");
+    fn branch_read_constraints_rejects_truncated_replay_window() {
+        let mut rows = vec![json!({"id": 2})];
 
-        assert_eq!(fetch_limit, 1_000);
+        let err = apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                limit: 2,
+                base_has_more: true,
+                materialization_cap: 2,
+                ..branch_constraint_input()
+            },
+        )
+        .expect_err("short branch replay with more base rows must fail closed");
+
+        assert_eq!(err.code, "BRANCH_REPLAY_WINDOW_TOO_LARGE");
     }
 
     #[test]
     fn branch_base_fetch_limit_rejects_windows_past_materialization_cap() {
-        let err = branch_base_fetch_limit(9_990, 50, 1_000, 10_000)
+        let err = branch_base_fetch_limit(9_990, 50, 10_000)
             .expect_err("branch cannot materialize this requested page exactly");
 
         assert_eq!(err.code, "BRANCH_PAGE_WINDOW_TOO_LARGE");
