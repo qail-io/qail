@@ -1608,12 +1608,16 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
             && chunk[1].eq_ignore_ascii_case("of")
         {
             events.push("UPDATE".to_string());
+            let before_count = update_columns.len();
             let cols = chunk[2..].join(" ");
             for col in cols.split(',') {
                 let c = col.trim();
                 if !c.is_empty() {
                     update_columns.push(c.to_string());
                 }
+            }
+            if update_columns.len() == before_count {
+                return Err("trigger update of requires at least one column".to_string());
             }
             continue;
         }
@@ -3175,6 +3179,13 @@ function normalize_email(email text, fallback text) returns text language sql $$
         let input = "trigger trg_updated_at on users before update execute set_updated_at garbage";
         let err = parse_qail(input).expect_err("trailing trigger content should fail");
         assert!(err.contains("trailing content after trigger function"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_empty_update_of_columns() {
+        let input = "trigger trg_updated_at on users before update of , execute set_updated_at";
+        let err = parse_qail(input).expect_err("empty update-of columns should fail");
+        assert!(err.contains("trigger update of requires at least one column"));
     }
 
     #[test]
