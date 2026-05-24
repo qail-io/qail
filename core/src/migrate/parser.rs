@@ -296,6 +296,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                             col = col.on_update(action);
                             i += 2;
                         }
+                        "on_delete" | "on_update" => {
+                            return Err(format!("{} requires a foreign key action", parts[i + 1]));
+                        }
                         _ => break,
                     }
                 }
@@ -2761,6 +2764,18 @@ table orders {
 "#;
         let err = parse_qail(input).expect_err("unknown foreign key action should fail");
         assert!(err.contains("unknown foreign key action: cascad"));
+    }
+
+    #[test]
+    fn test_parse_fk_rejects_missing_action() {
+        let input = r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users(id) on_delete
+}
+"#;
+        let err = parse_qail(input).expect_err("missing foreign key action should fail");
+        assert!(err.contains("on_delete requires a foreign key action"));
     }
 
     #[test]
