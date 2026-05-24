@@ -17,6 +17,28 @@ fn parse_count_text(raw: Option<String>, label: &str) -> Result<u64> {
         .map_err(|e| anyhow!("Invalid {label} count {:?}: {}", raw, e))
 }
 
+fn required_backup_row_string(row: &qail_pg::PgRow, idx: usize, label: &str) -> Result<String> {
+    row.get_string(idx)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("Missing backup snapshot {}", label))
+}
+
+fn snapshot_json_string(value: &str) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|e| anyhow!("Failed to serialize backup snapshot value: {}", e))
+}
+
+fn snapshot_row_json(row: &qail_pg::PgRow) -> Result<String> {
+    let mut object = serde_json::Map::new();
+    for idx in 0..row.columns.len() {
+        if let Some(text) = row.get_string(idx) {
+            object.insert(format!("col_{}", idx), serde_json::Value::String(text));
+        }
+    }
+    serde_json::to_string(&serde_json::Value::Object(object))
+        .map_err(|e| anyhow!("Failed to serialize backup snapshot row: {}", e))
+}
+
 /// Impact analysis result for a migration command
 #[derive(Debug, Default)]
 pub struct MigrationImpact {
@@ -546,7 +568,7 @@ pub async fn snapshot_column_to_db(
     let mut saved = 0u64;
 
     for row in rows {
-        let row_id = row.get_string(0).unwrap_or_default();
+        let row_id = required_backup_row_string(&row, 0, "row_id")?;
         let value = row.get_string(1);
 
         if let Some(val) = value {
@@ -565,7 +587,7 @@ pub async fn snapshot_column_to_db(
                     table.to_string(),
                     column.to_string(),
                     row_id,
-                    format!("\"{}\"", val.replace('"', "\\\"")), // JSON string
+                    snapshot_json_string(&val)?,
                     SnapshotType::DropColumn.to_string(),
                 ]);
 
@@ -602,15 +624,7 @@ pub async fn snapshot_table_to_db(
     for (idx, row) in rows.iter().enumerate() {
         // Try to get row ID from first column, or use index
         let row_id = row.get_string(0).unwrap_or_else(|| idx.to_string());
-
-        let mut json_parts = Vec::new();
-        for i in 0..20 {
-            // Max 20 columns
-            if let Some(val) = row.get_string(i) {
-                json_parts.push(format!("\"col_{}\": \"{}\"", i, val.replace('"', "\\\"")));
-            }
-        }
-        let value_json = format!("{{{}}}", json_parts.join(", "));
+        let value_json = snapshot_row_json(row)?;
 
         // Insert snapshot record
         let snapshot_cmd = Qail::add("_qail_data_snapshots")
@@ -724,10 +738,11 @@ pub async fn restore_column_from_db(
     let mut restored = 0u64;
 
     for row in rows {
-        let row_id = row.get_string(0).unwrap_or_default();
-        let value_json = row.get_string(1).unwrap_or_default();
+        let row_id = required_backup_row_string(&row, 0, "row_id")?;
+        let value_json = required_backup_row_string(&row, 1, "value_json")?;
 
-        let value = value_json.trim_matches('"').replace("\\\"", "\"");
+        let value = serde_json::from_str::<String>(&value_json)
+            .map_err(|e| anyhow!("Invalid backup snapshot value_json: {}", e))?;
 
         // Update the row
         let update_cmd = Qail::set(table)
@@ -770,9 +785,9 @@ pub async fn list_snapshots(
     let mut results = Vec::new();
 
     for row in rows {
-        let version = row.get_string(0).unwrap_or_default();
-        let table = row.get_string(1).unwrap_or_default();
-        let column = row.get_string(2).unwrap_or_default();
+        let version = required_backup_row_string(&row, 0, "migration_version")?;
+        let table = required_backup_row_string(&row, 1, "table_name")?;
+        let column = required_backup_row_string(&row, 2, "column_name")?;
         let count = parse_count_text(row.get_string(3), "snapshot")?;
 
         results.push((version, table, column, count));
@@ -783,7 +798,10 @@ pub async fn list_snapshots(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_narrowing_type_change, normalize_type_for_cast, parse_count_text};
+    use super::{
+        is_narrowing_type_change, normalize_type_for_cast, parse_count_text,
+        required_backup_row_string, snapshot_json_string, snapshot_row_json,
+    };
 
     #[test]
     fn normalize_type_for_cast_maps_information_schema_names() {
@@ -812,5 +830,45 @@ mod tests {
         assert!(parse_count_text(None, "table row").is_err());
         assert!(parse_count_text(Some("not-a-count".to_string()), "table row").is_err());
         assert!(parse_count_text(Some("-1".to_string()), "table row").is_err());
+    }
+
+    #[test]
+    fn backup_snapshot_metadata_fails_closed() {
+        let missing = qail_pg::PgRow {
+            columns: vec![None],
+            column_info: None,
+        };
+        assert!(required_backup_row_string(&missing, 0, "row_id").is_err());
+
+        let empty = qail_pg::PgRow {
+            columns: vec![Some(b"".to_vec())],
+            column_info: None,
+        };
+        assert!(required_backup_row_string(&empty, 0, "row_id").is_err());
+    }
+
+    #[test]
+    fn backup_snapshot_json_escapes_full_string_content() {
+        let raw = "quote \" slash \\ newline \n tab \t";
+        let encoded = snapshot_json_string(raw).unwrap();
+        let decoded: String = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn backup_table_snapshot_serializes_all_columns_as_json() {
+        let columns = (0..25)
+            .map(|idx| Some(format!("v{}\\", idx).into_bytes()))
+            .collect();
+        let row = qail_pg::PgRow {
+            columns,
+            column_info: None,
+        };
+
+        let encoded = snapshot_row_json(&row).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded["col_0"], "v0\\");
+        assert_eq!(decoded["col_24"], "v24\\");
     }
 }
