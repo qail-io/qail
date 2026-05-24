@@ -38,40 +38,45 @@ impl TransactionSessionManager {
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = Instant::now();
 
+        let mut conn = Some(conn);
         {
             let mut sessions = self.sessions.lock().await;
-            if sessions.len() >= self.max_sessions {
+            let at_capacity = sessions.len() >= self.max_sessions;
+            if !at_capacity {
+                let session = TransactionSession {
+                    conn: conn.take(),
+                    tenant_id,
+                    user_id,
+                    auth_fingerprint,
+                    created_at: now,
+                    last_used: now,
+                    closed: false,
+                    statements_executed: 0,
+                    pg_aborted: false,
+                    mutated_tables: std::collections::HashSet::new(),
+                };
+                sessions.insert(session_id.clone(), Arc::new(Mutex::new(session)));
+                crate::metrics::record_txn_active_sessions(sessions.len());
+            }
+        }
+
+        if let Some(conn) = conn {
+            tracing::warn!(
+                reason = "capacity_guard",
+                session_id = %session_id,
+                "Rejecting transaction session after BEGIN due to session cap race"
+            );
+            crate::metrics::record_txn_forced_rollback("capacity_guard");
+            if let Err(e) = conn.rollback_and_release().await {
                 tracing::warn!(
                     reason = "capacity_guard",
-                    session_id = %session_id,
-                    "Rejecting transaction session after BEGIN due to session cap race"
+                    error = %e,
+                    "Rollback/release failed while rejecting transaction session at capacity"
                 );
-                crate::metrics::record_txn_forced_rollback("capacity_guard");
-                if let Err(e) = conn.rollback_and_release().await {
-                    tracing::warn!(
-                        reason = "capacity_guard",
-                        error = %e,
-                        "Rollback/release failed while rejecting transaction session at capacity"
-                    );
-                }
-                return Err(TransactionError::SessionLimitReached(self.max_sessions));
             }
-
-            let session = TransactionSession {
-                conn: Some(conn),
-                tenant_id,
-                user_id,
-                auth_fingerprint,
-                created_at: now,
-                last_used: now,
-                closed: false,
-                statements_executed: 0,
-                pg_aborted: false,
-                mutated_tables: std::collections::HashSet::new(),
-            };
-            sessions.insert(session_id.clone(), Arc::new(Mutex::new(session)));
-            crate::metrics::record_txn_active_sessions(sessions.len());
+            return Err(TransactionError::SessionLimitReached(self.max_sessions));
         }
+
         crate::metrics::record_txn_session_created();
 
         tracing::info!(session_id = %session_id, "Transaction session created");
