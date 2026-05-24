@@ -569,6 +569,9 @@ impl QdrantDriver {
         must_conditions: &[qail_core::ast::Condition],
         should_groups: &[Vec<qail_core::ast::Condition>],
     ) -> QdrantResult<decoder::ScrollResult> {
+        validate_conditions_finite(must_conditions, "filter condition")?;
+        validate_condition_groups_finite(should_groups, "filter condition")?;
+
         self.buffer.clear();
         encoder::encode_scroll_points_with_filter_grouped_cages_proto(
             &mut self.buffer,
@@ -719,8 +722,9 @@ mod validation_tests {
     use crate::point::{PayloadValue, Point};
 
     use super::{
-        QdrantError, validate_conditions_finite, validate_payload_finite, validate_points_finite,
-        validate_score_threshold, validate_vector_finite,
+        QdrantError, validate_condition_groups_finite, validate_conditions_finite,
+        validate_payload_finite, validate_points_finite, validate_score_threshold,
+        validate_vector_finite,
     };
 
     fn assert_encode_error(result: crate::error::QdrantResult<()>, needle: &str) {
@@ -755,6 +759,21 @@ mod validation_tests {
 
         assert_encode_error(
             validate_conditions_finite(&conditions, "filter condition"),
+            "non-finite float",
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_grouped_filter_values() {
+        let groups = vec![vec![Condition {
+            left: Expr::Named("score".to_string()),
+            op: Operator::Gt,
+            value: Value::Float(f64::INFINITY),
+            is_array_unnest: false,
+        }]];
+
+        assert_encode_error(
+            validate_condition_groups_finite(&groups, "filter condition"),
             "non-finite float",
         );
     }
