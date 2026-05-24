@@ -511,6 +511,18 @@ fn test_alter_set_default_rejects_invalid_fragments() {
         "/* ERROR: Invalid default expression */"
     );
 
+    let unsafe_nul_default = Qail {
+        action: Action::AlterSetDefault,
+        table: "events".to_string(),
+        columns: vec![Expr::Named("score".to_string())],
+        payload: Some("0\0".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_nul_default.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid default expression */"
+    );
+
     let missing_column = Qail {
         action: Action::AlterDropDefault,
         table: "events".to_string(),

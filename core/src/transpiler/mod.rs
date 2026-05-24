@@ -425,6 +425,7 @@ impl ToSql for Qail {
                         .to_string();
                 };
                 if default_expr.trim().is_empty()
+                    || default_expr.contains('\0')
                     || contains_unquoted_statement_delimiter(default_expr)
                 {
                     return "/* ERROR: Invalid default expression */".to_string();

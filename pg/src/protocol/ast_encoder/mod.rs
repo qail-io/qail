@@ -2393,6 +2393,20 @@ mod tests {
             "unexpected error: {err}"
         );
 
+        let unsafe_nul_default = Qail {
+            action: Action::AlterSetDefault,
+            table: "events".to_string(),
+            columns: vec![Expr::Named("score".to_string())],
+            payload: Some("0\0".to_string()),
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&unsafe_nul_default)
+            .expect_err("nul default expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("invalid default expression")),
+            "unexpected error: {err}"
+        );
+
         let missing_column = Qail {
             action: Action::AlterDropDefault,
             table: "events".to_string(),

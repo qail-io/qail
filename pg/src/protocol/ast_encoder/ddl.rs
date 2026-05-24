@@ -1198,7 +1198,10 @@ pub fn encode_alter_set_default(
             "ALTER SET DEFAULT requires a default expression".to_string(),
         ));
     };
-    if default_expr.trim().is_empty() || contains_unquoted_statement_delimiter(default_expr) {
+    if default_expr.trim().is_empty()
+        || default_expr.contains('\0')
+        || contains_unquoted_statement_delimiter(default_expr)
+    {
         return Err(crate::protocol::EncodeError::InvalidAst(format!(
             "invalid default expression: {default_expr:?}"
         )));
