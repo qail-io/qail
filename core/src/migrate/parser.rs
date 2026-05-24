@@ -1407,14 +1407,14 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     }
 
     // Try "left and right"
-    if let Some(and_pos) = s.find(" and ") {
+    if let Some(and_pos) = find_top_level_operator(s, " and ") {
         let left = parse_check_expr_from_qail(&s[..and_pos])?;
         let right = parse_check_expr_from_qail(&s[and_pos + 5..])?;
         return Some(CheckExpr::And(Box::new(left), Box::new(right)));
     }
 
     // Try "left or right"
-    if let Some(or_pos) = s.find(" or ") {
+    if let Some(or_pos) = find_top_level_operator(s, " or ") {
         let left = parse_check_expr_from_qail(&s[..or_pos])?;
         let right = parse_check_expr_from_qail(&s[or_pos + 4..])?;
         return Some(CheckExpr::Or(Box::new(left), Box::new(right)));
@@ -1476,6 +1476,41 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     } else {
         Some(CheckExpr::Sql(s.to_string()))
     }
+}
+
+fn find_top_level_operator(s: &str, operator: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            _ => {
+                if paren_depth == 0 && bracket_depth == 0 && s[idx..].starts_with(operator) {
+                    return Some(idx);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn parse_check_in_expr(s: &str) -> Option<CheckExpr> {
@@ -2363,6 +2398,43 @@ table tickets {
             rendered
                 .contains(r#"status in [draft, "needs review", "card,bank", "quote "" ok", ""]"#)
         );
+    }
+
+    #[test]
+    fn test_parse_check_logical_operators_ignore_quoted_values() {
+        let input = r#"
+table tickets {
+  status text check(status in ["needs and review", ready] and score >= 0)
+  title text check(title ~ 'rock and roll')
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let status_check = &schema.tables["tickets"].columns[0]
+            .check
+            .as_ref()
+            .unwrap()
+            .expr;
+        let CheckExpr::And(left, right) = status_check else {
+            panic!("Expected And, got {status_check:?}");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            CheckExpr::In { values, .. } if values == &["needs and review".to_string(), "ready".to_string()]
+        ));
+        assert!(matches!(
+            right.as_ref(),
+            CheckExpr::GreaterOrEqual { column, value } if column == "score" && *value == 0
+        ));
+
+        let title_check = &schema.tables["tickets"].columns[1]
+            .check
+            .as_ref()
+            .unwrap()
+            .expr;
+        assert!(matches!(
+            title_check,
+            CheckExpr::Sql(sql) if sql == "title ~ 'rock and roll'"
+        ));
     }
 
     #[test]
