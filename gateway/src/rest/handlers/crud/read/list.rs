@@ -154,6 +154,24 @@ pub(super) fn ensure_branch_policy_filter_columns_projected(
     Ok(())
 }
 
+fn apply_list_distinct(
+    mut cmd: qail_core::ast::Qail,
+    distinct: Option<&str>,
+    has_branch: bool,
+) -> Result<(qail_core::ast::Qail, Vec<String>), String> {
+    let Some(distinct) = distinct else {
+        return Ok((cmd, Vec::new()));
+    };
+
+    let cols = parse_identifier_csv(distinct)?;
+    if has_branch {
+        return Ok((cmd, cols));
+    }
+
+    cmd = cmd.distinct_on(cols);
+    Ok((cmd, Vec::new()))
+}
+
 fn nested_parent_key_column_for_relation(
     schema: &crate::schema::SchemaRegistry,
     table_name: &str,
@@ -290,12 +308,10 @@ pub(crate) async fn list_handler(
     }
 
     // Distinct
-    let mut branch_distinct_columns = Vec::new();
-    if let Some(ref distinct) = params.distinct {
-        let cols = parse_identifier_csv(distinct).map_err(ApiError::parse_error)?;
-        branch_distinct_columns = cols.clone();
-        cmd = cmd.distinct_on(cols);
-    }
+    let (next_cmd, branch_distinct_columns) =
+        apply_list_distinct(cmd, params.distinct.as_deref(), has_branch)
+            .map_err(ApiError::parse_error)?;
+    cmd = next_cmd;
 
     // Expand FK relations via LEFT JOIN
     let mut has_joins = false;
@@ -1277,9 +1293,10 @@ fn apply_branch_distinct(data: &mut Vec<Value>, distinct_columns: &[String]) {
 mod tests {
     use super::{
         BranchReadConstraintInput, apply_branch_distinct, apply_branch_read_constraints,
-        branch_base_fetch_limit, branch_projection_columns_from_cmd, encode_ndjson_rows,
-        ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
-        rest_list_cache_key, row_matches_policy_filter_cages, split_expand_relations,
+        apply_list_distinct, branch_base_fetch_limit, branch_projection_columns_from_cmd,
+        encode_ndjson_rows, ensure_nested_parent_key_columns_projected,
+        project_rows_to_selected_columns, rest_list_cache_key, row_matches_policy_filter_cages,
+        split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
@@ -1341,6 +1358,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows, vec![json!({"id": 1, "region": "west"})]);
+    }
+
+    #[test]
+    fn branch_list_distinct_defers_sql_distinct_to_replay() {
+        let cmd = qail_core::ast::Qail::get("orders");
+
+        let (branch_cmd, branch_distinct_columns) =
+            apply_list_distinct(cmd.clone(), Some("status,region"), true).unwrap();
+        assert!(
+            branch_cmd.distinct_on.is_empty(),
+            "branch replay must not let SQL DISTINCT discard runner-up rows before overlay replay"
+        );
+        assert_eq!(branch_distinct_columns, vec!["status", "region"]);
+
+        let (normal_cmd, normal_distinct_columns) =
+            apply_list_distinct(cmd, Some("status,region"), false).unwrap();
+        assert_eq!(
+            normal_cmd.distinct_on,
+            vec![Expr::Named("status".into()), Expr::Named("region".into())]
+        );
+        assert!(normal_distinct_columns.is_empty());
     }
 
     #[test]
