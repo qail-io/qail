@@ -203,7 +203,14 @@ impl Schema {
                     let block = block_content.unwrap_or_default();
                     let tokens = split_resource_tokens(block.trim())?;
                     let mut tokens = tokens.iter();
+                    let mut seen_keys = HashSet::new();
                     while let Some(key) = tokens.next() {
+                        if !seen_keys.insert(key) {
+                            return Err(format!(
+                                "Duplicate resource property '{}' in '{}'",
+                                key, name
+                            ));
+                        }
                         let Some(val) = tokens.next() else {
                             return Err(format!(
                                 "Resource property '{}' in '{}' requires a value",

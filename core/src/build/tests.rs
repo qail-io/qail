@@ -151,6 +151,19 @@ bucket avatars {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_resource_properties() {
+    let content = r#"
+bucket avatars {
+  provider aws
+  provider gcp
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("duplicate resource property must fail");
+    assert!(err.contains("Duplicate resource property 'provider' in 'avatars'"));
+}
+
+#[test]
 fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
     let mut schema = Schema::parse(
         r#"
