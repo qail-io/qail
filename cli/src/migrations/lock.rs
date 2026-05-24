@@ -3,7 +3,6 @@
 use crate::colors::*;
 use crate::util::redact_url;
 use anyhow::{Result, anyhow, bail};
-use qail_core::prelude::Qail;
 use qail_pg::PgDriver;
 use std::time::Instant;
 use tokio::time::{Duration, sleep};
@@ -96,15 +95,12 @@ fn scoped_lock_object_id(lock_scope: Option<&str>) -> i32 {
 }
 
 async fn try_acquire_lock(driver: &mut PgDriver, lock_object_id: i32) -> Result<bool> {
-    let lock_source = format!(
-        "pg_try_advisory_lock({}, {})",
+    let lock_sql = format!(
+        "SELECT pg_try_advisory_lock({}, {})",
         LOCK_CLASS_ID, lock_object_id
     );
-    let lock_cmd = Qail::get(lock_source.as_str())
-        .column("pg_try_advisory_lock")
-        .limit(1);
     let rows = driver
-        .fetch_all(&lock_cmd)
+        .simple_query(&lock_sql)
         .await
         .map_err(|e| anyhow!("Failed to acquire migration advisory lock: {}", e))?;
     Ok(rows.first().and_then(|r| r.get_bool(0)).unwrap_or(false))

@@ -10,7 +10,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{Action, Constraint, Expr, Qail};
+use qail_core::ast::{Action, Constraint, Expr, JoinKind, Qail};
 use qail_pg::driver::PgDriver;
 
 use crate::introspection::{
@@ -758,21 +758,35 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         fk_ref_candidates.entry(fk_name).or_default().push(ref_name);
     }
 
-    let fk_catalog_cmd = Qail::get(
-        "pg_catalog.pg_constraint con \
-         JOIN pg_catalog.pg_class src ON src.oid = con.conrelid \
-         JOIN pg_catalog.pg_class ref ON ref.oid = con.confrelid \
-         JOIN pg_catalog.pg_namespace ns ON ns.oid = con.connamespace",
-    )
-    .columns([
-        "con.conname",
-        "src.relname",
-        "ref.relname",
-        "con.confdeltype",
-        "con.confupdtype",
-    ])
-    .filter("con.contype", Operator::Eq, "f")
-    .filter("ns.nspname", Operator::Eq, "public");
+    let fk_catalog_cmd = Qail::get("pg_catalog.pg_constraint")
+        .table_alias("con")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
+        )
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class ref",
+            "ref.oid",
+            "con.confrelid",
+        )
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_namespace ns",
+            "ns.oid",
+            "con.connamespace",
+        )
+        .columns([
+            "con.conname",
+            "src.relname",
+            "ref.relname",
+            "con.confdeltype",
+            "con.confupdtype",
+        ])
+        .filter("con.contype", Operator::Eq, "f")
+        .filter("ns.nspname", Operator::Eq, "public");
 
     let fk_catalog_rows = driver
         .fetch_all(&fk_catalog_cmd)

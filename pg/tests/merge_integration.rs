@@ -349,7 +349,11 @@ async fn test_merge_cte_query_source_and_returning_against_postgres() -> PgResul
             ],
         );
     cmd.returning = Some(vec![
-        Expr::Named("merge_action()".to_string()),
+        Expr::FunctionCall {
+            name: "merge_action".to_string(),
+            args: vec![],
+            alias: None,
+        },
         Expr::Named(format!("{target}.id")),
     ]);
 

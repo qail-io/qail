@@ -5,7 +5,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{Operator, Qail};
+use qail_core::ast::{JoinKind, Operator, Qail};
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{Deferrable, FkAction};
 use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
@@ -518,26 +518,35 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     // ── 5b. Qualified FK source/reference tables + deferrability ─────────
-    let fk_catalog_cmd = Qail::get(
-        "pg_catalog.pg_constraint con \
-         JOIN pg_catalog.pg_class src ON src.oid = con.conrelid \
-         JOIN pg_catalog.pg_class ref ON ref.oid = con.confrelid",
-    )
-    .columns([
-        "con.conname",
-        "src.relname",
-        "ref.relname",
-        "con.condeferrable",
-        "con.condeferred",
-        "con.confdeltype",
-        "con.confupdtype",
-    ])
-    .filter("con.contype", Operator::Eq, "f")
-    .filter(
-        "con.connamespace",
-        Operator::Eq,
-        public_namespace_oid.clone(),
-    );
+    let fk_catalog_cmd = Qail::get("pg_catalog.pg_constraint")
+        .table_alias("con")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
+        )
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class ref",
+            "ref.oid",
+            "con.confrelid",
+        )
+        .columns([
+            "con.conname",
+            "src.relname",
+            "ref.relname",
+            "con.condeferrable",
+            "con.condeferred",
+            "con.confdeltype",
+            "con.confupdtype",
+        ])
+        .filter("con.contype", Operator::Eq, "f")
+        .filter(
+            "con.connamespace",
+            Operator::Eq,
+            public_namespace_oid.clone(),
+        );
 
     let fk_catalog_rows = driver
         .fetch_all(&fk_catalog_cmd)
@@ -1236,14 +1245,23 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
     }
 
-    let constraint_comment_cmd = Qail::get(
-        "pg_catalog.pg_constraint con \
-         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = con.oid AND d.objsubid = 0",
-    )
-    .columns(["con.conname", "c.relname", "d.description"])
-    .filter("c.relnamespace", Operator::Eq, public_namespace_oid);
+    let constraint_comment_cmd = Qail::get("pg_catalog.pg_constraint")
+        .table_alias("con")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class c",
+            "c.oid",
+            "con.conrelid",
+        )
+        .join(
+            JoinKind::Left,
+            "pg_catalog.pg_description d",
+            "d.objoid",
+            "con.oid",
+        )
+        .columns(["con.conname", "c.relname", "d.description"])
+        .filter("c.relnamespace", Operator::Eq, public_namespace_oid)
+        .filter("d.objsubid", Operator::Eq, 0);
 
     let constraint_comment_rows = driver
         .fetch_all(&constraint_comment_cmd)

@@ -6,7 +6,7 @@ use crate::colors::*;
 use crate::migrations::maybe_failpoint;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::analyzer::{CodebaseScanner, QueryType};
-use qail_core::ast::{Action, Constraint, Expr, JoinKind, Qail};
+use qail_core::ast::{Action, Constraint, Expr, Qail};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -434,15 +434,11 @@ async fn inspect_backfill_pk_kind(
     pk_column: &str,
 ) -> Result<BackfillPkKind> {
     let (schema, table_name) = split_schema_table(table);
-    let cmd = Qail::get("pg_attribute a")
-        .column("format_type(a.atttypid, a.atttypmod) AS typ")
-        .join(JoinKind::Inner, "pg_class c", "c.oid", "a.attrelid")
-        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
-        .where_eq("n.nspname", schema)
-        .where_eq("c.relname", table_name)
-        .where_eq("a.attname", pk_column)
-        .gt("a.attnum", 0)
-        .where_eq("a.attisdropped", false)
+    let cmd = Qail::get("information_schema.columns")
+        .columns(["data_type", "udt_name", "character_maximum_length"])
+        .where_eq("table_schema", schema)
+        .where_eq("table_name", table_name)
+        .where_eq("column_name", pk_column)
         .limit(1);
 
     let rows = pg.fetch_all(&cmd).await.map_err(|e| {
@@ -463,13 +459,42 @@ async fn inspect_backfill_pk_kind(
         );
     };
 
-    let typ = row.get_string(0).unwrap_or_default();
+    let typ = backfill_pk_type_from_information_schema(row).with_context(|| {
+        format!(
+            "Failed to read backfill PK '{}.{}' type metadata",
+            table, pk_column
+        )
+    })?;
     classify_backfill_pk_type(&typ).with_context(|| {
         format!(
             "Unsupported backfill PK '{}.{}' type '{}'",
             table, pk_column, typ
         )
     })
+}
+
+fn backfill_pk_type_from_information_schema(row: &qail_pg::PgRow) -> Result<String> {
+    let data_type = row
+        .get_string(0)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("missing information_schema.columns.data_type"))?;
+    let udt_name = row
+        .get_string(1)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let max_len = row.get_i64(2);
+
+    let normalized = data_type.to_ascii_lowercase();
+    if matches!(normalized.as_str(), "user-defined" | "array") && !udt_name.is_empty() {
+        return Ok(udt_name);
+    }
+    if matches!(normalized.as_str(), "character varying" | "character")
+        && let Some(max_len) = max_len
+    {
+        return Ok(format!("{}({})", normalized, max_len));
+    }
+    Ok(normalized)
 }
 
 async fn update_backfill_checkpoint(

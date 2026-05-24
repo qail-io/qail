@@ -112,6 +112,14 @@ impl PgDriver {
         self.connection.execute_simple(sql).await
     }
 
+    /// Execute trusted administrative SQL and return rows.
+    ///
+    /// This is the row-returning counterpart to `execute_simple`; prefer AST
+    /// APIs for application data access.
+    pub async fn simple_query(&mut self, sql: &str) -> PgResult<Vec<PgRow>> {
+        self.connection.simple_query(sql).await
+    }
+
     // ==================== RLS (MULTI-TENANT) ====================
 
     /// Set the RLS context for multi-tenant data isolation.
