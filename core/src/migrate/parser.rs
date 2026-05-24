@@ -1352,7 +1352,11 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
             }
             continue;
         }
-        events.push(chunk.join(" ").to_uppercase());
+        let event = chunk.join(" ").to_uppercase();
+        if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE" | "TRUNCATE") {
+            return Err(format!("unsupported trigger event: {event}"));
+        }
+        events.push(event);
     }
     if events.is_empty() {
         return Err("trigger requires at least one event".to_string());
@@ -2541,6 +2545,13 @@ $qail$
         let input = "trigger trg_updated_at on users during update execute set_updated_at";
         let err = parse_qail(input).expect_err("invalid trigger timing should fail");
         assert!(err.contains("unsupported trigger timing: DURING"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_invalid_event() {
+        let input = "trigger trg_updated_at on users before banana execute set_updated_at";
+        let err = parse_qail(input).expect_err("invalid trigger event should fail");
+        assert!(err.contains("unsupported trigger event: BANANA"));
     }
 
     #[test]
