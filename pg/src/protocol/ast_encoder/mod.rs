@@ -807,6 +807,18 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_fuzzy_wraps_search_term() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("users").filter("name", Operator::Fuzzy, "john");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(sql, "SELECT * FROM users WHERE name ILIKE '%' || $1 || '%'");
+        assert_eq!(params, vec![Some(b"john".to_vec())]);
+    }
+
+    #[test]
     fn test_encode_rejects_unresolved_positional_parameter() {
         use qail_core::ast::{Operator, Value};
 

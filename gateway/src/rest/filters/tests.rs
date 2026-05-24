@@ -11,6 +11,24 @@ fn test_parse_filters_basic() {
 }
 
 #[test]
+fn test_parse_filters_distinguishes_ilike_and_fuzzy() {
+    let filters = parse_filters("name.ilike=*ferry*&name.not_ilike=*bar*&name=fuzzy.ferry");
+    assert_eq!(filters.len(), 3);
+
+    assert_eq!(filters[0].0, "name");
+    assert!(matches!(filters[0].1, Operator::ILike));
+    assert_eq!(filters[0].2, QailValue::String("%ferry%".to_string()));
+
+    assert_eq!(filters[1].0, "name");
+    assert!(matches!(filters[1].1, Operator::NotILike));
+    assert_eq!(filters[1].2, QailValue::String("%bar%".to_string()));
+
+    assert_eq!(filters[2].0, "name");
+    assert!(matches!(filters[2].1, Operator::Fuzzy));
+    assert_eq!(filters[2].2, QailValue::String("ferry".to_string()));
+}
+
+#[test]
 fn test_parse_identifier_csv_accepts_documented_format() {
     let cols = parse_identifier_csv("name, description ,name").expect("valid CSV identifiers");
     assert_eq!(cols, vec!["name", "description"]);

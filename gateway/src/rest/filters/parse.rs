@@ -321,7 +321,9 @@ fn parse_operator_token(op_str: &str) -> Option<Operator> {
         "lt" => Some(Operator::Lt),
         "lte" | "le" => Some(Operator::Lte),
         "like" => Some(Operator::Like),
-        "ilike" | "fuzzy" => Some(Operator::Fuzzy),
+        "ilike" => Some(Operator::ILike),
+        "not_ilike" | "nilike" => Some(Operator::NotILike),
+        "fuzzy" => Some(Operator::Fuzzy),
         "not_like" => Some(Operator::NotLike),
         "in" => Some(Operator::In),
         "not_in" | "nin" => Some(Operator::NotIn),
@@ -337,9 +339,11 @@ fn parse_filter_value_for_op(op: Operator, decoded_value: &str) -> QailValue {
     match op {
         Operator::IsNull | Operator::IsNotNull => QailValue::Null,
         Operator::In | Operator::NotIn => QailValue::Array(parse_csv_values(decoded_value)),
-        Operator::Like | Operator::Fuzzy | Operator::NotLike => {
-            QailValue::String(normalize_like_pattern(decoded_value))
-        }
+        Operator::Like
+        | Operator::ILike
+        | Operator::NotLike
+        | Operator::NotILike
+        | Operator::Fuzzy => QailValue::String(normalize_like_pattern(decoded_value)),
         _ => parse_scalar_value(decoded_value),
     }
 }

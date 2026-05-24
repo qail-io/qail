@@ -849,7 +849,12 @@ pub fn encode_conditions(
             Operator::Contains => buf.extend_from_slice(b" @> "),
             Operator::ContainedBy => buf.extend_from_slice(b" <@ "),
             Operator::Overlaps => buf.extend_from_slice(b" && "),
-            Operator::Fuzzy => buf.extend_from_slice(b" ILIKE "),
+            Operator::Fuzzy => {
+                buf.extend_from_slice(b" ILIKE '%' || ");
+                encode_value(&cond.value, buf, params)?;
+                buf.extend_from_slice(b" || '%'");
+                continue;
+            }
             Operator::KeyExists => buf.extend_from_slice(b" ? "),
             Operator::KeyExistsAny => buf.extend_from_slice(b" ?| "),
             Operator::KeyExistsAll => buf.extend_from_slice(b" ?& "),
