@@ -19,11 +19,30 @@ fn json_value_to_pk(value: &Value) -> Option<String> {
     }
 }
 
-fn ensure_pk_on_overlay_row(row: &mut Value, pk_column: &str, row_pk: &str) {
+fn ensure_pk_on_overlay_row(
+    row: &mut Value,
+    pk_column: &str,
+    row_pk: &str,
+) -> Result<(), ApiError> {
     if let Some(obj) = row.as_object_mut() {
-        obj.entry(pk_column.to_string())
-            .or_insert_with(|| Value::String(row_pk.to_string()));
+        if let Some(existing) = obj.get(pk_column) {
+            if existing
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| json_value_to_pk(existing))
+                .as_deref()
+                != Some(row_pk)
+            {
+                return Err(ApiError::internal(format!(
+                    "Branch overlay row_data primary key '{}' does not match row_pk '{}'",
+                    pk_column, row_pk
+                )));
+            }
+        } else {
+            obj.insert(pk_column.to_string(), Value::String(row_pk.to_string()));
+        }
     }
+    Ok(())
 }
 
 pub(crate) fn project_rows_to_selected_columns(data: &mut [Value], selected_columns: &[String]) {
@@ -162,8 +181,8 @@ fn upsert_overlay_row(
     row_pk: &str,
     mut row: Value,
     pk_column: &str,
-) {
-    ensure_pk_on_overlay_row(&mut row, pk_column, row_pk);
+) -> Result<(), ApiError> {
+    ensure_pk_on_overlay_row(&mut row, pk_column, row_pk)?;
     if let Some(&idx) = data_map.get(row_pk) {
         data[idx] = row;
         to_delete.remove(&idx);
@@ -172,6 +191,7 @@ fn upsert_overlay_row(
         data.push(row);
         data_map.insert(row_pk.to_string(), idx);
     }
+    Ok(())
 }
 
 fn patch_overlay_row(
@@ -181,7 +201,8 @@ fn patch_overlay_row(
     row_pk: &str,
     mut patch: Value,
     pk_column: &str,
-) {
+) -> Result<(), ApiError> {
+    ensure_pk_on_overlay_row(&mut patch, pk_column, row_pk)?;
     if let Some(&idx) = data_map.get(row_pk) {
         to_delete.remove(&idx);
         let existing = &mut data[idx];
@@ -191,15 +212,14 @@ fn patch_overlay_row(
                 existing_obj.insert(k.clone(), v.clone());
             }
         } else {
-            ensure_pk_on_overlay_row(&mut patch, pk_column, row_pk);
             *existing = patch;
         }
     } else {
         let idx = data.len();
-        ensure_pk_on_overlay_row(&mut patch, pk_column, row_pk);
         data.push(patch);
         data_map.insert(row_pk.to_string(), idx);
     }
+    Ok(())
 }
 
 fn parse_overlay_row_data(row: &qail_pg::PgRow, row_pk: &str) -> Result<Value, ApiError> {
@@ -246,7 +266,7 @@ pub(crate) fn apply_branch_overlay_rows(
         match operation.as_str() {
             "insert" => {
                 let val = parse_overlay_row_data(row, &row_pk)?;
-                upsert_overlay_row(data, &mut data_map, &mut to_delete, &row_pk, val, pk_column);
+                upsert_overlay_row(data, &mut data_map, &mut to_delete, &row_pk, val, pk_column)?;
             }
             "update" => {
                 let new_val = parse_overlay_row_data(row, &row_pk)?;
@@ -257,7 +277,7 @@ pub(crate) fn apply_branch_overlay_rows(
                     &row_pk,
                     new_val,
                     pk_column,
-                );
+                )?;
             }
             "delete" => {
                 if let Some(&idx) = data_map.get(&row_pk) {
@@ -402,7 +422,8 @@ mod tests {
             "order-1",
             json!({"id": "order-1", "status": "draft"}),
             "id",
-        );
+        )
+        .unwrap();
         patch_overlay_row(
             &mut rows,
             &mut data_map,
@@ -410,7 +431,8 @@ mod tests {
             "order-1",
             json!({"status": "submitted"}),
             "id",
-        );
+        )
+        .unwrap();
 
         assert_eq!(rows, vec![json!({"id": "order-1", "status": "submitted"})]);
     }
@@ -429,7 +451,8 @@ mod tests {
             "order-1",
             json!({"id": "order-1", "status": "branch"}),
             "id",
-        );
+        )
+        .unwrap();
 
         assert!(to_delete.contains(&0));
         assert_eq!(rows[1], json!({"id": "order-1", "status": "branch"}));
@@ -546,6 +569,36 @@ mod tests {
         let err = apply_branch_overlay_rows(&overlay_rows, &mut rows, "id").unwrap_err();
         assert_internal_error(err);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn apply_branch_overlay_rows_rejects_insert_pk_drift() {
+        let overlay_rows = vec![overlay_row(
+            Some("order-1"),
+            Some("insert"),
+            Some(r#"{"id":"order-2","status":"draft"}"#),
+        )];
+        let mut rows = Vec::new();
+
+        let err = apply_branch_overlay_rows(&overlay_rows, &mut rows, "id").unwrap_err();
+
+        assert_internal_error(err);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn apply_branch_overlay_rows_rejects_update_pk_drift() {
+        let overlay_rows = vec![overlay_row(
+            Some("order-1"),
+            Some("update"),
+            Some(r#"{"id":"order-2","status":"branch"}"#),
+        )];
+        let mut rows = vec![json!({"id": "order-1", "status": "main"})];
+
+        let err = apply_branch_overlay_rows(&overlay_rows, &mut rows, "id").unwrap_err();
+
+        assert_internal_error(err);
+        assert_eq!(rows, vec![json!({"id": "order-1", "status": "main"})]);
     }
 
     #[test]
