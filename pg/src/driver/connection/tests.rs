@@ -1,7 +1,7 @@
 //! Connection unit tests.
 
-use super::helpers::{md5_password_message, select_scram_mechanism};
-use crate::driver::ScramChannelBindingMode;
+use super::helpers::{md5_password_message, parse_affected_rows, select_scram_mechanism};
+use crate::driver::{PgError, ScramChannelBindingMode};
 #[cfg(unix)]
 use {
     super::types::{PgConnection, StatementCache},
@@ -140,6 +140,36 @@ fn test_select_scram_require_succeeds_with_plus_and_binding() {
     .unwrap();
     assert_eq!(mechanism, "SCRAM-SHA-256-PLUS");
     assert_eq!(selected_binding, Some(binding));
+}
+
+#[test]
+fn test_parse_affected_rows_reads_counted_command_tags() {
+    assert_eq!(parse_affected_rows("INSERT 0 7").unwrap(), 7);
+    assert_eq!(parse_affected_rows("UPDATE 3").unwrap(), 3);
+    assert_eq!(parse_affected_rows("MERGE 2").unwrap(), 2);
+    assert_eq!(parse_affected_rows("COPY 11").unwrap(), 11);
+}
+
+#[test]
+fn test_parse_affected_rows_allows_countless_ddl_tags() {
+    assert_eq!(parse_affected_rows("CREATE TABLE").unwrap(), 0);
+    assert_eq!(parse_affected_rows("ALTER TABLE").unwrap(), 0);
+    assert_eq!(parse_affected_rows("DROP DATABASE").unwrap(), 0);
+}
+
+#[test]
+fn test_parse_affected_rows_rejects_malformed_counted_tags() {
+    let err = parse_affected_rows("UPDATE nope").unwrap_err();
+    assert!(
+        matches!(err, PgError::Protocol(ref msg) if msg.contains("invalid affected row count")),
+        "unexpected error: {err:?}"
+    );
+
+    let err = parse_affected_rows("DELETE").unwrap_err();
+    assert!(
+        matches!(err, PgError::Protocol(ref msg) if msg.contains("missing affected row count")),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[cfg(unix)]

@@ -653,10 +653,8 @@ impl PgDriver {
                 crate::protocol::BackendMessage::DataRow(_) => {}
                 crate::protocol::BackendMessage::NoData => {}
                 crate::protocol::BackendMessage::CommandComplete(tag) => {
-                    if error.is_none()
-                        && let Some(n) = tag.split_whitespace().last()
-                    {
-                        affected = n.parse().unwrap_or(0);
+                    if error.is_none() {
+                        affected = super::parse_affected_rows(&tag)?;
                     }
                 }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {

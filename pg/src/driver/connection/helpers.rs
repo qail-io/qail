@@ -221,11 +221,34 @@ impl Drop for PgConnection {
     }
 }
 
-pub(crate) fn parse_affected_rows(tag: &str) -> u64 {
-    tag.split_whitespace()
-        .last()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+fn command_tag_carries_affected_rows(command: &str) -> bool {
+    matches!(
+        command,
+        "COPY" | "DELETE" | "FETCH" | "INSERT" | "MERGE" | "MOVE" | "SELECT" | "UPDATE"
+    )
+}
+
+pub(crate) fn parse_affected_rows(tag: &str) -> PgResult<u64> {
+    let mut parts = tag.split_whitespace();
+    let Some(command) = parts.next() else {
+        return Ok(0);
+    };
+    if !command_tag_carries_affected_rows(command) {
+        return Ok(0);
+    }
+
+    let Some(count) = parts.last() else {
+        return Err(PgError::Protocol(format!(
+            "CommandComplete tag '{}' missing affected row count",
+            tag
+        )));
+    };
+    count.parse::<u64>().map_err(|_| {
+        PgError::Protocol(format!(
+            "CommandComplete tag '{}' has invalid affected row count",
+            tag
+        ))
+    })
 }
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]

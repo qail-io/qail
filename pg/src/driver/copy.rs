@@ -246,7 +246,7 @@ impl PgConnection {
                     }
                     saw_command_complete = true;
                     if final_error.is_none() {
-                        affected = parse_affected_rows(&tag);
+                        affected = parse_affected_rows(&tag)?;
                     }
                 }
                 BackendMessage::ReadyForQuery(_) => {
@@ -349,7 +349,7 @@ impl PgConnection {
                     }
                     saw_command_complete = true;
                     if final_error.is_none() {
-                        affected = parse_affected_rows(&tag);
+                        affected = parse_affected_rows(&tag)?;
                     }
                 }
                 BackendMessage::ReadyForQuery(_) => {
