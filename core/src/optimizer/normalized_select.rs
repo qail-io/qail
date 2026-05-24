@@ -20,7 +20,7 @@ pub struct NormalizedSelect {
 pub struct NormalizedJoin {
     pub table: String,
     pub kind: JoinKind,
-    pub on: Vec<Condition>,
+    pub on: Option<Vec<Condition>>,
     pub on_true: bool,
 }
 
@@ -135,7 +135,7 @@ impl TryFrom<&Qail> for NormalizedSelect {
             .map(|join| NormalizedJoin {
                 table: join.table.clone(),
                 kind: join.kind.clone(),
-                on: join.on.clone().unwrap_or_default(),
+                on: join.on.clone(),
                 on_true: join.on_true,
             })
             .collect();
@@ -166,9 +166,9 @@ impl NormalizedSelect {
 
         for join in &mut cleaned.joins {
             if join.on_true {
-                join.on.clear();
-            } else {
-                join.on = dedupe_conditions_sorted(std::mem::take(&mut join.on));
+                join.on = None;
+            } else if let Some(on) = &mut join.on {
+                *on = dedupe_conditions_sorted(std::mem::take(on));
             }
         }
 
@@ -235,11 +235,7 @@ impl NormalizedSelect {
                 .map(|join| Join {
                     table: join.table.clone(),
                     kind: join.kind.clone(),
-                    on: if join.on_true {
-                        None
-                    } else {
-                        Some(join.on.clone())
-                    },
+                    on: if join.on_true { None } else { join.on.clone() },
                     on_true: join.on_true,
                 })
                 .collect(),
@@ -520,6 +516,28 @@ mod tests {
             normalize_select(&roundtrip).expect("roundtrip should normalize"),
             normalized
         );
+    }
+
+    #[test]
+    fn normalize_preserves_implicit_join_conditions() {
+        let qail = Qail {
+            action: Action::Get,
+            table: "users".to_string(),
+            joins: vec![Join {
+                table: "posts".to_string(),
+                kind: JoinKind::Left,
+                on: None,
+                on_true: false,
+            }],
+            ..Default::default()
+        };
+
+        let normalized = normalize_select(&qail).expect("implicit joins should normalize");
+        assert_eq!(normalized.joins[0].on, None);
+
+        let cleaned = cleanup_select(&normalized);
+        assert_eq!(cleaned.joins[0].on, None);
+        assert_eq!(cleaned.to_qail().joins[0].on, None);
     }
 
     #[test]
