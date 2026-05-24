@@ -770,6 +770,7 @@ pub fn encode_conditions(
             continue;
         }
 
+        let left_start = buf.len();
         encode_expr(&cond.left, buf)?;
 
         match cond.op {
@@ -866,9 +867,8 @@ pub fn encode_conditions(
             }
             Operator::Exists | Operator::NotExists => {
                 // EXISTS/NOT EXISTS: rewrite as a standalone subquery check.
-                // Truncate the left-side expression that was already written
-                let left_bytes = cond.left.to_string().len();
-                buf.truncate(buf.len() - left_bytes);
+                // Truncate the left-side expression that was already written.
+                buf.truncate(left_start);
                 // Remove the preceding " AND " if this isn't the first condition
                 if i > 0 {
                     // " AND " was already written before encode_expr
@@ -913,9 +913,7 @@ pub fn encode_conditions(
                 // We need to wrap it. Since encode_expr already wrote, we'll
                 // rewrite by clearing and rebuilding this condition.
 
-                // Calculate how much to remove (the left-side column name)
-                let left_bytes = col_str.len();
-                buf.truncate(buf.len() - left_bytes);
+                buf.truncate(left_start);
 
                 // Write the full tsvector expression
                 buf.extend_from_slice(b"to_tsvector('english', ");
@@ -1214,5 +1212,33 @@ mod tests {
         );
         assert_eq!(params.len(), 2);
         assert_eq!(params[1].as_deref(), Some(b"tenant-b".as_slice()));
+    }
+
+    #[test]
+    fn encode_exists_ignores_left_expr_without_truncation_panic() {
+        let subquery = Qail::get("users").column("id");
+        let cond = Condition {
+            left: Expr::Aliased {
+                name: "ignored".to_string(),
+                alias: "display_is_longer_than_encoded".to_string(),
+            },
+            op: Operator::Exists,
+            value: Value::Subquery(Box::new(subquery)),
+            is_array_unnest: false,
+        };
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        encode_conditions(&[cond], &mut sql, &mut params).unwrap();
+
+        let sql = String::from_utf8(sql.to_vec()).unwrap();
+        assert!(
+            sql.starts_with("EXISTS ("),
+            "expected clean EXISTS SQL: {sql}"
+        );
+        assert!(
+            !sql.contains("ignored"),
+            "EXISTS left expression should not leak into SQL: {sql}"
+        );
     }
 }
