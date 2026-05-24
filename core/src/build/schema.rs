@@ -258,7 +258,9 @@ impl Schema {
             if current_table.is_none()
                 && let Some(view_name) = extract_view_name(line)
             {
-                schema.views.insert(view_name.to_string());
+                if !schema.views.insert(view_name.to_string()) {
+                    return Err(format!("duplicate view declaration '{}'", view_name));
+                }
                 continue;
             }
 

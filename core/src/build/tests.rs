@@ -109,6 +109,21 @@ $$
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_views() {
+    let content = r#"
+view v_users $$
+SELECT 1
+$$
+
+materialized view v_users $$
+SELECT 2
+$$
+"#;
+    let err = Schema::parse(content).expect_err("duplicate view must fail");
+    assert!(err.contains("duplicate view declaration 'v_users'"));
+}
+
+#[test]
 fn test_parse_schema_consumes_multiline_resource_blocks() {
     let content = r#"
 bucket avatars {
