@@ -1402,6 +1402,32 @@ fn test_merge_postgres_fuzzy_fallback_escapes_rendered_value() {
 }
 
 #[test]
+fn test_merge_postgres_parameterized_fuzzy_binds_named_param() {
+    use crate::transpiler::ToSqlParameterized;
+
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.name".to_string()),
+                op: Operator::Fuzzy,
+                value: Value::NamedParam("term".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let result = cmd.to_sql_parameterized();
+    assert!(
+        result.sql.contains("users.name ILIKE '%' || $1 || '%'"),
+        "sql={}",
+        result.sql
+    );
+    assert_eq!(result.named_params, vec!["term"]);
+}
+
+#[test]
 fn test_merge_postgres_json_path_escapes_literal() {
     let cmd = Qail::merge_into("users")
         .using_table_as("staging_users", "s")

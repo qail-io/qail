@@ -250,6 +250,10 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
             let placeholder = generator.placeholder(*index);
             generator.string_concat(&["'%'", &placeholder, "'%'"])
         }
+        Value::NamedParam(name) => {
+            let placeholder = format!(":{}", name);
+            generator.string_concat(&["'%'", &placeholder, "'%'"])
+        }
         value => format!(
             "'%{}%'",
             escape_sql_string_literal(&value_sql(value, generator))
