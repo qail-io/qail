@@ -1401,6 +1401,11 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
         });
     }
 
+    // Try "col in [a, b, \"c,d\"]"
+    if let Some(expr) = parse_check_in_expr(s) {
+        return Some(expr);
+    }
+
     // Try "left and right"
     if let Some(and_pos) = s.find(" and ") {
         let left = parse_check_expr_from_qail(&s[..and_pos])?;
@@ -1471,6 +1476,58 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     } else {
         Some(CheckExpr::Sql(s.to_string()))
     }
+}
+
+fn parse_check_in_expr(s: &str) -> Option<CheckExpr> {
+    let marker = " in [";
+    let pos = s.find(marker)?;
+    let column = s[..pos].trim();
+    if column.is_empty() {
+        return None;
+    }
+
+    let values_start = pos + marker.len();
+    let values_raw = list_body_before_closing_bracket(&s[values_start..])?;
+    let values = parse_enum_values(values_raw).ok()?;
+    if values.is_empty() {
+        return None;
+    }
+
+    Some(CheckExpr::In {
+        column: column.to_string(),
+        values,
+    })
+}
+
+fn list_body_before_closing_bracket(raw: &str) -> Option<&str> {
+    let mut quote: Option<char> = None;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ']' => {
+                if raw[idx + ch.len_utf8()..].trim().is_empty() {
+                    return Some(&raw[..idx]);
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Parse an infrastructure resource declaration.
@@ -2260,6 +2317,52 @@ table products {
         };
         assert_eq!(column, "score");
         assert_eq!(*value, 0);
+    }
+
+    #[test]
+    fn test_parse_check_in_round_trips_quoted_values() {
+        let input = r#"
+table tickets {
+  status text check(status in [draft, "needs review", "card,bank", "quote "" ok", ""])
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["tickets"].columns[0];
+        let CheckExpr::In { column, values } = &col.check.as_ref().unwrap().expr else {
+            panic!("Expected In, got {:?}", col.check);
+        };
+
+        assert_eq!(column, "status");
+        assert_eq!(
+            values,
+            &[
+                "draft".to_string(),
+                "needs review".to_string(),
+                "card,bank".to_string(),
+                "quote \" ok".to_string(),
+                String::new(),
+            ]
+        );
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        let reparsed = parse_qail(&rendered).unwrap();
+        let CheckExpr::In {
+            column: reparsed_column,
+            values: reparsed_values,
+        } = &reparsed.tables["tickets"].columns[0]
+            .check
+            .as_ref()
+            .unwrap()
+            .expr
+        else {
+            panic!("Expected reparsed In");
+        };
+        assert_eq!(reparsed_column, column);
+        assert_eq!(reparsed_values, values);
+        assert!(
+            rendered
+                .contains(r#"status in [draft, "needs review", "card,bank", "quote "" ok", ""]"#)
+        );
     }
 
     #[test]

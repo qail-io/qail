@@ -1288,6 +1288,23 @@ fn fk_action_str(action: &FkAction) -> &'static str {
     }
 }
 
+fn format_qail_value_token(value: &str, extra_special: &[char]) -> String {
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, ',' | '\'' | '"') || extra_special.contains(&ch)
+        });
+
+    if needs_quotes {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_check_in_value(value: &str) -> String {
+    format_qail_value_token(value, &['[', ']'])
+}
+
 /// Serialize CheckExpr to QAIL check syntax
 fn check_expr_str(expr: &CheckExpr) -> String {
     match expr {
@@ -1296,8 +1313,18 @@ fn check_expr_str(expr: &CheckExpr) -> String {
         CheckExpr::LessThan { column, value } => format!("{} < {}", column, value),
         CheckExpr::LessOrEqual { column, value } => format!("{} <= {}", column, value),
         CheckExpr::Between { column, low, high } => format!("{} between {} {}", column, low, high),
-        CheckExpr::In { column, values } => format!("{} in [{}]", column, values.join(", ")),
-        CheckExpr::Regex { column, pattern } => format!("{} ~ '{}'", column, pattern),
+        CheckExpr::In { column, values } => format!(
+            "{} in [{}]",
+            column,
+            values
+                .iter()
+                .map(|value| format_check_in_value(value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        CheckExpr::Regex { column, pattern } => {
+            format!("{} ~ '{}'", column, pattern.replace('\'', "''"))
+        }
         CheckExpr::MaxLength { column, max } => format!("length({}) <= {}", column, max),
         CheckExpr::MinLength { column, min } => format!("length({}) >= {}", column, min),
         CheckExpr::NotNull { column } => format!("{} not_null", column),
@@ -1309,16 +1336,7 @@ fn check_expr_str(expr: &CheckExpr) -> String {
 }
 
 fn format_enum_value(value: &str) -> String {
-    let needs_quotes = value.is_empty()
-        || value
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, ',' | '{' | '}' | '\'' | '"'));
-
-    if needs_quotes {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
+    format_qail_value_token(value, &['{', '}'])
 }
 
 fn dollar_quote_qail_body(body: &str) -> String {
