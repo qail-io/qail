@@ -421,7 +421,7 @@ fn parenthesized_content(input: &str) -> IResult<&str, &str> {
     )))
 }
 
-fn split_top_level_csv(input: &str) -> Vec<String> {
+fn split_top_level_csv(input: &str) -> Result<Vec<String>, ()> {
     let mut parts = Vec::new();
     let mut start = 0usize;
     let mut paren_depth = 0usize;
@@ -446,24 +446,37 @@ fn split_top_level_csv(input: &str) -> Vec<String> {
                 }
             }
             '(' if !in_single && !in_double => paren_depth += 1,
-            ')' if !in_single && !in_double && paren_depth > 0 => paren_depth -= 1,
+            ')' if !in_single && !in_double => {
+                if paren_depth == 0 {
+                    return Err(());
+                }
+                paren_depth -= 1;
+            }
             ',' if !in_single && !in_double && paren_depth == 0 => {
                 let part = input[start..idx].trim();
-                if !part.is_empty() {
-                    parts.push(part.to_string());
+                if part.is_empty() {
+                    return Err(());
                 }
+                parts.push(part.to_string());
                 start = idx + ch.len_utf8();
             }
             _ => {}
         }
     }
 
+    if in_single || in_double || paren_depth != 0 {
+        return Err(());
+    }
     let part = input[start..].trim();
-    if !part.is_empty() {
+    if part.is_empty() {
+        if !input.trim().is_empty() {
+            return Err(());
+        }
+    } else {
         parts.push(part.to_string());
     }
 
-    parts
+    Ok(parts)
 }
 
 fn starts_constraint_keyword(input: &str) -> bool {
@@ -987,7 +1000,18 @@ fn parse_index(input: &str) -> IResult<&str, IndexDef> {
     let (input, _) = nom_ws0(input)?;
     let (input, unique_tag) = opt(tag_no_case("unique")).parse(input)?;
 
-    let columns = split_top_level_csv(cols_str);
+    let columns = split_top_level_csv(cols_str).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(
+            cols_str,
+            nom::error::ErrorKind::SeparatedList,
+        ))
+    })?;
+    if columns.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            cols_str,
+            nom::error::ErrorKind::SeparatedList,
+        )));
+    }
 
     let is_unique = unique_tag.is_some();
 
@@ -1312,6 +1336,22 @@ mod tests {
             index.to_sql(),
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_search ON docs (regexp_replace(title, ')', '', 'g'), lower(slug))"
         );
+    }
+
+    #[test]
+    fn test_index_rejects_empty_columns() {
+        for input in [
+            "index idx_docs_search on docs ()",
+            "index idx_docs_search on docs (title,)",
+            "index idx_docs_search on docs (,title)",
+            "index idx_docs_search on docs (title,,slug)",
+        ] {
+            let err = Schema::parse(input).expect_err("empty index columns should fail");
+            assert!(
+                err.contains("Parse error") || err.contains("Unexpected content"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
