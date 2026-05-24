@@ -223,6 +223,153 @@ fn call_target_to_sql(target: &str) -> String {
     }
 }
 
+fn is_safe_sql_type_fragment(fragment: &str) -> bool {
+    let fragment = fragment.trim();
+    !fragment.is_empty()
+        && !fragment.contains('\0')
+        && !fragment.contains(';')
+        && !fragment.contains('\'')
+        && !fragment.contains('"')
+        && !fragment.contains("--")
+        && !fragment.contains("/*")
+        && !fragment.contains("*/")
+        && fragment.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+                )
+        })
+}
+
+fn sql_type_fragment_to_sql(fragment: &str, fallback: &str) -> String {
+    let fragment = fragment.trim();
+    if is_safe_sql_type_fragment(fragment) {
+        fragment.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn volatility_to_sql(volatility: &str) -> Option<&'static str> {
+    match volatility.trim().to_ascii_uppercase().as_str() {
+        "VOLATILE" => Some("VOLATILE"),
+        "STABLE" => Some("STABLE"),
+        "IMMUTABLE" => Some("IMMUTABLE"),
+        _ => None,
+    }
+}
+
+fn function_arg_to_sql(arg: &str) -> Option<String> {
+    let arg = arg.trim();
+    if !is_safe_sql_type_fragment(arg) {
+        return None;
+    }
+
+    let mut parts = arg.split_whitespace().collect::<Vec<_>>();
+    if parts.is_empty() {
+        return None;
+    }
+    if parts.len() == 1 {
+        return Some(parts[0].to_string());
+    }
+
+    let mode = match parts[0].to_ascii_uppercase().as_str() {
+        "IN" | "OUT" | "INOUT" | "VARIADIC" => Some(parts.remove(0).to_ascii_uppercase()),
+        _ => None,
+    };
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let name = escape_identifier(parts.remove(0));
+    let type_fragment = parts.join(" ");
+    if !is_safe_sql_type_fragment(&type_fragment) {
+        return None;
+    }
+
+    let mut rendered = String::new();
+    if let Some(mode) = mode {
+        rendered.push_str(&mode);
+        rendered.push(' ');
+    }
+    rendered.push_str(&name);
+    rendered.push(' ');
+    rendered.push_str(type_fragment.trim());
+    Some(rendered)
+}
+
+fn function_args_to_sql(args: &[String]) -> String {
+    args.iter()
+        .filter_map(|arg| function_arg_to_sql(arg))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn split_top_level_args(args: &str) -> Option<Vec<&str>> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    for (idx, ch) in args.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                result.push(args[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let tail = args[start..].trim();
+    if !tail.is_empty() {
+        result.push(tail);
+    }
+    Some(result)
+}
+
+fn function_signature_to_sql(signature: &str) -> String {
+    let signature = signature.trim().trim_end_matches(';').trim();
+    if signature.is_empty()
+        || signature.contains('\0')
+        || signature.contains(';')
+        || signature.contains("--")
+        || signature.contains("/*")
+        || signature.contains("*/")
+    {
+        return escape_identifier(signature);
+    }
+
+    match signature.split_once('(') {
+        Some((name, args)) if args.ends_with(')') => {
+            let args = &args[..args.len() - 1];
+            let Some(parts) = split_top_level_args(args) else {
+                return escape_identifier(signature);
+            };
+            let mut rendered_args = Vec::new();
+            for part in parts {
+                if part.is_empty() {
+                    continue;
+                }
+                if !is_safe_sql_type_fragment(part) {
+                    return escape_identifier(signature);
+                }
+                rendered_args.push(part.trim().to_string());
+            }
+            format!(
+                "{}({})",
+                escape_identifier(name.trim()),
+                rendered_args.join(", ")
+            )
+        }
+        None => escape_identifier(signature),
+        _ => escape_identifier(signature),
+    }
+}
+
 fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
     match constraint {
         TableConstraint::Unique(cols) => {
@@ -987,20 +1134,21 @@ pub fn encode_create_function(
     };
 
     let lang = func.language.as_deref().unwrap_or("plpgsql");
-    let args = func.args.join(", ");
+    let args = function_args_to_sql(&func.args);
     buf.extend_from_slice(b"CREATE OR REPLACE FUNCTION ");
     push_identifier(buf, &func.name);
     buf.extend_from_slice(b"(");
     buf.extend_from_slice(args.as_bytes());
     buf.extend_from_slice(b") RETURNS ");
-    buf.extend_from_slice(func.returns.as_bytes());
+    buf.extend_from_slice(sql_type_fragment_to_sql(&func.returns, "void").as_bytes());
     buf.extend_from_slice(b" LANGUAGE ");
     buf.extend_from_slice(escape_identifier(lang).as_bytes());
     if let Some(volatility) = &func.volatility
         && !volatility.trim().is_empty()
+        && let Some(volatility) = volatility_to_sql(volatility)
     {
         buf.extend_from_slice(b" ");
-        buf.extend_from_slice(volatility.trim().to_ascii_uppercase().as_bytes());
+        buf.extend_from_slice(volatility.as_bytes());
     }
     buf.extend_from_slice(b" AS ");
     buf.extend_from_slice(dollar_quote_block(&func.body).as_bytes());
@@ -1011,7 +1159,7 @@ pub fn encode_create_function(
 pub fn encode_drop_function(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP FUNCTION IF EXISTS ");
     if let Some(signature) = &cmd.payload {
-        buf.extend_from_slice(signature.as_bytes());
+        buf.extend_from_slice(function_signature_to_sql(signature).as_bytes());
     } else {
         push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b"()");

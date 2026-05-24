@@ -160,6 +160,50 @@ fn test_create_function_with_args_sql() {
 }
 
 #[test]
+fn test_function_definition_fragments_are_sanitized() {
+    let cmd = Qail {
+        action: Action::CreateFunction,
+        function_def: Some(FunctionDef {
+            name: "notice_boom".to_string(),
+            args: vec![
+                "v int); DROP TABLE users; --".to_string(),
+                "amount numeric(10,2)".to_string(),
+                "OUT result text".to_string(),
+            ],
+            returns: "int; DROP TABLE users".to_string(),
+            body: "BEGIN RETURN; END;".to_string(),
+            language: Some("plpgsql".to_string()),
+            volatility: Some("stable; DROP TABLE users".to_string()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE OR REPLACE FUNCTION notice_boom(amount numeric(10,2), OUT result text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END; $$"
+    );
+
+    let valid_drop = Qail {
+        action: Action::DropFunction,
+        payload: Some("public.cleanup(numeric(10,2), text)".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        valid_drop.to_sql_with_dialect(Dialect::Postgres),
+        "DROP FUNCTION IF EXISTS public.cleanup(numeric(10,2), text)"
+    );
+
+    let malicious_drop = Qail {
+        action: Action::DropFunction,
+        payload: Some("public.cleanup(int); DROP TABLE users; --".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        malicious_drop.to_sql_with_dialect(Dialect::Postgres),
+        "DROP FUNCTION IF EXISTS public.\"cleanup(int); DROP TABLE users; --\""
+    );
+}
+
+#[test]
 fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
     let do_cmd = Qail {
         action: Action::Do,
