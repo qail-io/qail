@@ -3,6 +3,7 @@
 use super::scanner::*;
 use super::schema::*;
 use super::validate::*;
+use crate::migrate::types::ColumnType;
 
 #[test]
 fn test_parse_schema() {
@@ -94,6 +95,41 @@ table users {
 
     let err = Schema::parse(content).expect_err("missing column type must fail");
     assert!(err.contains("Missing type for column 'id' in table 'users'"));
+}
+
+#[test]
+fn test_parse_schema_rejects_unknown_column_type() {
+    let content = r#"
+table users {
+  id UUUD
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("unknown column type must fail");
+    assert!(err.contains("Unknown column type 'UUUD' for column 'id' in table 'users'"));
+}
+
+#[test]
+fn test_parse_schema_supports_declared_enum_column_type() {
+    let content = r#"
+enum ticket_status { draft, active, cancelled }
+
+table tickets {
+  id UUID
+  status ticket_status
+}
+"#;
+
+    let schema = Schema::parse(content).expect("declared enum type should parse");
+    let status = schema
+        .table("tickets")
+        .and_then(|table| table.column_type("status"))
+        .expect("status column should exist");
+    let ColumnType::Enum { name, values } = status else {
+        panic!("expected enum column type, got {:?}", status);
+    };
+    assert_eq!(name, "ticket_status");
+    assert_eq!(values, &["draft", "active", "cancelled"]);
 }
 
 #[test]

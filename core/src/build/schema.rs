@@ -154,6 +154,7 @@ impl Schema {
         let mut current_policies: HashMap<String, String> = HashMap::new();
         let mut current_fks: Vec<ForeignKey> = Vec::new();
         let mut current_rls_flag = false;
+        let mut enum_types: HashMap<String, Vec<String>> = HashMap::new();
 
         let mut lines = content.lines().peekable();
         while let Some(raw_line) = lines.next() {
@@ -161,6 +162,14 @@ impl Schema {
 
             // Skip comments and empty lines
             if line.is_empty() {
+                continue;
+            }
+
+            if current_table.is_none() && line.starts_with("enum ") {
+                let (name, values) = parse_build_enum_declaration(line, &mut lines)?;
+                if enum_types.insert(name.clone(), values).is_some() {
+                    return Err(format!("duplicate enum declaration '{}'", name));
+                }
                 continue;
             }
 
@@ -349,9 +358,22 @@ impl Schema {
                             col_name, table_name
                         ));
                     };
-                    let col_type = col_type_str
-                        .parse::<ColumnType>()
-                        .unwrap_or(ColumnType::Text);
+                    let col_type = match col_type_str.parse::<ColumnType>() {
+                        Ok(col_type) => col_type,
+                        Err(_) => {
+                            if let Some(values) = enum_types.get(col_type_str) {
+                                ColumnType::Enum {
+                                    name: col_type_str.to_string(),
+                                    values: values.clone(),
+                                }
+                            } else {
+                                return Err(format!(
+                                    "Unknown column type '{}' for column '{}' in table '{}'",
+                                    col_type_str, col_name, table_name
+                                ));
+                            }
+                        }
+                    };
                     current_columns.insert(col_name.to_string(), col_type);
 
                     // Check for policies and foreign keys
@@ -728,6 +750,150 @@ impl Schema {
 
         changes
     }
+}
+
+fn parse_build_enum_declaration<'a, I: Iterator<Item = &'a str>>(
+    first_line: &str,
+    lines: &mut std::iter::Peekable<I>,
+) -> Result<(String, Vec<String>), String> {
+    let rest = first_line
+        .strip_prefix("enum ")
+        .ok_or_else(|| "Expected 'enum' prefix".to_string())?
+        .trim();
+    let (name, body_start) = rest
+        .split_once('{')
+        .ok_or_else(|| "enum definition requires { values }".to_string())?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("enum name is missing before '{'".to_string());
+    }
+
+    let mut body = body_start.to_string();
+    while build_enum_body_before_closing_brace(&body)?.is_none() {
+        let Some(next_line) = lines.next() else {
+            return Err(format!("enum '{}' is missing closing '}}'", name));
+        };
+        let inner = strip_schema_comments(next_line);
+        body.push(' ');
+        body.push_str(inner);
+    }
+
+    let body = build_enum_body_before_closing_brace(&body)?
+        .ok_or_else(|| format!("enum '{}' is missing closing '}}'", name))?;
+    let values = parse_build_enum_values(body)?;
+    if values.is_empty() {
+        return Err(format!("enum '{}' must have at least one value", name));
+    }
+
+    Ok((name.to_string(), values))
+}
+
+fn build_enum_body_before_closing_brace(raw: &str) -> Result<Option<&str>, String> {
+    let mut quote: Option<char> = None;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '}' => {
+                let rest = &raw[idx + ch.len_utf8()..];
+                if !rest.trim().is_empty() {
+                    return Err("trailing content after enum block".to_string());
+                }
+                return Ok(Some(&raw[..idx]));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_build_enum_values(raw: &str) -> Result<Vec<String>, String> {
+    let mut values = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ',' => {
+                push_build_enum_value(&mut values, &raw[start..idx])?;
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if quote.is_some() {
+        return Err("unterminated quoted enum value".to_string());
+    }
+
+    push_build_enum_value(&mut values, &raw[start..])?;
+    let mut seen = HashSet::new();
+    for value in &values {
+        if !seen.insert(value) {
+            return Err(format!("duplicate enum value '{}'", value));
+        }
+    }
+
+    Ok(values)
+}
+
+fn push_build_enum_value(values: &mut Vec<String>, raw: &str) -> Result<(), String> {
+    let value = parse_build_enum_value(raw)?;
+    if value.is_empty() {
+        return Err("enum value is empty".to_string());
+    }
+    values.push(value);
+    Ok(())
+}
+
+fn parse_build_enum_value(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        let quote = trimmed.as_bytes()[0] as char;
+        let inner = &trimmed[1..trimmed.len() - 1];
+        return Ok(inner.replace(&format!("{quote}{quote}"), &quote.to_string()));
+    }
+
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Ok(trimmed.to_string());
+    }
+
+    Err(format!("invalid enum value token '{}'", trimmed))
 }
 
 fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {
