@@ -228,7 +228,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 }
                 col.default = Some(default_parts.join(" "));
             }
-            "default" => {}
+            "default" => {
+                return Err(format!("default requires a value for column '{}'", name));
+            }
             "generated_identity" => {
                 col.generated = Some(Generated::AlwaysIdentity);
             }
@@ -3012,6 +3014,17 @@ table idempotency_keys {
             col.default.as_deref(),
             Some("(now() + '24:00:00'::interval)")
         );
+    }
+
+    #[test]
+    fn test_parse_default_rejects_missing_value() {
+        let input = r#"
+table idempotency_keys {
+  expires_at timestamptz default
+}
+"#;
+        let err = parse_qail(input).expect_err("missing default value should fail");
+        assert!(err.contains("default requires a value for column 'expires_at'"));
     }
 
     #[test]
