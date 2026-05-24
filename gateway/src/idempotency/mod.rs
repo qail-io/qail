@@ -180,59 +180,12 @@ fn auth_replay_fingerprint(auth: &crate::auth::AuthContext) -> String {
         canonical.push('|');
         canonical.push_str(key);
         canonical.push('=');
-        canonical.push_str(&canonical_json_value(value));
+        canonical.push_str(&crate::auth::canonical_json_value(value));
     }
 
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     format!("{:x}", hasher.finalize())
-}
-
-fn canonical_json_value(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    write_canonical_json_value(value, &mut out);
-    out
-}
-
-fn write_canonical_json_value(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {
-            out.push_str(
-                &serde_json::to_string(value)
-                    .expect("serializing scalar serde_json::Value should not fail"),
-            );
-        }
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                write_canonical_json_value(item, out);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            let mut keys: Vec<_> = map.keys().collect();
-            keys.sort_unstable();
-            for (idx, key) in keys.into_iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(
-                    &serde_json::to_string(key)
-                        .expect("serializing JSON object key should not fail"),
-                );
-                out.push(':');
-                write_canonical_json_value(&map[key], out);
-            }
-            out.push('}');
-        }
-    }
 }
 
 fn request_fingerprint_with_auth(

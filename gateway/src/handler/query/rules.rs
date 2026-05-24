@@ -215,9 +215,7 @@ pub(super) fn auth_scoped_cache_key(
     claims.sort_by_key(|(left, _)| *left);
     for (key, value) in claims {
         key.hash(&mut hasher);
-        serde_json::to_string(value)
-            .unwrap_or_default()
-            .hash(&mut hasher);
+        crate::auth::canonical_json_value(value).hash(&mut hasher);
     }
 
     format!(

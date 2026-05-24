@@ -192,6 +192,38 @@ fn auth_scoped_cache_key_includes_claim_values() {
 }
 
 #[test]
+fn auth_scoped_cache_key_canonicalizes_nested_claim_objects() {
+    let cmd = qail_core::ast::Qail::get("orders");
+    let mut left_claims = HashMap::new();
+    left_claims.insert(
+        "scope".to_string(),
+        serde_json::json!({"b": 2, "a": {"z": true, "m": [1, 2]}}),
+    );
+    let mut right_claims = HashMap::new();
+    right_claims.insert(
+        "scope".to_string(),
+        serde_json::json!({"a": {"m": [1, 2], "z": true}, "b": 2}),
+    );
+    let left = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: left_claims,
+    };
+    let right = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: right_claims,
+    };
+
+    assert_eq!(
+        auth_scoped_cache_key(&left, &cmd),
+        auth_scoped_cache_key(&right, &cmd)
+    );
+}
+
+#[test]
 fn allow_list_disabled_allows_query() {
     let allow_list = QueryAllowList::new();
     let cmd = qail_core::ast::Qail::get("users");

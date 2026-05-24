@@ -50,5 +50,55 @@ pub struct AuthContext {
     pub claims: HashMap<String, serde_json::Value>,
 }
 
+pub(crate) fn canonical_json_value(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_canonical_json_value(value, &mut out);
+    out
+}
+
+fn write_canonical_json_value(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {
+            out.push_str(
+                &serde_json::to_string(value)
+                    .expect("serializing scalar serde_json::Value should not fail"),
+            );
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                write_canonical_json_value(item, out);
+            }
+            out.push(']');
+        }
+        serde_json::Value::Object(map) => {
+            out.push('{');
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort_unstable();
+            for (idx, key) in keys.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(
+                    &serde_json::to_string(key)
+                        .expect("serializing JSON object key should not fail"),
+                );
+                out.push(':');
+                write_canonical_json_value(
+                    map.get(key).expect("key collected from map must exist"),
+                    out,
+                );
+            }
+            out.push('}');
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -21,9 +21,7 @@ fn rest_list_cache_key(
     claims.sort_by_key(|(left, _)| *left);
     for (key, value) in claims {
         key.hash(&mut hasher);
-        serde_json::to_string(value)
-            .unwrap_or_default()
-            .hash(&mut hasher);
+        crate::auth::canonical_json_value(value).hash(&mut hasher);
     }
 
     format!("rest:{}:{}:{:016x}", tenant, table_name, hasher.finish())
@@ -1233,7 +1231,7 @@ mod tests {
         BranchReadConstraintInput, apply_branch_read_constraints, branch_base_fetch_limit,
         branch_projection_columns_from_cmd, encode_ndjson_rows,
         ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
-        row_matches_policy_filter_cages, split_expand_relations,
+        rest_list_cache_key, row_matches_policy_filter_cages, split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
@@ -1299,6 +1297,39 @@ mod tests {
         assert_eq!(
             body,
             "{\"id\":1,\"status\":\"ready\"}\n{\"id\":2,\"status\":\"queued\"}\n"
+        );
+    }
+
+    #[test]
+    fn rest_list_cache_key_canonicalizes_nested_claim_objects() {
+        let uri: axum::http::Uri = "/api/orders?select=id".parse().unwrap();
+        let cmd = qail_core::ast::Qail::get("orders").columns(["id"]);
+        let mut left_claims = std::collections::HashMap::new();
+        left_claims.insert(
+            "scope".to_string(),
+            serde_json::json!({"b": 2, "a": {"z": true, "m": [1, 2]}}),
+        );
+        let mut right_claims = std::collections::HashMap::new();
+        right_claims.insert(
+            "scope".to_string(),
+            serde_json::json!({"a": {"m": [1, 2], "z": true}, "b": 2}),
+        );
+        let left = AuthContext {
+            user_id: "user-1".to_string(),
+            role: "operator".to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            claims: left_claims,
+        };
+        let right = AuthContext {
+            user_id: "user-1".to_string(),
+            role: "operator".to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            claims: right_claims,
+        };
+
+        assert_eq!(
+            rest_list_cache_key("tenant-a", "orders", &left, &uri, &cmd),
+            rest_list_cache_key("tenant-a", "orders", &right, &uri, &cmd)
         );
     }
 
