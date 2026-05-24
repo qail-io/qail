@@ -625,16 +625,21 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
         let mut seq = Sequence::new(name);
 
         let mut tokens_str = rest.split('{').nth(1).unwrap_or("").to_string();
+        let mut found_closing_brace = tokens_str.contains('}');
 
-        if !tokens_str.contains('}') {
+        if !found_closing_brace {
             for line in lines.by_ref() {
                 let line = line.trim();
                 tokens_str.push(' ');
                 tokens_str.push_str(line);
                 if line.contains('}') {
+                    found_closing_brace = true;
                     break;
                 }
             }
+        }
+        if !found_closing_brace {
+            return Err(format!("Unclosed sequence block '{}'", name));
         }
 
         let tokens_str = tokens_str.replace('}', "");
@@ -2048,6 +2053,18 @@ rename users.username -> users.name
         assert_eq!(seq.increment, Some(1));
         assert_eq!(seq.cache, Some(10));
         assert!(seq.cycle);
+    }
+
+    #[test]
+    fn test_parse_rejects_unclosed_sequence_block() {
+        let input = r#"
+sequence order_seq {
+  start 1000
+  increment 1
+"#;
+
+        let err = parse_qail(input).expect_err("unclosed sequence block should be rejected");
+        assert!(err.contains("Unclosed sequence block"));
     }
 
     #[test]
