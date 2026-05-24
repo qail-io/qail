@@ -165,6 +165,16 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_resource(res);
         } else if line.starts_with("policy ") {
             let policy = parse_policy(line, &mut lines)?;
+            if schema
+                .policies
+                .iter()
+                .any(|existing| existing.name == policy.name && existing.table == policy.table)
+            {
+                return Err(format!(
+                    "duplicate policy declaration '{} on {}'",
+                    policy.name, policy.table
+                ));
+            }
             schema.add_policy(policy);
         } else {
             return Err(format!("Unknown statement: {}", line));
@@ -3716,6 +3726,26 @@ policy docs_select on docs
         assert_eq!(policy.target, PolicyTarget::Select);
         assert_eq!(policy.role.as_deref(), Some("app_user"));
         assert_eq!(policy.permissiveness, PolicyPermissiveness::Restrictive);
+    }
+
+    #[test]
+    fn test_parse_policy_rejects_duplicate_table_scoped_names() {
+        let input = r#"
+policy tenant_isolation on docs for select
+policy tenant_isolation on docs for update
+"#;
+        let err = parse_qail(input).expect_err("duplicate policy should fail");
+        assert!(err.contains("duplicate policy declaration 'tenant_isolation on docs'"));
+    }
+
+    #[test]
+    fn test_parse_policy_allows_same_name_on_different_tables() {
+        let input = r#"
+policy tenant_isolation on docs for select
+policy tenant_isolation on folders for select
+"#;
+        let schema = parse_qail(input).expect("same policy name on different tables should parse");
+        assert_eq!(schema.policies.len(), 2);
     }
 
     #[test]
