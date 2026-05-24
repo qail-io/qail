@@ -218,8 +218,12 @@ impl FromPg for Uuid {
             });
         }
 
-        if format == 1 && bytes.len() == 16 {
-            // Binary format: 16 bytes
+        if format == 1 {
+            if bytes.len() != 16 {
+                return Err(TypeError::InvalidData(
+                    "Expected 16 bytes for UUID".to_string(),
+                ));
+            }
             decode_uuid(bytes).map(Uuid).map_err(TypeError::InvalidData)
         } else {
             // Text format
@@ -601,6 +605,13 @@ mod tests {
         ];
         let result = Uuid::from_pg(&uuid_bytes, oid::UUID, 1).unwrap();
         assert_eq!(result.0, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_uuid_from_pg_binary_rejects_bad_length() {
+        let err = Uuid::from_pg(b"550e8400-e29b-41d4-a716-446655440000", oid::UUID, 1).unwrap_err();
+
+        assert!(matches!(err, TypeError::InvalidData(msg) if msg.contains("16 bytes")));
     }
 
     #[cfg(feature = "uuid")]
