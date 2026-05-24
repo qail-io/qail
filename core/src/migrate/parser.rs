@@ -138,6 +138,7 @@ where
     let mut table = Table::new(&name);
     let mut consumed = 0;
     let mut found_closing_brace = false;
+    let mut seen_columns = HashSet::new();
 
     for line in lines.by_ref() {
         consumed += 1;
@@ -173,6 +174,12 @@ where
         }
 
         let col = parse_column(line, enum_types)?;
+        if !seen_columns.insert(col.name.clone()) {
+            return Err(format!(
+                "duplicate column '{}' in table '{}'",
+                col.name, name
+            ));
+        }
         table.columns.push(col);
     }
 
@@ -2194,6 +2201,18 @@ table users {
             let err = parse_qail(input).expect_err("malformed table braces should fail");
             assert!(err.contains(expected), "expected '{expected}' in '{err}'");
         }
+    }
+
+    #[test]
+    fn test_parse_table_rejects_duplicate_columns() {
+        let input = r#"
+table users {
+  id serial primary_key
+  id uuid
+}
+"#;
+        let err = parse_qail(input).expect_err("duplicate columns should fail");
+        assert!(err.contains("duplicate column 'id' in table 'users'"));
     }
 
     #[test]
