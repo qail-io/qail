@@ -1000,6 +1000,9 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     let paren_end = find_matching_paren(rest, paren_start).ok_or("function missing )")?;
 
     let name = rest[..paren_start].trim();
+    if name.is_empty() {
+        return Err("function name is required".to_string());
+    }
     let args_str = &rest[paren_start + 1..paren_end];
     let args = split_function_args(args_str);
 
@@ -2443,6 +2446,13 @@ $qail$
         assert_eq!(schema.functions.len(), 1);
         assert_eq!(schema.functions[0].name, "is_super_admin");
         assert_eq!(schema.functions[0].volatility.as_deref(), Some("stable"));
+    }
+
+    #[test]
+    fn test_parse_function_rejects_missing_name() {
+        let input = "function () returns int language sql $$ SELECT 1 $$";
+        let err = parse_qail(input).expect_err("missing function name should fail");
+        assert!(err.contains("function name is required"));
     }
 
     #[test]
