@@ -1847,10 +1847,17 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
         let content = content.trim();
         let tokens = split_resource_tokens(content)?;
         let mut tokens = tokens.iter();
+        let mut seen_keys = HashSet::new();
 
         while let Some(key) = tokens.next() {
             if key.is_empty() || key == "}" {
                 continue;
+            }
+            if !seen_keys.insert(key) {
+                return Err(format!(
+                    "Duplicate resource property '{}' in '{}'",
+                    key, name
+                ));
             }
             if let Some(value) = tokens.next() {
                 if key == "provider" {
@@ -3513,6 +3520,18 @@ bucket avatars {
 "#;
         let err = parse_qail(input).expect_err("resource property without value should fail");
         assert!(err.contains("Resource property 'provider' in 'avatars' requires a value"));
+    }
+
+    #[test]
+    fn test_parse_resource_rejects_duplicate_properties() {
+        let input = r#"
+bucket avatars {
+  provider s3
+  provider gcs
+}
+"#;
+        let err = parse_qail(input).expect_err("duplicate resource properties should fail");
+        assert!(err.contains("Duplicate resource property 'provider' in 'avatars'"));
     }
 
     #[test]
