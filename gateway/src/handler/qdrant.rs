@@ -1044,9 +1044,6 @@ fn qdrant_point_matches_filter_cages(
 ) -> Result<bool, ApiError> {
     use qail_core::ast::LogicalOp;
 
-    let mut has_or_condition = false;
-    let mut any_or_condition_matches = false;
-
     for cage in cages {
         match cage.logical_op {
             LogicalOp::And => {
@@ -1059,20 +1056,26 @@ fn qdrant_point_matches_filter_cages(
                 }
             }
             LogicalOp::Or => {
+                if cage.conditions.is_empty() {
+                    continue;
+                }
+                let mut cage_matches = false;
                 for condition in &cage.conditions {
                     if let Some(matches) = qdrant_point_matches_filter_condition(point, condition)?
+                        && matches
                     {
-                        has_or_condition = true;
-                        if matches {
-                            any_or_condition_matches = true;
-                        }
+                        cage_matches = true;
+                        break;
                     }
+                }
+                if !cage_matches {
+                    return Ok(false);
                 }
             }
         }
     }
 
-    Ok(!has_or_condition || any_or_condition_matches)
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1562,6 +1565,36 @@ mod tests {
         }];
 
         assert!(qdrant_payload_matches_filter_cages(&payload, &cages).unwrap());
+    }
+
+    #[test]
+    fn qdrant_payload_filter_requires_each_or_cage_to_match() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "city".to_string(),
+            qail_qdrant::PayloadValue::String("London".to_string()),
+        );
+        payload.insert(
+            "country".to_string(),
+            qail_qdrant::PayloadValue::String("DE".to_string()),
+        );
+        let cages = vec![
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![cond("city", "London"), cond("city", "Paris")],
+                logical_op: LogicalOp::Or,
+            },
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![cond("country", "UK"), cond("country", "FR")],
+                logical_op: LogicalOp::Or,
+            },
+        ];
+
+        let err = enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing")
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
     #[test]
