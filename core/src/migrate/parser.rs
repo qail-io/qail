@@ -382,12 +382,8 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 }
                 col.generated = Some(Generated::AlwaysStored(inner.to_string()));
             }
-            s if s.starts_with("references") => {
-                let fk_str = if s.contains('(') {
-                    // references is attached: "references users(id)"
-                    s.strip_prefix("references").unwrap_or(s)
-                } else if i + 1 < parts.len() {
-                    // references is separate: "references" "users(id)"
+            "references" => {
+                let fk_str = if i + 1 < parts.len() {
                     i += 1;
                     parts[i]
                 } else {
@@ -419,6 +415,19 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                         _ => break,
                     }
                 }
+            }
+            s if s.starts_with("references(") => {
+                let inner = s
+                    .strip_prefix("references(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .ok_or_else(|| format!("invalid foreign key reference target: {}", s))?;
+                let (table, column) = inner
+                    .split_once('.')
+                    .ok_or_else(|| format!("invalid foreign key reference target: {}", s))?;
+                if table.trim().is_empty() || column.trim().is_empty() {
+                    return Err(format!("invalid foreign key reference target: {}", s));
+                }
+                col = col.references(table.trim(), column.trim());
             }
             s if s.starts_with("check(") => {
                 // Parse check(expr) — expression may contain nested parens and spaces.
@@ -3152,6 +3161,23 @@ table orders {
     }
 
     #[test]
+    fn test_parse_fk_references_dot_form() {
+        let input = r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references(users.id)
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let fk = schema.tables["orders"].columns[1]
+            .foreign_key
+            .as_ref()
+            .unwrap();
+        assert_eq!(fk.table, "users");
+        assert_eq!(fk.column, "id");
+    }
+
+    #[test]
     fn test_parse_fk_rejects_unknown_action() {
         let input = r#"
 table orders {
@@ -3186,6 +3212,15 @@ table orders {
 }
 "#,
                 "foreign key reference target is required",
+            ),
+            (
+                r#"
+table orders {
+  id uuid primary_key
+  user_id uuid referencesusers(id)
+}
+"#,
+                "unknown column option 'referencesusers(id)' for column 'user_id'",
             ),
             (
                 r#"
