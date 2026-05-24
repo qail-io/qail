@@ -765,18 +765,18 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
 
         let mut values_str = rest.split('{').nth(1).unwrap_or("").to_string();
 
-        if enum_body_before_closing_brace(&values_str).is_none() {
+        if enum_body_before_closing_brace(&values_str)?.is_none() {
             for line in lines.by_ref() {
                 let line = line.trim();
                 values_str.push(' ');
                 values_str.push_str(line);
-                if enum_body_before_closing_brace(&values_str).is_some() {
+                if enum_body_before_closing_brace(&values_str)?.is_some() {
                     break;
                 }
             }
         }
 
-        let values_str = enum_body_before_closing_brace(&values_str)
+        let values_str = enum_body_before_closing_brace(&values_str)?
             .ok_or_else(|| format!("enum '{}' is missing closing '}}'", name))?;
         let values = parse_enum_values(values_str)?;
 
@@ -790,7 +790,7 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
     }
 }
 
-fn enum_body_before_closing_brace(raw: &str) -> Option<&str> {
+fn enum_body_before_closing_brace(raw: &str) -> Result<Option<&str>, String> {
     let mut quote: Option<char> = None;
     let mut chars = raw.char_indices().peekable();
 
@@ -808,12 +808,18 @@ fn enum_body_before_closing_brace(raw: &str) -> Option<&str> {
 
         match ch {
             '\'' | '"' => quote = Some(ch),
-            '}' => return Some(&raw[..idx]),
+            '}' => {
+                let rest = &raw[idx + ch.len_utf8()..];
+                if !rest.trim().is_empty() {
+                    return Err("trailing content after enum block".to_string());
+                }
+                return Ok(Some(&raw[..idx]));
+            }
             _ => {}
         }
     }
 
-    None
+    Ok(None)
 }
 
 fn parse_enum_values(raw: &str) -> Result<Vec<String>, String> {
@@ -2228,6 +2234,13 @@ comment on users.name "Full name"
                 String::new(),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_enum_rejects_trailing_content_after_block() {
+        let input = "enum status { active } garbage";
+        let err = parse_qail(input).expect_err("trailing enum content should fail");
+        assert!(err.contains("trailing content after enum block"));
     }
 
     #[test]
