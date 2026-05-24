@@ -69,6 +69,13 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_sequence(seq);
         } else if line.starts_with("enum ") {
             let enum_type = parse_enum(line, &mut lines)?;
+            if schema
+                .enums
+                .iter()
+                .any(|existing| existing.name == enum_type.name)
+            {
+                return Err(format!("duplicate enum declaration '{}'", enum_type.name));
+            }
             schema.add_enum(enum_type);
         } else if line.starts_with("view ") || line.starts_with("materialized view ") {
             let view = parse_view(line, &mut lines)?;
@@ -2584,6 +2591,16 @@ comment on users.name "Full name"
         let input = "enum order_status { pending, paid, pending }";
         let err = parse_qail(input).expect_err("duplicate enum values should fail");
         assert!(err.contains("duplicate enum value 'pending'"));
+    }
+
+    #[test]
+    fn test_parse_enum_rejects_duplicate_names() {
+        let input = r#"
+enum status { pending, approved }
+enum status { draft, archived }
+"#;
+        let err = parse_qail(input).expect_err("duplicate enum declarations should fail");
+        assert!(err.contains("duplicate enum declaration 'status'"));
     }
 
     #[test]
