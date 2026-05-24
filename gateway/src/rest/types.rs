@@ -33,6 +33,27 @@ pub struct ListParams {
     pub search_columns: Option<String>,
 }
 
+impl ListParams {
+    /// Validate and normalize REST pagination.
+    pub(crate) fn bounded_limit_offset(
+        &self,
+        max_result_rows: usize,
+    ) -> Result<(i64, i64), String> {
+        let max_rows = max_result_rows.min(1000) as i64;
+        let limit = self.limit.unwrap_or(50);
+        if limit <= 0 {
+            return Err("limit must be greater than zero".to_string());
+        }
+
+        let offset = self.offset.unwrap_or(0);
+        if offset < 0 {
+            return Err("offset must not be negative".to_string());
+        }
+
+        Ok((limit.min(max_rows), offset.min(100_000)))
+    }
+}
+
 /// Query parameters for mutation (create/update/delete) returning support
 #[derive(Debug, Deserialize, Default)]
 pub struct MutationParams {
@@ -107,4 +128,48 @@ pub struct BatchCreateResponse {
     pub data: Vec<Value>,
     /// Number of rows inserted.
     pub count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListParams;
+
+    #[test]
+    fn list_params_reject_invalid_pagination_bounds() {
+        let params = ListParams {
+            limit: Some(0),
+            ..Default::default()
+        };
+        assert!(
+            params
+                .bounded_limit_offset(1_000)
+                .unwrap_err()
+                .contains("limit")
+        );
+
+        let params = ListParams {
+            offset: Some(-1),
+            ..Default::default()
+        };
+        assert!(
+            params
+                .bounded_limit_offset(1_000)
+                .unwrap_err()
+                .contains("offset")
+        );
+    }
+
+    #[test]
+    fn list_params_clamps_high_pagination_bounds() {
+        let params = ListParams {
+            limit: Some(5_000),
+            offset: Some(500_000),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            params.bounded_limit_offset(2_000).unwrap(),
+            (1_000, 100_000)
+        );
+    }
 }

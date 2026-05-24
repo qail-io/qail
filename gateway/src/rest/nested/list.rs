@@ -81,9 +81,9 @@ pub(crate) async fn nested_list_handler(
         crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &child_table);
     let tenant_scope_column = tenant_scope.as_ref().map(|(col, _)| col.as_str());
 
-    let max_rows = state.config.max_result_rows.min(1000) as i64;
-    let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
-    let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
+    let (limit, offset) = params
+        .bounded_limit_offset(state.config.max_result_rows)
+        .map_err(ApiError::parse_error)?;
 
     // Build: get child[fk_col = parent_id]
     let mut cmd = qail_core::ast::Qail::get(&child_table).filter(

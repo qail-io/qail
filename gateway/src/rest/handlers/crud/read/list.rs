@@ -180,9 +180,10 @@ pub(crate) async fn list_handler(
     let has_branch = branch_ctx.branch_name().is_some();
 
     // Build Qail AST
-    let max_rows = state.config.max_result_rows.min(1000) as i64;
-    let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
-    let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
+    let page_limit_cap = state.config.max_result_rows.min(1000) as i64;
+    let (limit, offset) = params
+        .bounded_limit_offset(state.config.max_result_rows)
+        .map_err(ApiError::parse_error)?;
 
     let mut cmd = qail_core::ast::Qail::get(&table_name);
     let mut strip_tenant_scope_column = false;
@@ -336,7 +337,7 @@ pub(crate) async fn list_handler(
         cmd = cmd.limit(branch_base_fetch_limit(
             offset,
             limit,
-            max_rows,
+            page_limit_cap,
             state.config.max_result_rows,
         )?);
     } else {
