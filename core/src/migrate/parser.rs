@@ -89,6 +89,17 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_view(view);
         } else if line.starts_with("function ") {
             let func = parse_function(line, &mut lines)?;
+            if schema
+                .functions
+                .iter()
+                .any(|existing| existing.name == func.name && existing.args == func.args)
+            {
+                return Err(format!(
+                    "duplicate function declaration '{}({})'",
+                    func.name,
+                    func.args.join(", ")
+                ));
+            }
             schema.add_function(func);
         } else if line.starts_with("trigger ") {
             let trigger = parse_trigger(line)?;
@@ -2883,6 +2894,26 @@ $qail$
 
         assert!(rendered.contains("$qail$"));
         assert_eq!(reparsed.functions[0].body, schema.functions[0].body);
+    }
+
+    #[test]
+    fn test_parse_function_rejects_duplicate_signatures() {
+        let input = r#"
+function normalize_email(email text) returns text language sql $$ SELECT lower(email) $$
+function normalize_email(email text) returns text language sql $$ SELECT trim(email) $$
+"#;
+        let err = parse_qail(input).expect_err("duplicate function signatures should fail");
+        assert!(err.contains("duplicate function declaration 'normalize_email(email text)'"));
+    }
+
+    #[test]
+    fn test_parse_function_allows_overloads() {
+        let input = r#"
+function normalize_email(email text) returns text language sql $$ SELECT lower(email) $$
+function normalize_email(email text, fallback text) returns text language sql $$ SELECT lower(email) $$
+"#;
+        let schema = parse_qail(input).expect("function overloads should parse");
+        assert_eq!(schema.functions.len(), 2);
     }
 
     #[test]
