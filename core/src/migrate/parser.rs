@@ -1627,18 +1627,18 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
 
         // Parse key-value pairs from block content
         let content = block_content.trim_end_matches('}').trim();
-        let mut tokens = content.split_whitespace().peekable();
+        let tokens = split_resource_tokens(content)?;
+        let mut tokens = tokens.iter();
 
         while let Some(key) = tokens.next() {
             if key.is_empty() || key == "}" {
                 continue;
             }
             if let Some(value) = tokens.next() {
-                let value = value.trim_matches('"').to_string();
                 if key == "provider" {
-                    provider = Some(value);
+                    provider = Some(value.to_string());
                 } else {
-                    properties.insert(key.to_string(), value);
+                    properties.insert(key.to_string(), value.to_string());
                 }
             }
         }
@@ -1650,6 +1650,50 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
         provider,
         properties,
     })
+}
+
+fn split_resource_tokens(content: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in content.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some(q) => match ch {
+                '\\' => escaped = true,
+                c if c == q => quote = None,
+                c => current.push(c),
+            },
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            },
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err("Unterminated quoted resource value".to_string());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
 }
 
 /// Parse an RLS policy definition.
@@ -2783,6 +2827,30 @@ bucket avatars {
 
         let err = parse_qail(input).expect_err("unclosed resource block should be rejected");
         assert!(err.contains("Unclosed bucket resource block"));
+    }
+
+    #[test]
+    fn test_parse_resource_preserves_quoted_property_values() {
+        let input = r#"
+bucket avatars {
+  provider s3
+  display_name "Profile Images"
+  region 'ap southeast 1'
+}
+"#;
+
+        let schema = parse_qail(input).expect("resource should parse");
+        let resource = schema.resources.first().expect("resource missing");
+
+        assert_eq!(resource.provider.as_deref(), Some("s3"));
+        assert_eq!(
+            resource.properties.get("display_name").map(String::as_str),
+            Some("Profile Images")
+        );
+        assert_eq!(
+            resource.properties.get("region").map(String::as_str),
+            Some("ap southeast 1")
+        );
     }
 
     #[test]
