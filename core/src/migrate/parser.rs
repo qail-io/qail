@@ -577,6 +577,9 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
         .find('"')
         .ok_or_else(|| "comment text must be quoted".to_string())?;
     let target_str = rest[..quote_start].trim();
+    if target_str.is_empty() {
+        return Err("comment target is required".to_string());
+    }
     let text = parse_comment_text(&rest[quote_start..])?;
 
     if is_comment_raw_target(target_str) {
@@ -2068,6 +2071,13 @@ rename users.username -> users.name
         let schema = parse_qail(input).unwrap();
         assert_eq!(schema.comments.len(), 1);
         assert_eq!(schema.comments[0].text, "Primary contact email");
+    }
+
+    #[test]
+    fn test_parse_comment_rejects_missing_target() {
+        let input = r#"comment on "orphaned comment""#;
+        let err = parse_qail(input).expect_err("missing comment target should fail");
+        assert!(err.contains("comment target is required"));
     }
 
     #[test]
