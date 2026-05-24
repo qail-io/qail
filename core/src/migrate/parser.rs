@@ -1301,6 +1301,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         .get(on_idx + 2)
         .ok_or("trigger missing timing")?
         .to_uppercase();
+    if !matches!(timing.as_str(), "BEFORE" | "AFTER") {
+        return Err(format!("unsupported trigger timing: {timing}"));
+    }
 
     // Collect events (INSERT, UPDATE, DELETE, etc.) until "execute"
     let mut events = Vec::new();
@@ -2531,6 +2534,13 @@ $qail$
         let input = "trigger trg_updated_at on users before execute set_updated_at";
         let err = parse_qail(input).expect_err("missing trigger event should fail");
         assert!(err.contains("trigger requires at least one event"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_invalid_timing() {
+        let input = "trigger trg_updated_at on users during update execute set_updated_at";
+        let err = parse_qail(input).expect_err("invalid trigger timing should fail");
+        assert!(err.contains("unsupported trigger timing: DURING"));
     }
 
     #[test]
