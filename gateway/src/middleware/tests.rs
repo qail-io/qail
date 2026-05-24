@@ -28,6 +28,21 @@ async fn test_rate_limiter() {
     );
 }
 
+#[tokio::test]
+async fn rate_limiter_rejects_invalid_refill_rates() {
+    for rate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+        let limiter = RateLimiter::new(rate, 1);
+        assert!(limiter.check("test").await.is_ok());
+        assert!(limiter.check("test").await.is_err());
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        assert!(
+            limiter.check("test").await.is_err(),
+            "invalid rate {rate:?} must not refill tokens"
+        );
+    }
+}
+
 #[test]
 fn test_allow_list() {
     let mut allow_list = QueryAllowList::new();

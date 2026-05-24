@@ -38,6 +38,12 @@ impl RateLimiter {
     /// - `rate`: requests per second
     /// - `burst`: maximum burst capacity
     pub fn new(rate: f64, burst: u32) -> Arc<Self> {
+        let rate = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            0.0
+        };
+
         Arc::new(Self {
             rate,
             burst,
