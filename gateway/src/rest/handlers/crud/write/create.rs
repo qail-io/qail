@@ -403,7 +403,7 @@ pub(crate) async fn create_handler(
             let row_pk = match branch_insert_overlay_key(obj, pk_col) {
                 Ok(row_pk) => row_pk,
                 Err(e) => {
-                    conn.release().await;
+                    let _ = conn.rollback_and_release().await;
                     return Err(e);
                 }
             };
@@ -418,7 +418,7 @@ pub(crate) async fn create_handler(
             )
             .await;
             if let Err(e) = overlay_result {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 return Err(e);
             }
             all_results.push(row_data);

@@ -185,14 +185,14 @@ pub(crate) async fn update_handler(
         {
             Ok(rows) => rows,
             Err(e) => {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 return Err(e);
             }
         };
         let overlay_state = match branch_overlay_row_state(&overlay_rows, &id) {
             Ok(state) => state,
             Err(e) => {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 return Err(e);
             }
         };
@@ -209,31 +209,31 @@ pub(crate) async fn update_handler(
                     );
                 }
                 if let Err(e) = state.policy_engine.apply_policies(&auth, &mut exists_cmd) {
-                    conn.release().await;
+                    let _ = conn.rollback_and_release().await;
                     return Err(ApiError::forbidden(e.to_string()));
                 }
                 state.optimize_qail_for_execution(&mut exists_cmd);
                 let rows = match conn.fetch_all_uncached(&exists_cmd).await {
                     Ok(rows) => rows,
                     Err(e) => {
-                        conn.release().await;
+                        let _ = conn.rollback_and_release().await;
                         return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
                     }
                 };
                 if rows.is_empty() {
-                    conn.release().await;
+                    let _ = conn.rollback_and_release().await;
                     return Err(ApiError::not_found(format!("row '{}'", id)));
                 }
                 base_row = rows.first().map(row_to_json);
             }
             Ok(false) => {}
             Err(e) => {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 return Err(e);
             }
         }
 
-        let row_data = build_branch_update_overlay_row(
+        let row_data = match build_branch_update_overlay_row(
             base_row,
             obj,
             &pk,
@@ -242,7 +242,13 @@ pub(crate) async fn update_handler(
                 .as_deref()
                 .unwrap_or(&state.config.tenant_column),
             auth.tenant_id.as_deref(),
-        )?;
+        ) {
+            Ok(row_data) => row_data,
+            Err(e) => {
+                let _ = conn.rollback_and_release().await;
+                return Err(e);
+            }
+        };
         let overlay_result = redirect_to_overlay(
             &mut conn,
             branch_name,
@@ -253,7 +259,7 @@ pub(crate) async fn update_handler(
         )
         .await;
         if let Err(e) = overlay_result {
-            conn.release().await;
+            let _ = conn.rollback_and_release().await;
             return Err(e);
         }
         conn.release_checked()
