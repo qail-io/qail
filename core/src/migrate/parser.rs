@@ -1178,9 +1178,13 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     if local_cols.is_empty() || local_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key local columns are required".to_string());
     }
+    let mut seen_local_cols = HashSet::new();
     for col in &local_cols {
         if !is_native_identifier(col) {
             return Err(format!("invalid foreign_key local column '{}'", col));
+        }
+        if !seen_local_cols.insert(col) {
+            return Err(format!("duplicate foreign_key local column '{}'", col));
         }
     }
 
@@ -1216,9 +1220,13 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     if ref_cols.is_empty() || ref_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key referenced columns are required".to_string());
     }
+    let mut seen_ref_cols = HashSet::new();
     for col in &ref_cols {
         if !is_native_identifier(col) {
             return Err(format!("invalid foreign_key referenced column '{}'", col));
+        }
+        if !seen_ref_cols.insert(col) {
+            return Err(format!("duplicate foreign_key referenced column '{}'", col));
         }
     }
     if local_cols.len() != ref_cols.len() {
@@ -3152,6 +3160,14 @@ table audits {
             (
                 "table bookings {\n  foreign_key (route_id) references schedules(bad-id)\n}",
                 "invalid foreign_key referenced column 'bad-id'",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id, route_id) references schedules(id, schedule_id)\n}",
+                "duplicate foreign_key local column 'route_id'",
+            ),
+            (
+                "table bookings {\n  foreign_key (route_id, schedule_id) references schedules(id, id)\n}",
+                "duplicate foreign_key referenced column 'id'",
             ),
             (
                 "table bookings {\n  foreign_key (route_id, schedule_id) references schedules(id)\n}",
