@@ -1270,6 +1270,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     }
     let args_str = &rest[paren_start + 1..paren_end];
     let args = split_function_args(args_str)?;
+    validate_function_args(&args)?;
 
     let after_args = rest[paren_end + 1..].trim();
 
@@ -1386,6 +1387,37 @@ fn split_function_args(args: &str) -> Result<Vec<String>, String> {
     }
 
     Ok(out)
+}
+
+fn validate_function_args(args: &[String]) -> Result<(), String> {
+    let mut seen_names = HashSet::new();
+    for arg in args {
+        let Some(name) = function_arg_name(arg) else {
+            continue;
+        };
+        let key = name.to_ascii_lowercase();
+        if !seen_names.insert(key) {
+            return Err(format!("duplicate function argument '{}'", name));
+        }
+    }
+    Ok(())
+}
+
+fn function_arg_name(arg: &str) -> Option<&str> {
+    let mut parts = arg.split_whitespace();
+    let first = parts.next()?;
+    let second = parts.next();
+    let name = if matches!(
+        first.to_ascii_lowercase().as_str(),
+        "in" | "out" | "inout" | "variadic"
+    ) {
+        second?
+    } else if second.is_some() {
+        first
+    } else {
+        return None;
+    };
+    is_native_identifier(name).then_some(name)
 }
 
 #[derive(Debug)]
@@ -3238,6 +3270,17 @@ $$
         ] {
             let err = parse_qail(input).expect_err("empty function arg should fail");
             assert!(err.contains("empty function argument"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_function_rejects_duplicate_arg_names() {
+        for input in [
+            "function f(email text, email text) returns text language sql $$ SELECT email $$",
+            "function f(IN email text, email text) returns text language sql $$ SELECT email $$",
+        ] {
+            let err = parse_qail(input).expect_err("duplicate function arg should fail");
+            assert!(err.contains("duplicate function argument 'email'"), "{err}");
         }
     }
 
