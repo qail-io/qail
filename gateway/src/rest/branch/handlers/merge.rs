@@ -97,6 +97,57 @@ fn branch_merge_requires_affected_row(operation: &str) -> bool {
     matches!(operation, "update" | "delete")
 }
 
+#[derive(Debug, Clone)]
+struct BranchOverlayMergeRow {
+    table: String,
+    row_pk: String,
+    operation: String,
+    row_data: String,
+}
+
+fn required_overlay_merge_string(
+    row: &qail_pg::PgRow,
+    name: &str,
+    idx: usize,
+) -> Result<String, String> {
+    let value = row
+        .try_get_by_name::<String>(name)
+        .ok()
+        .or_else(|| row.get_string(idx))
+        .ok_or_else(|| format!("Invalid branch overlay {} metadata", name))?;
+    if value.is_empty() {
+        return Err(format!("Invalid empty branch overlay {} metadata", name));
+    }
+    Ok(value)
+}
+
+fn optional_overlay_merge_string(row: &qail_pg::PgRow, name: &str, idx: usize) -> Option<String> {
+    row.try_get_by_name::<String>(name)
+        .ok()
+        .or_else(|| row.get_string(idx))
+}
+
+fn branch_overlay_merge_row_from_pg(row: &qail_pg::PgRow) -> Result<BranchOverlayMergeRow, String> {
+    let table = required_overlay_merge_string(row, "table_name", 0)?;
+    if !crate::rest::filters::is_safe_identifier(&table) {
+        return Err(format!("Invalid branch overlay table '{}'", table));
+    }
+    let row_pk = required_overlay_merge_string(row, "row_pk", 1)?;
+    let operation = required_overlay_merge_string(row, "operation", 2)?;
+    let row_data = match operation.as_str() {
+        "insert" | "update" => required_overlay_merge_string(row, "row_data", 3)?,
+        "delete" => optional_overlay_merge_string(row, "row_data", 3).unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    Ok(BranchOverlayMergeRow {
+        table,
+        row_pk,
+        operation,
+        row_data,
+    })
+}
+
 /// POST /api/_branch/:name/merge — Merge branch overlay into main tables.
 pub(crate) async fn branch_merge_handler(
     State(state): State<Arc<GatewayState>>,
@@ -197,59 +248,46 @@ pub(crate) async fn branch_merge_handler(
         Ok(pg_conn) => match pg_conn.simple_query(&overlay_sql).await {
             Ok(overlay_rows) => {
                 for row in &overlay_rows {
-                    let table = row
-                        .try_get_by_name::<String>("table_name")
-                        .ok()
-                        .or_else(|| row.get_string(0))
-                        .unwrap_or_default();
-                    let row_pk = row
-                        .try_get_by_name::<String>("row_pk")
-                        .ok()
-                        .or_else(|| row.get_string(1))
-                        .unwrap_or_default();
-                    let operation = row
-                        .try_get_by_name::<String>("operation")
-                        .ok()
-                        .or_else(|| row.get_string(2))
-                        .unwrap_or_default();
-                    let row_data_str = row
-                        .try_get_by_name::<String>("row_data")
-                        .ok()
-                        .or_else(|| row.get_string(3))
-                        .unwrap_or_default();
-
+                    let overlay = match branch_overlay_merge_row_from_pg(row) {
+                        Ok(overlay) => overlay,
+                        Err(e) => {
+                            errors.push(e);
+                            continue;
+                        }
+                    };
                     let pk_col = state
                         .schema
-                        .table(&table)
+                        .table(&overlay.table)
                         .and_then(|t| t.primary_key.as_deref());
                     match build_branch_overlay_merge_cmd(
-                        &table,
-                        &row_pk,
-                        &operation,
-                        &row_data_str,
+                        &overlay.table,
+                        &overlay.row_pk,
+                        &overlay.operation,
+                        &overlay.row_data,
                         pk_col,
                     ) {
                         Ok(mut qail_cmd) => {
                             state.optimize_qail_for_execution(&mut qail_cmd);
                             match conn.fetch_all_uncached(&qail_cmd).await {
                                 Ok(rows)
-                                    if branch_merge_requires_affected_row(&operation)
+                                    if branch_merge_requires_affected_row(&overlay.operation)
                                         && rows.is_empty() =>
                                 {
                                     errors.push(format!(
                                         "{}.{}: merge {} affected no rows",
-                                        table, row_pk, operation
+                                        overlay.table, overlay.row_pk, overlay.operation
                                     ));
                                 }
                                 Ok(_) => {
                                     applied += 1;
-                                    mutated_tables.insert(table.clone());
+                                    mutated_tables.insert(overlay.table.clone());
                                 }
-                                Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
+                                Err(e) => errors
+                                    .push(format!("{}.{}: {}", overlay.table, overlay.row_pk, e)),
                             }
                         }
                         Err(e) => {
-                            errors.push(format!("{}.{}: {}", table, row_pk, e));
+                            errors.push(format!("{}.{}: {}", overlay.table, overlay.row_pk, e));
                         }
                     }
                 }
@@ -379,10 +417,27 @@ pub(crate) async fn branch_merge_handler(
 mod tests {
     use super::{
         apply_insert_conflict_target, branch_merge_requires_affected_row,
-        build_branch_overlay_merge_cmd,
+        branch_overlay_merge_row_from_pg, build_branch_overlay_merge_cmd,
     };
     use qail_core::ast::{Action, ConflictAction, Expr};
     use serde_json::{Map, json};
+
+    fn overlay_pg_row(
+        table: Option<&str>,
+        row_pk: Option<&str>,
+        operation: Option<&str>,
+        row_data: Option<&str>,
+    ) -> qail_pg::PgRow {
+        qail_pg::PgRow {
+            columns: vec![
+                table.map(|value| value.as_bytes().to_vec()),
+                row_pk.map(|value| value.as_bytes().to_vec()),
+                operation.map(|value| value.as_bytes().to_vec()),
+                row_data.map(|value| value.as_bytes().to_vec()),
+            ],
+            column_info: None,
+        }
+    }
 
     #[test]
     fn insert_merge_uses_pk_conflict_update_when_known() {
@@ -447,6 +502,61 @@ mod tests {
         let err = build_branch_overlay_merge_cmd("orders", "order-1", "update", "[]", Some("id"))
             .expect_err("non-object update overlay must fail closed");
         assert!(err.contains("expected object"));
+    }
+
+    #[test]
+    fn overlay_merge_row_parser_accepts_complete_metadata() {
+        let row = overlay_pg_row(
+            Some("orders"),
+            Some("order-1"),
+            Some("insert"),
+            Some(r#"{"id":"order-1"}"#),
+        );
+
+        let parsed = branch_overlay_merge_row_from_pg(&row).unwrap();
+
+        assert_eq!(parsed.table, "orders");
+        assert_eq!(parsed.row_pk, "order-1");
+        assert_eq!(parsed.operation, "insert");
+        assert_eq!(parsed.row_data, r#"{"id":"order-1"}"#);
+    }
+
+    #[test]
+    fn overlay_merge_row_parser_rejects_missing_required_metadata() {
+        let row = overlay_pg_row(None, Some("order-1"), Some("insert"), Some("{}"));
+        let err = branch_overlay_merge_row_from_pg(&row).unwrap_err();
+        assert!(err.contains("table_name"));
+
+        let row = overlay_pg_row(Some("orders"), None, Some("insert"), Some("{}"));
+        let err = branch_overlay_merge_row_from_pg(&row).unwrap_err();
+        assert!(err.contains("row_pk"));
+
+        let row = overlay_pg_row(Some("orders"), Some("order-1"), None, Some("{}"));
+        let err = branch_overlay_merge_row_from_pg(&row).unwrap_err();
+        assert!(err.contains("operation"));
+    }
+
+    #[test]
+    fn overlay_merge_row_parser_rejects_missing_row_data_for_mutations() {
+        let row = overlay_pg_row(Some("orders"), Some("order-1"), Some("insert"), None);
+        let err = branch_overlay_merge_row_from_pg(&row).unwrap_err();
+        assert!(err.contains("row_data"));
+
+        let row = overlay_pg_row(Some("orders"), Some("order-1"), Some("delete"), None);
+        let parsed = branch_overlay_merge_row_from_pg(&row).unwrap();
+        assert_eq!(parsed.row_data, "");
+    }
+
+    #[test]
+    fn overlay_merge_row_parser_rejects_unsafe_table_metadata() {
+        let row = overlay_pg_row(
+            Some("orders;drop table users"),
+            Some("order-1"),
+            Some("delete"),
+            None,
+        );
+        let err = branch_overlay_merge_row_from_pg(&row).unwrap_err();
+        assert!(err.contains("Invalid branch overlay table"));
     }
 
     #[test]
