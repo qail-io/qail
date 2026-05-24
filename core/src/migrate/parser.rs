@@ -1674,6 +1674,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     }
 
     let name = parts[0];
+    if !is_native_identifier(name) {
+        return Err(format!("invalid trigger name '{}'", name));
+    }
 
     // Find "on" keyword
     let on_idx = parts
@@ -1681,6 +1684,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         .position(|&p| p == "on")
         .ok_or("trigger missing 'on' keyword")?;
     let table = parts.get(on_idx + 1).ok_or("trigger missing table name")?;
+    if !is_native_table_ref(table) {
+        return Err(format!("invalid trigger table '{}'", table));
+    }
 
     let timing = parts
         .get(on_idx + 2)
@@ -1743,6 +1749,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
                 if !seen_cols.insert(c.to_string()) {
                     return Err(format!("duplicate trigger update column '{}'", c));
                 }
+                if !is_native_identifier(c) {
+                    return Err(format!("invalid trigger update column '{}'", c));
+                }
                 update_columns.push(c.to_string());
             }
             if update_columns.len() == before_count {
@@ -1766,6 +1775,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     let func_name = parts
         .get(exec_idx + 1)
         .ok_or("trigger missing function name")?;
+    if !is_native_table_ref(func_name) {
+        return Err(format!("invalid trigger function '{}'", func_name));
+    }
     if parts.len() > exec_idx + 2 {
         return Err("trailing content after trigger function".to_string());
     }
@@ -3438,6 +3450,34 @@ function normalize_email(email text, fallback text) returns text language sql $$
         let input = "trigger trg_updated_at on users before banana execute set_updated_at";
         let err = parse_qail(input).expect_err("invalid trigger event should fail");
         assert!(err.contains("unsupported trigger event: BANANA"));
+    }
+
+    #[test]
+    fn test_parse_trigger_rejects_invalid_identifiers() {
+        for (input, expected) in [
+            (
+                "trigger bad-name on users before update execute set_updated_at",
+                "invalid trigger name 'bad-name'",
+            ),
+            (
+                "trigger trg_updated_at on bad-table before update execute set_updated_at",
+                "invalid trigger table 'bad-table'",
+            ),
+            (
+                "trigger trg_updated_at on users before update execute bad-func",
+                "invalid trigger function 'bad-func'",
+            ),
+            (
+                "trigger trg_updated_at on users before update of bad-name execute set_updated_at",
+                "invalid trigger update column 'bad-name'",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("invalid trigger identifier should fail");
+            assert!(err.contains(expected), "{err}");
+        }
+
+        parse_qail("trigger trg_updated_at on app.users before update execute util.touch")
+            .expect("schema-qualified trigger refs should parse");
     }
 
     #[test]
