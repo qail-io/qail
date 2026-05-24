@@ -135,12 +135,33 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_hint(hint);
         } else if line.starts_with("bucket ") {
             let res = parse_resource(line, &mut lines, ResourceKind::Bucket)?;
+            if schema
+                .resources
+                .iter()
+                .any(|existing| existing.name == res.name)
+            {
+                return Err(format!("duplicate resource declaration '{}'", res.name));
+            }
             schema.add_resource(res);
         } else if line.starts_with("queue ") {
             let res = parse_resource(line, &mut lines, ResourceKind::Queue)?;
+            if schema
+                .resources
+                .iter()
+                .any(|existing| existing.name == res.name)
+            {
+                return Err(format!("duplicate resource declaration '{}'", res.name));
+            }
             schema.add_resource(res);
         } else if line.starts_with("topic ") {
             let res = parse_resource(line, &mut lines, ResourceKind::Topic)?;
+            if schema
+                .resources
+                .iter()
+                .any(|existing| existing.name == res.name)
+            {
+                return Err(format!("duplicate resource declaration '{}'", res.name));
+            }
             schema.add_resource(res);
         } else if line.starts_with("policy ") {
             let policy = parse_policy(line, &mut lines)?;
@@ -3737,6 +3758,16 @@ bucket avatars {
 "#;
         let err = parse_qail(input).expect_err("duplicate resource properties should fail");
         assert!(err.contains("Duplicate resource property 'provider' in 'avatars'"));
+    }
+
+    #[test]
+    fn test_parse_resource_rejects_duplicate_names() {
+        let input = r#"
+bucket notifications { provider s3 }
+queue notifications { provider sqs }
+"#;
+        let err = parse_qail(input).expect_err("duplicate resources should fail");
+        assert!(err.contains("duplicate resource declaration 'notifications'"));
     }
 
     #[test]
