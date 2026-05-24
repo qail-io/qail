@@ -279,6 +279,8 @@ fn overlay_apply_sql(row: &OverlayRow, pk_col: &str) -> Result<Option<String>> {
 }
 
 fn overlay_insert_sql(row: &OverlayRow, pk_col: &str) -> Result<String> {
+    ensure_insert_overlay_pk_matches(row, pk_col)?;
+
     let columns = overlay_columns(row)?;
     let table = quote_ident(&row.table);
     let quoted_columns = columns
@@ -317,6 +319,61 @@ fn overlay_insert_sql(row: &OverlayRow, pk_col: &str) -> Result<String> {
          {};",
         table, quoted_columns, select_columns, table, data, conflict
     ))
+}
+
+fn ensure_insert_overlay_pk_matches(row: &OverlayRow, pk_col: &str) -> Result<()> {
+    let data = row
+        .row_data
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Branch overlay insert row is missing row_data"))?;
+    let value: Value = serde_json::from_str(data).with_context(|| {
+        format!(
+            "Branch overlay row {}.{} contains invalid JSON",
+            row.table, row.row_pk
+        )
+    })?;
+    let obj = value.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Branch overlay row {}.{} row_data must be a JSON object",
+            row.table,
+            row.row_pk
+        )
+    })?;
+    let pk_value = obj.get(pk_col).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Branch overlay insert row {}.{} is missing primary key '{}'",
+            row.table,
+            row.row_pk,
+            pk_col
+        )
+    })?;
+    let pk_text = json_pk_value_to_text(pk_value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Branch overlay insert row {}.{} primary key '{}' must be a scalar",
+            row.table,
+            row.row_pk,
+            pk_col
+        )
+    })?;
+    if pk_text != row.row_pk {
+        bail!(
+            "Branch overlay insert row {}.{} primary key '{}' does not match row_data value '{}'",
+            row.table,
+            row.row_pk,
+            pk_col,
+            pk_text
+        );
+    }
+    Ok(())
+}
+
+fn json_pk_value_to_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 fn overlay_update_sql(row: &OverlayRow, pk_col: &str) -> Result<Option<String>> {
@@ -459,6 +516,29 @@ mod tests {
         );
         assert!(sql.contains(r#"ON CONFLICT ("id") DO UPDATE SET"#), "{sql}");
         assert!(sql.contains(r#""name" = EXCLUDED."name""#), "{sql}");
+    }
+
+    #[test]
+    fn branch_merge_insert_overlay_requires_matching_row_pk() {
+        let missing = OverlayRow {
+            table: "users".to_string(),
+            row_pk: "u1".to_string(),
+            operation: "insert".to_string(),
+            row_data: Some(r#"{"name":"Ada"}"#.to_string()),
+        };
+        let err =
+            overlay_apply_sql(&missing, "id").expect_err("insert overlay missing pk must fail");
+        assert!(err.to_string().contains("missing primary key"));
+
+        let mismatched = OverlayRow {
+            table: "users".to_string(),
+            row_pk: "u1".to_string(),
+            operation: "insert".to_string(),
+            row_data: Some(r#"{"id":"u2","name":"Ada"}"#.to_string()),
+        };
+        let err = overlay_apply_sql(&mismatched, "id")
+            .expect_err("insert overlay with mismatched pk must fail");
+        assert!(err.to_string().contains("does not match"));
     }
 
     #[test]
