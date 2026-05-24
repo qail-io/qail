@@ -415,6 +415,10 @@ async fn prepare_tenant_guarded_query_filters_merge_query_source() {
     let qail_core::ast::MergeSource::Query { query, .. } = &merge.source else {
         panic!("expected query source");
     };
+    assert!(merge.on.iter().any(|condition| {
+        matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "orders.tenant_id")
+            && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+    }));
     assert!(query.cages.iter().any(|cage| {
         matches!(cage.kind, qail_core::ast::CageKind::Filter)
             && cage.conditions.iter().any(|condition| {

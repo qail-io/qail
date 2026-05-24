@@ -629,6 +629,8 @@ fn scope_merge_target(
                 value: Value::Column(source_column),
                 is_array_unnest: false,
             });
+        } else {
+            merge.on.push(target_condition.clone());
         }
 
         for clause in &mut merge.clauses {
