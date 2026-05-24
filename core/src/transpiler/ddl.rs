@@ -199,6 +199,28 @@ fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
     }
 }
 
+fn index_method_to_sql(method: &str) -> Option<&'static str> {
+    match method.trim().to_ascii_lowercase().as_str() {
+        "btree" => Some("btree"),
+        "hash" => Some("hash"),
+        "gin" => Some("gin"),
+        "gist" => Some("gist"),
+        "brin" => Some("brin"),
+        "spgist" | "sp-gist" => Some("spgist"),
+        _ => None,
+    }
+}
+
+fn index_column_to_sql(column: &str, generator: &dyn SqlGenerator) -> String {
+    if is_simple_identifier(column) {
+        generator.quote_identifier(column)
+    } else if contains_unquoted_statement_delimiter(column) {
+        generator.quote_identifier(column)
+    } else {
+        column.trim().to_string()
+    }
+}
+
 fn parse_fk_action(tokens: &[&str], index: usize) -> Option<(String, usize)> {
     match tokens.get(index)?.to_ascii_uppercase().as_str() {
         "CASCADE" => Some(("CASCADE".to_string(), index + 1)),
@@ -597,13 +619,7 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
             let cols = idx
                 .columns
                 .iter()
-                .map(|c| {
-                    if is_simple_identifier(c) {
-                        generator.quote_identifier(c)
-                    } else {
-                        c.clone()
-                    }
-                })
+                .map(|c| index_column_to_sql(c, generator.as_ref()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let mut sql = format!(
@@ -613,17 +629,17 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
                 generator.quote_identifier(&idx.table)
             );
             if let Some(method) = &idx.index_type
-                && !method.trim().is_empty()
+                && let Some(method) = index_method_to_sql(method)
             {
                 sql.push_str(" USING ");
-                sql.push_str(method.trim());
+                sql.push_str(method);
             }
             sql.push_str(" (");
             sql.push_str(&cols);
             sql.push(')');
             if let Some(where_clause) = &idx.where_clause {
                 sql.push_str(" WHERE ");
-                sql.push_str(where_clause);
+                sql.push_str(&sql_expr_fragment_to_sql(where_clause, "FALSE"));
             }
             sql
         }

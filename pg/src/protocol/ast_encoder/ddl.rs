@@ -179,7 +179,11 @@ fn sequence_option_to_sql(opt: &str) -> Option<String> {
 
 fn push_index_column(buf: &mut BytesMut, column: &str) {
     if column.contains('(') {
-        buf.extend_from_slice(column.as_bytes());
+        if contains_unquoted_statement_delimiter(column) {
+            push_identifier(buf, column);
+        } else {
+            buf.extend_from_slice(column.trim().as_bytes());
+        }
     } else {
         push_identifier(buf, column);
     }
@@ -434,6 +438,18 @@ fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         expr.replace('\0', "")
+    }
+}
+
+fn index_method_to_sql(method: &str) -> Option<&'static str> {
+    match method.trim().to_ascii_lowercase().as_str() {
+        "btree" => Some("btree"),
+        "hash" => Some("hash"),
+        "gin" => Some("gin"),
+        "gist" => Some("gist"),
+        "brin" => Some("brin"),
+        "spgist" | "sp-gist" => Some("spgist"),
+        _ => None,
     }
 }
 
@@ -762,10 +778,10 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) {
         buf.extend_from_slice(b" ON ");
         push_identifier(buf, &idx.table);
         if let Some(method) = &idx.index_type
-            && !method.trim().is_empty()
+            && let Some(method) = index_method_to_sql(method)
         {
             buf.extend_from_slice(b" USING ");
-            buf.extend_from_slice(method.trim().as_bytes());
+            buf.extend_from_slice(method.as_bytes());
         }
         buf.extend_from_slice(b" (");
         for (i, col) in idx.columns.iter().enumerate() {
@@ -777,7 +793,7 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) {
         buf.extend_from_slice(b")");
         if let Some(where_clause) = &idx.where_clause {
             buf.extend_from_slice(b" WHERE ");
-            buf.extend_from_slice(where_clause.as_bytes());
+            buf.extend_from_slice(sql_expr_fragment_to_sql(where_clause, "FALSE").as_bytes());
         }
     }
 }

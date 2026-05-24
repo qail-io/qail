@@ -2013,6 +2013,45 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_index_fragments_are_sanitized() {
+        use qail_core::ast::IndexDef;
+
+        let valid = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_lower_email".to_string(),
+                table: "users".to_string(),
+                columns: vec!["lower(email)".to_string()],
+                unique: false,
+                index_type: Some("btree".to_string()),
+                where_clause: Some("active = true".to_string()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&valid).unwrap().0,
+            "CREATE INDEX idx_lower_email ON users USING btree (lower(email)) WHERE active = true"
+        );
+
+        let malicious = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx_bad".to_string(),
+                table: "users".to_string(),
+                columns: vec!["lower(email); DROP TABLE users; --".to_string()],
+                unique: false,
+                index_type: Some("btree; DROP TABLE users".to_string()),
+                where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&malicious).unwrap().0,
+            "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\") WHERE FALSE"
+        );
+    }
+
+    #[test]
     fn test_encode_foreign_key_reference_targets_are_sanitized() {
         use qail_core::ast::{Constraint, Expr};
 

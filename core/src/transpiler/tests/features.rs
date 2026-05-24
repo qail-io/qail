@@ -23,6 +23,43 @@ fn test_index_sql_unique() {
 }
 
 #[test]
+fn test_index_fragments_are_sanitized() {
+    let valid = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_lower_email".to_string(),
+            table: "users".to_string(),
+            columns: vec!["lower(email)".to_string()],
+            unique: false,
+            index_type: Some("btree".to_string()),
+            where_clause: Some("active = true".to_string()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        valid.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE INDEX idx_lower_email ON users USING btree (lower(email)) WHERE active = true"
+    );
+
+    let malicious = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_bad".to_string(),
+            table: "users".to_string(),
+            columns: vec!["lower(email); DROP TABLE users; --".to_string()],
+            unique: false,
+            index_type: Some("btree; DROP TABLE users".to_string()),
+            where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        malicious.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE INDEX idx_bad ON users (\"lower(email); DROP TABLE users; --\") WHERE FALSE"
+    );
+}
+
+#[test]
 fn test_composite_pk_sql() {
     // make order_items order_id:uuid, item_id:uuid primary key(order_id, item_id)
     let cmd = parse("make order_items order_id:uuid, item_id:uuid primary key(order_id, item_id)")
