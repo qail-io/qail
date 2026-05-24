@@ -243,7 +243,7 @@ pub fn split_schema(input: &str, out_dir: &str, force: bool) -> Result<()> {
             .cloned()
             .collect();
 
-        let filename = format!("{table_name}.qail");
+        let filename = schema_module_filename(&table_name);
         let path = out.join(&filename);
         write_text(&path, &canonical_schema_text(&module))?;
         order_entries.push(filename);
@@ -560,6 +560,39 @@ fn write_text(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content).with_context(|| format!("Failed to write '{}'", path.display()))
 }
 
+fn schema_module_filename(table_name: &str) -> String {
+    let safe_name = filename_component(table_name);
+    if safe_name == table_name {
+        format!("{safe_name}.qail")
+    } else {
+        let digest = crate::time::md5_hex(table_name);
+        format!("{}_{}.qail", safe_name, &digest[..8])
+    }
+}
+
+fn filename_component(raw: &str) -> String {
+    let mut safe = String::new();
+    let mut last_was_separator = false;
+
+    for ch in raw.chars() {
+        let is_safe = ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.');
+        if is_safe {
+            safe.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            safe.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    let safe = safe.trim_matches(|ch| matches!(ch, '_' | '-' | '.'));
+    if safe.is_empty() {
+        "unnamed".to_string()
+    } else {
+        safe.to_string()
+    }
+}
+
 fn rel_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .ok()
@@ -594,4 +627,43 @@ fn strict_manifest_default_enabled(schema_root: &Path) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{filename_component, schema_module_filename};
+
+    #[test]
+    fn schema_module_filename_preserves_common_table_names() {
+        assert_eq!(schema_module_filename("users"), "users.qail");
+        assert_eq!(schema_module_filename("public.users"), "public.users.qail");
+        assert_eq!(schema_module_filename("tenant_users"), "tenant_users.qail");
+    }
+
+    #[test]
+    fn schema_module_filename_sanitizes_path_like_names() {
+        let filename = schema_module_filename("../../tenant/users\n");
+
+        assert!(filename.starts_with("tenant_users_"));
+        assert!(filename.ends_with(".qail"));
+        assert!(!filename.contains('/'));
+        assert!(!filename.contains('\\'));
+        assert!(!filename.contains(".."));
+    }
+
+    #[test]
+    fn schema_module_filename_hashes_sanitized_collisions() {
+        let slash_name = schema_module_filename("tenant/users");
+        let question_name = schema_module_filename("tenant?users");
+
+        assert_ne!(slash_name, question_name);
+        assert!(slash_name.starts_with("tenant_users_"));
+        assert!(question_name.starts_with("tenant_users_"));
+    }
+
+    #[test]
+    fn schema_filename_component_fails_closed_for_empty_names() {
+        assert_eq!(filename_component("..."), "unnamed");
+        assert_eq!(filename_component(" \n\t "), "unnamed");
+    }
 }
