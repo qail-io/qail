@@ -1,4 +1,4 @@
-use crate::transpiler::nosql::{mongo::ToMongo, qdrant::ToQdrant};
+use crate::transpiler::nosql::{dynamo::ToDynamo, mongo::ToMongo, qdrant::ToQdrant};
 
 #[test]
 fn test_qdrant_search() {
@@ -268,4 +268,92 @@ fn test_mongo_shell_fragments_are_escaped() {
         "{find}"
     );
     assert!(find.contains(".sort({ \"score\\\"bad\": -1 })"), "{find}");
+}
+
+#[test]
+fn test_dynamo_json_and_expression_names_are_escaped() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let get = Qail {
+        table: "users\"bad".to_string(),
+        columns: vec![Expr::Named("payload\"key".to_string())],
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("city\", #x = :evil".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("London\"bad".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("index".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("gsi\"bad".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_dynamo();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&get).expect("dynamo get JSON must stay valid");
+    assert_eq!(parsed["TableName"], "users\"bad");
+    assert_eq!(parsed["IndexName"], "gsi\"bad");
+    assert_eq!(parsed["FilterExpression"], "#f1 = :v1");
+    assert_eq!(
+        parsed["ExpressionAttributeNames"]["#f1"],
+        "city\", #x = :evil"
+    );
+    assert_eq!(parsed["ExpressionAttributeNames"]["#p1"], "payload\"key");
+    assert_eq!(
+        parsed["ExpressionAttributeValues"][":v1"]["S"],
+        "London\"bad"
+    );
+    assert_eq!(parsed["ProjectionExpression"], "#p1");
+
+    let update = Qail {
+        action: Action::Set,
+        table: "users".to_string(),
+        cages: vec![
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("pk\"bad".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("user\"1".to_string()),
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            },
+            Cage {
+                kind: CageKind::Payload,
+                conditions: vec![Condition {
+                    left: Expr::Named("set\", danger = :x".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("active\"yes".to_string()),
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            },
+        ],
+        ..Default::default()
+    }
+    .to_dynamo();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&update).expect("dynamo update JSON must stay valid");
+    assert_eq!(parsed["Key"]["pk\"bad"]["S"], "user\"1");
+    assert_eq!(parsed["UpdateExpression"], "SET #u101 = :u101");
+    assert_eq!(
+        parsed["ExpressionAttributeNames"]["#u101"],
+        "set\", danger = :x"
+    );
+    assert_eq!(
+        parsed["ExpressionAttributeValues"][":u101"]["S"],
+        "active\"yes"
+    );
 }
