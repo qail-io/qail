@@ -1699,6 +1699,11 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
     for raw_privilege in privs_str.split(',') {
         let privilege_key = raw_privilege.trim().to_uppercase();
         let privilege = parse_privilege(raw_privilege)?;
+        if privilege_key == "ALL" && !seen_privileges.is_empty()
+            || privilege_key != "ALL" && seen_privileges.contains("ALL")
+        {
+            return Err("ALL privilege cannot be combined with specific privileges".to_string());
+        }
         if !seen_privileges.insert(privilege_key.clone()) {
             return Err(format!("duplicate grant/revoke privilege: {privilege_key}"));
         }
@@ -3288,6 +3293,17 @@ trigger audit_change on posts after update execute audit_post
         let input = "grant select, SELECT on users to app_role";
         let err = parse_qail(input).expect_err("duplicate grant privilege should fail");
         assert!(err.contains("duplicate grant/revoke privilege: SELECT"));
+    }
+
+    #[test]
+    fn test_parse_grant_rejects_all_with_specific_privileges() {
+        for input in [
+            "grant all, select on users to app_role",
+            "revoke select, all on users from app_role",
+        ] {
+            let err = parse_qail(input).expect_err("mixed ALL grant privileges should fail");
+            assert!(err.contains("ALL privilege cannot be combined with specific privileges"));
+        }
     }
 
     #[test]
