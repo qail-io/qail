@@ -456,6 +456,19 @@ fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
     }
 }
 
+fn checked_sql_expr_fragment(
+    expr: &str,
+    context: &str,
+) -> Result<String, crate::protocol::EncodeError> {
+    let expr = expr.trim();
+    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid {context}: {expr:?}"
+        )));
+    }
+    Ok(expr.to_string())
+}
+
 fn index_method_to_sql(method: &str) -> Option<&'static str> {
     match method.trim().to_ascii_lowercase().as_str() {
         "btree" => Some("btree"),
@@ -608,7 +621,11 @@ fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
     }
 }
 
-fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMut) {
+fn encode_column_check_constraint(
+    name: &str,
+    vals: &[String],
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
     if vals.len() == 1
         && vals[0]
             .trim_start()
@@ -617,11 +634,14 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
     {
         buf.extend_from_slice(b" ");
         if contains_unquoted_statement_delimiter(&vals[0]) {
-            buf.extend_from_slice(b"CHECK (FALSE)");
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "invalid column check constraint for {name:?}: {:?}",
+                vals[0]
+            )));
         } else {
             buf.extend_from_slice(vals[0].as_bytes());
         }
-        return;
+        return Ok(());
     }
 
     let looks_like_expr = vals.len() == 1
@@ -631,8 +651,12 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
         });
 
     if looks_like_expr {
+        let raw_check = checked_sql_expr_fragment(
+            &vals.join(" "),
+            &format!("column check expression for {name:?}"),
+        )?;
         buf.extend_from_slice(b" CHECK (");
-        buf.extend_from_slice(sql_expr_fragment_to_sql(&vals.join(" "), "FALSE").as_bytes());
+        buf.extend_from_slice(raw_check.as_bytes());
         buf.extend_from_slice(b")");
     } else {
         buf.extend_from_slice(b" CHECK (");
@@ -648,10 +672,11 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
         }
         buf.extend_from_slice(b"))");
     }
+    Ok(())
 }
 
 /// Encode CREATE TABLE statement.
-pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
+pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"CREATE TABLE ");
     push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" (");
@@ -697,7 +722,10 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
                     let sql_default = match val.as_str() {
                         "uuid()" => "gen_random_uuid()".to_string(),
                         "now()" => "NOW()".to_string(),
-                        other => sql_expr_fragment_to_sql(other, "NULL"),
+                        other => checked_sql_expr_fragment(
+                            other,
+                            &format!("column default expression for {name:?}"),
+                        )?,
                     };
                     buf.extend_from_slice(sql_default.as_bytes());
                 }
@@ -711,16 +739,20 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
                         }
                         ColumnGeneration::Stored(expr) => {
                             buf.extend_from_slice(b" GENERATED ALWAYS AS (");
-                            buf.extend_from_slice(
-                                sql_expr_fragment_to_sql(expr, "NULL").as_bytes(),
-                            );
+                            let expr = checked_sql_expr_fragment(
+                                expr,
+                                &format!("generated column expression for {name:?}"),
+                            )?;
+                            buf.extend_from_slice(expr.as_bytes());
                             buf.extend_from_slice(b") STORED");
                         }
                         ColumnGeneration::Virtual(expr) => {
                             buf.extend_from_slice(b" GENERATED ALWAYS AS (");
-                            buf.extend_from_slice(
-                                sql_expr_fragment_to_sql(expr, "NULL").as_bytes(),
-                            );
+                            let expr = checked_sql_expr_fragment(
+                                expr,
+                                &format!("generated column expression for {name:?}"),
+                            )?;
+                            buf.extend_from_slice(expr.as_bytes());
                             buf.extend_from_slice(b")");
                         }
                     }
@@ -748,7 +780,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
             // CHECK constraint
             for constraint in constraints {
                 if let Constraint::Check(vals) = constraint {
-                    encode_column_check_constraint(name, vals, buf);
+                    encode_column_check_constraint(name, vals, buf)?;
                 }
             }
         }
@@ -779,6 +811,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
     }
 
     buf.extend_from_slice(b")");
+    Ok(())
 }
 
 /// Encode CREATE INDEX statement.
@@ -898,7 +931,10 @@ pub fn encode_alter_add_column(
                     let sql_default = match val.as_str() {
                         "uuid()" => "gen_random_uuid()".to_string(),
                         "now()" => "NOW()".to_string(),
-                        other => sql_expr_fragment_to_sql(other, "NULL"),
+                        other => checked_sql_expr_fragment(
+                            other,
+                            &format!("column default expression for {name:?}"),
+                        )?,
                     };
                     buf.extend_from_slice(sql_default.as_bytes());
                 }
@@ -907,7 +943,7 @@ pub fn encode_alter_add_column(
                     buf.extend_from_slice(references_target_to_sql(target).as_bytes());
                 }
                 if let Constraint::Check(vals) = constraint {
-                    encode_column_check_constraint(name, vals, buf);
+                    encode_column_check_constraint(name, vals, buf)?;
                 }
             }
         }
@@ -1887,6 +1923,29 @@ mod tests {
         assert!(
             sql.contains("CHECK (score >= 0)"),
             "add-column SQL should preserve CHECK constraint, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn encode_alter_add_column_rejects_invalid_default_expression() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "players".to_string(),
+            columns: vec![Expr::Def {
+                name: "score".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let err = encode_alter_add_column(&cmd, &mut buf)
+            .expect_err("unsafe add-column default must fail");
+
+        assert!(
+            matches!(&err, crate::protocol::EncodeError::InvalidAst(message) if message.contains("column default expression")),
+            "unexpected error: {err}"
         );
     }
 

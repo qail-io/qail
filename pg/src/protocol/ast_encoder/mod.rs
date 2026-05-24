@@ -165,7 +165,7 @@ impl AstEncoder {
             Action::Export => {
                 dml::encode_export(cmd, sql_buf, params)?;
             }
-            Action::Make => ddl::encode_make(cmd, sql_buf),
+            Action::Make => ddl::encode_make(cmd, sql_buf)?,
             Action::Index => ddl::encode_index(cmd, sql_buf)?,
             Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, sql_buf),
@@ -249,7 +249,7 @@ impl AstEncoder {
             Action::Export => {
                 dml::encode_export(cmd, &mut sql_buf, &mut params)?;
             }
-            Action::Make => ddl::encode_make(cmd, &mut sql_buf),
+            Action::Make => ddl::encode_make(cmd, &mut sql_buf)?,
             Action::Index => ddl::encode_index(cmd, &mut sql_buf)?,
             Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, &mut sql_buf),
@@ -2154,45 +2154,76 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_column_expression_fragments_are_sanitized() {
+    fn test_encode_column_expression_fragments_reject_invalid_fragments() {
         use qail_core::ast::{ColumnGeneration, Constraint, Expr};
 
-        let cmd = Qail {
+        let safe = Qail {
             action: Action::Make,
             table: "events".to_string(),
-            columns: vec![
-                Expr::Def {
-                    name: "safe_note".to_string(),
-                    data_type: "str".to_string(),
-                    constraints: vec![Constraint::Default("'semi;inside'".to_string())],
-                },
-                Expr::Def {
-                    name: "unsafe_default".to_string(),
-                    data_type: "int".to_string(),
-                    constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
-                },
-                Expr::Def {
-                    name: "unsafe_check".to_string(),
-                    data_type: "int".to_string(),
-                    constraints: vec![Constraint::Check(vec![
-                        "unsafe_check > 0; DROP TABLE users; --".to_string(),
-                    ])],
-                },
-                Expr::Def {
-                    name: "unsafe_generated".to_string(),
-                    data_type: "str".to_string(),
-                    constraints: vec![Constraint::Generated(ColumnGeneration::Stored(
-                        "lower(safe_note); DROP TABLE users; --".to_string(),
-                    ))],
-                },
-            ],
+            columns: vec![Expr::Def {
+                name: "safe_note".to_string(),
+                data_type: "str".to_string(),
+                constraints: vec![Constraint::Default("'semi;inside'".to_string())],
+            }],
             ..Default::default()
         };
-        let sql = AstEncoder::encode_cmd_sql(&cmd).unwrap().0;
+        let sql = AstEncoder::encode_cmd_sql(&safe).unwrap().0;
         assert!(sql.contains("DEFAULT 'semi;inside'"));
-        assert!(sql.contains("unsafe_default INT NOT NULL DEFAULT NULL"));
-        assert!(sql.contains("unsafe_check INT NOT NULL CHECK (FALSE)"));
-        assert!(sql.contains("unsafe_generated TEXT NOT NULL GENERATED ALWAYS AS (NULL) STORED"));
+
+        let unsafe_default = Qail {
+            action: Action::Make,
+            table: "events".to_string(),
+            columns: vec![Expr::Def {
+                name: "unsafe_default".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
+            }],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&unsafe_default)
+            .expect_err("unsafe default expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("column default expression")),
+            "unexpected error: {err}"
+        );
+
+        let unsafe_check = Qail {
+            action: Action::Make,
+            table: "events".to_string(),
+            columns: vec![Expr::Def {
+                name: "unsafe_check".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Check(vec![
+                    "unsafe_check > 0; DROP TABLE users; --".to_string(),
+                ])],
+            }],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&unsafe_check)
+            .expect_err("unsafe check expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("column check expression")),
+            "unexpected error: {err}"
+        );
+
+        let unsafe_generated = Qail {
+            action: Action::Make,
+            table: "events".to_string(),
+            columns: vec![Expr::Def {
+                name: "unsafe_generated".to_string(),
+                data_type: "str".to_string(),
+                constraints: vec![Constraint::Generated(ColumnGeneration::Stored(
+                    "lower(safe_note); DROP TABLE users; --".to_string(),
+                ))],
+            }],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&unsafe_generated)
+            .expect_err("unsafe generated expression must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("generated column expression")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

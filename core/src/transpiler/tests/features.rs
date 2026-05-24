@@ -299,44 +299,82 @@ fn test_foreign_key_reference_targets_are_sanitized() {
 }
 
 #[test]
-fn test_column_expression_fragments_are_sanitized() {
-    let cmd = Qail {
+fn test_column_expression_fragments_reject_invalid_fragments() {
+    let safe = Qail {
         action: Action::Make,
         table: "events".to_string(),
-        columns: vec![
-            Expr::Def {
-                name: "safe_note".to_string(),
-                data_type: "str".to_string(),
-                constraints: vec![Constraint::Default("'semi;inside'".to_string())],
-            },
-            Expr::Def {
-                name: "unsafe_default".to_string(),
-                data_type: "int".to_string(),
-                constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
-            },
-            Expr::Def {
-                name: "unsafe_check".to_string(),
-                data_type: "int".to_string(),
-                constraints: vec![Constraint::Check(vec![
-                    "unsafe_check > 0; DROP TABLE users; --".to_string(),
-                ])],
-            },
-            Expr::Def {
-                name: "unsafe_generated".to_string(),
-                data_type: "str".to_string(),
-                constraints: vec![Constraint::Generated(ColumnGeneration::Stored(
-                    "lower(safe_note); DROP TABLE users; --".to_string(),
-                ))],
-            },
-        ],
+        columns: vec![Expr::Def {
+            name: "safe_note".to_string(),
+            data_type: "str".to_string(),
+            constraints: vec![Constraint::Default("'semi;inside'".to_string())],
+        }],
         ..Default::default()
     };
-    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    let sql = safe.to_sql_with_dialect(Dialect::Postgres);
     assert!(sql.contains("DEFAULT 'semi;inside'"));
-    assert!(sql.contains("unsafe_default INT NOT NULL DEFAULT NULL"));
-    assert!(sql.contains("unsafe_check INT NOT NULL CHECK (FALSE)"));
-    assert!(
-        sql.contains("unsafe_generated VARCHAR(255) NOT NULL GENERATED ALWAYS AS (NULL) STORED")
+
+    let unsafe_default = Qail {
+        action: Action::Make,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_default".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_default.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid column default expression */"
+    );
+
+    let unsafe_check = Qail {
+        action: Action::Make,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_check".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Check(vec![
+                "unsafe_check > 0; DROP TABLE users; --".to_string(),
+            ])],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_check.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid column check expression */"
+    );
+
+    let unsafe_generated = Qail {
+        action: Action::Make,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "unsafe_generated".to_string(),
+            data_type: "str".to_string(),
+            constraints: vec![Constraint::Generated(ColumnGeneration::Stored(
+                "lower(safe_note); DROP TABLE users; --".to_string(),
+            ))],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_generated.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid generated column expression */"
+    );
+
+    let unsafe_alter_default = Qail {
+        action: Action::Alter,
+        table: "events".to_string(),
+        columns: vec![Expr::Def {
+            name: "score".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_alter_default.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid column default expression */"
     );
 }
 
