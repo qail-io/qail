@@ -1321,6 +1321,25 @@ fn format_enum_value(value: &str) -> String {
     }
 }
 
+fn dollar_quote_qail_body(body: &str) -> String {
+    let delimiter = if !body.contains("$$") {
+        "$$".to_string()
+    } else {
+        (0..)
+            .map(|idx| {
+                if idx == 0 {
+                    "$qail$".to_string()
+                } else {
+                    format!("$qail{idx}$")
+                }
+            })
+            .find(|candidate| !body.contains(candidate))
+            .expect("infinite delimiter candidates should always find a match")
+    };
+
+    format!("{delimiter}\n{body}\n{delimiter}")
+}
+
 /// Serialize a `Schema` back to a QAIL-format string.
 pub fn to_qail_string(schema: &Schema) -> String {
     let mut output = String::new();
@@ -1529,10 +1548,8 @@ pub fn to_qail_string(schema: &Schema) -> String {
         } else {
             "view"
         };
-        output.push_str(&format!(
-            "{} {} $$\n{}\n$$\n\n",
-            prefix, view.name, view.query
-        ));
+        let body = dollar_quote_qail_body(&view.query);
+        output.push_str(&format!("{} {} {}\n\n", prefix, view.name, body));
     }
 
     // Functions
@@ -1544,9 +1561,10 @@ pub fn to_qail_string(schema: &Schema) -> String {
             .filter(|v| !v.trim().is_empty())
             .map(|v| format!(" {}", v))
             .unwrap_or_default();
+        let body = dollar_quote_qail_body(&func.body);
         output.push_str(&format!(
-            "function {}({}) returns {} language {}{} $$\n{}\n$$\n\n",
-            func.name, args, func.returns, func.language, volatility, func.body
+            "function {}({}) returns {} language {}{} {}\n\n",
+            func.name, args, func.returns, func.language, volatility, body
         ));
     }
 

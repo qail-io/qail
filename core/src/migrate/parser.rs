@@ -885,27 +885,14 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
             .trim()
     };
 
-    // Split name from body at $$
-    if let Some(dollar_pos) = rest.find("$$") {
+    if let Some((dollar_pos, delimiter)) = find_dollar_delimiter(rest) {
         let name = rest[..dollar_pos].trim();
-        let mut body = rest[dollar_pos + 2..].to_string();
-
-        if !body.contains("$$") {
-            // Multi-line: read until closing $$
-            for line in lines.by_ref() {
-                if line.contains("$$") {
-                    let before_closing = line.split("$$").next().unwrap_or("");
-                    body.push('\n');
-                    body.push_str(before_closing);
-                    break;
-                }
-                body.push('\n');
-                body.push_str(line);
-            }
-        } else {
-            // Inline: strip closing $$
-            body = body.replace("$$", "");
-        }
+        let body = collect_dollar_body(
+            &rest[dollar_pos + delimiter.len()..],
+            lines,
+            &delimiter,
+            "view",
+        )?;
 
         let mut view = ViewDef::new(name, body.trim());
         if materialized {
@@ -913,7 +900,7 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
         }
         Ok(view)
     } else {
-        Err("view body must be wrapped in $$...$$".to_string())
+        Err("view body must be wrapped in a dollar-quoted block".to_string())
     }
 }
 
@@ -942,14 +929,16 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
 
     let after_args = rest[paren_end + 1..].trim();
 
-    // Parse returns/language
-    let parts: Vec<&str> = after_args.split_whitespace().collect();
     let mut returns = "void".to_string();
     let mut language = "plpgsql".to_string();
 
+    let (body_start_idx, delimiter) = find_dollar_delimiter(after_args)
+        .ok_or_else(|| "function body must be wrapped in a dollar-quoted block".to_string())?;
+    let header = after_args[..body_start_idx].trim();
+    let parts: Vec<&str> = header.split_whitespace().collect();
+
     let mut volatility: Option<String> = None;
     let mut i = 0;
-    let mut body_start_idx = None;
     while i < parts.len() {
         if parts[i] == "returns" && i + 1 < parts.len() {
             returns = parts[i + 1].to_string();
@@ -962,39 +951,20 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
             if token == "volatile" || token == "stable" || token == "immutable" {
                 volatility = Some(token);
                 i += 1;
-            } else if parts[i] == "$$" {
-                body_start_idx = Some(i);
-                break;
             } else {
                 i += 1;
             }
         }
     }
 
-    // Extract body between $$ markers
-    let body = if let Some(idx) = body_start_idx {
-        let after_first_dollar = parts[idx + 1..].join(" ");
-        let mut body_str = after_first_dollar;
-
-        if !body_str.contains("$$") {
-            for line in lines.by_ref() {
-                if line.contains("$$") {
-                    let before = line.split("$$").next().unwrap_or("");
-                    body_str.push('\n');
-                    body_str.push_str(before);
-                    break;
-                }
-                body_str.push('\n');
-                body_str.push_str(line);
-            }
-        } else {
-            body_str = body_str.replace("$$", "");
-        }
-
-        body_str.trim().to_string()
-    } else {
-        return Err("function body must be wrapped in $$...$$".to_string());
-    };
+    let body = collect_dollar_body(
+        &after_args[body_start_idx + delimiter.len()..],
+        lines,
+        &delimiter,
+        "function",
+    )?
+    .trim()
+    .to_string();
 
     let mut func = SchemaFunctionDef::new(name, &returns, body);
     func.language = language;
@@ -1002,6 +972,66 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     func.volatility = volatility;
 
     Ok(func)
+}
+
+fn find_dollar_delimiter(raw: &str) -> Option<(usize, String)> {
+    let mut search_start = 0;
+    while let Some(relative_open) = raw[search_start..].find('$') {
+        let open = search_start + relative_open;
+        let tag_start = open + 1;
+        let relative_close = raw[tag_start..].find('$')?;
+        let close = tag_start + relative_close;
+        let tag = &raw[tag_start..close];
+        if tag
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Some((open, raw[open..=close].to_string()));
+        }
+        search_start = tag_start;
+    }
+
+    None
+}
+
+fn collect_dollar_body<'a, I: Iterator<Item = &'a str>>(
+    first_fragment: &str,
+    lines: &mut std::iter::Peekable<I>,
+    delimiter: &str,
+    kind: &str,
+) -> Result<String, String> {
+    let mut body = String::new();
+    if let Some(closing) = first_fragment.find(delimiter) {
+        body.push_str(&first_fragment[..closing]);
+        let trailing = &first_fragment[closing + delimiter.len()..];
+        if !trailing.trim().is_empty() {
+            return Err(format!(
+                "{kind} body has trailing content after closing delimiter"
+            ));
+        }
+        return Ok(body);
+    }
+
+    body.push_str(first_fragment);
+    for line in lines.by_ref() {
+        if let Some(closing) = line.find(delimiter) {
+            body.push('\n');
+            body.push_str(&line[..closing]);
+            let trailing = &line[closing + delimiter.len()..];
+            if !trailing.trim().is_empty() {
+                return Err(format!(
+                    "{kind} body has trailing content after closing delimiter"
+                ));
+            }
+            return Ok(body);
+        }
+        body.push('\n');
+        body.push_str(line);
+    }
+
+    Err(format!(
+        "{kind} body is missing closing delimiter {delimiter}"
+    ))
 }
 
 /// Parse a trigger definition.
@@ -1846,6 +1876,22 @@ $$
     }
 
     #[test]
+    fn test_parse_view_with_tagged_dollar_delimiter() {
+        let input = r#"
+view debug_sql $qail$
+  SELECT '$$literal$$' AS sample
+$qail$
+"#;
+        let schema = parse_qail(input).unwrap();
+        let rendered = super::super::schema::to_qail_string(&schema);
+        let reparsed = parse_qail(&rendered).unwrap();
+
+        assert_eq!(schema.views[0].name, "debug_sql");
+        assert!(schema.views[0].query.contains("$$literal$$"));
+        assert_eq!(reparsed.views[0].query, schema.views[0].query);
+    }
+
+    #[test]
     fn test_parse_function() {
         let input = "function set_updated_at() returns trigger language plpgsql $$ BEGIN NEW.updated_at = now(); RETURN NEW; END; $$";
         let schema = parse_qail(input).unwrap();
@@ -1863,6 +1909,23 @@ $$
         assert_eq!(schema.functions.len(), 1);
         assert_eq!(schema.functions[0].name, "is_super_admin");
         assert_eq!(schema.functions[0].volatility.as_deref(), Some("stable"));
+    }
+
+    #[test]
+    fn test_function_to_qail_string_round_trips_body_with_dollar_delimiter() {
+        let input = r#"
+function debug_notice() returns void language plpgsql $qail$
+BEGIN
+  RAISE NOTICE $$hello$$;
+END;
+$qail$
+"#;
+        let schema = parse_qail(input).unwrap();
+        let rendered = super::super::schema::to_qail_string(&schema);
+        let reparsed = parse_qail(&rendered).unwrap();
+
+        assert!(rendered.contains("$qail$"));
+        assert_eq!(reparsed.functions[0].body, schema.functions[0].body);
     }
 
     #[test]
