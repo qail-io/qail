@@ -123,6 +123,19 @@ table posts {
 }
 
 #[test]
+fn test_parse_schema_rejects_trailing_table_close_content() {
+    let content = r#"
+table users {
+  id UUID
+} trailing
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("trailing close content must fail");
+    assert!(err.contains("Trailing content after table closing brace for 'users'"));
+}
+
+#[test]
 fn test_parse_schema_tracks_views() {
     let content = r#"
 table users {

@@ -302,24 +302,31 @@ impl Schema {
                 current_table = Some((*name).to_string());
             }
             // End of table definition
-            else if line == "}" {
-                if let Some(table_name) = current_table.take() {
-                    if schema.tables.contains_key(&table_name) {
-                        return Err(format!("duplicate table declaration '{}'", table_name));
-                    }
-                    let has_rls = current_rls_flag || current_columns.contains_key("tenant_id");
-                    schema.tables.insert(
-                        table_name.clone(),
-                        TableSchema {
-                            name: table_name,
-                            columns: std::mem::take(&mut current_columns),
-                            policies: std::mem::take(&mut current_policies),
-                            foreign_keys: std::mem::take(&mut current_fks),
-                            rls_enabled: has_rls,
-                        },
-                    );
-                    current_rls_flag = false;
+            else if let Some(after_brace) = line.strip_prefix('}') {
+                let Some(table_name) = current_table.take() else {
+                    return Err("Unexpected table closing brace".to_string());
+                };
+                if !after_brace.trim().is_empty() {
+                    return Err(format!(
+                        "Trailing content after table closing brace for '{}'",
+                        table_name
+                    ));
                 }
+                if schema.tables.contains_key(&table_name) {
+                    return Err(format!("duplicate table declaration '{}'", table_name));
+                }
+                let has_rls = current_rls_flag || current_columns.contains_key("tenant_id");
+                schema.tables.insert(
+                    table_name.clone(),
+                    TableSchema {
+                        name: table_name,
+                        columns: std::mem::take(&mut current_columns),
+                        policies: std::mem::take(&mut current_policies),
+                        foreign_keys: std::mem::take(&mut current_fks),
+                        rls_enabled: has_rls,
+                    },
+                );
+                current_rls_flag = false;
             }
             // Column definition: column_name TYPE [constraints] [ref:table.column] [protected]
             // Format from qail pull: "flow_name VARCHAR not_null"
