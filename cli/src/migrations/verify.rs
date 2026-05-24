@@ -3,7 +3,7 @@
 use crate::colors::*;
 use anyhow::{Result, anyhow, bail};
 use qail_core::ast::{Operator, Qail};
-use qail_core::migrate::{Schema, policy::PolicyPermissiveness};
+use qail_core::migrate::{Column, Generated, Index, Schema, policy::PolicyPermissiveness};
 use qail_pg::driver::PgDriver;
 use std::collections::{BTreeSet, HashSet};
 
@@ -115,7 +115,7 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
                 table.name,
                 col.name,
                 col.data_type.to_pg_type(),
-                col.nullable,
+                effective_nullable(&col),
                 col.primary_key,
                 col.unique,
                 fk
@@ -127,7 +127,7 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
     indexes.sort_by(|a, b| a.table.cmp(&b.table).then(a.name.cmp(&b.name)));
     for idx in indexes {
         // Fingerprint only simple indexes currently represented by introspection.
-        if !idx.expressions.is_empty() || idx.where_clause.is_some() || !idx.include.is_empty() {
+        if !is_simple_index(&idx) {
             continue;
         }
         lines.push(format!(
@@ -212,6 +212,9 @@ fn verify_foreign_keys(expected: &Schema, live: &Schema) -> Result<()> {
 fn verify_indexes(expected: &Schema, live: &Schema) -> Result<()> {
     let mut live_index_keys = HashSet::<String>::new();
     for idx in &live.indexes {
+        if !is_simple_index(idx) {
+            continue;
+        }
         let key = index_key(
             idx.table.as_str(),
             idx.name.as_str(),
@@ -224,7 +227,7 @@ fn verify_indexes(expected: &Schema, live: &Schema) -> Result<()> {
     let mut missing = Vec::<String>::new();
     let mut skipped = 0usize;
     for idx in &expected.indexes {
-        if !idx.expressions.is_empty() || idx.where_clause.is_some() || !idx.include.is_empty() {
+        if !is_simple_index(idx) {
             skipped += 1;
             continue;
         }
@@ -362,6 +365,43 @@ fn index_key(table: &str, name: &str, unique: bool, cols: &[String]) -> String {
     )
 }
 
+fn effective_nullable(col: &Column) -> bool {
+    if col.primary_key || is_identity_generated(&col.generated) {
+        false
+    } else {
+        col.nullable
+    }
+}
+
+fn is_identity_generated(generated: &Option<Generated>) -> bool {
+    matches!(
+        generated,
+        Some(Generated::AlwaysIdentity | Generated::ByDefaultIdentity)
+    )
+}
+
+fn is_simple_index(idx: &Index) -> bool {
+    idx.expressions.is_empty()
+        && idx.where_clause.is_none()
+        && idx.include.is_empty()
+        && idx
+            .columns
+            .iter()
+            .all(|column| is_simple_index_column(column))
+}
+
+fn is_simple_index_column(column: &str) -> bool {
+    column
+        .split('.')
+        .map(|part| part.trim().trim_matches('"'))
+        .all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+}
+
 fn normalize_ident(s: &str) -> String {
     s.trim()
         .trim_matches('"')
@@ -389,10 +429,10 @@ fn normalize_policy_permissive(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_ident, normalize_policy_cmd, normalize_policy_permissive,
-        schema_fingerprint_lines,
+        effective_nullable, is_simple_index_column, normalize_ident, normalize_policy_cmd,
+        normalize_policy_permissive, schema_fingerprint_lines,
     };
-    use qail_core::migrate::{Column, ColumnType, Schema, Table};
+    use qail_core::migrate::{Column, ColumnType, Generated, Schema, Table};
 
     #[test]
     fn normalize_ident_is_stable() {
@@ -424,5 +464,21 @@ mod tests {
         b.add_table(users);
 
         assert_eq!(schema_fingerprint_lines(&a), schema_fingerprint_lines(&b));
+    }
+
+    #[test]
+    fn identity_columns_are_effectively_not_nullable() {
+        let mut col = Column::new("row_seq", ColumnType::BigInt);
+        col.nullable = true;
+        col.generated = Some(Generated::ByDefaultIdentity);
+
+        assert!(!effective_nullable(&col));
+    }
+
+    #[test]
+    fn expression_index_columns_are_not_simple() {
+        assert!(is_simple_index_column("tenant_id"));
+        assert!(is_simple_index_column("public.tenant_id"));
+        assert!(!is_simple_index_column("lower(full_name)"));
     }
 }

@@ -5,7 +5,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{JoinKind, Operator, Qail};
+use qail_core::ast::{Condition, Expr, JoinKind, Operator, Qail, Value};
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{Deferrable, FkAction};
 use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
@@ -23,11 +23,143 @@ fn parse_required_i32(raw: Option<String>, label: &str) -> Result<i32> {
         .map_err(|e| anyhow!("Invalid {label} {:?}: {}", raw, e))
 }
 
+fn parse_pg_attnum_array(raw: &str, label: &str) -> Result<Vec<i32>> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return Err(anyhow!("Invalid {label} {:?}", raw));
+    };
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<i32>()
+                .map_err(|e| anyhow!("Invalid {label} {:?}: {}", raw, e))
+        })
+        .collect()
+}
+
 fn public_rls_status_cmd(public_namespace_oid: String) -> Qail {
     Qail::get("pg_catalog.pg_class")
         .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
         .filter("relkind", Operator::Eq, "r")
         .filter("relnamespace", Operator::Eq, public_namespace_oid)
+}
+
+fn join_column_eq(left: &str, right: &str) -> Condition {
+    Condition {
+        left: Expr::Named(left.to_string()),
+        op: Operator::Eq,
+        value: Value::Column(right.to_string()),
+        is_array_unnest: false,
+    }
+}
+
+fn join_int_eq(left: &str, value: i64) -> Condition {
+    Condition {
+        left: Expr::Named(left.to_string()),
+        op: Operator::Eq,
+        value: Value::Int(value),
+        is_array_unnest: false,
+    }
+}
+
+fn table_comment_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_class")
+        .table_alias("c")
+        .left_join_conds(
+            "pg_catalog.pg_description d",
+            vec![
+                join_column_eq("d.objoid", "c.oid"),
+                join_int_eq("d.objsubid", 0),
+            ],
+        )
+        .columns(["c.relname", "c.relkind", "d.description"])
+        .filter("c.relnamespace", Operator::Eq, public_namespace_oid)
+}
+
+fn column_comment_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_attribute")
+        .table_alias("a")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class c",
+            "a.attrelid",
+            "c.oid",
+        )
+        .left_join_conds(
+            "pg_catalog.pg_description d",
+            vec![
+                join_column_eq("d.objoid", "c.oid"),
+                join_column_eq("d.objsubid", "a.attnum"),
+            ],
+        )
+        .columns([
+            "c.relname",
+            "a.attname",
+            "a.attnum",
+            "a.attisdropped",
+            "d.description",
+        ])
+        .filter("c.relnamespace", Operator::Eq, public_namespace_oid)
+}
+
+fn function_comment_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_proc")
+        .table_alias("p")
+        .left_join_conds(
+            "pg_catalog.pg_description d",
+            vec![
+                join_column_eq("d.objoid", "p.oid"),
+                join_int_eq("d.objsubid", 0),
+            ],
+        )
+        .columns_expr([
+            Expr::Named("p.proname".to_string()),
+            Expr::FunctionCall {
+                name: "pg_catalog.pg_get_function_identity_arguments".to_string(),
+                args: vec![Expr::Named("p.oid".to_string())],
+                alias: None,
+            },
+            Expr::Named("d.description".to_string()),
+        ])
+        .filter("p.pronamespace", Operator::Eq, public_namespace_oid)
+}
+
+fn type_comment_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_type")
+        .table_alias("t")
+        .left_join_conds(
+            "pg_catalog.pg_description d",
+            vec![
+                join_column_eq("d.objoid", "t.oid"),
+                join_int_eq("d.objsubid", 0),
+            ],
+        )
+        .columns(["t.typname", "d.description"])
+        .filter("t.typnamespace", Operator::Eq, public_namespace_oid)
+}
+
+fn policy_comment_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_policy")
+        .table_alias("p")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class c",
+            "c.oid",
+            "p.polrelid",
+        )
+        .left_join_conds(
+            "pg_catalog.pg_description d",
+            vec![
+                join_column_eq("d.objoid", "p.oid"),
+                join_int_eq("d.objsubid", 0),
+            ],
+        )
+        .columns(["p.polname", "c.relname", "d.description"])
+        .filter("c.relnamespace", Operator::Eq, public_namespace_oid)
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +328,33 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         {
             base_tables.insert(table_name);
         }
+    }
+
+    let attnum_cmd = Qail::get("pg_catalog.pg_attribute")
+        .table_alias("a")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class c",
+            "c.oid",
+            "a.attrelid",
+        )
+        .columns(["c.relname", "a.attnum", "a.attname"])
+        .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone())
+        .filter("a.attnum", Operator::Gt, 0)
+        .filter("a.attisdropped", Operator::Eq, false);
+    let attnum_rows = driver
+        .fetch_all(&attnum_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query attribute ordinals: {}", e))?;
+    let mut attnum_columns = std::collections::HashMap::<(String, i32), String>::new();
+    for row in attnum_rows {
+        let table = row.text(0);
+        if !base_tables.contains(&table) {
+            continue;
+        }
+        let attnum = parse_required_i32(row.get_string(1), "pg_attribute.attnum")?;
+        let column = row.text(2);
+        attnum_columns.insert((table, attnum), column);
     }
 
     // ── 1. Columns + Defaults (AST-native) ──────────────────────────────
@@ -510,11 +669,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         std::collections::HashMap::new();
     for row in fk_ref_rows {
         let fk_constraint = row.text(0);
-        let unique_constraint = row.text(1);
-        fk_ref_candidates
-            .entry(fk_constraint)
-            .or_default()
-            .push(unique_constraint);
+        if let Some(unique_constraint) = row.get_string(1).filter(|value| !value.trim().is_empty())
+        {
+            fk_ref_candidates
+                .entry(fk_constraint)
+                .or_default()
+                .push(unique_constraint);
+        }
     }
 
     // ── 5b. Qualified FK source/reference tables + deferrability ─────────
@@ -540,6 +701,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "con.condeferred",
             "con.confdeltype",
             "con.confupdtype",
+            "con.conkey",
+            "con.confkey",
         ])
         .filter("con.contype", Operator::Eq, "f")
         .filter(
@@ -554,6 +717,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .map_err(|e| anyhow!("Failed to query FK constraint metadata: {}", e))?;
 
     let mut fk_references = Vec::new();
+    let mut table_multi_column_fks: std::collections::HashMap<String, Vec<MultiColumnForeignKey>> =
+        std::collections::HashMap::new();
     for row in fk_catalog_rows {
         let constraint_name = row.text(0);
         let source_table = row.text(1);
@@ -565,6 +730,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let condeferred = row.text(4) == "t";
         let on_delete = parse_pg_constraint_fk_action(&row.text(5));
         let on_update = parse_pg_constraint_fk_action(&row.text(6));
+        let source_attnums = parse_pg_attnum_array(&row.text(7), "pg_constraint.conkey")?;
+        let ref_attnums = parse_pg_attnum_array(&row.text(8), "pg_constraint.confkey")?;
         let status = if condeferred {
             qail_core::migrate::schema::Deferrable::InitiallyDeferred
         } else if condeferrable {
@@ -573,32 +740,78 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             qail_core::migrate::schema::Deferrable::NotDeferrable
         };
 
-        let Some(candidates) = fk_ref_candidates.get(&constraint_name) else {
+        if let Some(candidates) = fk_ref_candidates.get(&constraint_name)
+            && let Some(ref_constraint) = candidates.iter().find(|ref_constraint| {
+                qualified_constraint_columns.contains_key(&IntrospectedConstraintIdentity::new(
+                    ref_table.clone(),
+                    (*ref_constraint).clone(),
+                ))
+            })
+        {
+            fk_references.push(IntrospectedForeignKeyReference {
+                constraint: IntrospectedConstraintIdentity::new(source_table, constraint_name),
+                referenced_constraint: IntrospectedConstraintIdentity::new(
+                    ref_table,
+                    ref_constraint.clone(),
+                ),
+                on_delete,
+                on_update,
+                deferrable: status,
+            });
             continue;
-        };
-        let Some(ref_constraint) = candidates.iter().find(|ref_constraint| {
-            qualified_constraint_columns.contains_key(&IntrospectedConstraintIdentity::new(
-                ref_table.clone(),
-                (*ref_constraint).clone(),
-            ))
-        }) else {
-            continue;
-        };
+        }
 
-        fk_references.push(IntrospectedForeignKeyReference {
-            constraint: IntrospectedConstraintIdentity::new(source_table, constraint_name),
-            referenced_constraint: IntrospectedConstraintIdentity::new(
-                ref_table,
-                ref_constraint.clone(),
-            ),
-            on_delete,
-            on_update,
-            deferrable: status,
-        });
+        let source_cols = source_attnums
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, attnum)| {
+                attnum_columns
+                    .get(&(source_table.clone(), *attnum))
+                    .map(|column| {
+                        IntrospectedKeyColumn::new(source_table.clone(), column.clone(), idx as i32)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let ref_cols = ref_attnums
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, attnum)| {
+                attnum_columns
+                    .get(&(ref_table.clone(), *attnum))
+                    .map(|column| {
+                        IntrospectedKeyColumn::new(ref_table.clone(), column.clone(), idx as i32)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if let Some(resolved) = resolve_introspected_foreign_key(
+            &constraint_name,
+            &source_cols,
+            &ref_cols,
+            &on_delete,
+            &on_update,
+            status,
+        ) {
+            match resolved {
+                IntrospectedForeignKey::Single {
+                    table,
+                    column,
+                    foreign_key,
+                } => {
+                    if let Some(columns) = tables.get_mut(&table)
+                        && let Some(col) = columns.iter_mut().find(|col| col.name == column)
+                    {
+                        col.foreign_key = Some(foreign_key);
+                    }
+                }
+                IntrospectedForeignKey::Multi { table, foreign_key } => {
+                    table_multi_column_fks
+                        .entry(table)
+                        .or_default()
+                        .push(foreign_key);
+                }
+            }
+        }
     }
-
-    let mut table_multi_column_fks: std::collections::HashMap<String, Vec<MultiColumnForeignKey>> =
-        std::collections::HashMap::new();
 
     // Resolve FK source column → referenced table.column with actions
     for fk_reference in &fk_references {
@@ -1109,33 +1322,14 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     // ── 16. Table/Column comments (AST-native joins) ───────────────────
-    let table_comment_cmd = Qail::get(
-        "pg_catalog.pg_class c \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = c.oid AND d.objsubid = 0",
-    )
-    .columns(["c.relname", "c.relkind", "d.description"])
-    .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let table_comment_cmd = table_comment_cmd(public_namespace_oid.clone());
 
     let table_comment_rows = driver
         .fetch_all(&table_comment_cmd)
         .await
         .map_err(|e| anyhow!("Failed to query table comments: {}", e))?;
 
-    let col_comment_cmd = Qail::get(
-        "pg_catalog.pg_attribute a \
-         JOIN pg_catalog.pg_class c ON a.attrelid = c.oid \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = c.oid AND d.objsubid = a.attnum",
-    )
-    .columns([
-        "c.relname",
-        "a.attname",
-        "a.attnum",
-        "a.attisdropped",
-        "d.description",
-    ])
-    .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let col_comment_cmd = column_comment_cmd(public_namespace_oid.clone());
 
     let col_comment_rows = driver
         .fetch_all(&col_comment_cmd)
@@ -1169,17 +1363,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
     }
 
-    let fn_comment_cmd = Qail::get(
-        "pg_catalog.pg_proc p \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = p.oid AND d.objsubid = 0",
-    )
-    .columns([
-        "p.proname",
-        "pg_catalog.pg_get_function_identity_arguments(p.oid)",
-        "d.description",
-    ])
-    .filter("p.pronamespace", Operator::Eq, public_namespace_oid.clone());
+    let fn_comment_cmd = function_comment_cmd(public_namespace_oid.clone());
 
     let fn_comment_rows = driver
         .fetch_all(&fn_comment_cmd)
@@ -1197,13 +1381,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
     }
 
-    let type_comment_cmd = Qail::get(
-        "pg_catalog.pg_type t \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = t.oid AND d.objsubid = 0",
-    )
-    .columns(["t.typname", "d.description"])
-    .filter("t.typnamespace", Operator::Eq, public_namespace_oid.clone());
+    let type_comment_cmd = type_comment_cmd(public_namespace_oid.clone());
 
     let type_comment_rows = driver
         .fetch_all(&type_comment_cmd)
@@ -1220,14 +1398,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
     }
 
-    let policy_comment_cmd = Qail::get(
-        "pg_catalog.pg_policy p \
-         JOIN pg_catalog.pg_class c ON c.oid = p.polrelid \
-         LEFT JOIN pg_catalog.pg_description d \
-           ON d.objoid = p.oid AND d.objsubid = 0",
-    )
-    .columns(["p.polname", "c.relname", "d.description"])
-    .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let policy_comment_cmd = policy_comment_cmd(public_namespace_oid.clone());
 
     let policy_comment_rows = driver
         .fetch_all(&policy_comment_cmd)
@@ -1932,6 +2103,38 @@ mod tests {
                     && condition.value == qail_core::ast::Value::String("2200".to_string())
             })
         }));
+    }
+
+    #[test]
+    fn comment_introspection_queries_encode_safe_catalog_joins() {
+        let cases = [
+            (
+                table_comment_cmd("2200".to_string()),
+                "FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0",
+            ),
+            (
+                column_comment_cmd("2200".to_string()),
+                "FROM pg_catalog.pg_attribute a INNER JOIN pg_catalog.pg_class c ON a.attrelid = c.oid LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = a.attnum",
+            ),
+            (
+                function_comment_cmd("2200".to_string()),
+                "FROM pg_catalog.pg_proc p LEFT JOIN pg_catalog.pg_description d ON d.objoid = p.oid AND d.objsubid = 0",
+            ),
+            (
+                type_comment_cmd("2200".to_string()),
+                "FROM pg_catalog.pg_type t LEFT JOIN pg_catalog.pg_description d ON d.objoid = t.oid AND d.objsubid = 0",
+            ),
+            (
+                policy_comment_cmd("2200".to_string()),
+                "FROM pg_catalog.pg_policy p INNER JOIN pg_catalog.pg_class c ON c.oid = p.polrelid LEFT JOIN pg_catalog.pg_description d ON d.objoid = p.oid AND d.objsubid = 0",
+            ),
+        ];
+
+        for (cmd, expected_join) in cases {
+            let (sql, _) =
+                qail_pg::protocol::AstEncoder::encode_cmd_sql(&cmd).expect("query encodes");
+            assert!(sql.contains(expected_join), "{sql}");
+        }
     }
 
     #[test]

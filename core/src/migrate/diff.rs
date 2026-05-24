@@ -4,10 +4,10 @@
 //! Now with intent-awareness from MigrationHint.
 
 use super::schema::{
-    MigrationHint, Schema, check_expr_to_sql, foreign_key_to_sql, index_method_str,
+    Generated, MigrationHint, Schema, check_expr_to_sql, foreign_key_to_sql, index_method_str,
     multi_column_fk_to_alter_command,
 };
-use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
+use crate::ast::{Action, ColumnGeneration, Constraint, Expr, IndexDef, Qail};
 use std::collections::BTreeSet;
 
 /// Return unsupported non-table object families present in a schema.
@@ -158,6 +158,33 @@ fn existing_column_primary_key_diffs(old: &Schema, new: &Schema) -> Vec<String> 
     changes
 }
 
+fn existing_column_generated_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+
+            if generated_signature(&old_col.generated) != generated_signature(&new_col.generated) {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn new_column_primary_key_additions(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -212,6 +239,29 @@ fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<Str
 
 fn foreign_key_signature(fk: &Option<super::schema::ForeignKey>) -> Option<String> {
     fk.as_ref().map(|fk| format!("{:?}", fk))
+}
+
+fn generated_signature(generated: &Option<Generated>) -> Option<String> {
+    match generated {
+        Some(Generated::AlwaysStored(expr)) => Some(format!("stored:{expr}")),
+        Some(Generated::AlwaysIdentity) => Some("identity:always".to_string()),
+        Some(Generated::ByDefaultIdentity) => Some("identity:by_default".to_string()),
+        None => None,
+    }
+}
+
+fn generated_to_constraint(generated: &Generated) -> Constraint {
+    match generated {
+        Generated::AlwaysStored(expr) => {
+            Constraint::Generated(ColumnGeneration::Stored(expr.clone()))
+        }
+        Generated::AlwaysIdentity => {
+            Constraint::Generated(ColumnGeneration::Stored("identity".to_string()))
+        }
+        Generated::ByDefaultIdentity => {
+            Constraint::Generated(ColumnGeneration::Stored("identity_by_default".to_string()))
+        }
+    }
 }
 
 fn index_signature(idx: &super::schema::Index) -> String {
@@ -307,6 +357,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely alter single-column foreign keys on existing columns: {}. \
              Use an explicit migration for ADD/DROP/replace FOREIGN KEY constraints.",
             fk_diffs.join(", ")
+        ));
+    }
+
+    let generated_diffs = existing_column_generated_diffs(old, new);
+    if !generated_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely alter GENERATED/IDENTITY clauses on existing columns: {}. \
+             Use an explicit migration for GENERATED/IDENTITY changes.",
+            generated_diffs.join(", ")
         ));
     }
 
@@ -460,6 +519,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         constraints.push(Constraint::Check(vec![check_sql]));
                     }
                 }
+                if let Some(generated) = &col.generated {
+                    constraints.push(generated_to_constraint(generated));
+                }
 
                 Expr::Def {
                     name: col.name.clone(),
@@ -585,6 +647,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                             } else {
                                 constraints.push(Constraint::Check(vec![check_sql]));
                             }
+                        }
+                        if let Some(generated) = &col.generated {
+                            constraints.push(generated_to_constraint(generated));
                         }
                         // SERIAL is a pseudo-type only valid in CREATE TABLE
                         // For ALTER TABLE ADD COLUMN, convert to INTEGER/BIGINT
@@ -1199,6 +1264,52 @@ mod tests {
     }
 
     #[test]
+    fn diff_new_column_preserves_generated_constraint() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("people")
+                .column(Column::new("first_name", ColumnType::Text))
+                .column(Column::new("last_name", ColumnType::Text)),
+        );
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("people")
+            .expect("people table should exist")
+            .columns
+            .push(
+                Column::new("full_name", ColumnType::Text)
+                    .generated_stored("first_name || ' ' || last_name"),
+            );
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new generated column should diff");
+        let add_col = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Alter) && cmd.table == "people")
+            .expect("add-column command should be present");
+
+        let Expr::Def { constraints, .. } = &add_col.columns[0] else {
+            panic!("expected generated column definition");
+        };
+        assert!(constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                Constraint::Generated(ColumnGeneration::Stored(expr))
+                    if expr == "first_name || ' ' || last_name"
+            )
+        }));
+
+        let sql = add_col.to_sql();
+        assert!(
+            sql.contains("GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED"),
+            "add-column SQL should preserve GENERATED clause, got: {sql}"
+        );
+    }
+
+    #[test]
     fn diff_new_table_preserves_foreign_key_actions() {
         use super::super::types::ColumnType;
         use crate::transpiler::ToSql;
@@ -1237,6 +1348,62 @@ mod tests {
             sql.contains("REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT"),
             "create-table SQL should preserve FK action clauses, got: {sql}"
         );
+    }
+
+    #[test]
+    fn diff_new_table_preserves_generated_and_identity_columns() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let old = Schema::default();
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("people")
+                .column(Column::new("first_name", ColumnType::Text))
+                .column(Column::new("last_name", ColumnType::Text))
+                .column(
+                    Column::new("full_name", ColumnType::Text)
+                        .generated_stored("first_name || ' ' || last_name"),
+                )
+                .column(Column::new("row_seq", ColumnType::BigInt).generated_by_default()),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new table should diff");
+        let make_cmd = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Make) && cmd.table == "people")
+            .expect("create-table command should be present");
+
+        let sql = make_cmd.to_sql();
+        assert!(
+            sql.contains("GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED"),
+            "create-table SQL should preserve GENERATED clause, got: {sql}"
+        );
+        assert!(
+            sql.contains("GENERATED BY DEFAULT AS IDENTITY"),
+            "create-table SQL should preserve IDENTITY clause, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn state_diff_rejects_generated_changes_on_existing_columns() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("people").column(Column::new("full_name", ColumnType::Text)));
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("people").column(
+                Column::new("full_name", ColumnType::Text)
+                    .generated_stored("first_name || ' ' || last_name"),
+            ),
+        );
+
+        let err = validate_state_diff_support(&old, &new)
+            .expect_err("generated changes on existing columns should fail closed");
+        assert!(err.contains("GENERATED/IDENTITY"), "{err}");
+        assert!(err.contains("people.full_name"), "{err}");
     }
 
     #[test]

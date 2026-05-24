@@ -3,7 +3,7 @@
 use crate::colors::*;
 use crate::migrations::EnforcementMode;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{Action, JoinKind, Qail};
+use qail_core::ast::{Action, Expr, JoinKind, Qail};
 use qail_pg::driver::PgDriver;
 use std::collections::HashMap;
 
@@ -217,13 +217,7 @@ fn risk_reason(level: LockLevel, stats: TableStats, score: u8, max_score: u8) ->
 }
 
 async fn fetch_table_stats(driver: &mut PgDriver, table: &str) -> Result<TableStats> {
-    let cmd = Qail::get("pg_class c")
-        .columns(["c.reltuples", "pg_total_relation_size(c.oid)"])
-        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
-        .where_eq("n.nspname", "public")
-        .where_eq("c.relname", table)
-        .in_vals("c.relkind", ["r", "p", "m"])
-        .limit(1);
+    let cmd = lock_risk_stats_cmd(table);
     let rows = driver
         .fetch_all(&cmd)
         .await
@@ -234,6 +228,24 @@ async fn fetch_table_stats(driver: &mut PgDriver, table: &str) -> Result<TableSt
     }
 
     Ok(TableStats::default())
+}
+
+fn lock_risk_stats_cmd(table: &str) -> Qail {
+    Qail::get("pg_class")
+        .table_alias("c")
+        .columns_expr([
+            Expr::Named("c.reltuples".to_string()),
+            Expr::FunctionCall {
+                name: "pg_total_relation_size".to_string(),
+                args: vec![Expr::Named("c.oid".to_string())],
+                alias: None,
+            },
+        ])
+        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
+        .where_eq("n.nspname", "public")
+        .where_eq("c.relname", table)
+        .in_vals("c.relkind", ["r", "p", "m"])
+        .limit(1)
 }
 
 fn table_stats_from_row(row: &qail_pg::PgRow, table: &str) -> Result<TableStats> {
@@ -314,7 +326,8 @@ fn format_bytes(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LockLevel, TableStats, lock_level_for_action, risk_reason, risk_score, table_stats_from_row,
+        LockLevel, TableStats, lock_level_for_action, lock_risk_stats_cmd, risk_reason, risk_score,
+        table_stats_from_row,
     };
     use qail_core::ast::Action;
 
@@ -372,5 +385,18 @@ mod tests {
             column_info: None,
         };
         assert!(table_stats_from_row(&malformed, "users").is_err());
+    }
+
+    #[test]
+    fn lock_risk_stats_query_encodes_function_column_safely() {
+        let cmd = lock_risk_stats_cmd("tickets");
+
+        let (sql, _) =
+            qail_pg::protocol::AstEncoder::encode_cmd_sql(&cmd).expect("stats query encodes");
+
+        assert!(
+            sql.contains("PG_TOTAL_RELATION_SIZE(c.oid)"),
+            "stats query should encode relation-size function as an AST expression, got: {sql}"
+        );
     }
 }
