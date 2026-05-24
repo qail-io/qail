@@ -24,6 +24,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic;
 
+const MAX_FFI_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
 /// Helper: wrap an FFI body in catch_unwind and return a default on panic.
 /// Also sets the thread-local error so callers can inspect via qail_last_error().
 macro_rules! ffi_catch {
@@ -52,6 +54,84 @@ fn clear_error() {
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = None;
     });
+}
+
+fn checked_batch_capacity(unit_len: usize, count: usize, label: &str) -> Result<usize, String> {
+    let total = unit_len
+        .checked_mul(count)
+        .ok_or_else(|| format!("{label} batch size overflow"))?;
+    if total > MAX_FFI_BATCH_BYTES {
+        return Err(format!(
+            "{label} batch too large: {total} bytes (max {MAX_FFI_BATCH_BYTES})"
+        ));
+    }
+    Ok(total)
+}
+
+fn checked_bind_execute_pair_len(statement_len: usize, param_len: usize) -> Result<usize, String> {
+    let content_len = 1usize
+        .checked_add(statement_len)
+        .and_then(|v| v.checked_add(1))
+        .and_then(|v| v.checked_add(2))
+        .and_then(|v| v.checked_add(2))
+        .and_then(|v| v.checked_add(4))
+        .and_then(|v| v.checked_add(param_len))
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| "Bind message size overflow".to_string())?;
+    1usize
+        .checked_add(4)
+        .and_then(|v| v.checked_add(content_len))
+        .and_then(|v| v.checked_add(10))
+        .ok_or_else(|| "Bind/Execute pair size overflow".to_string())
+}
+
+fn checked_bind_execute_batch_capacity(
+    statement_len: usize,
+    param_strs: &[&str],
+    count: usize,
+) -> Result<usize, String> {
+    let cycle_count = param_strs.len().max(1);
+    let mut cycle_len = 0usize;
+
+    if param_strs.is_empty() {
+        cycle_len = checked_bind_execute_pair_len(statement_len, 0)?;
+    } else {
+        for param in param_strs {
+            cycle_len = cycle_len
+                .checked_add(checked_bind_execute_pair_len(statement_len, param.len())?)
+                .ok_or_else(|| "Bind/Execute cycle size overflow".to_string())?;
+        }
+    }
+
+    let full_cycles = count / cycle_count;
+    let remainder = count % cycle_count;
+    let repeated = cycle_len
+        .checked_mul(full_cycles)
+        .ok_or_else(|| "Bind/Execute batch size overflow".to_string())?;
+    let mut total = 5usize
+        .checked_add(repeated)
+        .ok_or_else(|| "Bind/Execute batch size overflow".to_string())?;
+
+    if param_strs.is_empty() {
+        if remainder > 0 {
+            total = total
+                .checked_add(checked_bind_execute_pair_len(statement_len, 0)?)
+                .ok_or_else(|| "Bind/Execute batch size overflow".to_string())?;
+        }
+    } else {
+        for param in param_strs.iter().take(remainder) {
+            total = total
+                .checked_add(checked_bind_execute_pair_len(statement_len, param.len())?)
+                .ok_or_else(|| "Bind/Execute batch size overflow".to_string())?;
+        }
+    }
+
+    if total > MAX_FFI_BATCH_BYTES {
+        return Err(format!(
+            "Bind/Execute batch too large: {total} bytes (max {MAX_FFI_BATCH_BYTES})"
+        ));
+    }
+    Ok(total)
 }
 
 // ============================================================================
@@ -303,7 +383,14 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
         let single_query = encode_simple_query(&sql);
 
         // Batch: repeat the query `count` times
-        let mut batch_bytes = Vec::with_capacity(single_query.len() * count);
+        let batch_len = match checked_batch_capacity(single_query.len(), count, "uniform query") {
+            Ok(len) => len,
+            Err(e) => {
+                set_error(e);
+                return -4;
+            }
+        };
+        let mut batch_bytes = Vec::with_capacity(batch_len);
         for _ in 0..count {
             batch_bytes.extend_from_slice(&single_query);
         }
@@ -560,14 +647,15 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
                 .collect()
         };
 
-        // Pre-calculate size: each Bind+Execute is ~30 bytes + param data
-        let avg_param_len = if param_strs.is_empty() {
-            2
-        } else {
-            param_strs.iter().map(|s| s.len()).sum::<usize>() / param_strs.len()
-        };
-        let estimated_size = count * (30 + stmt_str.len() + avg_param_len);
-        let mut buf = Vec::with_capacity(estimated_size);
+        let batch_len =
+            match checked_bind_execute_batch_capacity(stmt_str.len(), &param_strs, count) {
+                Ok(len) => len,
+                Err(e) => {
+                    set_error(e);
+                    return -4;
+                }
+            };
+        let mut buf = Vec::with_capacity(batch_len);
 
         for i in 0..count {
             // Get param for this query
@@ -1046,5 +1134,59 @@ mod tests {
         let bytes = encode_parse_message("stmt1", "SELECT $1");
         assert_eq!(bytes[0], b'P');
         assert!(bytes.len() > 10);
+    }
+
+    fn last_error_string() -> String {
+        let ptr = qail_last_error();
+        assert!(!ptr.is_null(), "expected last error to be set");
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn test_uniform_batch_rejects_size_overflow_without_allocation() {
+        let table = CString::new("users").unwrap();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_uniform_batch(
+                table.as_ptr(),
+                std::ptr::null(),
+                1,
+                usize::MAX,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -4);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("uniform query batch"));
+    }
+
+    #[test]
+    fn test_bind_execute_batch_rejects_size_overflow_without_allocation() {
+        let statement = CString::new("stmt").unwrap();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_bind_execute_batch(
+                statement.as_ptr(),
+                std::ptr::null(),
+                0,
+                usize::MAX,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -4);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Bind/Execute batch"));
     }
 }
