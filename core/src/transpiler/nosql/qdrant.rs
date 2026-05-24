@@ -12,19 +12,27 @@ pub trait ToQdrant {
 
 impl ToQdrant for Qail {
     fn to_qdrant_search(&self) -> String {
-        match self.action {
+        let result = match self.action {
             Action::Get => build_qdrant_search(self),
             Action::Put | Action::Add => build_qdrant_upsert(self),
             Action::Del => build_qdrant_delete(self),
-            _ => format!(
-                "{{ \"error\": \"Action {:?} not supported for Qdrant\" }}",
-                self.action
-            ),
-        }
+            _ => {
+                return format!(
+                    "{{ \"error\": \"Action {:?} not supported for Qdrant\" }}",
+                    self.action
+                );
+            }
+        };
+
+        result.unwrap_or_else(|err| qdrant_error(&err))
     }
 }
 
-fn build_qdrant_upsert(cmd: &Qail) -> String {
+fn qdrant_error(message: &str) -> String {
+    format!("{{ \"error\": {} }}", json_string(message))
+}
+
+fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
     // POST /collections/{name}/points?wait=true
     // Body: { "points": [ { "id": 1, "vector": [...], "payload": {...} } ] }
     // let mut points = Vec::new(); // Unused
@@ -40,14 +48,14 @@ fn build_qdrant_upsert(cmd: &Qail) -> String {
                 for cond in &cage.conditions {
                     if let Expr::Named(name) = &cond.left {
                         if name == "id" {
-                            point_id = value_to_json(&cond.value);
+                            point_id = value_to_json(&cond.value)?;
                         } else if name == "vector" {
-                            vector = value_to_json(&cond.value);
+                            vector = vector_to_json(&cond.value)?;
                         } else {
                             payload_parts.push(format!(
                                 "{}: {}",
                                 json_string(name),
-                                value_to_json(&cond.value)
+                                value_to_json(&cond.value)?
                             ));
                         }
                     }
@@ -69,10 +77,10 @@ fn build_qdrant_upsert(cmd: &Qail) -> String {
         point_id, vector, payload_json
     );
 
-    format!("{{ \"points\": [{}] }}", point)
+    Ok(format!("{{ \"points\": [{}] }}", point))
 }
 
-fn build_qdrant_delete(cmd: &Qail) -> String {
+fn build_qdrant_delete(cmd: &Qail) -> Result<String, String> {
     // POST /collections/{name}/points/delete
     // Body: { "points": [1, 2, 3] } OR { "filter": ... }
 
@@ -85,22 +93,25 @@ fn build_qdrant_delete(cmd: &Qail) -> String {
                 if let Expr::Named(name) = &cond.left
                     && name == "id"
                 {
-                    ids.push(value_to_json(&cond.value));
+                    ids.push(value_to_json(&cond.value)?);
                 }
             }
         }
     }
 
     if !ids.is_empty() {
-        format!("{{ \"points\": [{}] }}", ids.join(", "))
+        Ok(format!("{{ \"points\": [{}] }}", ids.join(", ")))
     } else {
         // Delete by filter
-        let filter = build_filter(cmd);
-        format!("{{ \"filter\": {} }}", filter)
+        let filter = build_filter(cmd)?;
+        if filter.is_empty() {
+            return Err("Qdrant delete requires an id or filter condition".to_string());
+        }
+        Ok(format!("{{ \"filter\": {} }}", filter))
     }
 }
 
-fn build_qdrant_search(cmd: &Qail) -> String {
+fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
     // Target endpoint: POST /collections/{collection_name}/points/search
     // Output: JSON Body
 
@@ -128,7 +139,7 @@ fn build_qdrant_search(cmd: &Qail) -> String {
                             ));
                         }
                         _ => {
-                            parts.push(format!("\"vector\": {}", value_to_json(&cond.value)));
+                            parts.push(format!("\"vector\": {}", vector_to_json(&cond.value)?));
                         }
                     }
                     vector_found = true;
@@ -147,7 +158,7 @@ fn build_qdrant_search(cmd: &Qail) -> String {
     }
 
     // 2. Filters (Hybrid Search)
-    let filter = build_filter(cmd);
+    let filter = build_filter(cmd)?;
     if !filter.is_empty() {
         parts.push(format!("\"filter\": {}", filter));
     }
@@ -175,10 +186,10 @@ fn build_qdrant_search(cmd: &Qail) -> String {
         parts.push("\"with_payload\": true".to_string());
     }
 
-    format!("{{ {} }}", parts.join(", "))
+    Ok(format!("{{ {} }}", parts.join(", ")))
 }
 
-fn build_filter(cmd: &Qail) -> String {
+fn build_filter(cmd: &Qail) -> Result<String, String> {
     // Qdrant Filter structure: { "must": [ { "key": "city", "match": { "value": "London" } } ] }
     let mut musts = Vec::new();
     let mut should_groups: Vec<Vec<String>> = Vec::new();
@@ -192,10 +203,14 @@ fn build_filter(cmd: &Qail) -> String {
                     continue;
                 }
 
-                let val = value_to_json(&cond.value);
+                let val = value_to_json(&cond.value)?;
                 let col_str = match &cond.left {
                     Expr::Named(name) => name.clone(),
-                    expr => expr.to_string(),
+                    expr => {
+                        return Err(format!(
+                            "Qdrant filters require named fields, got expression `{expr}`"
+                        ));
+                    }
                 };
 
                 let clause = match cond.op {
@@ -230,11 +245,7 @@ fn build_filter(cmd: &Qail) -> String {
                         json_string(&col_str),
                         val
                     ), // This needs wrapping?
-                    _ => format!(
-                        "{{ \"key\": {}, \"match\": {{ \"value\": {} }} }}",
-                        json_string(&col_str),
-                        val
-                    ),
+                    _ => return Err(format!("unsupported Qdrant filter operator {:?}", cond.op)),
                 };
                 cage_clauses.push(clause);
             }
@@ -259,14 +270,14 @@ fn build_filter(cmd: &Qail) -> String {
     }
 
     if musts.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut parts = Vec::new();
     if !musts.is_empty() {
         parts.push(format!("\"must\": [{}]", musts.join(", ")));
     }
-    format!("{{ {} }}", parts.join(", "))
+    Ok(format!("{{ {} }}", parts.join(", ")))
 }
 
 fn get_cage_val(cmd: &Qail, kind_example: CageKind) -> Option<usize> {
@@ -278,23 +289,67 @@ fn get_cage_val(cmd: &Qail, kind_example: CageKind) -> Option<usize> {
     None
 }
 
-fn value_to_json(v: &Value) -> String {
+fn value_to_json(v: &Value) -> Result<String, String> {
     match v {
-        Value::String(s) => json_string(s),
-        Value::Int(n) => n.to_string(),
-        Value::Float(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
+        Value::Null | Value::NullUuid => Ok("null".to_string()),
+        Value::String(s) => Ok(json_string(s)),
+        Value::Int(n) => Ok(n.to_string()),
+        Value::Float(n) if n.is_finite() => Ok(n.to_string()),
+        Value::Float(_) => Err("non-finite floats cannot be encoded as Qdrant JSON".to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Uuid(u) => Ok(json_string(&u.to_string())),
+        Value::Timestamp(ts) => Ok(json_string(ts)),
         Value::Array(arr) => {
-            let elems: Vec<String> = arr
+            let elems: Result<Vec<String>, String> = arr.iter().map(value_to_json).collect();
+            Ok(format!("[{}]", elems?.join(", ")))
+        }
+        Value::Vector(values) => {
+            let elems: Result<Vec<String>, String> = values
                 .iter()
-                .map(|e| match e {
-                    Value::Int(i) => i.to_string(),
-                    Value::Float(f) => f.to_string(),
-                    _ => "0.0".to_string(),
+                .map(|value| {
+                    if value.is_finite() {
+                        Ok(value.to_string())
+                    } else {
+                        Err("non-finite vector values cannot be encoded as Qdrant JSON".to_string())
+                    }
                 })
                 .collect();
-            format!("[{}]", elems.join(", "))
+            Ok(format!("[{}]", elems?.join(", ")))
         }
-        _ => "null".to_string(),
+        Value::Json(json) => serde_json::from_str::<serde_json::Value>(json)
+            .map(|value| value.to_string())
+            .map_err(|err| format!("invalid JSON value for Qdrant payload: {err}")),
+        other => Err(format!("unsupported Qdrant JSON value: {other}")),
     }
+}
+
+fn vector_to_json(v: &Value) -> Result<String, String> {
+    let elems: Result<Vec<String>, String> = match v {
+        Value::Vector(values) => values
+            .iter()
+            .map(|value| {
+                if value.is_finite() {
+                    Ok(value.to_string())
+                } else {
+                    Err("Qdrant vector values must be finite numbers".to_string())
+                }
+            })
+            .collect(),
+        Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                Value::Int(n) => Ok(n.to_string()),
+                Value::Float(n) if n.is_finite() => Ok(n.to_string()),
+                Value::Float(_) => Err("Qdrant vector values must be finite numbers".to_string()),
+                other => Err(format!("Qdrant vector values must be numeric, got {other}")),
+            })
+            .collect(),
+        other => return Err(format!("Qdrant vector must be an array, got {other}")),
+    };
+
+    let elems = elems?;
+    if elems.is_empty() {
+        return Err("Qdrant vector cannot be empty".to_string());
+    }
+    Ok(format!("[{}]", elems.join(", ")))
 }

@@ -199,6 +199,138 @@ fn test_qdrant_json_strings_are_escaped() {
 }
 
 #[test]
+fn test_qdrant_transpiler_rejects_invalid_json_values() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let search = Qail {
+        table: "points".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("score".to_string()),
+                op: Operator::Eq,
+                value: Value::Float(f64::NAN),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("non-finite")
+    );
+}
+
+#[test]
+fn test_qdrant_transpiler_preserves_payload_arrays() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let upsert = Qail {
+        action: Action::Add,
+        table: "points".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![Condition {
+                left: Expr::Named("tags".to_string()),
+                op: Operator::Eq,
+                value: Value::Array(vec![
+                    Value::String("blue".to_string()),
+                    Value::Bool(true),
+                    Value::Int(7),
+                ]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&upsert).expect("qdrant upsert JSON must stay valid");
+    assert_eq!(
+        parsed["points"][0]["payload"]["tags"],
+        serde_json::json!(["blue", true, 7])
+    );
+}
+
+#[test]
+fn test_qdrant_transpiler_rejects_invalid_vector_values() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let search = Qail {
+        table: "points".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("vector".to_string()),
+                op: Operator::Fuzzy,
+                value: Value::Array(vec![Value::String("oops".to_string())]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("vector values must be numeric")
+    );
+}
+
+#[test]
+fn test_qdrant_transpiler_rejects_unsupported_filter_operator() {
+    use crate::ast::{Operator, Qail};
+
+    let search = Qail::get("points")
+        .filter("city", Operator::Like, "%Lon%")
+        .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("unsupported Qdrant filter operator")
+    );
+}
+
+#[test]
+fn test_qdrant_delete_without_filter_returns_error_json() {
+    use crate::ast::{Action, Qail};
+
+    let delete = Qail {
+        action: Action::Del,
+        table: "points".to_string(),
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&delete).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("requires an id or filter")
+    );
+}
+
+#[test]
 fn test_mongo_shell_fragments_are_escaped() {
     use crate::ast::{
         Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, SortOrder, Value,
