@@ -139,6 +139,18 @@ queue jobs {
 }
 
 #[test]
+fn test_parse_schema_rejects_resource_property_without_value() {
+    let content = r#"
+bucket avatars {
+  provider
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("missing resource value must fail");
+    assert!(err.contains("Resource property 'provider' in 'avatars' requires a value"));
+}
+
+#[test]
 fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
     let mut schema = Schema::parse(
         r#"

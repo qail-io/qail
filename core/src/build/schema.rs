@@ -204,12 +204,16 @@ impl Schema {
                     let tokens = split_resource_tokens(block.trim())?;
                     let mut tokens = tokens.iter();
                     while let Some(key) = tokens.next() {
-                        if let Some(val) = tokens.next() {
-                            if key == "provider" {
-                                provider = Some(val.to_string());
-                            } else {
-                                properties.insert(key.to_string(), val.to_string());
-                            }
+                        let Some(val) = tokens.next() else {
+                            return Err(format!(
+                                "Resource property '{}' in '{}' requires a value",
+                                key, name
+                            ));
+                        };
+                        if key == "provider" {
+                            provider = Some(val.to_string());
+                        } else {
+                            properties.insert(key.to_string(), val.to_string());
                         }
                     }
                 }
