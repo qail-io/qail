@@ -1,4 +1,223 @@
 use super::*;
+use qail_core::ast::{Condition, Expr, MergeAction, MergeSource, Value};
+
+fn for_each_value_subquery(value: &Value, visit: &mut impl FnMut(&qail_core::ast::Qail)) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                for_each_value_subquery(value, visit);
+            }
+        }
+        Value::Subquery(query) => visit(query),
+        Value::Expr(expr) => for_each_expr_subquery(expr, visit),
+        _ => {}
+    }
+}
+
+fn for_each_condition_subquery(
+    condition: &Condition,
+    visit: &mut impl FnMut(&qail_core::ast::Qail),
+) {
+    for_each_expr_subquery(&condition.left, visit);
+    for_each_value_subquery(&condition.value, visit);
+}
+
+fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Qail)) {
+    match expr {
+        Expr::Aggregate {
+            filter: Some(filter),
+            ..
+        } => {
+            for condition in filter {
+                for_each_condition_subquery(condition, visit);
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
+            for_each_expr_subquery(expr, visit);
+        }
+        Expr::Window { params, order, .. } => {
+            for expr in params {
+                for_each_expr_subquery(expr, visit);
+            }
+            for cage in order {
+                for condition in &cage.conditions {
+                    for_each_condition_subquery(condition, visit);
+                }
+            }
+        }
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            for (condition, then_expr) in when_clauses {
+                for_each_condition_subquery(condition, visit);
+                for_each_expr_subquery(then_expr, visit);
+            }
+            if let Some(expr) = else_value {
+                for_each_expr_subquery(expr, visit);
+            }
+        }
+        Expr::FunctionCall { args, .. } => {
+            for expr in args {
+                for_each_expr_subquery(expr, visit);
+            }
+        }
+        Expr::SpecialFunction { args, .. } => {
+            for (_, expr) in args {
+                for_each_expr_subquery(expr, visit);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            for_each_expr_subquery(left, visit);
+            for_each_expr_subquery(right, visit);
+        }
+        Expr::Literal(value) => for_each_value_subquery(value, visit),
+        Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+            for expr in elements {
+                for_each_expr_subquery(expr, visit);
+            }
+        }
+        Expr::Subscript { expr, index, .. } => {
+            for_each_expr_subquery(expr, visit);
+            for_each_expr_subquery(index, visit);
+        }
+        Expr::FieldAccess { expr, .. } => for_each_expr_subquery(expr, visit),
+        Expr::Subquery { query, .. } | Expr::Exists { query, .. } => visit(query),
+        Expr::Star
+        | Expr::Named(_)
+        | Expr::Aliased { .. }
+        | Expr::Aggregate { filter: None, .. }
+        | Expr::Def { .. }
+        | Expr::JsonAccess { .. } => {}
+    }
+}
+
+fn expression_subquery_complexity(expr: &Expr) -> (usize, usize, usize) {
+    let mut complexity = (0, 0, 0);
+    for_each_expr_subquery(expr, &mut |query| {
+        let child = query_complexity(query);
+        complexity.0 += 1 + child.0;
+        complexity.1 += child.1;
+        complexity.2 += child.2;
+    });
+    complexity
+}
+
+fn condition_subquery_complexity(condition: &Condition) -> (usize, usize, usize) {
+    let mut complexity = expression_subquery_complexity(&condition.left);
+    for_each_value_subquery(&condition.value, &mut |query| {
+        let child = query_complexity(query);
+        complexity.0 += 1 + child.0;
+        complexity.1 += child.1;
+        complexity.2 += child.2;
+    });
+    complexity
+}
+
+fn add_complexity(total: &mut (usize, usize, usize), child: (usize, usize, usize)) {
+    total.0 += child.0;
+    total.1 += child.1;
+    total.2 += child.2;
+}
+
+fn validate_expr_subqueries<F>(expr: &Expr, validate: &mut F) -> Result<(), ApiError>
+where
+    F: FnMut(&qail_core::ast::Qail) -> Result<(), ApiError>,
+{
+    let mut result = Ok(());
+    for_each_expr_subquery(expr, &mut |query| {
+        if result.is_ok() {
+            result = validate(query);
+        }
+    });
+    result
+}
+
+fn validate_condition_subqueries<F>(condition: &Condition, validate: &mut F) -> Result<(), ApiError>
+where
+    F: FnMut(&qail_core::ast::Qail) -> Result<(), ApiError>,
+{
+    validate_expr_subqueries(&condition.left, validate)?;
+
+    let mut result = Ok(());
+    for_each_value_subquery(&condition.value, &mut |query| {
+        if result.is_ok() {
+            result = validate(query);
+        }
+    });
+    result
+}
+
+fn validate_embedded_subqueries<F>(
+    cmd: &qail_core::ast::Qail,
+    validate: &mut F,
+) -> Result<(), ApiError>
+where
+    F: FnMut(&qail_core::ast::Qail) -> Result<(), ApiError>,
+{
+    for expr in &cmd.columns {
+        validate_expr_subqueries(expr, validate)?;
+    }
+    for expr in &cmd.distinct_on {
+        validate_expr_subqueries(expr, validate)?;
+    }
+    if let Some(returning) = &cmd.returning {
+        for expr in returning {
+            validate_expr_subqueries(expr, validate)?;
+        }
+    }
+    for cage in &cmd.cages {
+        for condition in &cage.conditions {
+            validate_condition_subqueries(condition, validate)?;
+        }
+    }
+    for condition in &cmd.having {
+        validate_condition_subqueries(condition, validate)?;
+    }
+    for join in &cmd.joins {
+        if let Some(conditions) = &join.on {
+            for condition in conditions {
+                validate_condition_subqueries(condition, validate)?;
+            }
+        }
+    }
+    if let Some(on_conflict) = &cmd.on_conflict
+        && let qail_core::ast::ConflictAction::DoUpdate { assignments } = &on_conflict.action
+    {
+        for (_, expr) in assignments {
+            validate_expr_subqueries(expr, validate)?;
+        }
+    }
+    if let Some(merge) = &cmd.merge {
+        if let MergeSource::Query { query, .. } = &merge.source {
+            validate(query)?;
+        }
+        for condition in &merge.on {
+            validate_condition_subqueries(condition, validate)?;
+        }
+        for clause in &merge.clauses {
+            for condition in &clause.condition {
+                validate_condition_subqueries(condition, validate)?;
+            }
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (_, expr) in assignments {
+                        validate_expr_subqueries(expr, validate)?;
+                    }
+                }
+                MergeAction::Insert { values, .. } => {
+                    for expr in values {
+                        validate_expr_subqueries(expr, validate)?;
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
+        }
+    }
+
+    Ok(())
+}
 
 pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
     if !public_query_action_allowed(cmd.action) {
@@ -23,6 +242,7 @@ pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), 
     if let Some(ref source_query) = cmd.source_query {
         reject_dangerous_action(source_query)?;
     }
+    validate_embedded_subqueries(cmd, &mut |query| reject_dangerous_action(query))?;
 
     Ok(())
 }
@@ -50,6 +270,7 @@ pub(crate) fn reject_non_read_action(
     if let Some(ref source_query) = cmd.source_query {
         reject_non_read_action(source_query, surface)?;
     }
+    validate_embedded_subqueries(cmd, &mut |query| reject_non_read_action(query, surface))?;
 
     Ok(())
 }
@@ -100,6 +321,89 @@ pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usi
         .sum();
 
     let mut join_count = cmd.joins.len();
+    let mut nested_complexity = (0, 0, 0);
+
+    for expr in &cmd.columns {
+        add_complexity(&mut nested_complexity, expression_subquery_complexity(expr));
+    }
+    for expr in &cmd.distinct_on {
+        add_complexity(&mut nested_complexity, expression_subquery_complexity(expr));
+    }
+    if let Some(returning) = &cmd.returning {
+        for expr in returning {
+            add_complexity(&mut nested_complexity, expression_subquery_complexity(expr));
+        }
+    }
+    for cage in &cmd.cages {
+        for condition in &cage.conditions {
+            add_complexity(
+                &mut nested_complexity,
+                condition_subquery_complexity(condition),
+            );
+        }
+    }
+    for condition in &cmd.having {
+        add_complexity(
+            &mut nested_complexity,
+            condition_subquery_complexity(condition),
+        );
+    }
+    for join in &cmd.joins {
+        if let Some(conditions) = &join.on {
+            for condition in conditions {
+                add_complexity(
+                    &mut nested_complexity,
+                    condition_subquery_complexity(condition),
+                );
+            }
+        }
+    }
+    if let Some(on_conflict) = &cmd.on_conflict
+        && let qail_core::ast::ConflictAction::DoUpdate { assignments } = &on_conflict.action
+    {
+        for (_, expr) in assignments {
+            add_complexity(&mut nested_complexity, expression_subquery_complexity(expr));
+        }
+    }
+    if let Some(merge) = &cmd.merge {
+        if let MergeSource::Query { query, .. } = &merge.source {
+            let child = query_complexity(query);
+            add_complexity(&mut nested_complexity, (1 + child.0, child.1, child.2));
+        }
+        for condition in &merge.on {
+            add_complexity(
+                &mut nested_complexity,
+                condition_subquery_complexity(condition),
+            );
+        }
+        for clause in &merge.clauses {
+            for condition in &clause.condition {
+                add_complexity(
+                    &mut nested_complexity,
+                    condition_subquery_complexity(condition),
+                );
+            }
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (_, expr) in assignments {
+                        add_complexity(
+                            &mut nested_complexity,
+                            expression_subquery_complexity(expr),
+                        );
+                    }
+                }
+                MergeAction::Insert { values, .. } => {
+                    for expr in values {
+                        add_complexity(
+                            &mut nested_complexity,
+                            expression_subquery_complexity(expr),
+                        );
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
+        }
+    }
 
     for cte in &cmd.ctes {
         let (child_depth, child_filters, child_joins) = query_complexity(&cte.base_query);
@@ -128,6 +432,10 @@ pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usi
         filter_count += child_filters;
         join_count += child_joins;
     }
+
+    depth += nested_complexity.0;
+    filter_count += nested_complexity.1;
+    join_count += nested_complexity.2;
 
     (depth, filter_count, join_count)
 }
@@ -175,6 +483,64 @@ pub(crate) fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
             let join_table = qail_table_name(&join.table);
             if !cte_names.iter().any(|name| *name == join_table) {
                 push_table(tables, &join.table);
+            }
+            if let Some(conditions) = &join.on {
+                for condition in conditions {
+                    for_each_condition_subquery(condition, &mut |query| collect(query, tables));
+                }
+            }
+        }
+
+        for expr in &cmd.columns {
+            for_each_expr_subquery(expr, &mut |query| collect(query, tables));
+        }
+        for expr in &cmd.distinct_on {
+            for_each_expr_subquery(expr, &mut |query| collect(query, tables));
+        }
+        if let Some(returning) = &cmd.returning {
+            for expr in returning {
+                for_each_expr_subquery(expr, &mut |query| collect(query, tables));
+            }
+        }
+        for cage in &cmd.cages {
+            for condition in &cage.conditions {
+                for_each_condition_subquery(condition, &mut |query| collect(query, tables));
+            }
+        }
+        for condition in &cmd.having {
+            for_each_condition_subquery(condition, &mut |query| collect(query, tables));
+        }
+        if let Some(on_conflict) = &cmd.on_conflict
+            && let qail_core::ast::ConflictAction::DoUpdate { assignments } = &on_conflict.action
+        {
+            for (_, expr) in assignments {
+                for_each_expr_subquery(expr, &mut |query| collect(query, tables));
+            }
+        }
+        if let Some(merge) = &cmd.merge {
+            if let MergeSource::Query { query, .. } = &merge.source {
+                collect(query, tables);
+            }
+            for condition in &merge.on {
+                for_each_condition_subquery(condition, &mut |query| collect(query, tables));
+            }
+            for clause in &merge.clauses {
+                for condition in &clause.condition {
+                    for_each_condition_subquery(condition, &mut |query| collect(query, tables));
+                }
+                match &clause.action {
+                    MergeAction::Update { assignments } => {
+                        for (_, expr) in assignments {
+                            for_each_expr_subquery(expr, &mut |query| collect(query, tables));
+                        }
+                    }
+                    MergeAction::Insert { values, .. } => {
+                        for expr in values {
+                            for_each_expr_subquery(expr, &mut |query| collect(query, tables));
+                        }
+                    }
+                    MergeAction::Delete | MergeAction::DoNothing => {}
+                }
             }
         }
     }

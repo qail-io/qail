@@ -1328,6 +1328,20 @@ fn security_expand_filter_prefers_longest_claim_placeholder() {
 }
 
 #[test]
+fn security_expand_filter_does_not_partially_replace_unknown_longer_placeholder() {
+    let engine = PolicyEngine::new();
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let result = engine.expand_filter("tenant_shadow = $tenant_id_shadow", &auth);
+    assert_eq!(result, "tenant_shadow = $tenant_id_shadow");
+}
+
+#[test]
 fn security_expand_filter_does_not_reexpand_replacement_values() {
     let engine = PolicyEngine::new();
     let mut claims = std::collections::HashMap::new();
@@ -1422,6 +1436,24 @@ fn test_expand_filter_tenant_id_sql_injection() {
         "Unescaped quote in tenant_id: {}",
         result
     );
+}
+
+#[test]
+fn test_parse_expanded_filter_unescapes_quoted_tenant_id() {
+    let engine = PolicyEngine::new();
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("O'Brien".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let expanded = engine.expand_filter("operator_id = $tenant_id", &auth);
+    let condition = engine
+        .parse_filter_to_condition(&expanded)
+        .expect("expanded policy filter should parse");
+
+    assert_eq!(condition.value, Value::String("O'Brien".to_string()));
 }
 
 #[test]

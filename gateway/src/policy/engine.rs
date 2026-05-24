@@ -1066,19 +1066,21 @@ impl PolicyEngine {
     }
 
     fn expand_policy_placeholders(template: &str, replacements: &[(String, String)]) -> String {
-        let mut ordered: Vec<_> = replacements.iter().collect();
-        ordered.sort_by_key(|(placeholder, _)| std::cmp::Reverse(placeholder.len()));
-
         let mut result = String::with_capacity(template.len());
         let mut idx = 0;
         while idx < template.len() {
-            if template.as_bytes()[idx] == b'$'
-                && let Some((placeholder, replacement)) = ordered
+            if template.as_bytes()[idx] == b'$' {
+                let token_len = Self::policy_placeholder_token_len(&template[idx..]);
+                let token = &template[idx..idx + token_len];
+                if let Some((_, replacement)) = replacements
                     .iter()
-                    .find(|(placeholder, _)| template[idx..].starts_with(placeholder.as_str()))
-            {
-                result.push_str(replacement);
-                idx += placeholder.len();
+                    .find(|(placeholder, _)| placeholder == token)
+                {
+                    result.push_str(replacement);
+                } else {
+                    result.push_str(token);
+                }
+                idx += token_len;
                 continue;
             }
 
@@ -1090,6 +1092,37 @@ impl PolicyEngine {
         }
 
         result
+    }
+
+    fn policy_placeholder_token_len(input: &str) -> usize {
+        let mut len = 1;
+        for ch in input[1..].chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
+                len += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        len
+    }
+
+    fn parse_policy_quoted_string(value: &str) -> Option<String> {
+        if !(value.starts_with('\'') && value.ends_with('\'')) || value.len() < 2 {
+            return None;
+        }
+
+        let inner = &value[1..value.len() - 1];
+        let mut parsed = String::with_capacity(inner.len());
+        let mut chars = inner.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\'' && chars.peek() == Some(&'\'') {
+                parsed.push('\'');
+                chars.next();
+            } else {
+                parsed.push(ch);
+            }
+        }
+        Some(parsed)
     }
 
     /// Parse a filter string into an AST Condition.
@@ -1119,8 +1152,8 @@ impl PolicyEngine {
         let value_str = parts[1].trim();
         let is_not_equal = filter_expr.contains(" != ");
 
-        let value = if value_str.starts_with('\'') && value_str.ends_with('\'') {
-            Value::String(value_str[1..value_str.len() - 1].to_string())
+        let value = if let Some(parsed) = Self::parse_policy_quoted_string(value_str) {
+            Value::String(parsed)
         } else if value_str == "true" {
             Value::Bool(true)
         } else if value_str == "false" {

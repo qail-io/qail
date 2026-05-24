@@ -329,6 +329,16 @@ fn reject_dangerous_action_blocks_nested_cte_ddl() {
 }
 
 #[test]
+fn reject_dangerous_action_blocks_merge_query_source_ddl() {
+    let cmd = qail_core::ast::Qail::merge_into("users")
+        .using_query_as(qail_core::ast::Qail::make("evil"), "s")
+        .merge_on_column("users.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_matched_update(&[("name", qail_core::ast::Expr::Named("s.name".into()))]);
+
+    assert!(reject_dangerous_action(&cmd).is_err());
+}
+
+#[test]
 fn reject_dangerous_action_allows_qdrant_collection_management_for_admin_gate() {
     let mut cmd = qail_core::ast::Qail::get("embeddings");
     cmd.action = qail_core::ast::Action::CreateCollection;
@@ -361,6 +371,17 @@ fn reject_non_read_action_blocks_mutations() {
 #[test]
 fn reject_non_read_action_blocks_nested_mutations() {
     let cmd = qail_core::ast::Qail::get("safe").with("safe", qail_core::ast::Qail::add("evil"));
+
+    assert!(reject_non_read_action(&cmd, "test").is_err());
+}
+
+#[test]
+fn reject_non_read_action_blocks_expression_subquery_mutation() {
+    let mut cmd = qail_core::ast::Qail::get("safe");
+    cmd.columns.push(qail_core::ast::Expr::Subquery {
+        query: Box::new(qail_core::ast::Qail::add("evil")),
+        alias: Some("evil_count".to_string()),
+    });
 
     assert!(reject_non_read_action(&cmd, "test").is_err());
 }
