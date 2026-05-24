@@ -1276,7 +1276,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     let (body_start_idx, delimiter) = find_dollar_delimiter(after_args)
         .ok_or_else(|| "function body must be wrapped in a dollar-quoted block".to_string())?;
     let header = after_args[..body_start_idx].trim();
-    let (returns, language, volatility) = parse_function_header(header);
+    let (returns, language, volatility) = parse_function_header(header)?;
 
     let body = collect_dollar_body(
         &after_args[body_start_idx + delimiter.len()..],
@@ -1379,7 +1379,7 @@ struct HeaderWord {
     depth: usize,
 }
 
-fn parse_function_header(header: &str) -> (String, String, Option<String>) {
+fn parse_function_header(header: &str) -> Result<(String, String, Option<String>), String> {
     let words = header_word_spans(header);
     let returns_idx = words.iter().position(|word| {
         word.depth == 0 && header[word.start..word.end].eq_ignore_ascii_case("returns")
@@ -1397,32 +1397,32 @@ fn parse_function_header(header: &str) -> (String, String, Option<String>) {
         )
     });
 
-    let returns = returns_idx
-        .map(|idx| {
-            let start = words[idx].end;
-            let end = [language_idx, volatility_idx]
-                .into_iter()
-                .flatten()
-                .filter(|next_idx| *next_idx > idx)
-                .min()
-                .map(|next_idx| words[next_idx].start)
-                .unwrap_or(header.len());
-            header[start..end].trim()
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or("void")
-        .to_string();
+    let returns_idx = returns_idx.ok_or_else(|| "function missing returns clause".to_string())?;
+    let start = words[returns_idx].end;
+    let end = [language_idx, volatility_idx]
+        .into_iter()
+        .flatten()
+        .filter(|next_idx| *next_idx > returns_idx)
+        .min()
+        .map(|next_idx| words[next_idx].start)
+        .unwrap_or(header.len());
+    let returns = header[start..end].trim();
+    if returns.is_empty() {
+        return Err("function returns clause requires a type".to_string());
+    }
 
-    let language = language_idx
-        .and_then(|idx| words.get(idx + 1))
+    let language_idx =
+        language_idx.ok_or_else(|| "function missing language clause".to_string())?;
+    let language = words
+        .get(language_idx + 1)
         .map(|word| header[word.start..word.end].to_string())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "plpgsql".to_string());
+        .ok_or_else(|| "function language clause requires a language".to_string())?;
 
     let volatility =
         volatility_idx.map(|idx| header[words[idx].start..words[idx].end].to_ascii_lowercase());
 
-    (returns, language, volatility)
+    Ok((returns.to_string(), language, volatility))
 }
 
 fn header_word_spans(header: &str) -> Vec<HeaderWord> {
@@ -3086,6 +3086,27 @@ materialized view active_users $$ SELECT 2 $$
         let input = "function () returns int language sql $$ SELECT 1 $$";
         let err = parse_qail(input).expect_err("missing function name should fail");
         assert!(err.contains("function name is required"));
+    }
+
+    #[test]
+    fn test_parse_function_rejects_missing_header_fields() {
+        for (input, expected) in [
+            (
+                "function f() language sql $$ SELECT 1 $$",
+                "function missing returns clause",
+            ),
+            (
+                "function f() returns language sql $$ SELECT 1 $$",
+                "function returns clause requires a type",
+            ),
+            (
+                "function f() returns int $$ SELECT 1 $$",
+                "function missing language clause",
+            ),
+        ] {
+            let err = parse_qail(input).expect_err("missing function header field should fail");
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]
