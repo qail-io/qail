@@ -253,6 +253,63 @@ async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
 }
 
 #[tokio::test]
+async fn txn_begin_preserves_backpressure_error_metadata() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    let config = GatewayConfig {
+        production_strict: false,
+        require_auth: false,
+        db_max_waiters_global: 1,
+        db_max_waiters_per_tenant: 1,
+        max_tenants: 0,
+        ..GatewayConfig::default()
+    };
+
+    let state = build_test_state(config).await;
+    let app = Router::new()
+        .route("/txn/begin", post(txn_begin))
+        .with_state(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/txn/begin")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should execute");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-qail-backpressure-scope")
+            .and_then(|v| v.to_str().ok()),
+        Some("tenant_map")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-qail-backpressure-reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("tenant_tracker_saturated")
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(parse_error_code(&body), "POOL_BACKPRESSURE");
+}
+
+#[tokio::test]
 async fn txn_savepoint_returns_conflict_when_statement_limit_exceeded() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {

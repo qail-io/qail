@@ -74,6 +74,9 @@ fn test_transaction_error_display() {
     let err = TransactionError::AuthScopeMismatch;
     assert!(err.to_string().contains("different auth scope"));
 
+    let err = TransactionError::Backpressure("Database acquire queue is saturated".to_string());
+    assert!(err.to_string().contains("Backpressure"));
+
     let err = TransactionError::SessionLifetimeExceeded(900);
     assert!(err.to_string().contains("900"));
 

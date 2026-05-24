@@ -13,6 +13,8 @@ pub enum TransactionError {
     AuthScopeMismatch,
     /// Connection pool error.
     Pool(String),
+    /// DB acquire backpressure shed this transaction begin request.
+    Backpressure(String),
     /// Database query error.
     Database(String),
     /// Query was rejected (dangerous action).
@@ -39,6 +41,7 @@ impl std::fmt::Display for TransactionError {
                 write!(f, "Transaction session belongs to a different auth scope")
             }
             Self::Pool(e) => write!(f, "Pool error: {}", e),
+            Self::Backpressure(e) => write!(f, "Backpressure: {}", e),
             Self::Database(e) => write!(f, "Database error: {}", e),
             Self::Rejected(e) => write!(f, "Query rejected: {}", e),
             Self::SessionLifetimeExceeded(secs) => write!(

@@ -7,7 +7,10 @@ use crate::GatewayState;
 use crate::auth::AuthContext;
 use crate::middleware::ApiError;
 
-use super::{backpressure_api_error, record_acquire_outcome, waiter_key_for_auth};
+use super::{
+    backpressure_api_error, backpressure_message, record_acquire_outcome,
+    record_backpressure_reject, waiter_key_for_auth,
+};
 
 impl GatewayState {
     /// Central optimizer hook for all executable QAIL commands.
@@ -129,9 +132,9 @@ impl GatewayState {
     ) -> Result<String, crate::transaction::TransactionError> {
         let waiter_key = waiter_key_for_auth(auth);
         let _waiter = self.db_backpressure.enter(&waiter_key).map_err(|reason| {
-            backpressure_api_error(reason);
-            crate::transaction::TransactionError::Pool(
-                "transaction begin shed by DB backpressure".to_string(),
+            record_backpressure_reject(reason);
+            crate::transaction::TransactionError::Backpressure(
+                backpressure_message(reason).to_string(),
             )
         })?;
 

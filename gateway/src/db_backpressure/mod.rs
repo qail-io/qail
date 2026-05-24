@@ -170,17 +170,25 @@ fn waiter_key_for_auth(auth: &AuthContext) -> String {
     }
 }
 
-fn backpressure_api_error(reason: RejectReason) -> ApiError {
-    let message = match reason {
+fn backpressure_message(reason: RejectReason) -> &'static str {
+    match reason {
         RejectReason::Global => POOL_BACKPRESSURE_MSG_GLOBAL,
         RejectReason::Tenant => POOL_BACKPRESSURE_MSG_TENANT,
         RejectReason::TenantMapSaturated => POOL_BACKPRESSURE_MSG_TENANT_MAP,
-    };
+    }
+}
+
+fn record_backpressure_reject(reason: RejectReason) {
     crate::metrics::record_db_acquire_shed(match reason {
         RejectReason::Global => "global",
         RejectReason::Tenant => "tenant",
         RejectReason::TenantMapSaturated => "tenant_map",
     });
+}
+
+fn backpressure_api_error(reason: RejectReason) -> ApiError {
+    record_backpressure_reject(reason);
+    let message = backpressure_message(reason);
     ApiError::with_code("POOL_BACKPRESSURE", message)
 }
 

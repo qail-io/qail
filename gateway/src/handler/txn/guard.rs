@@ -54,6 +54,7 @@ pub(super) fn txn_err_to_api(err: crate::transaction::TransactionError) -> ApiEr
         TransactionError::UserMismatch => ApiError::forbidden(err.to_string()),
         TransactionError::AuthScopeMismatch => ApiError::forbidden(err.to_string()),
         TransactionError::Pool(e) => ApiError::connection_error(e),
+        TransactionError::Backpressure(e) => ApiError::with_code("POOL_BACKPRESSURE", e),
         TransactionError::Database(e) => ApiError::internal(e),
         TransactionError::Rejected(e) => ApiError::bad_request("TXN_REJECTED", e),
         TransactionError::SessionLifetimeExceeded(_) => {
