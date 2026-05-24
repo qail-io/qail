@@ -146,9 +146,19 @@ pub(super) fn parse_rpc_signatures(
                 arg_type_oids.len()
             )));
         }
+        if arg_type_oids.iter().any(|oid| *oid == 0) {
+            return Err(ApiError::internal(
+                "Invalid RPC arg type OID metadata: OID 0 is not allowed",
+            ));
+        }
 
         let variadic_element_oid =
             optional_u32(row, "variadic_element_oid", 3, "variadic_element_oid")?;
+        if variadic_element_oid == Some(0) {
+            return Err(ApiError::internal(
+                "Invalid RPC variadic element OID metadata: OID 0 is not allowed",
+            ));
+        }
         if variadic && variadic_element_oid.is_none() {
             return Err(ApiError::internal(
                 "Invalid RPC signature metadata: variadic function is missing element OID",
@@ -339,6 +349,20 @@ mod tests {
 
         let mut row = valid_rpc_signature_row();
         row.columns[7] = Some(br#"["text"]"#.to_vec());
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
+    }
+
+    #[test]
+    fn parse_rpc_signatures_rejects_zero_type_oids() {
+        let mut row = valid_rpc_signature_row();
+        row.columns[6] = Some(b"[25,0]".to_vec());
+        let err = parse_rpc_signatures(&[row]).unwrap_err();
+        assert_internal_error(err);
+
+        let mut row = valid_rpc_signature_row();
+        row.columns[2] = Some(b"t".to_vec());
+        row.columns[3] = Some(b"0".to_vec());
         let err = parse_rpc_signatures(&[row]).unwrap_err();
         assert_internal_error(err);
     }

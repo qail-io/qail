@@ -132,6 +132,13 @@ pub(in super::super) fn build_rpc_bound_sql(
 ) -> Result<RpcBoundQuery, ApiError> {
     let (call_target, params, param_type_oids) =
         build_rpc_bound_call_target(function_name, args, signature)?;
+    if signature.is_some()
+        && (param_type_oids.len() != params.len() || param_type_oids.contains(&0))
+    {
+        return Err(ApiError::internal(
+            "Invalid RPC signature metadata: missing parameter type OID",
+        ));
+    }
     let sql = match if scalar_context {
         RpcSelectContext::Scalar
     } else {
@@ -404,15 +411,14 @@ fn signature_positional_arg_info(
     idx: usize,
 ) -> Option<(&str, u32)> {
     if signature.variadic && idx >= signature.total_args.saturating_sub(1) {
-        return signature.arg_types.last().map(|type_name| {
-            (
-                variadic_element_type(type_name),
-                signature
-                    .variadic_element_oid
-                    .or_else(|| signature.arg_type_oids.last().copied())
-                    .unwrap_or(0),
-            )
-        });
+        let oid = signature
+            .variadic_element_oid
+            .or_else(|| signature.arg_type_oids.last().copied())
+            .filter(|oid| *oid != 0)?;
+        return signature
+            .arg_types
+            .last()
+            .map(|type_name| (variadic_element_type(type_name), oid));
     }
 
     signature

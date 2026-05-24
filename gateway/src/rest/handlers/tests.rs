@@ -12,6 +12,20 @@ mod suite {
     use serde_json::json;
     use std::collections::HashSet;
 
+    fn oid_for_test_type(type_name: &str) -> u32 {
+        match type_name.trim().to_ascii_lowercase().as_str() {
+            "bigint" => 20,
+            "boolean" => 16,
+            "integer" => 23,
+            "json" => 114,
+            "jsonb" => 3802,
+            "text" => 25,
+            "uuid" => 2950,
+            "integer[]" => 1007,
+            other => panic!("missing test OID mapping for {}", other),
+        }
+    }
+
     fn sig(
         total_args: usize,
         default_args: usize,
@@ -29,8 +43,18 @@ mod suite {
                 .map(|n| n.map(|v| v.to_ascii_lowercase()))
                 .collect(),
             arg_types: arg_types.iter().map(|t| t.to_ascii_lowercase()).collect(),
-            arg_type_oids: vec![0; arg_types.len()],
-            variadic_element_oid: None,
+            arg_type_oids: arg_types
+                .iter()
+                .map(|type_name| oid_for_test_type(type_name))
+                .collect(),
+            variadic_element_oid: if variadic {
+                arg_types
+                    .last()
+                    .and_then(|type_name| type_name.strip_suffix("[]"))
+                    .map(oid_for_test_type)
+            } else {
+                None
+            },
             identity_args: identity.to_string(),
             result_type: "jsonb".to_string(),
         }
@@ -129,7 +153,7 @@ mod suite {
             query.params[1].as_deref(),
             Some(b"550e8400-e29b-41d4-a716-446655440000".as_slice())
         );
-        assert_eq!(query.param_type_oids, vec![0, 0]);
+        assert_eq!(query.param_type_oids, vec![23, 2950]);
     }
 
     #[test]
@@ -143,7 +167,7 @@ mod suite {
 
         assert_eq!(query.sql, "SELECT \"api\".\"echo_json\"(\"payload\" => $1)");
         assert_eq!(query.params[0].as_deref(), Some(br#""abc""#.as_slice()));
-        assert_eq!(query.param_type_oids, vec![0]);
+        assert_eq!(query.param_type_oids, vec![3802]);
     }
 
     #[test]
@@ -155,7 +179,29 @@ mod suite {
 
         assert_eq!(query.sql, "SELECT * FROM \"api\".\"lookup_many\"($1)");
         assert_eq!(query.params[0].as_deref(), Some(b"{1,2,3}".as_slice()));
-        assert_eq!(query.param_type_oids, vec![0]);
+        assert_eq!(query.param_type_oids, vec![1007]);
+    }
+
+    #[test]
+    fn build_rpc_bound_sql_rejects_signature_with_missing_type_oid() {
+        let args = serde_json::json!(["prefix", 1, 2]);
+        let mut signature = sig(
+            2,
+            0,
+            true,
+            &[Some("prefix"), Some("ids")],
+            &["text", "integer[]"],
+            "prefix text, variadic ids integer[]",
+        );
+        signature.variadic_element_oid = Some(0);
+        let function = RpcFunctionName::parse("api.lookup_many").unwrap();
+
+        let err = build_rpc_bound_sql(&function, Some(&args), Some(&signature), false).unwrap_err();
+
+        assert_eq!(
+            err.status_code(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
