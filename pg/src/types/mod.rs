@@ -285,18 +285,26 @@ fn decode_inet_like_binary(bytes: &[u8], force_prefix: bool) -> Result<String, T
             "inet/cidr binary payload length mismatch".to_string(),
         ));
     }
+    if is_cidr > 1 {
+        return Err(TypeError::InvalidData(
+            "invalid inet/cidr is_cidr flag".to_string(),
+        ));
+    }
 
     let addr = &bytes[4..];
     match family {
         2 => {
-            if addr_len > 4 {
+            if addr_len != 4 {
                 return Err(TypeError::InvalidData(
                     "invalid IPv4 inet/cidr address length".to_string(),
                 ));
             }
-            let mut full = [0u8; 4];
-            full[..addr_len].copy_from_slice(addr);
-            let ip = std::net::Ipv4Addr::from(full);
+            if bits > 32 {
+                return Err(TypeError::InvalidData(
+                    "invalid IPv4 inet/cidr prefix length".to_string(),
+                ));
+            }
+            let ip = std::net::Ipv4Addr::from([addr[0], addr[1], addr[2], addr[3]]);
             let include_prefix = force_prefix || is_cidr != 0 || bits != 32;
             if include_prefix {
                 Ok(format!("{}/{}", ip, bits))
@@ -305,13 +313,18 @@ fn decode_inet_like_binary(bytes: &[u8], force_prefix: bool) -> Result<String, T
             }
         }
         3 => {
-            if addr_len > 16 {
+            if addr_len != 16 {
                 return Err(TypeError::InvalidData(
                     "invalid IPv6 inet/cidr address length".to_string(),
                 ));
             }
+            if bits > 128 {
+                return Err(TypeError::InvalidData(
+                    "invalid IPv6 inet/cidr prefix length".to_string(),
+                ));
+            }
             let mut full = [0u8; 16];
-            full[..addr_len].copy_from_slice(addr);
+            full.copy_from_slice(addr);
             let ip = std::net::Ipv6Addr::from(full);
             let include_prefix = force_prefix || is_cidr != 0 || bits != 128;
             if include_prefix {
@@ -608,6 +621,17 @@ mod tests {
         let bytes = [2u8, 24, 1, 4, 192, 168, 1, 0];
         let cidr = Cidr::from_pg(&bytes, oid::CIDR, 1).unwrap();
         assert_eq!(cidr.0, "192.168.1.0/24");
+    }
+
+    #[test]
+    fn test_network_types_reject_malformed_binary_payloads() {
+        assert!(Inet::from_pg(&[2u8, 33, 0, 4, 10, 1, 2, 3], oid::INET, 1).is_err());
+        assert!(Inet::from_pg(&[2u8, 32, 0, 1, 10], oid::INET, 1).is_err());
+        assert!(Inet::from_pg(&[2u8, 32, 2, 4, 10, 1, 2, 3], oid::INET, 1).is_err());
+
+        let mut ipv6 = vec![3u8, 129, 0, 16];
+        ipv6.extend_from_slice(&[0u8; 16]);
+        assert!(Inet::from_pg(&ipv6, oid::INET, 1).is_err());
     }
 
     #[test]
