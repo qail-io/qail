@@ -2,6 +2,7 @@
 //!
 //! Generates Rust modules from `schema.qail` for compile-time type safety.
 
+use std::collections::HashMap;
 use std::fs;
 
 use crate::migrate::types::ColumnType;
@@ -248,6 +249,18 @@ pub fn generate_schema_code(schema: &Schema) -> String {
         "// =============================================================================\n\n",
     );
 
+    let mut relation_impl_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for table in &tables {
+        for fk in &table.foreign_keys {
+            *relation_impl_counts
+                .entry((table.name.as_str(), fk.ref_table.as_str()))
+                .or_default() += 1;
+            *relation_impl_counts
+                .entry((fk.ref_table.as_str(), table.name.as_str()))
+                .or_default() += 1;
+        }
+    }
+
     for table in &tables {
         for fk in &table.foreign_keys {
             // table.column refs ref_table.ref_column
@@ -261,38 +274,52 @@ pub fn generate_schema_code(schema: &Schema) -> String {
 
             // Forward: From table (child) -> Referenced table (parent)
             // Example: posts -> users (posts.user_id -> users.id)
-            code.push_str(&format!(
-                "/// {} has a foreign key to {} via {}.{}\n",
-                table.name, fk.ref_table, table.name, fk.column
-            ));
-            code.push_str(&format!(
-                "impl RelatedTo<{}::{}> for {}::{} {{\n",
-                to_mod, to_struct, from_mod, from_struct
-            ));
-            code.push_str(&format!(
-                "    fn join_columns() -> (&'static str, &'static str) {{ ({}, {}) }}\n",
-                rust_string_literal(&fk.column),
-                rust_string_literal(&fk.ref_column)
-            ));
-            code.push_str("}\n\n");
+            if relation_impl_counts
+                .get(&(table.name.as_str(), fk.ref_table.as_str()))
+                .copied()
+                .unwrap_or_default()
+                == 1
+            {
+                code.push_str(&format!(
+                    "/// {} has a foreign key to {} via {}.{}\n",
+                    table.name, fk.ref_table, table.name, fk.column
+                ));
+                code.push_str(&format!(
+                    "impl RelatedTo<{}::{}> for {}::{} {{\n",
+                    to_mod, to_struct, from_mod, from_struct
+                ));
+                code.push_str(&format!(
+                    "    fn join_columns() -> (&'static str, &'static str) {{ ({}, {}) }}\n",
+                    rust_string_literal(&fk.column),
+                    rust_string_literal(&fk.ref_column)
+                ));
+                code.push_str("}\n\n");
+            }
 
             // Reverse: Referenced table (parent) -> From table (child)
             // Example: users -> posts (users.id -> posts.user_id)
             // This allows: Qail::get(users::table).join_related(posts::table)
-            code.push_str(&format!(
-                "/// {} is referenced by {} via {}.{}\n",
-                fk.ref_table, table.name, table.name, fk.column
-            ));
-            code.push_str(&format!(
-                "impl RelatedTo<{}::{}> for {}::{} {{\n",
-                from_mod, from_struct, to_mod, to_struct
-            ));
-            code.push_str(&format!(
-                "    fn join_columns() -> (&'static str, &'static str) {{ ({}, {}) }}\n",
-                rust_string_literal(&fk.ref_column),
-                rust_string_literal(&fk.column)
-            ));
-            code.push_str("}\n\n");
+            if relation_impl_counts
+                .get(&(fk.ref_table.as_str(), table.name.as_str()))
+                .copied()
+                .unwrap_or_default()
+                == 1
+            {
+                code.push_str(&format!(
+                    "/// {} is referenced by {} via {}.{}\n",
+                    fk.ref_table, table.name, table.name, fk.column
+                ));
+                code.push_str(&format!(
+                    "impl RelatedTo<{}::{}> for {}::{} {{\n",
+                    from_mod, from_struct, to_mod, to_struct
+                ));
+                code.push_str(&format!(
+                    "    fn join_columns() -> (&'static str, &'static str) {{ ({}, {}) }}\n",
+                    rust_string_literal(&fk.ref_column),
+                    rust_string_literal(&fk.column)
+                ));
+                code.push_str("}\n\n");
+            }
         }
     }
 
@@ -353,6 +380,29 @@ table secrets {
 
         // Verify Protected policy
         assert!(code.contains("pub const token: TypedColumn<String, Protected>"));
+    }
+
+    #[test]
+    fn test_generate_schema_code_skips_ambiguous_related_to_impls() {
+        let schema_content = r#"
+table users {
+    id UUID primary_key
+}
+
+table invoices {
+    id UUID primary_key
+    buyer_id UUID ref:users.id
+    seller_id UUID ref:users.id
+}
+"#;
+
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+
+        assert!(code.contains("pub const buyer_id: TypedColumn<uuid::Uuid, Public>"));
+        assert!(code.contains("pub const seller_id: TypedColumn<uuid::Uuid, Public>"));
+        assert!(!code.contains("impl RelatedTo<users::Users> for invoices::Invoices"));
+        assert!(!code.contains("impl RelatedTo<invoices::Invoices> for users::Users"));
     }
 
     #[test]
