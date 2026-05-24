@@ -308,6 +308,8 @@ impl ApiError {
             | "MISSING_POINT_ID"
             | "INVALID_POINT_ID"
             | "INVALID_VECTOR"
+            | "INVALID_SCORE_THRESHOLD"
+            | "INVALID_QDRANT_FILTER"
             | "INVALID_QDRANT_PAYLOAD"
             | "EXPORT_ONLY"
             | "AST_VALIDATION_FAILED" => StatusCode::BAD_REQUEST,

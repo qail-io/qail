@@ -45,6 +45,8 @@ pub(super) async fn execute_qdrant_cmd(
 
     let collection = &cmd.table;
     let (must_conditions, should_groups) = split_filter_conditions(&cmd);
+    ensure_qdrant_conditions_finite(&must_conditions)?;
+    ensure_qdrant_condition_groups_finite(&should_groups)?;
 
     // Extract limit from CageKind::Limit if present
     let limit_val = qdrant_limit_from_cmd(&cmd, state.config.max_result_rows)?;
@@ -55,6 +57,8 @@ pub(super) async fn execute_qdrant_cmd(
             let vector = cmd.vector.as_deref().ok_or_else(|| {
                 ApiError::bad_request("MISSING_VECTOR", "Search requires a vector")
             })?;
+            ensure_qdrant_vector_finite(vector)?;
+            ensure_qdrant_score_threshold_finite(cmd.score_threshold)?;
             let search_request = qail_qdrant::encoder::SearchRequest {
                 collection,
                 vector,
@@ -631,6 +635,65 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
     })
 }
 
+fn ensure_qdrant_vector_finite(vector: &[f32]) -> Result<(), ApiError> {
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(ApiError::bad_request(
+            "INVALID_VECTOR",
+            "Qdrant vector values must be finite numbers",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_qdrant_score_threshold_finite(score_threshold: Option<f32>) -> Result<(), ApiError> {
+    if let Some(value) = score_threshold
+        && !value.is_finite()
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_SCORE_THRESHOLD",
+            "Qdrant score threshold must be a finite number",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_qdrant_value_finite(value: &qail_core::ast::Value) -> Result<(), ApiError> {
+    use qail_core::ast::Value;
+
+    match value {
+        Value::Float(value) if !value.is_finite() => Err(ApiError::bad_request(
+            "INVALID_QDRANT_FILTER",
+            "Qdrant filter numeric values must be finite numbers",
+        )),
+        Value::Vector(values) => ensure_qdrant_vector_finite(values),
+        Value::Array(items) => {
+            for item in items {
+                ensure_qdrant_value_finite(item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn ensure_qdrant_conditions_finite(
+    conditions: &[qail_core::ast::Condition],
+) -> Result<(), ApiError> {
+    for condition in conditions {
+        ensure_qdrant_value_finite(&condition.value)?;
+    }
+    Ok(())
+}
+
+fn ensure_qdrant_condition_groups_finite(
+    groups: &[Vec<qail_core::ast::Condition>],
+) -> Result<(), ApiError> {
+    for group in groups {
+        ensure_qdrant_conditions_finite(group)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QdrantUpsertFilterTarget<'a> {
     Id,
@@ -658,13 +721,19 @@ fn point_id_from_value(value: &qail_core::ast::Value) -> Option<qail_qdrant::Poi
 fn vector_from_value(value: &qail_core::ast::Value) -> Option<Vec<f32>> {
     use qail_core::ast::Value;
     match value {
-        Value::Vector(v) => Some(v.clone()),
+        Value::Vector(v) if v.iter().all(|value| value.is_finite()) => Some(v.clone()),
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 match item {
                     Value::Int(n) => out.push(*n as f32),
-                    Value::Float(f) => out.push(*f as f32),
+                    Value::Float(f) => {
+                        let value = *f as f32;
+                        if !value.is_finite() {
+                            return None;
+                        }
+                        out.push(value);
+                    }
                     _ => return None,
                 }
             }
@@ -683,7 +752,11 @@ fn payload_value_from_ast(
         Value::Null => Ok(qail_qdrant::PayloadValue::Null),
         Value::Bool(b) => Ok(qail_qdrant::PayloadValue::Bool(*b)),
         Value::Int(n) => Ok(qail_qdrant::PayloadValue::Integer(*n)),
-        Value::Float(f) => Ok(qail_qdrant::PayloadValue::Float(*f)),
+        Value::Float(f) if f.is_finite() => Ok(qail_qdrant::PayloadValue::Float(*f)),
+        Value::Float(_) => Err(ApiError::bad_request(
+            "INVALID_QDRANT_PAYLOAD",
+            "Qdrant float payload values must be finite numbers",
+        )),
         Value::String(s) => Ok(qail_qdrant::PayloadValue::String(s.clone())),
         Value::Uuid(u) => Ok(qail_qdrant::PayloadValue::String(u.to_string())),
         Value::Json(s) => Ok(qail_qdrant::PayloadValue::String(s.clone())),
@@ -1154,7 +1227,9 @@ mod tests {
     use super::{
         ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
-        extract_upsert_point, prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
+        ensure_qdrant_conditions_finite, ensure_qdrant_score_threshold_finite,
+        ensure_qdrant_vector_finite, extract_upsert_point,
+        prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
         qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
         qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd,
         qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
@@ -1438,6 +1513,40 @@ mod tests {
             .set_value("blob", Value::Bytes(vec![1, 2, 3]));
 
         let err = extract_upsert_point(&cmd).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_gateway_rejects_non_finite_vectors_and_thresholds() {
+        let err = ensure_qdrant_vector_finite(&[0.1, f32::NAN]).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+
+        let err = ensure_qdrant_score_threshold_finite(Some(f32::INFINITY)).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+
+        let conditions = vec![Condition {
+            left: Expr::Named("score".to_string()),
+            op: Operator::Gt,
+            value: Value::Float(f64::NEG_INFINITY),
+            is_array_unnest: false,
+        }];
+        let err = ensure_qdrant_conditions_finite(&conditions).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_non_finite_numbers() {
+        let bad_vector = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, f32::NAN]));
+        let err = extract_upsert_point(&bad_vector).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+
+        let bad_payload = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value("rank", Value::Float(f64::INFINITY));
+        let err = extract_upsert_point(&bad_payload).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 
