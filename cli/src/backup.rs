@@ -10,6 +10,13 @@ use std::path::PathBuf;
 
 use crate::migrations::types::is_safe_cast;
 
+fn parse_count_text(raw: Option<String>, label: &str) -> Result<u64> {
+    let raw = raw.ok_or_else(|| anyhow!("Missing {label} count"))?;
+    raw.trim()
+        .parse::<u64>()
+        .map_err(|e| anyhow!("Invalid {label} count {:?}: {}", raw, e))
+}
+
 /// Impact analysis result for a migration command
 #[derive(Debug, Default)]
 pub struct MigrationImpact {
@@ -96,13 +103,11 @@ async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
         .await
         .map_err(|e| anyhow!("Failed to count rows: {}", e))?;
 
-    if let Some(row) = rows.first()
-        && let Some(count_str) = row.get_string(0)
-    {
-        return Ok(count_str.parse().unwrap_or(0));
+    if let Some(row) = rows.first() {
+        return parse_count_text(row.get_string(0), "table row");
     }
 
-    Ok(0)
+    Err(anyhow!("Missing table row count result"))
 }
 
 /// Count non-null values in a column using AST-native query
@@ -115,13 +120,11 @@ async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -
         .await
         .map_err(|e| anyhow!("Failed to count column values: {}", e))?;
 
-    if let Some(row) = rows.first()
-        && let Some(count_str) = row.get_string(0)
-    {
-        return Ok(count_str.parse().unwrap_or(0));
+    if let Some(row) = rows.first() {
+        return parse_count_text(row.get_string(0), "column value");
     }
 
-    Ok(0)
+    Err(anyhow!("Missing column value count result"))
 }
 
 fn alter_type_target(cmd: &Qail) -> Option<(String, String)> {
@@ -770,7 +773,7 @@ pub async fn list_snapshots(
         let version = row.get_string(0).unwrap_or_default();
         let table = row.get_string(1).unwrap_or_default();
         let column = row.get_string(2).unwrap_or_default();
-        let count: u64 = row.get_string(3).unwrap_or_default().parse().unwrap_or(0);
+        let count = parse_count_text(row.get_string(3), "snapshot")?;
 
         results.push((version, table, column, count));
     }
@@ -780,7 +783,7 @@ pub async fn list_snapshots(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_narrowing_type_change, normalize_type_for_cast};
+    use super::{is_narrowing_type_change, normalize_type_for_cast, parse_count_text};
 
     #[test]
     fn normalize_type_for_cast_maps_information_schema_names() {
@@ -798,5 +801,16 @@ mod tests {
         assert!(is_narrowing_type_change("TEXT", "INT"));
         assert!(!is_narrowing_type_change("INT", "BIGINT"));
         assert!(!is_narrowing_type_change("INT", "TEXT"));
+    }
+
+    #[test]
+    fn count_parsing_fails_closed_on_missing_or_malformed_values() {
+        assert_eq!(
+            parse_count_text(Some("42".to_string()), "table row").unwrap(),
+            42
+        );
+        assert!(parse_count_text(None, "table row").is_err());
+        assert!(parse_count_text(Some("not-a-count".to_string()), "table row").is_err());
+        assert!(parse_count_text(Some("-1".to_string()), "table row").is_err());
     }
 }
