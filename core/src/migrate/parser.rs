@@ -50,6 +50,13 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             let _ = consumed;
         } else if line.starts_with("unique index ") || line.starts_with("index ") {
             let index = parse_index(line)?;
+            if schema
+                .indexes
+                .iter()
+                .any(|existing| existing.name == index.name)
+            {
+                return Err(format!("duplicate index declaration '{}'", index.name));
+            }
             schema.add_index(index);
         } else if line.starts_with("extension ") {
             let ext = parse_extension(line)?;
@@ -2335,6 +2342,16 @@ index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_co
         let input = "index idx_users_email on users using btre (email)";
         let err = parse_qail(input).expect_err("unknown index method should fail");
         assert!(err.contains("unknown index method: btre"));
+    }
+
+    #[test]
+    fn test_parse_index_rejects_duplicate_names() {
+        let input = r#"
+index idx_users_email on users (email)
+unique index idx_users_email on users (tenant_id, email)
+"#;
+        let err = parse_qail(input).expect_err("duplicate indexes should fail");
+        assert!(err.contains("duplicate index declaration 'idx_users_email'"));
     }
 
     #[test]
