@@ -930,6 +930,67 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_value_subquery_allows_read_only_cte() {
+        use qail_core::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let cte = Qail::get("plans")
+            .columns(["id"])
+            .filter("tier", Operator::Eq, "gold");
+        let mut subquery = Qail::get("eligible_plans")
+            .columns(["id"])
+            .with("eligible_plans", cte)
+            .filter("active", Operator::Eq, true);
+        subquery.action = Action::With;
+
+        let mut cmd = Qail::get("users");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("plan_id".to_string()),
+                op: Operator::In,
+                value: Value::Subquery(Box::new(subquery)),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains(
+                "plan_id IN (WITH eligible_plans(id) AS (SELECT id FROM plans WHERE tier = $1) \
+                 SELECT id FROM eligible_plans WHERE active = $2)"
+            ),
+            "read-only CTE subquery value must encode through the SELECT path: {sql}"
+        );
+        assert_eq!(params, vec![Some(b"gold".to_vec()), Some(b"t".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_value_subquery_rejects_mutation() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("users");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::In,
+                value: Value::Subquery(Box::new(Qail::add("audit_log").set_value("user_id", "u1"))),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating subquery must fail");
+        assert!(
+            err.to_string()
+                .contains("read-only SELECT query slot requires get/with action"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_encode_literal_timestamp_escapes_quotes() {
         use qail_core::ast::{Expr, Value};
 

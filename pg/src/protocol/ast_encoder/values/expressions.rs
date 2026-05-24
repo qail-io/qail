@@ -4,7 +4,7 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    Action, CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value,
+    CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value,
     WindowFrame,
 };
 
@@ -1028,10 +1028,7 @@ pub fn encode_value(
         }
         Value::Subquery(q) => {
             buf.extend_from_slice(b"(");
-            match q.action {
-                Action::Get => super::super::dml::encode_select(q, buf, params)?,
-                _ => return Err(super::super::EncodeError::UnsupportedAction(q.action)),
-            }
+            super::super::dml::encode_select(q, buf, params)?;
             buf.extend_from_slice(b")");
         }
         Value::Timestamp(ts) => {
