@@ -2,7 +2,7 @@
 //!
 //! Generates Rust modules from `schema.qail` for compile-time type safety.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use crate::migrate::types::ColumnType;
@@ -249,9 +249,13 @@ pub fn generate_schema_code(schema: &Schema) -> String {
         "// =============================================================================\n\n",
     );
 
+    let table_names: HashSet<&str> = tables.iter().map(|table| table.name.as_str()).collect();
     let mut relation_impl_counts: HashMap<(&str, &str), usize> = HashMap::new();
     for table in &tables {
         for fk in &table.foreign_keys {
+            if !table_names.contains(fk.ref_table.as_str()) {
+                continue;
+            }
             *relation_impl_counts
                 .entry((table.name.as_str(), fk.ref_table.as_str()))
                 .or_default() += 1;
@@ -263,6 +267,9 @@ pub fn generate_schema_code(schema: &Schema) -> String {
 
     for table in &tables {
         for fk in &table.foreign_keys {
+            if !table_names.contains(fk.ref_table.as_str()) {
+                continue;
+            }
             // table.column refs ref_table.ref_column
             // This means: table is related TO ref_table (forward)
             // AND: ref_table is related FROM table (reverse - parent has many children)
@@ -403,6 +410,23 @@ table invoices {
         assert!(code.contains("pub const seller_id: TypedColumn<uuid::Uuid, Public>"));
         assert!(!code.contains("impl RelatedTo<users::Users> for invoices::Invoices"));
         assert!(!code.contains("impl RelatedTo<invoices::Invoices> for users::Users"));
+    }
+
+    #[test]
+    fn test_generate_schema_code_skips_missing_target_related_to_impls() {
+        let schema_content = r#"
+table posts {
+    id UUID primary_key
+    user_id UUID ref:users.id
+}
+"#;
+
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+
+        assert!(code.contains("pub mod posts {"));
+        assert!(!code.contains("impl RelatedTo<users::Users> for posts::Posts"));
+        assert!(!code.contains("impl RelatedTo<posts::Posts> for users::Users"));
     }
 
     #[test]
