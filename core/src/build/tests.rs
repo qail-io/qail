@@ -85,6 +85,29 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_malformed_table_headers() {
+    let missing_name = r#"
+table {
+  id UUID
+}
+"#;
+    let err = Schema::parse(missing_name).expect_err("missing table name must fail");
+    assert!(err.contains("Missing name for table declaration"));
+
+    let unknown_option = r#"
+table users audit {
+  id UUID
+}
+"#;
+    let err = Schema::parse(unknown_option).expect_err("unknown table option must fail");
+    assert!(err.contains("Unknown table option 'audit' for 'users'"));
+
+    let trailing_content = "table users { id UUID }";
+    let err = Schema::parse(trailing_content).expect_err("inline table body must fail");
+    assert!(err.contains("Trailing content after table opening brace for 'users'"));
+}
+
+#[test]
 fn test_parse_schema_tracks_views() {
     let content = r#"
 table users {

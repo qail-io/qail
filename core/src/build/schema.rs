@@ -288,11 +288,30 @@ impl Schema {
                 // Parse new table name, check for `rls` keyword
                 // Format: "table bookings rls {" or "table bookings {"
                 let after_table = line.trim_start_matches("table ");
-                let before_brace = after_table.split('{').next().unwrap_or("").trim();
+                let (before_brace, after_brace) = after_table
+                    .split_once('{')
+                    .ok_or_else(|| format!("Invalid table definition: {}", line))?;
+                if !after_brace.trim().is_empty() {
+                    return Err(format!(
+                        "Trailing content after table opening brace for '{}'",
+                        before_brace
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("<missing>")
+                    ));
+                }
+                let before_brace = before_brace.trim();
                 let parts: Vec<&str> = before_brace.split_whitespace().collect();
-                let name = parts.first().unwrap_or(&"").to_string();
+                let Some(name) = parts.first().filter(|name| !name.is_empty()) else {
+                    return Err("Missing name for table declaration".to_string());
+                };
+                for option in parts.iter().skip(1) {
+                    if *option != "rls" {
+                        return Err(format!("Unknown table option '{}' for '{}'", option, name));
+                    }
+                }
                 current_rls_flag = parts.contains(&"rls");
-                current_table = Some(name);
+                current_table = Some((*name).to_string());
             }
             // End of table definition
             else if line == "}" {
