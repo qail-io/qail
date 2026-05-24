@@ -509,7 +509,7 @@ fn test_alter_set_default_rejects_invalid_fragments() {
 }
 
 #[test]
-fn test_view_payload_fragments_are_sanitized() {
+fn test_view_payload_fragments_reject_invalid_fragments() {
     let safe = Qail {
         action: Action::CreateView,
         table: "notes_view".to_string(),
@@ -529,7 +529,7 @@ fn test_view_payload_fragments_are_sanitized() {
     };
     assert_eq!(
         unsafe_view.to_sql_with_dialect(Dialect::Postgres),
-        "CREATE VIEW active_users AS SELECT NULL WHERE FALSE"
+        "/* ERROR: Invalid view query */"
     );
 
     let unsafe_materialized = Qail {
@@ -540,7 +540,7 @@ fn test_view_payload_fragments_are_sanitized() {
     };
     assert_eq!(
         unsafe_materialized.to_sql_with_dialect(Dialect::Postgres),
-        "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE"
+        "/* ERROR: Invalid materialized view query */"
     );
 }
 

@@ -1100,9 +1100,8 @@ pub fn encode_create_view(
     if let Some(ref source) = cmd.source_query {
         super::dml::encode_select(source, buf, params)?;
     } else if let Some(query) = &cmd.payload {
-        buf.extend_from_slice(
-            sql_expr_fragment_to_sql(query, "SELECT NULL WHERE FALSE").as_bytes(),
-        );
+        let query = checked_sql_expr_fragment(query, "view query")?;
+        buf.extend_from_slice(query.as_bytes());
     } else {
         return Err(super::super::EncodeError::UnsupportedAction(
             Action::CreateView,
@@ -1130,9 +1129,8 @@ pub fn encode_create_materialized_view(
     if let Some(ref source) = cmd.source_query {
         super::dml::encode_select(source, buf, params)?;
     } else if let Some(query) = &cmd.payload {
-        buf.extend_from_slice(
-            sql_expr_fragment_to_sql(query, "SELECT NULL WHERE FALSE").as_bytes(),
-        );
+        let query = checked_sql_expr_fragment(query, "materialized view query")?;
+        buf.extend_from_slice(query.as_bytes());
     } else {
         return Err(super::super::EncodeError::UnsupportedAction(
             Action::CreateMaterializedView,

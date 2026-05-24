@@ -2466,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_view_payload_fragments_are_sanitized() {
+    fn test_encode_view_payload_fragments_reject_invalid_fragments() {
         let safe = Qail {
             action: Action::CreateView,
             table: "notes_view".to_string(),
@@ -2486,9 +2486,12 @@ mod tests {
             payload: Some("SELECT id FROM users; DROP TABLE users; --".to_string()),
             ..Default::default()
         };
-        let (sql, params) = AstEncoder::encode_cmd_sql(&unsafe_view).unwrap();
-        assert_eq!(sql, "CREATE VIEW active_users AS SELECT NULL WHERE FALSE");
-        assert!(params.is_empty());
+        let err =
+            AstEncoder::encode_cmd_sql(&unsafe_view).expect_err("unsafe view query must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("view query")),
+            "unexpected error: {err}"
+        );
 
         let unsafe_materialized = Qail {
             action: Action::CreateMaterializedView,
@@ -2496,12 +2499,12 @@ mod tests {
             payload: Some("SELECT COUNT(*) FROM bookings; DROP TABLE bookings; --".to_string()),
             ..Default::default()
         };
-        let (sql, params) = AstEncoder::encode_cmd_sql(&unsafe_materialized).unwrap();
-        assert_eq!(
-            sql,
-            "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE"
+        let err = AstEncoder::encode_cmd_sql(&unsafe_materialized)
+            .expect_err("unsafe materialized view query must fail");
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("materialized view query")),
+            "unexpected error: {err}"
         );
-        assert!(params.is_empty());
     }
 
     #[test]

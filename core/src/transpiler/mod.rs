@@ -147,11 +147,14 @@ impl ToSql for Qail {
                         source.to_sql_with_dialect(dialect)
                     )
                 } else if let Some(query) = &self.payload {
-                    format!(
-                        "CREATE MATERIALIZED VIEW {} AS {}",
-                        escape_identifier(&self.table),
-                        sql_query_fragment_to_sql(query)
-                    )
+                    match checked_sql_query_fragment(query, "materialized view query") {
+                        Ok(query) => format!(
+                            "CREATE MATERIALIZED VIEW {} AS {}",
+                            escape_identifier(&self.table),
+                            query
+                        ),
+                        Err(err) => err,
+                    }
                 } else {
                     format!(
                         "CREATE MATERIALIZED VIEW {} AS {}",
@@ -235,11 +238,16 @@ impl ToSql for Qail {
                         source.to_sql_with_dialect(dialect)
                     )
                 } else if let Some(query) = &self.payload {
-                    format!(
-                        "CREATE VIEW {} AS {}",
-                        escape_identifier(&self.table),
-                        sql_query_fragment_to_sql(query)
-                    )
+                    match checked_sql_query_fragment(query, "view query") {
+                        Ok(query) => {
+                            format!(
+                                "CREATE VIEW {} AS {}",
+                                escape_identifier(&self.table),
+                                query
+                            )
+                        }
+                        Err(err) => err,
+                    }
                 } else {
                     format!(
                         "CREATE VIEW {} AS {}",
@@ -649,17 +657,12 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
     false
 }
 
-fn sql_expr_fragment_to_sql(expr: &str, fallback: &str) -> String {
-    let expr = expr.trim();
-    if expr.is_empty() || contains_unquoted_statement_delimiter(expr) {
-        fallback.to_string()
-    } else {
-        expr.replace('\0', "")
+fn checked_sql_query_fragment(query: &str, context: &str) -> Result<String, String> {
+    let query = query.trim();
+    if query.is_empty() || contains_unquoted_statement_delimiter(query) {
+        return Err(format!("/* ERROR: Invalid {context} */"));
     }
-}
-
-fn sql_query_fragment_to_sql(query: &str) -> String {
-    sql_expr_fragment_to_sql(query, "SELECT NULL WHERE FALSE")
+    Ok(query.to_string())
 }
 
 fn privilege_to_sql(privilege: &str) -> Option<&'static str> {
