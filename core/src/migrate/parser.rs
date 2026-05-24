@@ -964,6 +964,9 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
 
     if let Some((dollar_pos, delimiter)) = find_dollar_delimiter(rest) {
         let name = rest[..dollar_pos].trim();
+        if name.is_empty() {
+            return Err("view name is required".to_string());
+        }
         let body = collect_dollar_body(
             &rest[dollar_pos + delimiter.len()..],
             lines,
@@ -2413,6 +2416,13 @@ $qail$
         assert_eq!(schema.views[0].name, "debug_sql");
         assert!(schema.views[0].query.contains("$$literal$$"));
         assert_eq!(reparsed.views[0].query, schema.views[0].query);
+    }
+
+    #[test]
+    fn test_parse_view_rejects_missing_name() {
+        let input = "view $$ SELECT 1 $$";
+        let err = parse_qail(input).expect_err("missing view name should fail");
+        assert!(err.contains("view name is required"));
     }
 
     #[test]
