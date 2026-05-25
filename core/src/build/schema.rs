@@ -1006,11 +1006,8 @@ impl Schema {
                 }
             }
 
-            // ALTER TABLE ... ADD COLUMN
-            if line_upper.starts_with("ALTER TABLE")
-                && line_upper.contains("ADD COLUMN")
-                && let Some((table, col)) = extract_alter_add_column(line)
-            {
+            // ALTER TABLE ... ADD [COLUMN] ...
+            for (table, col) in extract_alter_add_columns(line) {
                 if let Some(t) = self.tables.get_mut(&table) {
                     if t.columns.insert(col.clone(), ColumnType::Text).is_none() {
                         changes += 1;
@@ -1031,17 +1028,6 @@ impl Schema {
                     );
                     changes += 1;
                 }
-            }
-
-            // ALTER TABLE ... ADD (without COLUMN keyword)
-            if line_upper.starts_with("ALTER TABLE")
-                && line_upper.contains(" ADD ")
-                && !line_upper.contains("ADD COLUMN")
-                && let Some((table, col)) = extract_alter_add(line)
-                && let Some(t) = self.tables.get_mut(&table)
-                && t.columns.insert(col.clone(), ColumnType::Text).is_none()
-            {
-                changes += 1;
             }
 
             // DROP TABLE
@@ -1736,39 +1722,40 @@ fn split_sql_top_level_csv(raw: &str) -> Vec<&str> {
     pieces
 }
 
-/// Extract table and column from ALTER TABLE ... ADD COLUMN
-fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
+/// Extract table and columns from ALTER TABLE ... ADD [COLUMN] actions.
+fn extract_alter_add_columns(line: &str) -> Vec<(String, String)> {
     let line_upper = line.to_uppercase();
-    let alter_pos = line_upper.find("ALTER TABLE")?;
-    let add_pos = line_upper.find("ADD COLUMN")?;
-
-    // Table name between ALTER TABLE and ADD COLUMN
-    let table_part = &line[alter_pos + 11..add_pos];
-    let table = extract_alter_table_ref(table_part)?;
-
-    // Column name after ADD COLUMN [IF NOT EXISTS]
-    let mut col_part = &line[add_pos + 10..];
-    if let Some(stripped) = strip_sql_if_not_exists(col_part) {
-        col_part = stripped;
+    if !line_upper.starts_with("ALTER TABLE") {
+        return Vec::new();
     }
-    let col = extract_sql_column_ref(col_part.trim())?;
+    let Some(alter_pos) = line_upper.find("ALTER TABLE") else {
+        return Vec::new();
+    };
+    let add_column_pos = line_upper.find("ADD COLUMN");
+    let add_pos = line_upper.find(" ADD ").map(|pos| pos + 1);
+    let Some(action_pos) = [add_column_pos, add_pos].into_iter().flatten().min() else {
+        return Vec::new();
+    };
 
-    Some((table, col))
+    let table_part = &line[alter_pos + 11..action_pos];
+    let Some(table) = extract_alter_table_ref(table_part) else {
+        return Vec::new();
+    };
+    let actions_part = &line[action_pos..];
+
+    split_sql_top_level_csv(actions_part)
+        .into_iter()
+        .filter_map(|action| {
+            extract_alter_add_column_action(action).map(|col| (table.clone(), col))
+        })
+        .collect()
 }
 
-/// Extract table and column from ALTER TABLE ... ADD (without COLUMN keyword)
-fn extract_alter_add(line: &str) -> Option<(String, String)> {
-    let line_upper = line.to_uppercase();
-    let alter_pos = line_upper.find("ALTER TABLE")?;
-    let add_pos = line_upper.find(" ADD ")?;
+fn extract_alter_add_column_action(action: &str) -> Option<String> {
+    let mut col_part = strip_sql_keyword(action, "ADD")?;
+    col_part = strip_sql_keyword(col_part, "COLUMN").unwrap_or(col_part);
+    col_part = strip_sql_if_not_exists(col_part).unwrap_or(col_part);
 
-    let table_part = &line[alter_pos + 11..add_pos];
-    let table = extract_alter_table_ref(table_part)?;
-
-    let mut col_part = &line[add_pos + 5..];
-    if let Some(stripped) = strip_sql_if_not_exists(col_part) {
-        col_part = stripped;
-    }
     let col_upper = col_part.trim_start().to_uppercase();
     if [
         "CONSTRAINT",
@@ -1783,9 +1770,8 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    let col = extract_sql_column_ref(col_part.trim())?;
 
-    Some((table, col))
+    extract_sql_column_ref(col_part.trim())
 }
 
 /// Extract table names from DROP TABLE statement
@@ -2353,5 +2339,20 @@ ALTER TABLE reports ADD COLUMN status text;
         let reports = schema.table("reports").expect("reports table should parse");
         assert!(reports.has_column("status"));
         assert!(!reports.has_column("alter"));
+    }
+
+    #[test]
+    fn sql_migration_handles_multiple_alter_add_actions() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid);
+ALTER TABLE users ADD COLUMN email text, ADD IF NOT EXISTS name text;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("email"));
+        assert!(users.has_column("name"));
     }
 }
