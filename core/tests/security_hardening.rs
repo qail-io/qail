@@ -915,6 +915,136 @@ fn update_returning_rejects_unsafe_cast_target() {
 }
 
 #[test]
+fn select_function_name_rejects_raw_sql_fragment() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![Expr::FunctionCall {
+            name: "lower); DROP TABLE users; --".to_string(),
+            args: vec![Expr::Named("name".to_string())],
+            alias: None,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid function name */"),
+        "unsafe SELECT function name must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe SELECT function name leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn window_function_name_rejects_raw_sql_fragment() {
+    let cmd = Qail {
+        action: Action::Over,
+        table: "users".to_string(),
+        columns: vec![Expr::Window {
+            name: "total".to_string(),
+            func: "sum); DROP TABLE users; --".to_string(),
+            params: vec![Expr::Named("amount".to_string())],
+            partition: vec![],
+            order: vec![],
+            frame: None,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid window function name */"),
+        "unsafe standalone window function name must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe standalone window function name leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn window_param_rejects_unsafe_cast_target() {
+    let cmd = Qail {
+        action: Action::Over,
+        table: "users".to_string(),
+        columns: vec![Expr::Window {
+            name: "total".to_string(),
+            func: "sum".to_string(),
+            params: vec![Expr::Cast {
+                expr: Box::new(Expr::Named("amount".to_string())),
+                target_type: "numeric); DROP TABLE users; --".to_string(),
+                alias: None,
+            }],
+            partition: vec![],
+            order: vec![],
+            frame: None,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid cast target type */"),
+        "unsafe standalone window parameter cast target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe standalone window parameter cast target leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn select_window_order_escapes_collation_fragment() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![Expr::Window {
+            name: "rn".to_string(),
+            func: "row_number".to_string(),
+            params: vec![],
+            partition: vec![],
+            order: vec![Cage {
+                kind: CageKind::Sort(SortOrder::Asc),
+                conditions: vec![Condition {
+                    left: Expr::Collate {
+                        expr: Box::new(Expr::Named("name".to_string())),
+                        collation: "C\"; DROP TABLE users; --".to_string(),
+                        alias: None,
+                    },
+                    op: Operator::Eq,
+                    value: Value::Null,
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            }],
+            frame: None,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("COLLATE \"C\"\"; DROP TABLE users; --\""),
+        "window ORDER BY collation identifier was not escaped: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("COLLATE \"C\"; DROP"),
+        "window ORDER BY collation identifier broke out of quotes: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_is_null_no_value_leak() {
     let cmd = select_where("users", "deleted_at", Operator::IsNull, Value::Null);
     let sql = cmd.to_sql();

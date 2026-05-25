@@ -140,6 +140,9 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                             }
                         } else {
                             // Standard Function - transpile each arg expression
+                            let Some(function) = render_function_name(name) else {
+                                return "/* ERROR: Invalid function name */".to_string();
+                            };
                             let args_sql: Vec<String> = args
                                 .iter()
                                 .map(|a| {
@@ -174,7 +177,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                                     }
                                 })
                                 .collect();
-                            let expr = format!("{}({})", name.to_uppercase(), args_sql.join(", "));
+                            let expr = format!("{}({})", function, args_sql.join(", "));
                             if let Some(a) = alias {
                                 format!("{} AS {}", expr, generator.quote_identifier(a))
                             } else {
@@ -277,9 +280,12 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         } else {
                             params
                                 .iter()
-                                .map(|v| v.to_string())
+                                .map(|v| render_expr_for_orderby(v, generator.as_ref(), cmd))
                                 .collect::<Vec<_>>()
                                 .join(", ")
+                        };
+                        let Some(function) = render_function_name(func) else {
+                            return "/* ERROR: Invalid window function name */".to_string();
                         };
 
                         let mut over_clause = String::from("OVER (");
@@ -302,7 +308,11 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                                     let col_str = if let Some(cond) = cage.conditions.first() {
                                         match &cond.left {
                                             Expr::Named(n) => generator.quote_identifier(n),
-                                            expr => expr.to_string(),
+                                            expr => render_expr_for_orderby(
+                                                expr,
+                                                generator.as_ref(),
+                                                cmd,
+                                            ),
                                         }
                                     } else {
                                         return String::new();
@@ -357,7 +367,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         over_clause.push(')');
                         format!(
                             "{}({}) {} AS {}",
-                            func.to_uppercase(),
+                            function,
                             params_str,
                             over_clause,
                             generator.quote_identifier(name)
@@ -728,11 +738,14 @@ fn render_expr_for_orderby(
             }
         }
         Expr::FunctionCall { name, args, .. } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid function name */".to_string();
+            };
             let args_sql: Vec<String> = args
                 .iter()
                 .map(|a| render_expr_for_orderby(a, generator, cmd))
                 .collect();
-            format!("{}({})", name.to_uppercase(), args_sql.join(", "))
+            format!("{}({})", function, args_sql.join(", "))
         }
         Expr::SpecialFunction { name, args, .. } => match name.as_str() {
             "SUBSTRING" => {
@@ -790,6 +803,20 @@ fn render_expr_for_orderby(
             render_qualified_identifier(field, generator)
         ),
         _ => expr.to_string(), // Fallback for Star, Aliased, etc.
+    }
+}
+
+fn render_function_name(name: &str) -> Option<String> {
+    if name.is_empty()
+        || name.contains('\0')
+        || name.split('.').any(str::is_empty)
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        None
+    } else {
+        Some(name.to_uppercase())
     }
 }
 
