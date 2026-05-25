@@ -264,6 +264,28 @@ table users audit {
 }
 
 #[test]
+fn test_parse_schema_rejects_invalid_table_names() {
+    let content = r#"
+table bad-name {
+  id UUID
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("invalid table name must fail");
+    assert!(err.contains("Invalid table name 'bad-name'"));
+
+    let schema = Schema::parse(
+        r#"
+table app.users {
+  id UUID
+}
+"#,
+    )
+    .expect("schema-qualified table names should parse");
+    assert!(schema.has_table("app.users"));
+}
+
+#[test]
 fn test_parse_schema_rejects_table_before_closing_current_table() {
     let content = r#"
 table users {

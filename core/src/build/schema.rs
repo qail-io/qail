@@ -302,6 +302,9 @@ impl Schema {
                 let Some(name) = parts.first().filter(|name| !name.is_empty()) else {
                     return Err("Missing name for table declaration".to_string());
                 };
+                if !is_build_table_ref(name) {
+                    return Err(format!("Invalid table name '{}'", name));
+                }
                 for option in parts.iter().skip(1) {
                     if *option != "rls" {
                         return Err(format!("Unknown table option '{}' for '{}'", option, name));
