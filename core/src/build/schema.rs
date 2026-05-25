@@ -659,11 +659,15 @@ impl Schema {
         for (table_name, parsed_table) in parsed.tables {
             if let Some(existing) = self.tables.get_mut(&table_name) {
                 for (col_name, col_type) in parsed_table.columns {
-                    if existing
-                        .columns
-                        .insert(col_name.clone(), col_type)
-                        .is_none()
-                    {
+                    if let Some(existing_type) = existing.columns.get(&col_name) {
+                        if existing_type != &col_type {
+                            return Err(format!(
+                                "conflicting column type for '{}.{}': existing {:?}, migration {:?}",
+                                table_name, col_name, existing_type, col_type
+                            ));
+                        }
+                    } else {
+                        existing.columns.insert(col_name.clone(), col_type);
                         changes += 1;
                     }
                 }
