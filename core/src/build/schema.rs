@@ -1039,12 +1039,31 @@ fn parse_build_enum_value(raw: &str) -> Result<String, String> {
         return Ok(String::new());
     }
 
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        let quote = trimmed.as_bytes()[0] as char;
-        let inner = &trimmed[1..trimmed.len() - 1];
-        return Ok(inner.replace(&format!("{quote}{quote}"), &quote.to_string()));
+    if let Some(quote) = trimmed.chars().next().filter(|ch| matches!(ch, '"' | '\'')) {
+        let mut value = String::new();
+        let mut chars = trimmed.char_indices();
+        chars.next();
+        let mut chars = chars.peekable();
+
+        while let Some((idx, ch)) = chars.next() {
+            if ch == quote {
+                if chars.peek().is_some_and(|(_, next)| *next == quote) {
+                    value.push(quote);
+                    chars.next();
+                    continue;
+                }
+
+                let after = idx + ch.len_utf8();
+                if !trimmed[after..].trim().is_empty() {
+                    return Err(format!("invalid enum value token '{}'", trimmed));
+                }
+                return Ok(value);
+            }
+
+            value.push(ch);
+        }
+
+        return Err("unterminated quoted enum value".to_string());
     }
 
     if trimmed

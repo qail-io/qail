@@ -376,6 +376,13 @@ table tickets {
 }
 
 #[test]
+fn test_parse_schema_rejects_invalid_quoted_enum_value_tokens() {
+    let err = Schema::parse(r#"enum status { "draft" "active" }"#)
+        .expect_err("quoted enum token with trailing content must fail");
+    assert!(err.contains(r#"invalid enum value token '"draft" "active"'"#));
+}
+
+#[test]
 fn test_parse_schema_rejects_malformed_table_headers() {
     let missing_name = r#"
 table {
