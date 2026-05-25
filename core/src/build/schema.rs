@@ -395,6 +395,7 @@ impl Schema {
                     let mut policy = "Public".to_string();
                     let mut seen_protected = false;
                     let mut seen_column_options = HashSet::new();
+                    let mut nullability_option: Option<&str> = None;
 
                     let mut i = 2;
                     while i < parts.len() {
@@ -422,6 +423,15 @@ impl Schema {
                                     "duplicate column option '{}' for column '{}' in table '{}'",
                                     part, col_name, table_name
                                 ));
+                            }
+                            if matches!(part, "not_null" | "nullable") {
+                                if let Some(existing) = nullability_option {
+                                    return Err(format!(
+                                        "conflicting nullability options '{}' and '{}' for column '{}' in table '{}'",
+                                        existing, part, col_name, table_name
+                                    ));
+                                }
+                                nullability_option = Some(part);
                             }
                             // Build-time validation only needs shape, type, policy, and relations.
                         } else if part == "default" {

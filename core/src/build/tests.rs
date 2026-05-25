@@ -146,6 +146,23 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_conflicting_nullability_options() {
+    let content = r#"
+table users {
+  email TEXT not_null nullable
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("conflicting nullability must fail");
+    assert!(
+        err.contains(
+            "conflicting nullability options 'not_null' and 'nullable' for column 'email' in table 'users'"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
 fn test_parse_schema_rejects_duplicate_protected_option() {
     let content = r#"
 table users {
