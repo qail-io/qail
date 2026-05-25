@@ -11,6 +11,17 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+#[inline]
+fn return_with_desync<T>(driver: &mut PgDriver, err: PgError) -> PgResult<T> {
+    if matches!(
+        err,
+        PgError::Protocol(_) | PgError::Connection(_) | PgError::Timeout(_)
+    ) {
+        driver.connection.mark_io_desynced();
+    }
+    Err(err)
+}
+
 impl PgDriver {
     /// Execute a QAIL command and fetch all rows (CACHED + ZERO-ALLOC).
     /// **Default method** - uses prepared statement caching for best performance.
@@ -124,11 +135,13 @@ impl PgDriver {
 
             loop {
                 let msg = self.connection.recv().await?;
-                flow.validate(
+                if let Err(err) = flow.validate(
                     &msg,
                     "driver fetch_all_prepared_ast execute",
                     error.is_some(),
-                )?;
+                ) {
+                    return return_with_desync(self, err);
+                }
                 match msg {
                     crate::protocol::BackendMessage::BindComplete => {}
                     crate::protocol::BackendMessage::RowDescription(_) => {}
@@ -166,10 +179,13 @@ impl PgDriver {
                     }
                     msg if is_ignorable_session_message(&msg) => {}
                     other => {
-                        return Err(unexpected_backend_message(
-                            "driver fetch_all_prepared_ast execute",
-                            &other,
-                        ));
+                        return return_with_desync(
+                            self,
+                            unexpected_backend_message(
+                                "driver fetch_all_prepared_ast execute",
+                                &other,
+                            ),
+                        );
                     }
                 }
             }
@@ -259,7 +275,9 @@ impl PgDriver {
 
         loop {
             let msg = self.connection.recv().await?;
-            flow.validate(&msg, "driver fetch_all execute", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "driver fetch_all execute", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -289,10 +307,10 @@ impl PgDriver {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message(
-                        "driver fetch_all execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("driver fetch_all execute", &other),
+                    );
                 }
             }
         }
@@ -336,11 +354,13 @@ impl PgDriver {
             let res = self.connection.recv_with_data_fast().await;
             match res {
                 Ok((msg_type, data)) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "driver fetch_all_fast execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'D' => {
                             if error.is_none()
@@ -546,7 +566,7 @@ impl PgDriver {
                     self.connection.prepared_statements.remove(&stmt_name);
                     self.connection.column_info_cache.remove(&sql_hash);
                 }
-                return Err(err);
+                return return_with_desync(self, err);
             }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete => {}
@@ -592,10 +612,13 @@ impl PgDriver {
                         self.connection.stmt_cache.remove(&sql_hash);
                         self.connection.prepared_statements.remove(&stmt_name);
                         self.connection.column_info_cache.remove(&sql_hash);
-                        return Err(PgError::Protocol(
-                            "Cache miss query reached ReadyForQuery without ParseComplete"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "Cache miss query reached ReadyForQuery without ParseComplete"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(rows);
                 }
@@ -615,10 +638,10 @@ impl PgDriver {
                         self.connection.prepared_statements.remove(&stmt_name);
                         self.connection.column_info_cache.remove(&sql_hash);
                     }
-                    return Err(unexpected_backend_message(
-                        "driver fetch_all_cached execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("driver fetch_all_cached execute", &other),
+                    );
                 }
             }
         }
@@ -645,7 +668,9 @@ impl PgDriver {
 
         loop {
             let msg = self.connection.recv().await?;
-            flow.validate(&msg, "driver execute mutation", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "driver execute mutation", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -654,7 +679,10 @@ impl PgDriver {
                 crate::protocol::BackendMessage::NoData => {}
                 crate::protocol::BackendMessage::CommandComplete(tag) => {
                     if error.is_none() {
-                        affected = super::parse_affected_rows(&tag)?;
+                        match super::parse_affected_rows(&tag) {
+                            Ok(parsed) => affected = parsed,
+                            Err(err) => return return_with_desync(self, err),
+                        }
                     }
                 }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
@@ -670,10 +698,10 @@ impl PgDriver {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message(
-                        "driver execute mutation",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("driver execute mutation", &other),
+                    );
                 }
             }
         }
@@ -713,7 +741,9 @@ impl PgDriver {
 
         loop {
             let msg = self.connection.recv().await?;
-            flow.validate(&msg, "driver query_ast", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "driver query_ast", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -743,8 +773,107 @@ impl PgDriver {
                     }
                 }
                 msg if is_ignorable_session_message(&msg) => {}
-                other => return Err(unexpected_backend_message("driver query_ast", &other)),
+                other => {
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("driver query_ast", &other),
+                    );
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn test_driver_with_peer() -> (PgDriver, tokio::net::UnixStream) {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, peer) = UnixStream::pair().expect("unix stream pair");
+        let conn = super::super::PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: super::super::PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: super::super::PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        };
+        (PgDriver::new(conn), peer)
+    }
+
+    #[cfg(unix)]
+    fn push_backend_frame(driver: &mut PgDriver, msg_type: u8, payload: &[u8]) {
+        driver.connection.buffer.extend_from_slice(&[msg_type]);
+        driver
+            .connection
+            .buffer
+            .extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        driver.connection.buffer.extend_from_slice(payload);
+    }
+
+    #[cfg(unix)]
+    fn push_command_complete(driver: &mut PgDriver, tag: &str) {
+        let mut payload = Vec::with_capacity(tag.len() + 1);
+        payload.extend_from_slice(tag.as_bytes());
+        payload.push(0);
+        push_backend_frame(driver, b'C', &payload);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fetch_fast_protocol_error_marks_driver_connection_desynced() {
+        let (mut driver, _peer) = test_driver_with_peer();
+        push_backend_frame(&mut driver, b'D', &0i16.to_be_bytes());
+
+        let err = match driver.fetch_all_fast(&Qail::get("users")).await {
+            Ok(_) => panic!("out-of-order DataRow must fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("DataRow before BindComplete"));
+        assert!(driver.connection.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_bad_command_tag_marks_driver_connection_desynced() {
+        let (mut driver, _peer) = test_driver_with_peer();
+        push_backend_frame(&mut driver, b'1', &[]);
+        push_backend_frame(&mut driver, b'2', &[]);
+        push_backend_frame(&mut driver, b'n', &[]);
+        push_command_complete(&mut driver, "UPDATE");
+        push_backend_frame(&mut driver, b'Z', b"I");
+
+        let err = driver
+            .execute(&Qail::get("users"))
+            .await
+            .expect_err("malformed CommandComplete tag must fail");
+
+        assert!(
+            err.to_string().contains("missing affected row count")
+                || err.to_string().contains("invalid affected row count")
+        );
+        assert!(driver.connection.is_io_desynced());
     }
 }
