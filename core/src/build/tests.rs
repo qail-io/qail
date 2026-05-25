@@ -134,6 +134,18 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_column_options() {
+    let content = r#"
+table users {
+  email TEXT unique unique
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("duplicate column option must fail");
+    assert!(err.contains("duplicate column option 'unique' for column 'email' in table 'users'"));
+}
+
+#[test]
 fn test_parse_schema_rejects_duplicate_protected_option() {
     let content = r#"
 table users {

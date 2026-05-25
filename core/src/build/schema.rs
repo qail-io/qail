@@ -394,6 +394,7 @@ impl Schema {
                     // Check for policies and foreign keys
                     let mut policy = "Public".to_string();
                     let mut seen_protected = false;
+                    let mut seen_column_options = HashSet::new();
 
                     let mut i = 2;
                     while i < parts.len() {
@@ -416,6 +417,12 @@ impl Schema {
                                 | "generated_identity"
                                 | "generated_by_default_identity"
                         ) {
+                            if !seen_column_options.insert(part) {
+                                return Err(format!(
+                                    "duplicate column option '{}' for column '{}' in table '{}'",
+                                    part, col_name, table_name
+                                ));
+                            }
                             // Build-time validation only needs shape, type, policy, and relations.
                         } else if part == "default" {
                             if i + 1 >= parts.len() {
