@@ -14,7 +14,9 @@ pub use error::EncodeError;
 
 pub use ast_encoder::AstEncoder;
 pub use auth::ScramClient;
-pub use copy_encoder::{encode_copy_batch, encode_copy_value};
+pub use copy_encoder::{
+    encode_copy_batch, encode_copy_value, try_encode_copy_batch, try_encode_copy_value,
+};
 pub use encoder::PgEncoder;
 pub use types::{is_array_oid, oid, oid_to_name};
 pub use wire::{

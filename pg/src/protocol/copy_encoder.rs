@@ -6,6 +6,8 @@
 use bytes::BytesMut;
 use qail_core::ast::Value;
 
+use crate::protocol::EncodeError;
+
 /// Encode a Value directly into COPY text format (no SQL quoting).
 /// COPY text format rules:
 /// - NULL: `\N`
@@ -15,6 +17,17 @@ use qail_core::ast::Value;
 /// - UUID: hyphenated lowercase
 #[inline]
 pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
+    let mut tmp = BytesMut::new();
+    if try_encode_copy_value(&mut tmp, value).is_ok() {
+        buf.extend_from_slice(&tmp);
+    } else {
+        buf.extend_from_slice(b"\\N");
+    }
+}
+
+/// Fallible COPY text encoder for a single data value.
+#[inline]
+pub fn try_encode_copy_value(buf: &mut BytesMut, value: &Value) -> Result<(), EncodeError> {
     match value {
         Value::Null | Value::NullUuid => buf.extend_from_slice(b"\\N"),
 
@@ -32,18 +45,7 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             buf.extend_from_slice(tmp.format(*n).as_bytes());
         }
 
-        Value::String(s) => {
-            // COPY text format: escape tabs, newlines, backslashes
-            for c in s.bytes() {
-                match c {
-                    b'\\' => buf.extend_from_slice(b"\\\\"),
-                    b'\t' => buf.extend_from_slice(b"\\t"),
-                    b'\n' => buf.extend_from_slice(b"\\n"),
-                    b'\r' => buf.extend_from_slice(b"\\r"),
-                    _ => buf.extend_from_slice(&[c]),
-                }
-            }
-        }
+        Value::String(s) => write_copy_escaped_str(buf, s)?,
 
         Value::Uuid(u) => {
             // UUID: 36-char hyphenated lowercase
@@ -52,34 +54,30 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             buf.extend_from_slice(&uuid_buf);
         }
 
-        Value::Timestamp(ts) => buf.extend_from_slice(ts.as_bytes()),
+        Value::Timestamp(ts) => write_copy_escaped_str(buf, ts)?,
 
-        Value::Column(s) => buf.extend_from_slice(s.as_bytes()),
-
-        Value::Function(s) => buf.extend_from_slice(s.as_bytes()),
-
-        Value::Param(n) => {
-            // $N - unlikely in COPY but handle gracefully
-            buf.extend_from_slice(b"$");
-            let mut tmp = itoa::Buffer::new();
-            buf.extend_from_slice(tmp.format(*n).as_bytes());
-        }
-
-        Value::NamedParam(name) => {
-            buf.extend_from_slice(b":");
-            buf.extend_from_slice(name.as_bytes());
+        Value::Column(_)
+        | Value::Function(_)
+        | Value::Param(_)
+        | Value::NamedParam(_)
+        | Value::Subquery(_)
+        | Value::Expr(_) => {
+            return Err(EncodeError::InvalidAst(
+                "COPY data value cannot be an expression or unresolved parameter".to_string(),
+            ));
         }
 
         Value::Array(arr) => {
-            // PostgreSQL array literal: {val1,val2,...}
-            buf.extend_from_slice(b"{");
+            let mut arr_buf = Vec::with_capacity(arr.len() * 8 + 2);
+            arr_buf.extend_from_slice(b"{");
             for (i, v) in arr.iter().enumerate() {
                 if i > 0 {
-                    buf.extend_from_slice(b",");
+                    arr_buf.push(b',');
                 }
-                encode_copy_value(buf, v);
+                write_copy_array_value(&mut arr_buf, v)?;
             }
-            buf.extend_from_slice(b"}");
+            arr_buf.extend_from_slice(b"}");
+            write_copy_escaped_bytes(buf, &arr_buf);
         }
 
         Value::Interval { amount, unit } => {
@@ -88,11 +86,6 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             buf.extend_from_slice(tmp.format(*amount).as_bytes());
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(unit.to_string().as_bytes());
-        }
-
-        Value::Subquery(_) => {
-            // Can't COPY a subquery - output NULL
-            buf.extend_from_slice(b"\\N");
         }
 
         Value::Bytes(bytes) => {
@@ -108,10 +101,6 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
                 ]);
             }
         }
-        Value::Expr(_) => {
-            // Expr values shouldn't appear in COPY - output NULL
-            buf.extend_from_slice(b"\\N");
-        }
         Value::Vector(vec) => {
             // PostgreSQL array format for vectors: {1.0,2.0,3.0}
             buf.extend_from_slice(b"{");
@@ -124,19 +113,76 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             }
             buf.extend_from_slice(b"}");
         }
-        Value::Json(json) => {
-            // JSONB as raw JSON text (escape backslashes for COPY format)
-            for c in json.bytes() {
-                match c {
-                    b'\\' => buf.extend_from_slice(b"\\\\"),
-                    b'\t' => buf.extend_from_slice(b"\\t"),
-                    b'\n' => buf.extend_from_slice(b"\\n"),
-                    b'\r' => buf.extend_from_slice(b"\\r"),
-                    _ => buf.extend_from_slice(&[c]),
-                }
-            }
+        Value::Json(json) => write_copy_escaped_str(buf, json)?,
+    }
+    Ok(())
+}
+
+fn write_copy_escaped_str(buf: &mut BytesMut, value: &str) -> Result<(), EncodeError> {
+    if value.as_bytes().contains(&0) {
+        return Err(EncodeError::NullByte);
+    }
+    write_copy_escaped_bytes(buf, value.as_bytes());
+    Ok(())
+}
+
+fn write_copy_escaped_bytes(buf: &mut BytesMut, value: &[u8]) {
+    for byte in value {
+        match *byte {
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            b'\t' => buf.extend_from_slice(b"\\t"),
+            b'\n' => buf.extend_from_slice(b"\\n"),
+            b'\r' => buf.extend_from_slice(b"\\r"),
+            _ => buf.extend_from_slice(&[*byte]),
         }
     }
+}
+
+fn write_copy_array_value(buf: &mut Vec<u8>, value: &Value) -> Result<(), EncodeError> {
+    match value {
+        Value::Null | Value::NullUuid => buf.extend_from_slice(b"NULL"),
+        Value::Bool(value) => buf.extend_from_slice(if *value { b"t" } else { b"f" }),
+        Value::Int(value) => buf.extend_from_slice(value.to_string().as_bytes()),
+        Value::Float(value) => buf.extend_from_slice(value.to_string().as_bytes()),
+        Value::Uuid(value) => buf.extend_from_slice(value.to_string().as_bytes()),
+        Value::String(value) | Value::Timestamp(value) | Value::Json(value) => {
+            write_quoted_array_element(buf, value)?
+        }
+        Value::Interval { amount, unit } => {
+            write_quoted_array_element(buf, &format!("{amount} {unit}"))?;
+        }
+        Value::Column(_)
+        | Value::Function(_)
+        | Value::Param(_)
+        | Value::NamedParam(_)
+        | Value::Array(_)
+        | Value::Subquery(_)
+        | Value::Bytes(_)
+        | Value::Expr(_)
+        | Value::Vector(_) => {
+            return Err(EncodeError::InvalidAst(
+                "COPY array value cannot contain expressions or nested binary/vector values"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_quoted_array_element(buf: &mut Vec<u8>, value: &str) -> Result<(), EncodeError> {
+    if value.as_bytes().contains(&0) {
+        return Err(EncodeError::NullByte);
+    }
+
+    buf.push(b'"');
+    for byte in value.bytes() {
+        if byte == b'"' || byte == b'\\' {
+            buf.push(b'\\');
+        }
+        buf.push(byte);
+    }
+    buf.push(b'"');
+    Ok(())
 }
 
 /// Encode a batch of rows into a single COPY data buffer.
@@ -159,6 +205,25 @@ pub fn encode_copy_batch(rows: &[Vec<Value>]) -> BytesMut {
     }
 
     buf
+}
+
+/// Fallible batch COPY text encoder.
+#[inline]
+pub fn try_encode_copy_batch(rows: &[Vec<Value>]) -> Result<BytesMut, EncodeError> {
+    let estimated_size = rows.len() * 7 * 50;
+    let mut buf = BytesMut::with_capacity(estimated_size);
+
+    for row in rows {
+        for (i, val) in row.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b"\t");
+            }
+            try_encode_copy_value(&mut buf, val)?;
+        }
+        buf.extend_from_slice(b"\n");
+    }
+
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -185,6 +250,57 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_copy_value(&mut buf, &Value::String("hello\tworld\n".to_string()));
         assert_eq!(&buf[..], b"hello\\tworld\\n");
+    }
+
+    #[test]
+    fn test_try_encode_rejects_expression_values() {
+        let mut buf = BytesMut::new();
+        let err = try_encode_copy_value(&mut buf, &Value::Function("now()\n1\t2".to_string()))
+            .unwrap_err();
+
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("COPY data value cannot be an expression")),
+            "{err}"
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_try_encode_rejects_null_bytes() {
+        let mut buf = BytesMut::new();
+        let err =
+            try_encode_copy_value(&mut buf, &Value::String("bad\0value".to_string())).unwrap_err();
+
+        assert_eq!(err, EncodeError::NullByte);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_try_encode_array_quotes_delimiter_values() {
+        let mut buf = BytesMut::new();
+
+        try_encode_copy_value(
+            &mut buf,
+            &Value::Array(vec![
+                Value::String("a,b".to_string()),
+                Value::String("line\nnext".to_string()),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(&buf[..], br#"{"a,b","line\nnext"}"#);
+    }
+
+    #[test]
+    fn test_try_encode_batch_rejects_expression_values() {
+        let rows = vec![vec![Value::Int(1), Value::Column("users.id".to_string())]];
+
+        let err = try_encode_copy_batch(&rows).unwrap_err();
+
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("COPY data value cannot be an expression")),
+            "{err}"
+        );
     }
 
     #[test]

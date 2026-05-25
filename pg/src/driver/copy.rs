@@ -178,7 +178,7 @@ impl PgConnection {
         columns: &[String],
         rows: &[Vec<qail_core::ast::Value>],
     ) -> PgResult<u64> {
-        use crate::protocol::encode_copy_batch;
+        use crate::protocol::try_encode_copy_batch;
 
         let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
         let sql = format!(
@@ -186,6 +186,10 @@ impl PgConnection {
             quote_ident(table),
             cols.join(", ")
         );
+
+        // Encode before opening COPY mode so invalid AST data cannot leave the
+        // connection waiting for CopyFail/CopyDone cleanup.
+        let batch_data = try_encode_copy_batch(rows)?;
 
         // Send COPY command
         let bytes = PgEncoder::try_encode_query_string(&sql)?;
@@ -221,9 +225,6 @@ impl PgConnection {
                 }
             }
         }
-
-        // Encode ALL rows into a single buffer (zero-allocation per value)
-        let batch_data = encode_copy_batch(rows);
 
         // Single write for entire batch!
         self.send_copy_data(&batch_data).await?;
