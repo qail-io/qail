@@ -1034,6 +1034,162 @@ fn select_function_name_rejects_raw_sql_fragment() {
 }
 
 #[test]
+fn select_aliased_projection_escapes_alias_fragment() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![Expr::Aliased {
+            name: "name".to_string(),
+            alias: "display\"; DROP TABLE users; --".to_string(),
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("name AS \"display\"\"; DROP TABLE users; --\""),
+        "SELECT alias identifier was not escaped: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("AS \"display\"; DROP"),
+        "SELECT alias identifier broke out of quotes: {}",
+        sql
+    );
+}
+
+#[test]
+fn select_aggregate_filter_uses_structured_condition_renderer() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![Expr::Aggregate {
+            col: "*".to_string(),
+            func: AggregateFunc::Count,
+            distinct: false,
+            filter: Some(vec![Condition {
+                left: Expr::FunctionCall {
+                    name: "lower); DROP TABLE users; --".to_string(),
+                    args: vec![Expr::Named("name".to_string())],
+                    alias: None,
+                },
+                op: Operator::Eq,
+                value: Value::String("ada".to_string()),
+                is_array_unnest: false,
+            }]),
+            alias: Some("total".to_string()),
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("FILTER (WHERE /* ERROR: Invalid function name */ = 'ada')"),
+        "aggregate filter must use the structured condition renderer: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe aggregate filter expression leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn select_projection_rejects_mutating_subquery() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![Expr::Subquery {
+            query: Box::new(Qail::del("audit_log")),
+            alias: Some("deleted_count".to_string()),
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("(/* ERROR: subquery must be read-only SELECT, got DEL */) AS deleted_count"),
+        "mutating SELECT projection subquery must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DELETE FROM"),
+        "mutating SELECT projection subquery SQL leaked: {}",
+        sql
+    );
+}
+
+#[test]
+fn select_order_by_rejects_mutating_subquery() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Sort(SortOrder::Asc),
+            conditions: vec![Condition {
+                left: Expr::Subquery {
+                    query: Box::new(Qail::set("audit_log").set_value("seen", Value::Bool(true))),
+                    alias: None,
+                },
+                op: Operator::Eq,
+                value: Value::Null,
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("ORDER BY (/* ERROR: subquery must be read-only SELECT, got SET */) ASC"),
+        "mutating ORDER BY subquery must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("UPDATE audit_log"),
+        "mutating ORDER BY subquery SQL leaked: {}",
+        sql
+    );
+}
+
+#[test]
+fn select_order_by_special_function_name_rejects_raw_sql_fragment() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Sort(SortOrder::Asc),
+            conditions: vec![Condition {
+                left: Expr::SpecialFunction {
+                    name: "EXTRACT); DROP TABLE users; --".to_string(),
+                    args: vec![(None, Box::new(Expr::Named("created_at".to_string())))],
+                    alias: None,
+                },
+                op: Operator::Eq,
+                value: Value::Null,
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("ORDER BY /* ERROR: Invalid function name */ ASC"),
+        "unsafe ORDER BY special function name must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe ORDER BY special function name leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
 fn window_function_name_rejects_raw_sql_fragment() {
     let cmd = Qail {
         action: Action::Over,

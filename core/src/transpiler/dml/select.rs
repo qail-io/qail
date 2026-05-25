@@ -1,7 +1,7 @@
 //! SELECT SQL generation.
 
 use crate::ast::*;
-use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::conditions::{ConditionToSql, read_only_subquery_sql};
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::traits::{SqlGenerator, escape_sql_string_literal};
 
@@ -47,7 +47,13 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             .iter()
             .map(|c| {
                 match c {
+                    Expr::Star => "*".to_string(),
                     Expr::Named(name) => generator.quote_identifier(name),
+                    Expr::Aliased { name, alias } => format!(
+                        "{} AS {}",
+                        generator.quote_identifier(name),
+                        generator.quote_identifier(alias)
+                    ),
                     Expr::Case {
                         when_clauses,
                         else_value,
@@ -207,8 +213,10 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         if let Some(conditions) = filter
                             && !conditions.is_empty()
                         {
-                            let filter_parts: Vec<String> =
-                                conditions.iter().map(|c| c.to_string()).collect();
+                            let filter_parts: Vec<String> = conditions
+                                .iter()
+                                .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
+                                .collect();
                             expr.push_str(&format!(
                                 " FILTER (WHERE {})",
                                 filter_parts.join(" AND ")
@@ -265,6 +273,35 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         } else {
                             field_expr
                         }
+                    }
+                    Expr::Binary { alias, .. }
+                    | Expr::SpecialFunction { alias, .. }
+                    | Expr::ArrayConstructor { alias, .. }
+                    | Expr::RowConstructor { alias, .. }
+                    | Expr::Subscript { alias, .. } => append_alias(
+                        render_expr_for_orderby(c, generator.as_ref(), cmd),
+                        alias,
+                        generator.as_ref(),
+                    ),
+                    Expr::Literal(value) => {
+                        render_value_for_expression(value, generator.as_ref(), cmd)
+                    }
+                    Expr::Subquery { query, alias } => append_alias(
+                        format!("({})", read_only_subquery_sql(query)),
+                        alias,
+                        generator.as_ref(),
+                    ),
+                    Expr::Exists {
+                        query,
+                        negated,
+                        alias,
+                    } => {
+                        let exists_sql = if *negated {
+                            format!("NOT EXISTS ({})", read_only_subquery_sql(query))
+                        } else {
+                            format!("EXISTS ({})", read_only_subquery_sql(query))
+                        };
+                        append_alias(exists_sql, alias, generator.as_ref())
                     }
                     Expr::Window {
                         name,
@@ -373,7 +410,9 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                             generator.quote_identifier(name)
                         )
                     }
-                    _ => c.to_string(), // Fallback for complex cols if any remaining
+                    Expr::Def { .. } | Expr::Mod { .. } => {
+                        "/* ERROR: Invalid select expression */".to_string()
+                    }
                 }
             })
             .collect();
@@ -688,6 +727,7 @@ fn render_expr_for_orderby(
     cmd: &Qail,
 ) -> String {
     match expr {
+        Expr::Star => "*".to_string(),
         Expr::Named(name) => {
             // Don't quote if already quoted, is a param, or is numeric
             if name.starts_with('\'')
@@ -703,6 +743,37 @@ fn render_expr_for_orderby(
             } else {
                 generator.quote_identifier(name)
             }
+        }
+        Expr::Aliased { name, .. } => generator.quote_identifier(name),
+        Expr::Literal(value) => render_value_for_expression(value, generator, cmd),
+        Expr::Aggregate {
+            col,
+            func,
+            distinct,
+            filter,
+            ..
+        } => {
+            let col_expr = if col == "*" {
+                "*".to_string()
+            } else {
+                generator.quote_identifier(col)
+            };
+            let mut expr = if *distinct {
+                format!("{}(DISTINCT {})", func, col_expr)
+            } else {
+                format!("{}({})", func, col_expr)
+            };
+            if let Some(conditions) = filter
+                && !conditions.is_empty()
+            {
+                let filter_parts = conditions
+                    .iter()
+                    .map(|condition| condition.to_sql(generator, Some(cmd)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                expr.push_str(&format!(" FILTER (WHERE {filter_parts})"));
+            }
+            expr
         }
         Expr::Case {
             when_clauses,
@@ -747,32 +818,24 @@ fn render_expr_for_orderby(
                 .collect();
             format!("{}({})", function, args_sql.join(", "))
         }
-        Expr::SpecialFunction { name, args, .. } => match name.as_str() {
-            "SUBSTRING" => {
-                let mut parts = Vec::new();
-                for (kw, arg) in args {
-                    let arg_sql = render_expr_for_orderby(arg, generator, cmd);
-                    if let Some(keyword) = kw {
-                        parts.push(format!("{} {}", keyword, arg_sql));
-                    } else {
-                        parts.push(arg_sql);
-                    }
+        Expr::SpecialFunction { name, args, .. } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid function name */".to_string();
+            };
+            let mut parts = Vec::new();
+            for (keyword, expr) in args {
+                let expr = render_expr_for_orderby(expr, generator, cmd);
+                if let Some(keyword) = keyword {
+                    let Some(keyword) = render_sql_keyword(keyword) else {
+                        return "/* ERROR: Invalid function keyword */".to_string();
+                    };
+                    parts.push(format!("{keyword} {expr}"));
+                } else {
+                    parts.push(expr);
                 }
-                format!("SUBSTRING({})", parts.join(" "))
             }
-            "EXTRACT" => {
-                let field = args
-                    .first()
-                    .map(|(_, e)| render_expr_for_orderby(e, generator, cmd))
-                    .unwrap_or_default();
-                let source = args
-                    .get(1)
-                    .map(|(_, e)| render_expr_for_orderby(e, generator, cmd))
-                    .unwrap_or_default();
-                format!("EXTRACT({} FROM {})", field, source)
-            }
-            _ => format!("{}(...)", name),
-        },
+            format!("{function}({})", parts.join(" "))
+        }
         Expr::JsonAccess {
             column,
             path_segments,
@@ -802,7 +865,73 @@ fn render_expr_for_orderby(
             render_expr_for_orderby(expr, generator, cmd),
             render_qualified_identifier(field, generator)
         ),
-        _ => expr.to_string(), // Fallback for Star, Aliased, etc.
+        Expr::ArrayConstructor { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(|element| render_expr_for_orderby(element, generator, cmd))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ARRAY[{elements}]")
+        }
+        Expr::RowConstructor { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(|element| render_expr_for_orderby(element, generator, cmd))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ROW({elements})")
+        }
+        Expr::Subscript { expr, index, .. } => format!(
+            "{}[{}]",
+            render_expr_for_orderby(expr, generator, cmd),
+            render_expr_for_orderby(index, generator, cmd)
+        ),
+        Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
+        Expr::Exists { query, negated, .. } => {
+            if *negated {
+                format!("NOT EXISTS ({})", read_only_subquery_sql(query))
+            } else {
+                format!("EXISTS ({})", read_only_subquery_sql(query))
+            }
+        }
+        Expr::Def { .. } | Expr::Mod { .. } | Expr::Window { .. } => {
+            "/* ERROR: Invalid select expression */".to_string()
+        }
+    }
+}
+
+fn append_alias(
+    expr_sql: String,
+    alias: &Option<String>,
+    generator: &dyn crate::transpiler::SqlGenerator,
+) -> String {
+    if let Some(alias) = alias {
+        format!("{} AS {}", expr_sql, generator.quote_identifier(alias))
+    } else {
+        expr_sql
+    }
+}
+
+fn render_value_for_expression(
+    value: &Value,
+    generator: &dyn crate::transpiler::SqlGenerator,
+    cmd: &Qail,
+) -> String {
+    match value {
+        Value::Column(column) => generator.quote_identifier(column),
+        Value::Expr(expr) => render_expr_for_orderby(expr, generator, cmd),
+        Value::Subquery(query) => format!("({})", read_only_subquery_sql(query)),
+        Value::Function(function) => render_raw_function_value(function),
+        Value::NamedParam(name) => render_named_param(name),
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(|value| render_value_for_expression(value, generator, cmd))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
+        _ => value.to_string(),
     }
 }
 
@@ -817,6 +946,46 @@ fn render_function_name(name: &str) -> Option<String> {
         None
     } else {
         Some(name.to_uppercase())
+    }
+}
+
+fn render_sql_keyword(keyword: &str) -> Option<String> {
+    if keyword.is_empty()
+        || keyword.contains('\0')
+        || !keyword
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'_')
+    {
+        None
+    } else {
+        Some(keyword.to_uppercase())
+    }
+}
+
+fn render_named_param(name: &str) -> String {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return "/* ERROR: Invalid parameter name */".to_string();
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return "/* ERROR: Invalid parameter name */".to_string();
+    }
+    format!(":{}", name)
+}
+
+fn render_raw_function_value(value: &str) -> String {
+    if value.len() > 1024
+        || value.contains('\0')
+        || value.contains(';')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        "/* ERROR: Invalid function expression */".to_string()
+    } else {
+        value.to_string()
     }
 }
 
