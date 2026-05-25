@@ -294,6 +294,7 @@ enum RunMode<'a> {
 }
 
 const FOR_EACH_ITEM_KEY: &str = "item";
+const TIMEOUT_FALLBACK_KEY: &str = "__qail_timeout_fallback";
 
 #[derive(Debug, Clone)]
 struct StepExecutionScope<'a> {
@@ -301,6 +302,7 @@ struct StepExecutionScope<'a> {
     path_prefix: Vec<WorkflowCursorFrame>,
     list_kind: StepListCursorKind,
     checkpoint_steps: bool,
+    checkpoint_timeout: bool,
 }
 
 impl<'a> StepExecutionScope<'a> {
@@ -310,7 +312,13 @@ impl<'a> StepExecutionScope<'a> {
             path_prefix: Vec::new(),
             list_kind,
             checkpoint_steps,
+            checkpoint_timeout: false,
         }
+    }
+
+    fn with_timeout_checkpoint(mut self) -> Self {
+        self.checkpoint_timeout = true;
+        self
     }
 
     fn child(&self, step_index: usize, list_kind: StepListCursorKind) -> Self {
@@ -319,6 +327,7 @@ impl<'a> StepExecutionScope<'a> {
             path_prefix: cursor_frames_for_index(&self.path_prefix, &self.list_kind, step_index),
             list_kind,
             checkpoint_steps: self.checkpoint_steps,
+            checkpoint_timeout: self.checkpoint_timeout,
         }
     }
 }
@@ -328,6 +337,33 @@ fn invalid_cursor(message: impl Into<String>) -> WorkflowError {
         "Invalid workflow resume cursor: {}",
         message.into()
     ))
+}
+
+fn set_timeout_fallback(
+    ctx: &mut WorkflowContext,
+    wait: &WorkflowPendingWait,
+) -> Result<(), WorkflowError> {
+    let value = serde_json::to_value(wait)
+        .map_err(|e| WorkflowError::Other(format!("Failed to serialize timeout cursor: {e}")))?;
+    ctx.set(TIMEOUT_FALLBACK_KEY, value);
+    Ok(())
+}
+
+fn timeout_fallback_from_context(
+    ctx: &WorkflowContext,
+) -> Result<Option<WorkflowPendingWait>, WorkflowError> {
+    let Some(value) = ctx.get(TIMEOUT_FALLBACK_KEY) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|e| invalid_cursor(format!("timeout fallback metadata is invalid: {e}")))
+}
+
+fn clear_timeout_fallback(ctx: &mut WorkflowContext) {
+    if ctx.data.remove(TIMEOUT_FALLBACK_KEY).is_some() {
+        ctx.updated_at = Utc::now();
+    }
 }
 
 fn json_type_name(value: &Value) -> &'static str {
@@ -394,7 +430,11 @@ async fn checkpoint_cursor<E: WorkflowExecutor>(
     state: &str,
     frames: Vec<WorkflowCursorFrame>,
     wait: Option<WorkflowPendingWait>,
+    timeout_fallback: bool,
 ) -> Result<(), WorkflowError> {
+    if !timeout_fallback {
+        clear_timeout_fallback(ctx);
+    }
     if ctx.current_state == state {
         ctx.set_cursor(WorkflowCursor {
             state: state.to_string(),
@@ -403,6 +443,9 @@ async fn checkpoint_cursor<E: WorkflowExecutor>(
         });
     } else {
         ctx.clear_cursor();
+        if timeout_fallback {
+            clear_timeout_fallback(ctx);
+        }
     }
     executor.save_state(ctx).await
 }
@@ -414,9 +457,10 @@ async fn checkpoint_completed_step<E: WorkflowExecutor>(
     path_prefix: &[WorkflowCursorFrame],
     kind: &StepListCursorKind,
     next_index: usize,
+    timeout_fallback: bool,
 ) -> Result<(), WorkflowError> {
     let frames = cursor_frames_for_index(path_prefix, kind, next_index);
-    checkpoint_cursor(executor, ctx, state, frames, None).await
+    checkpoint_cursor(executor, ctx, state, frames, None, timeout_fallback).await
 }
 
 fn restore_for_each_item(ctx: &mut WorkflowContext, previous_item: Option<Value>) {
@@ -506,6 +550,7 @@ fn execute_steps<'a, E: WorkflowExecutor>(
                             &scope.path_prefix,
                             &scope.list_kind,
                             idx + 1,
+                            scope.checkpoint_timeout,
                         )
                         .await?;
                     }
@@ -851,38 +896,46 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
     mode: RunMode<'a>,
 ) -> Result<String, WorkflowError> {
     let mut pending_cursor_frames = match ctx.cursor.clone() {
-        Some(cursor) if cursor.state == ctx.current_state => match (&cursor.wait, mode) {
-            (Some(wait), RunMode::Normal) => {
-                return Err(WorkflowError::Other(format!(
-                    "Workflow is paused awaiting event '{}'; resume with a matching event",
-                    wait.event
-                )));
-            }
-            (Some(wait), RunMode::EventResume { event }) => {
-                if wait.event != event {
-                    return Err(WorkflowError::Other(format!(
-                        "Workflow is waiting for event '{}', received '{}'",
-                        wait.event, event
-                    )));
-                }
-                if Utc::now() > wait.deadline_at {
-                    return Err(WorkflowError::Timeout {
-                        event: wait.event.clone(),
-                    });
-                }
-                ctx.clear_cursor();
-                Some(cursor.frames)
-            }
-            (None, RunMode::EventResume { .. }) => {
+        Some(cursor) if cursor.state == ctx.current_state => {
+            if timeout_fallback_from_context(ctx)?.is_some() {
                 return Err(WorkflowError::Other(
-                    "Workflow is not waiting for an external event".to_string(),
+                    "Workflow is executing a timeout fallback; resume with timeout_workflow"
+                        .to_string(),
                 ));
             }
-            (None, RunMode::Normal) => {
-                ctx.clear_cursor();
-                Some(cursor.frames)
+            match (&cursor.wait, mode) {
+                (Some(wait), RunMode::Normal) => {
+                    return Err(WorkflowError::Other(format!(
+                        "Workflow is paused awaiting event '{}'; resume with a matching event",
+                        wait.event
+                    )));
+                }
+                (Some(wait), RunMode::EventResume { event }) => {
+                    if wait.event != event {
+                        return Err(WorkflowError::Other(format!(
+                            "Workflow is waiting for event '{}', received '{}'",
+                            wait.event, event
+                        )));
+                    }
+                    if Utc::now() > wait.deadline_at {
+                        return Err(WorkflowError::Timeout {
+                            event: wait.event.clone(),
+                        });
+                    }
+                    ctx.clear_cursor();
+                    Some(cursor.frames)
+                }
+                (None, RunMode::EventResume { .. }) => {
+                    return Err(WorkflowError::Other(
+                        "Workflow is not waiting for an external event".to_string(),
+                    ));
+                }
+                (None, RunMode::Normal) => {
+                    ctx.clear_cursor();
+                    Some(cursor.frames)
+                }
             }
-        },
+        }
         Some(_) | None => None,
     };
 
@@ -920,6 +973,7 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
         )
         .await?
         {
+            clear_timeout_fallback(ctx);
             ctx.set_cursor(WorkflowCursor {
                 state: transition.from.clone(),
                 frames: pause.frames,
@@ -1010,16 +1064,28 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
             "timeout cursor state does not match current workflow state",
         ));
     }
-    let wait = cursor
-        .wait
-        .clone()
-        .ok_or_else(|| WorkflowError::Other("Workflow is not waiting for a timeout".to_string()))?;
-    if Utc::now() < wait.deadline_at {
-        return Err(WorkflowError::Other(format!(
-            "Workflow wait for event '{}' has not timed out",
-            wait.event
-        )));
+    let timeout_fallback = timeout_fallback_from_context(&ctx)?;
+    if cursor.wait.is_some() && timeout_fallback.is_some() {
+        return Err(invalid_cursor(
+            "timeout cursor cannot also be waiting for an event",
+        ));
     }
+
+    let (wait, cursor_frames) = if let Some(timeout) = timeout_fallback {
+        (timeout, cursor.frames.clone())
+    } else {
+        let wait = cursor.wait.clone().ok_or_else(|| {
+            WorkflowError::Other("Workflow is not waiting for a timeout".to_string())
+        })?;
+        if Utc::now() < wait.deadline_at {
+            return Err(WorkflowError::Other(format!(
+                "Workflow wait for event '{}' has not timed out",
+                wait.event
+            )));
+        }
+        (wait, Vec::new())
+    };
+
     if wait.on_timeout.is_empty() {
         return Err(WorkflowError::Timeout { event: wait.event });
     }
@@ -1029,22 +1095,34 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
         ));
     }
 
+    set_timeout_fallback(&mut ctx, &wait)?;
     ctx.clear_cursor();
     ctx.set(
         "event",
         serde_json::json!({
-            "event": wait.event,
+            "event": wait.event.clone(),
             "timeout": true,
         }),
     );
+
+    let (start_index, nested_cursor) = match cursor_frames.first() {
+        Some(WorkflowCursorFrame::Steps { index }) => (*index, &cursor_frames[1..]),
+        Some(_) => {
+            return Err(invalid_cursor(
+                "timeout fallback resume must start with a Steps frame",
+            ));
+        }
+        None => (0, &[][..]),
+    };
 
     if execute_steps(
         executor,
         &wait.on_timeout,
         &mut ctx,
-        0,
-        &[],
-        StepExecutionScope::new(&cursor.state, StepListCursorKind::Steps, false),
+        start_index,
+        nested_cursor,
+        StepExecutionScope::new(&cursor.state, StepListCursorKind::Steps, true)
+            .with_timeout_checkpoint(),
     )
     .await?
     .is_some()
@@ -1054,6 +1132,7 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
         ));
     }
 
+    clear_timeout_fallback(&mut ctx);
     ctx.clear_cursor();
     if ctx.current_state == cursor.state {
         executor.save_state(&ctx).await?;
@@ -1907,6 +1986,7 @@ mod tests {
         let cursor = restored.cursor.as_ref().expect("checkpoint cursor");
         assert_eq!(cursor.frames, vec![WorkflowCursorFrame::Steps { index: 1 }]);
         assert!(cursor.wait.is_none());
+        assert!(restored.get(TIMEOUT_FALLBACK_KEY).is_none());
 
         let err = run_workflow(&executor, &wf, &mut restored)
             .await
@@ -1916,6 +1996,72 @@ mod tests {
             executor.notifications.lock().unwrap().len(),
             1,
             "retry must resume after the completed notification step"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_checkpoint_prevents_side_effect_replay_after_failure() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("timeout_checkpoint_failure")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::wait_or(
+                    "payment.success",
+                    std::time::Duration::from_secs(0),
+                    vec![
+                        WorkflowStep::notify(
+                            ChannelKind::Email,
+                            "payment_timeout",
+                            "customer.email",
+                        ),
+                        WorkflowStep::Query {
+                            cmd_json: "legacy payload".to_string(),
+                            store_as: None,
+                        },
+                        WorkflowStep::transition("timed_out"),
+                    ],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-timeout-checkpoint", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        let err = timeout_workflow(&executor, &wf, "wf-timeout-checkpoint")
+            .await
+            .expect_err("legacy query should fail after timeout notification checkpoint");
+        assert!(matches!(err, WorkflowError::QueryFailed(_)));
+        assert_eq!(executor.notifications.lock().unwrap().len(), 1);
+
+        let saved = executor
+            .saved_state
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("timeout checkpoint should be saved after notification");
+        let cursor = saved.cursor.as_ref().expect("timeout checkpoint cursor");
+        assert_eq!(cursor.frames, vec![WorkflowCursorFrame::Steps { index: 1 }]);
+        assert!(cursor.wait.is_none());
+        assert!(
+            saved.get(TIMEOUT_FALLBACK_KEY).is_some(),
+            "timeout fallback cursor must retain internal on_timeout metadata"
+        );
+
+        let err = timeout_workflow(&executor, &wf, "wf-timeout-checkpoint")
+            .await
+            .expect_err("timeout fallback query should still fail on retry");
+        assert!(matches!(err, WorkflowError::QueryFailed(_)));
+        assert_eq!(
+            executor.notifications.lock().unwrap().len(),
+            1,
+            "timeout retry must resume after the completed notification step"
         );
     }
 
