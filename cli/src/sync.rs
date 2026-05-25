@@ -1,6 +1,6 @@
 //! qail sync - Generate sync triggers from qail.toml
 //!
-//! Parses [[sync]] rules and generates PostgreSQL trigger migrations
+//! Parses `[[sync]]` rules and generates PostgreSQL trigger migrations
 //! that populate the _qail_queue table on INSERT/UPDATE/DELETE.
 
 use crate::colors::*;

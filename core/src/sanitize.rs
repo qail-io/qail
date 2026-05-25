@@ -4,7 +4,7 @@
 //! but externally provided ASTs (binary endpoints, APIs, generated payloads, etc.)
 //! may bypass parser-level identifier checks and still reach execution.
 //!
-//! Call [`validate_ast`] on any `Qail` obtained from an untrusted source
+//! Call [`validate_ast`](crate::sanitize::validate_ast) on any `Qail` obtained from an untrusted source
 //! (binary endpoint, external API, etc.) before execution.
 
 use crate::ast::{

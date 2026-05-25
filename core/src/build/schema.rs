@@ -1486,7 +1486,7 @@ fn extract_inline_create_columns(line: &str) -> Vec<String> {
     let body = &line[open_idx + 1..close_idx];
     split_sql_top_level_csv(body)
         .into_iter()
-        .filter_map(|piece| extract_column_from_create(piece))
+        .filter_map(extract_column_from_create)
         .collect()
 }
 

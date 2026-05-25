@@ -292,17 +292,27 @@ async fn hybrid_rag_search_flow() {
 
     // ── 7. Verify search relevance ──────────────────────────────────
     println!("\n▸ Phase 7: Verifying relevance...");
-    // "fast Bali ferry" should match id=1 (Bali Fast Ferry) best
-    assert_eq!(
-        matched_ids[0], 1,
-        "Best match should be 'Bali Fast Ferry' (id=1)"
+    // "fast Bali ferry" gives id=1 and id=5 equal cosine scores. Qdrant does
+    // not guarantee deterministic ordering for exact score ties.
+    let top_score = search_results[0].score;
+    let tied_top_ids: Vec<u64> = search_results
+        .iter()
+        .filter(|r| (r.score - top_score).abs() <= f32::EPSILON)
+        .map(|r| match &r.id {
+            PointId::Num(n) => *n,
+            PointId::Uuid(s) => s.parse().unwrap_or(0),
+        })
+        .collect();
+    assert!(
+        tied_top_ids.contains(&1),
+        "Top score tie should include 'Bali Fast Ferry' (id=1), got {:?}",
+        tied_top_ids
     );
-    // id=5 (Fast Lombok Express) should also rank high (has 'fast' + 'bali')
     assert!(
         matched_ids.contains(&5),
         "id=5 (Fast Lombok Express) should be in top 3"
     );
-    println!("  ✓ Top result: id=1 (Bali Fast Ferry) — correct!");
+    println!("  ✓ Top score tie includes id=1 (Bali Fast Ferry) — correct!");
     println!("  ✓ id=5 (Fast Lombok Express) in top 3 — correct!");
 
     // ── 8. Search: "luxury scenic" ──────────────────────────────────

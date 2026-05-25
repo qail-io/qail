@@ -916,6 +916,7 @@ impl PolicyEngine {
         Ok((filters, has_unrestricted_policy))
     }
 
+    #[cfg(any(feature = "qdrant", test))]
     pub(crate) fn filter_cages_for_operation(
         &self,
         auth: &AuthContext,

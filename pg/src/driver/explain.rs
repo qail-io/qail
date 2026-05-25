@@ -378,8 +378,10 @@ mod tests {
 
     #[test]
     fn test_check_estimate_rejects_non_finite_costs() {
-        let mut config = ExplainConfig::default();
-        config.max_total_cost = f64::NAN;
+        let config = ExplainConfig {
+            max_total_cost: f64::NAN,
+            ..Default::default()
+        };
         let est = ExplainEstimate {
             total_cost: 50.0,
             plan_rows: 500,
