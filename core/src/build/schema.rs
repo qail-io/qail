@@ -1529,12 +1529,7 @@ fn extract_view_name(line: &str) -> Option<&str> {
 /// Extract table name from CREATE TABLE statement
 fn extract_create_table_name(line: &str) -> Option<String> {
     let rest = extract_create_table_target_start(line)?;
-    let rest = if let Some(after_if) = strip_sql_keyword(rest, "IF") {
-        let after_not = strip_sql_keyword(after_if, "NOT")?;
-        strip_sql_keyword(after_not, "EXISTS")?
-    } else {
-        rest
-    };
+    let rest = strip_sql_if_not_exists(rest).unwrap_or(rest);
 
     extract_sql_table_ref(rest)
 }
@@ -1564,6 +1559,17 @@ fn strip_sql_keyword<'a>(raw: &'a str, keyword: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn strip_sql_if_exists(raw: &str) -> Option<&str> {
+    let after_if = strip_sql_keyword(raw, "IF")?;
+    strip_sql_keyword(after_if, "EXISTS")
+}
+
+fn strip_sql_if_not_exists(raw: &str) -> Option<&str> {
+    let after_if = strip_sql_keyword(raw, "IF")?;
+    let after_not = strip_sql_keyword(after_if, "NOT")?;
+    strip_sql_keyword(after_not, "EXISTS")
 }
 
 /// Extract column name from a line inside CREATE TABLE block
@@ -1737,9 +1743,8 @@ fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
 
     // Column name after ADD COLUMN [IF NOT EXISTS]
     let mut col_part = &line[add_pos + 10..];
-    let col_upper = col_part.trim().to_uppercase();
-    if col_upper.starts_with("IF NOT EXISTS") {
-        col_part = &col_part.trim()[13..]; // skip "IF NOT EXISTS"
+    if let Some(stripped) = strip_sql_if_not_exists(col_part) {
+        col_part = stripped;
     }
     let col = extract_sql_column_ref(col_part.trim())?;
 
@@ -1755,7 +1760,10 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     let table_part = &line[alter_pos + 11..add_pos];
     let table = extract_alter_table_ref(table_part)?;
 
-    let col_part = &line[add_pos + 5..];
+    let mut col_part = &line[add_pos + 5..];
+    if let Some(stripped) = strip_sql_if_not_exists(col_part) {
+        col_part = stripped;
+    }
     let col_upper = col_part.trim_start().to_uppercase();
     if [
         "CONSTRAINT",
@@ -1809,14 +1817,8 @@ fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
 
     // Column name after DROP COLUMN
     let mut col_part = &line[drop_pos + 11..];
-    let col_upper = col_part.trim().to_uppercase();
-    if col_upper.starts_with("IF EXISTS")
-        && col_part
-            .trim()
-            .get("IF EXISTS".len()..)
-            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
-    {
-        col_part = &col_part.trim()["IF EXISTS".len()..];
+    if let Some(stripped) = strip_sql_if_exists(col_part) {
+        col_part = stripped;
     }
     let col = extract_sql_column_ref(col_part.trim())?;
 
@@ -1833,14 +1835,8 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     let table = extract_alter_table_ref(table_part)?;
 
     let mut col_part = &line[drop_pos + 6..];
-    let col_upper = col_part.trim().to_uppercase();
-    if col_upper.starts_with("IF EXISTS")
-        && col_part
-            .trim()
-            .get("IF EXISTS".len()..)
-            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
-    {
-        col_part = &col_part.trim()["IF EXISTS".len()..];
+    if let Some(stripped) = strip_sql_if_exists(col_part) {
+        col_part = stripped;
     }
     let col = extract_sql_column_ref(col_part.trim())?;
 
@@ -2298,5 +2294,21 @@ ALTER TABLE app.users RENAME TO customers;
             .expect("schema-qualified table rename should parse");
         assert!(customers.has_column("id"));
         assert!(customers.has_column("email"));
+    }
+
+    #[test]
+    fn sql_migration_handles_add_if_not_exists_without_column_keyword() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid);
+ALTER TABLE users ADD IF NOT EXISTS email text;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
+        assert!(!users.has_column("if"));
     }
 }
