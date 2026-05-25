@@ -393,11 +393,19 @@ impl Schema {
 
                     // Check for policies and foreign keys
                     let mut policy = "Public".to_string();
+                    let mut seen_protected = false;
 
                     let mut i = 2;
                     while i < parts.len() {
                         let part = parts[i];
                         if part == "protected" {
+                            if seen_protected {
+                                return Err(format!(
+                                    "duplicate protected option for column '{}' in table '{}'",
+                                    col_name, table_name
+                                ));
+                            }
+                            seen_protected = true;
                             policy = "Protected".to_string();
                         } else if matches!(
                             part,

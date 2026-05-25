@@ -134,6 +134,18 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_protected_option() {
+    let content = r#"
+table users {
+  password_hash TEXT protected protected
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("duplicate protected option must fail");
+    assert!(err.contains("duplicate protected option for column 'password_hash' in table 'users'"));
+}
+
+#[test]
 fn test_parse_schema_tracks_references_column_option() {
     let content = r#"
 table users {
