@@ -478,6 +478,17 @@ $$
 }
 
 #[test]
+fn test_parse_schema_rejects_invalid_view_names() {
+    let content = "view bad-name $$ SELECT 1 $$";
+    let err = Schema::parse(content).expect_err("invalid view name must fail");
+    assert!(err.contains("Invalid view name 'bad-name'"));
+
+    let schema = Schema::parse("materialized view reporting.active_users $$ SELECT 1 $$")
+        .expect("schema-qualified view names should parse");
+    assert!(schema.has_table("reporting.active_users"));
+}
+
+#[test]
 fn test_parse_schema_consumes_multiline_resource_blocks() {
     let content = r#"
 bucket avatars {
