@@ -4,8 +4,9 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    Action, CTEDef, CageKind, Condition, ConflictAction, Expr, GroupByMode, JoinKind, LogicalOp,
-    Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, SetOp, SortOrder, Value,
+    Action, CTEDef, CageKind, ColumnGeneration, Condition, ConflictAction, Constraint, Expr,
+    GroupByMode, JoinKind, LogicalOp, Merge, MergeAction, MergeMatchKind, MergeSource, Operator,
+    Qail, SetOp, SortOrder, Value,
 };
 
 use super::helpers::write_usize;
@@ -126,6 +127,112 @@ fn validate_sql_type_fragment(
     Ok(())
 }
 
+fn contains_unquoted_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn validate_sql_expr_fragment(
+    field: &str,
+    value: &str,
+) -> Result<(), crate::protocol::EncodeError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || contains_unquoted_statement_delimiter(trimmed) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid SQL expression fragment in {field}: {trimmed:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_comment_fragment(field: &str, value: &str) -> Result<(), crate::protocol::EncodeError> {
+    if value.as_bytes().contains(&0)
+        || value.contains('"')
+        || value.contains(';')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid column comment fragment in {field}: {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_def_constraint(
+    field: &str,
+    constraint: &Constraint,
+) -> Result<(), crate::protocol::EncodeError> {
+    match constraint {
+        Constraint::PrimaryKey | Constraint::Unique | Constraint::Nullable => Ok(()),
+        Constraint::Default(value) => {
+            validate_sql_expr_fragment(&format!("{field}.default"), value)
+        }
+        Constraint::Check(values) => {
+            validate_sql_expr_fragment(&format!("{field}.check"), &values.join(", "))
+        }
+        Constraint::References(target) => {
+            validate_sql_expr_fragment(&format!("{field}.references"), target)
+        }
+        Constraint::Generated(ColumnGeneration::Stored(expr))
+            if expr == "identity" || expr == "identity_by_default" =>
+        {
+            Ok(())
+        }
+        Constraint::Generated(ColumnGeneration::Stored(expr))
+        | Constraint::Generated(ColumnGeneration::Virtual(expr)) => {
+            validate_sql_expr_fragment(&format!("{field}.generated"), expr)
+        }
+        Constraint::Comment(value) => validate_comment_fragment(&format!("{field}.comment"), value),
+    }
+}
+
 fn is_positional_placeholder(expr: &Expr) -> bool {
     let Expr::Named(name) = expr else {
         return false;
@@ -170,10 +277,16 @@ pub(crate) fn validate_expr_ref(
             Ok(())
         }
         Expr::Def {
-            name, data_type, ..
+            name,
+            data_type,
+            constraints,
         } => {
             validate_ident_atom(field, name)?;
-            validate_sql_type_fragment(&format!("{field}.type"), data_type)
+            validate_sql_type_fragment(&format!("{field}.type"), data_type)?;
+            for constraint in constraints {
+                validate_def_constraint(field, constraint)?;
+            }
+            Ok(())
         }
         Expr::Mod { col, .. } => validate_expr_ref(field, col),
         Expr::Window {

@@ -1897,6 +1897,77 @@ mod tests {
     }
 
     #[test]
+    fn direct_column_encoder_allows_quoted_semicolon_default_constraint() {
+        use qail_core::ast::{Constraint, Expr};
+
+        let def = Expr::Def {
+            name: "note".to_string(),
+            data_type: "text".to_string(),
+            constraints: vec![Constraint::Default("'semi;inside'".to_string())],
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        super::values::encode_column_expr(&def, &mut buf)
+            .expect("quoted semicolon inside a literal should stay valid");
+
+        let result = String::from_utf8_lossy(&buf).to_string();
+        assert!(
+            result.contains("DEFAULT 'semi;inside'"),
+            "unexpected encoded definition: {result}"
+        );
+    }
+
+    #[test]
+    fn direct_column_encoder_rejects_unsafe_default_constraint() {
+        use qail_core::ast::{Constraint, Expr};
+
+        let def = Expr::Def {
+            name: "score".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Default("0; DROP TABLE users; --".to_string())],
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        let err = super::values::encode_column_expr(&def, &mut buf)
+            .expect_err("direct definition encoder must validate default fragments");
+
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("default")),
+            "unexpected error: {err}"
+        );
+        assert!(
+            buf.is_empty(),
+            "unsafe definition must not be partially encoded"
+        );
+    }
+
+    #[test]
+    fn direct_column_encoder_rejects_unsafe_reference_constraint() {
+        use qail_core::ast::{Constraint, Expr};
+
+        let def = Expr::Def {
+            name: "user_id".to_string(),
+            data_type: "uuid".to_string(),
+            constraints: vec![Constraint::References(
+                "users(id); DROP TABLE users; --".to_string(),
+            )],
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        let err = super::values::encode_column_expr(&def, &mut buf)
+            .expect_err("direct definition encoder must validate reference fragments");
+
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("references")),
+            "unexpected error: {err}"
+        );
+        assert!(
+            buf.is_empty(),
+            "unsafe definition must not be partially encoded"
+        );
+    }
+
+    #[test]
     fn test_encode_def_expr() {
         use qail_core::ast::{Constraint, Expr};
 
