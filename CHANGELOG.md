@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-26
+
 ### Fixed
 - **PostgreSQL protocol fail-closed behavior:** Hardened COPY, LISTEN/NOTIFY, replication streaming, pooled fetch, driver fetch, query, and pipeline paths so malformed backend ordering, bad stream frames, unexpected EOF, and corrupted protocol messages mark affected connections as desynchronized instead of returning them to normal reuse.
 - **PostgreSQL SQL boundary safety:** Tightened NUL and UTF-8 handling across savepoints, legacy string SQL rendering, AST-native SQL buffers, gateway explain SQL, COPY text decoding, backend wire decoding, and URL percent-decoding so invalid input fails closed instead of being silently stripped, replaced, or converted to empty SQL.

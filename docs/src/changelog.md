@@ -4,7 +4,7 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (Unreleased)
+## Current Highlights (v1.2.0)
 
 - **PostgreSQL protocol safety**: COPY, LISTEN/NOTIFY, replication, pooled fetch, driver fetch, query, and pipeline paths now fail closed and desynchronize bad connections on malformed backend state.
 - **NUL and UTF-8 hardening**: savepoints, SQL rendering, AST SQL buffers, gateway explain SQL, COPY text rows, backend wire strings, and PostgreSQL URL decoding now reject invalid input instead of silently mutating it.
