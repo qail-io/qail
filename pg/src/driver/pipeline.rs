@@ -1646,10 +1646,10 @@ impl PgConnection {
                     match msg_type {
                         b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
-                            if error.is_none() {
-                                if let Err(err) = on_row(row_buf.as_slice()) {
-                                    return return_callback_error_with_desync(self, err);
-                                }
+                            if error.is_none()
+                                && let Err(err) = on_row(row_buf.as_slice())
+                            {
+                                return return_callback_error_with_desync(self, err);
                             }
                         }
                         b'Z' => {

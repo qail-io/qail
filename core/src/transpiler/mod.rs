@@ -584,7 +584,7 @@ fn dollar_quote_block(body: &str) -> String {
         }
     }
 
-    format!("'{}'", escape_sql_string_literal(&body))
+    format!("'{}'", escape_sql_string_literal(body))
 }
 
 fn call_target_to_sql(target: &str) -> String {

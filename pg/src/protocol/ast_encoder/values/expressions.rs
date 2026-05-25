@@ -587,7 +587,7 @@ fn encode_case_condition_value(
         }
         Value::Subquery(query) => {
             buf.extend_from_slice(b"(");
-            if let Some(params) = params.as_deref_mut() {
+            if let Some(params) = params {
                 super::super::dml::encode_select(query, buf, params)?;
             } else {
                 let mut sub_params = Vec::new();
