@@ -64,6 +64,12 @@ fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
 }
 
 #[inline]
+fn return_callback_error_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    conn.mark_io_desynced();
+    Err(err)
+}
+
+#[inline]
 fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError>, err: PgError) {
     if slot.is_some() {
         return;
@@ -652,7 +658,9 @@ impl PgConnection {
                         b'1' | b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(&row)?;
+                                if let Err(err) = on_row(&row) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row.release_payload();
                             }
                         }
@@ -739,7 +747,9 @@ impl PgConnection {
                         b'1' | b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_value(first_column.as_deref())?;
+                                if let Err(err) = on_value(first_column.as_deref()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 first_column = None;
                             }
                         }
@@ -1628,7 +1638,9 @@ impl PgConnection {
                         b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(row_buf.as_slice())?;
+                                if let Err(err) = on_row(row_buf.as_slice()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                             }
                         }
                         b'Z' => {
@@ -1719,7 +1731,9 @@ impl PgConnection {
                         b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(&row)?;
+                                if let Err(err) = on_row(&row) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row.release_payload();
                             }
                         }
@@ -1810,7 +1824,9 @@ impl PgConnection {
                         b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_value(first_column.as_deref())?;
+                                if let Err(err) = on_value(first_column.as_deref()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 first_column = None;
                             }
                         }
@@ -1901,12 +1917,14 @@ impl PgConnection {
                         b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row([
+                                if let Err(err) = on_row([
                                     columns[0].as_deref(),
                                     columns[1].as_deref(),
                                     columns[2].as_deref(),
                                     columns[3].as_deref(),
-                                ])?;
+                                ]) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 columns.fill(None);
                             }
                         }
@@ -2119,6 +2137,21 @@ mod tests {
             detail: None,
             hint: None,
         })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_callback_error_marks_pipeline_connection_desynced() {
+        let mut conn = make_test_conn_with_prepared();
+
+        let err = return_callback_error_with_desync::<()>(
+            &mut conn,
+            PgError::Query("consumer stopped".to_string()),
+        )
+        .expect_err("callback error should be returned");
+
+        assert!(matches!(err, PgError::Query(msg) if msg == "consumer stopped"));
+        assert!(conn.is_io_desynced());
     }
 
     #[cfg(unix)]

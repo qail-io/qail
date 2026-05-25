@@ -36,6 +36,19 @@ async fn drain_extended_responses_after_rls_setup_error(conn: &mut PgConnection)
     }
 }
 
+fn copy_export_table_sql(table: &str, columns: &[String]) -> PgResult<String> {
+    let cols: Vec<String> = columns
+        .iter()
+        .map(|c| crate::driver::copy::quote_copy_column_ident(c))
+        .collect::<PgResult<_>>()?;
+
+    Ok(format!(
+        "COPY {} ({}) TO STDOUT",
+        crate::driver::copy::quote_copy_table_ref(table)?,
+        cols.join(", ")
+    ))
+}
+
 impl PooledConnection {
     /// Execute a QAIL command and fetch all rows (UNCACHED).
     /// Returns rows with column metadata for JSON serialization.
@@ -158,15 +171,7 @@ impl PooledConnection {
         table: &str,
         columns: &[String],
     ) -> PgResult<Vec<u8>> {
-        let quote_ident = |ident: &str| -> String {
-            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
-        };
-        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
-        let sql = format!(
-            "COPY {} ({}) TO STDOUT",
-            quote_ident(table),
-            cols.join(", ")
-        );
+        let sql = copy_export_table_sql(table, columns)?;
         self.conn_mut()?.copy_out_raw(&sql).await
     }
 
@@ -181,15 +186,7 @@ impl PooledConnection {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: std::future::Future<Output = PgResult<()>>,
     {
-        let quote_ident = |ident: &str| -> String {
-            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
-        };
-        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
-        let sql = format!(
-            "COPY {} ({}) TO STDOUT",
-            quote_ident(table),
-            cols.join(", ")
-        );
+        let sql = copy_export_table_sql(table, columns)?;
         self.conn_mut()?.copy_out_raw_stream(&sql, on_chunk).await
     }
 
@@ -954,5 +951,30 @@ impl PooledConnection {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_export_table_sql;
+
+    #[test]
+    fn pool_copy_export_table_sql_preserves_schema_qualified_table() {
+        let sql = copy_export_table_sql(
+            "tenant_a.users",
+            &["id".to_string(), "display\"name".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "COPY \"tenant_a\".\"users\" (\"id\", \"display\"\"name\") TO STDOUT"
+        );
+    }
+
+    #[test]
+    fn pool_copy_export_table_sql_rejects_nul_bytes() {
+        assert!(copy_export_table_sql("tenant\0.users", &["id".to_string()]).is_err());
+        assert!(copy_export_table_sql("users", &["id\0".to_string()]).is_err());
     }
 }

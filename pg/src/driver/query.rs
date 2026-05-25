@@ -24,6 +24,12 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
 }
 
 #[inline]
+fn return_callback_error_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    conn.mark_io_desynced();
+    Err(err)
+}
+
+#[inline]
 fn prepared_bind_execute_sync_wire_len(
     statement: &str,
     params: &[Option<Vec<u8>>],
@@ -134,6 +140,39 @@ impl SimpleFlowTracker {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
+
     #[test]
     fn prepared_buffer_sizing_rejects_too_many_params_before_allocation() {
         let params = vec![None; i16::MAX as usize + 1];
@@ -141,6 +180,21 @@ mod tests {
             .expect_err("parameter overflow must be rejected");
 
         assert!(matches!(err, PgError::Encode(msg) if msg.contains("Too many parameters")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_callback_error_marks_query_connection_desynced() {
+        let mut conn = test_conn();
+
+        let err = return_callback_error_with_desync::<()>(
+            &mut conn,
+            PgError::Query("consumer stopped".to_string()),
+        )
+        .expect_err("callback error should be returned");
+
+        assert!(matches!(err, PgError::Query(msg) if msg == "consumer stopped"));
+        assert!(conn.is_io_desynced());
     }
 }
 
@@ -482,7 +536,9 @@ impl PgConnection {
                         b'1' | b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(&row)?;
+                                if let Err(err) = on_row(&row) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                                 row.release_payload();
                             }
@@ -564,7 +620,9 @@ impl PgConnection {
                         b'1' | b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_value(first_column.as_deref())?;
+                                if let Err(err) = on_value(first_column.as_deref()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                                 first_column = None;
                             }
@@ -1205,7 +1263,9 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(row_buf.as_slice())?;
+                                if let Err(err) = on_row(row_buf.as_slice()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                             }
                         }
@@ -1282,7 +1342,9 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(&row)?;
+                                if let Err(err) = on_row(&row) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                                 row.release_payload();
                             }
@@ -1360,7 +1422,9 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_value(first_column.as_deref())?;
+                                if let Err(err) = on_value(first_column.as_deref()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                                 first_column = None;
                             }
@@ -1438,12 +1502,14 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row([
+                                if let Err(err) = on_row([
                                     columns[0].as_deref(),
                                     columns[1].as_deref(),
                                     columns[2].as_deref(),
                                     columns[3].as_deref(),
-                                ])?;
+                                ]) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 columns.fill(None);
                                 row_count += 1;
                             }
@@ -1527,7 +1593,9 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row(&row)?;
+                                if let Err(err) = on_row(&row) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                                 row.release_payload();
                             }
@@ -1612,7 +1680,9 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_value(first_column.as_deref())?;
+                                if let Err(err) = on_value(first_column.as_deref()) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 row_count += 1;
                                 first_column = None;
                             }
@@ -1697,12 +1767,14 @@ impl PgConnection {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
                             if error.is_none() {
-                                on_row([
+                                if let Err(err) = on_row([
                                     columns[0].as_deref(),
                                     columns[1].as_deref(),
                                     columns[2].as_deref(),
                                     columns[3].as_deref(),
-                                ])?;
+                                ]) {
+                                    return return_callback_error_with_desync(self, err);
+                                }
                                 columns.fill(None);
                                 row_count += 1;
                             }

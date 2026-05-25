@@ -34,6 +34,14 @@ type EncodeSqlResult = Result<(String, Vec<Option<Vec<u8>>>), EncodeError>;
 pub struct AstEncoder;
 
 impl AstEncoder {
+    #[inline]
+    fn reject_sql_nul(sql_buf: &BytesMut) -> Result<(), EncodeError> {
+        if sql_buf.as_ref().contains(&0) {
+            return Err(EncodeError::NullByte);
+        }
+        Ok(())
+    }
+
     /// Encode a Qail directly to Extended Query protocol bytes.
     /// Returns (wire_bytes, extracted_params_as_bytes)
     pub fn encode_cmd(cmd: &Qail) -> EncodeResult {
@@ -219,6 +227,7 @@ impl AstEncoder {
             Action::RollbackToSavepoint => ddl::encode_rollback_to_savepoint(cmd, sql_buf),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
+        Self::reject_sql_nul(sql_buf)?;
         Ok(())
     }
 
@@ -306,6 +315,7 @@ impl AstEncoder {
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
 
+        Self::reject_sql_nul(&sql_buf)?;
         let sql = String::from_utf8_lossy(&sql_buf).to_string();
         Ok((sql, params))
     }
@@ -345,6 +355,7 @@ impl AstEncoder {
             _ => return Ok(false),
         }
 
+        Self::reject_sql_nul(sql_buf)?;
         Ok(true)
     }
 
@@ -2547,6 +2558,15 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_database_rejects_nul_name() {
+        let cmd = Qail::create_database("shadow\0db");
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("NUL database name must fail");
+
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
     fn test_encode_ddl_quotes_structured_identifiers() {
         use qail_core::ast::{Constraint, Expr, IndexDef};
 
@@ -3205,6 +3225,17 @@ mod tests {
         let (sql, params) = AstEncoder::encode_cmd_sql(&savepoint).unwrap();
         assert_eq!(sql, "SAVEPOINT \"sp\"\"; DROP TABLE users; --tail\"");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_pubsub_rejects_nul_channel() {
+        let listen = Qail::listen("tenant\0events");
+        let err = AstEncoder::encode_cmd_sql(&listen).expect_err("NUL channel must fail");
+        assert_eq!(err, EncodeError::NullByte);
+
+        let notify = Qail::notify("tenant\0events", "payload");
+        let err = AstEncoder::encode_cmd(&notify).expect_err("NUL channel must fail on wire path");
+        assert_eq!(err, EncodeError::NullByte);
     }
 
     #[test]
