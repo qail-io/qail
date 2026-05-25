@@ -967,7 +967,9 @@ impl Schema {
                 // have their types from schema.qail. Tables that existed before
                 // this migration already have correct types; overwriting them
                 // with ColumnType::Text would be a bug.
-                let has_column_block = after_table_name.trim_start().starts_with('(');
+                let after_table_name = after_table_name.trim_start();
+                let has_column_block =
+                    after_table_name.is_empty() || after_table_name.starts_with('(');
                 if has_column_block && self.tables.get(&name).is_none_or(|t| t.columns.is_empty()) {
                     current_table = Some(name);
                 } else {
@@ -2379,5 +2381,23 @@ ALTER TABLE users ADD COLUMN primary_contact text, ADD check_status text;
         let users = schema.table("users").expect("users table should parse");
         assert!(users.has_column("primary_contact"));
         assert!(users.has_column("check_status"));
+    }
+
+    #[test]
+    fn sql_migration_handles_create_table_paren_on_next_line() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users
+(
+  id uuid,
+  email text
+);
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
     }
 }
