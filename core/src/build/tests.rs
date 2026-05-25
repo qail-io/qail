@@ -683,6 +683,15 @@ alter whatsapp_phone_configs add ai_reply_enabled:boolean:default=true
 }
 
 #[test]
+fn test_parse_qail_migration_rejects_invalid_explicit_alter_table_name() {
+    let mut schema = Schema::default();
+    let err = schema
+        .parse_qail_migration("alter bad-name add enabled:boolean")
+        .expect_err("invalid alter table name must fail");
+    assert!(err.contains("invalid alter table name 'bad-name'"));
+}
+
+#[test]
 fn test_extract_string_arg() {
     assert_eq!(extract_string_arg(r#""users")"#), Some("users".to_string()));
     assert_eq!(

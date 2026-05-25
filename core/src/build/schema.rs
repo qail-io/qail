@@ -1273,6 +1273,9 @@ fn parse_explicit_alter_add_column_line(
         .map(str::trim)
         .filter(|table| !table.is_empty())
         .ok_or_else(|| "expected table name after 'alter'".to_string())?;
+    if !is_build_table_ref(table) {
+        return Err(format!("invalid alter table name '{}'", table));
+    }
     let remainder = parts
         .next()
         .map(str::trim)
