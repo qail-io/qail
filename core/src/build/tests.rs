@@ -270,6 +270,14 @@ table users audit {
     let err = Schema::parse(unknown_option).expect_err("unknown table option must fail");
     assert!(err.contains("Unknown table option 'audit' for 'users'"));
 
+    let duplicate_option = r#"
+table users rls rls {
+  id UUID
+}
+"#;
+    let err = Schema::parse(duplicate_option).expect_err("duplicate table option must fail");
+    assert!(err.contains("Duplicate table option 'rls' for 'users'"));
+
     let trailing_content = "table users { id UUID }";
     let err = Schema::parse(trailing_content).expect_err("inline table body must fail");
     assert!(err.contains("Trailing content after table opening brace for 'users'"));

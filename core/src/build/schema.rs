@@ -305,10 +305,15 @@ impl Schema {
                 if !is_build_table_ref(name) {
                     return Err(format!("Invalid table name '{}'", name));
                 }
+                let mut seen_rls_option = false;
                 for option in parts.iter().skip(1) {
                     if *option != "rls" {
                         return Err(format!("Unknown table option '{}' for '{}'", option, name));
                     }
+                    if seen_rls_option {
+                        return Err(format!("Duplicate table option 'rls' for '{}'", name));
+                    }
+                    seen_rls_option = true;
                 }
                 current_rls_flag = parts.contains(&"rls");
                 current_table = Some((*name).to_string());
