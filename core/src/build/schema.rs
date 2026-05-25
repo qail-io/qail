@@ -726,7 +726,15 @@ impl Schema {
                 .map_err(|err| format!("Line {}: {}", line_no + 1, err))?;
 
             if let Some(existing) = self.tables.get_mut(&table) {
-                if existing.columns.insert(column_name, column_type).is_none() {
+                if let Some(existing_type) = existing.columns.get(&column_name) {
+                    if existing_type != &column_type {
+                        return Err(format!(
+                            "conflicting column type for '{}.{}': existing {:?}, migration {:?}",
+                            table, column_name, existing_type, column_type
+                        ));
+                    }
+                } else {
+                    existing.columns.insert(column_name, column_type);
                     changes += 1;
                 }
             } else {

@@ -730,6 +730,26 @@ table users {
 }
 
 #[test]
+fn test_parse_qail_migration_rejects_conflicting_explicit_alter_column_type() {
+    let mut schema = Schema::parse(
+        r#"
+table users {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let err = schema
+        .parse_qail_migration("alter users add id:text")
+        .expect_err("conflicting explicit alter column type must fail");
+    assert!(
+        err.contains("conflicting column type for 'users.id'"),
+        "{err}"
+    );
+}
+
+#[test]
 fn test_extract_string_arg() {
     assert_eq!(extract_string_arg(r#""users")"#), Some("users".to_string()));
     assert_eq!(
