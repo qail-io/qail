@@ -893,6 +893,15 @@ impl Schema {
                 }
                 in_create_block = true;
                 paren_depth = 0;
+                if let Some(table) = current_table.clone() {
+                    for col in extract_inline_create_columns(line) {
+                        if let Some(t) = self.tables.get_mut(&table)
+                            && t.columns.insert(col, ColumnType::Text).is_none()
+                        {
+                            changes += 1;
+                        }
+                    }
+                }
             }
 
             if in_create_block {
@@ -1459,6 +1468,89 @@ fn extract_column_from_create(line: &str) -> Option<String> {
     }
 }
 
+fn extract_inline_create_columns(line: &str) -> Vec<String> {
+    let Some(open_idx) = line.find('(') else {
+        return Vec::new();
+    };
+    let Some(close_idx) = find_matching_sql_paren(line, open_idx) else {
+        return Vec::new();
+    };
+    let body = &line[open_idx + 1..close_idx];
+    split_sql_top_level_csv(body)
+        .into_iter()
+        .filter_map(|piece| extract_column_from_create(piece))
+        .collect()
+}
+
+fn find_matching_sql_paren(raw: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = raw[open_idx..].char_indices().peekable();
+
+    while let Some((relative_idx, ch)) = chars.next() {
+        let idx = open_idx + relative_idx;
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_sql_top_level_csv(raw: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                pieces.push(raw[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    pieces.push(raw[start..].trim());
+    pieces
+}
+
 /// Extract table and column from ALTER TABLE ... ADD COLUMN
 fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
     let line_upper = line.to_uppercase();
@@ -1707,5 +1799,18 @@ ALTER TABLE app.users ADD COLUMN email text;
             .expect("schema-qualified table should parse");
         assert!(users.has_column("id"));
         assert!(users.has_column("email"));
+    }
+
+    #[test]
+    fn sql_migration_extracts_inline_create_table_columns() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            "CREATE TABLE users (id uuid, email text DEFAULT 'a,b', CHECK (length(email) > 3));",
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
+        assert!(!users.has_column("check"));
     }
 }
