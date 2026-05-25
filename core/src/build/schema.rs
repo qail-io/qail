@@ -96,9 +96,7 @@ fn strip_sql_migration_comments(
 
         if let Some(delim) = dollar_quote.as_deref() {
             if line[i..].starts_with(delim) {
-                if !suppress_dollar_content {
-                    out.push_str(delim);
-                }
+                out.push_str(delim);
                 i += delim.len();
                 *dollar_quote = None;
                 suppress_dollar_content = false;
@@ -211,59 +209,6 @@ fn schema_comment_start(line: &str, hash_comments: bool) -> Option<usize> {
     }
 
     None
-}
-
-fn count_parens_outside_quotes(line: &str) -> (usize, usize) {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut dollar_quote: Option<String> = None;
-    let mut opens = 0usize;
-    let mut closes = 0usize;
-    let mut i = 0usize;
-
-    while i < line.len() {
-        if let Some(delim) = dollar_quote.as_deref() {
-            if line[i..].starts_with(delim) {
-                i += delim.len();
-                dollar_quote = None;
-            } else {
-                i += line[i..].chars().next().map(char::len_utf8).unwrap_or(1);
-            }
-            continue;
-        }
-
-        let Some(ch) = line[i..].chars().next() else {
-            break;
-        };
-        match ch {
-            '\'' if !in_double => {
-                if in_single && line[i + ch.len_utf8()..].starts_with('\'') {
-                    i += 2;
-                    continue;
-                }
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                if in_double && line[i + ch.len_utf8()..].starts_with('"') {
-                    i += 2;
-                    continue;
-                }
-                in_double = !in_double;
-            }
-            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(line, i).is_some() => {
-                let delim = sql_dollar_quote_delimiter_at(line, i).expect("delimiter checked");
-                dollar_quote = Some(delim.to_string());
-                i += delim.len();
-                continue;
-            }
-            '(' if !in_single && !in_double => opens += 1,
-            ')' if !in_single && !in_double => closes += 1,
-            _ => {}
-        }
-        i += ch.len_utf8();
-    }
-
-    (opens, closes)
 }
 
 fn sql_dollar_quote_delimiter_at(raw: &str, idx: usize) -> Option<&str> {
@@ -906,106 +851,46 @@ impl Schema {
     pub(crate) fn parse_sql_migration(&mut self, sql: &str) -> usize {
         let mut changes = 0;
 
-        // Extract CREATE TABLE statements
-        // Pattern: CREATE [UNLOGGED] TABLE [IF NOT EXISTS] table_name (columns...)
-        let mut in_block_comment = false;
-        let mut dollar_quote = None;
-        for raw_line in sql.lines() {
-            let line =
-                strip_sql_migration_comments(raw_line, &mut in_block_comment, &mut dollar_quote);
-            let line = line.as_str();
-            if line.is_empty()
-                || line.starts_with("/*")
-                || line.starts_with('*')
-                || line.starts_with("*/")
-            {
-                continue;
-            }
-            if let Some(table_name) = extract_create_table_name(line)
-                && !self.tables.contains_key(&table_name)
-            {
-                self.tables.insert(
-                    table_name.clone(),
-                    TableSchema {
-                        name: table_name,
-                        columns: HashMap::new(),
-                        policies: HashMap::new(),
-                        foreign_keys: vec![],
-                        rls_enabled: false,
-                    },
-                );
-                changes += 1;
-            }
-        }
-
-        // Extract column definitions from CREATE TABLE blocks
-        // IMPORTANT: Only track CREATE blocks for tables that were newly created
-        // by this migration. Tables that already exist in the schema (from schema.qail)
-        // already have correct column types — overwriting them with ColumnType::Text
-        // would cause false type-mismatch errors.
-        let mut current_table: Option<String> = None;
-        let mut in_create_block = false;
-        let mut paren_depth = 0;
-        let mut in_block_comment = false;
-        let mut dollar_quote = None;
-
-        for raw_line in sql.lines() {
-            let line =
-                strip_sql_migration_comments(raw_line, &mut in_block_comment, &mut dollar_quote);
-            let line = line.as_str();
-            if line.is_empty()
-                || line.starts_with("/*")
-                || line.starts_with('*')
-                || line.starts_with("*/")
-            {
-                continue;
-            }
+        for statement in sql_migration_statements(sql) {
+            let line = statement.as_str();
             let line_upper = line.to_uppercase();
 
             if let Some((name, after_table_name)) = extract_create_table_name_with_tail(line) {
+                let table_existed = self.tables.contains_key(&name);
+                if !table_existed {
+                    self.tables.insert(
+                        name.clone(),
+                        TableSchema {
+                            name: name.clone(),
+                            columns: HashMap::new(),
+                            policies: HashMap::new(),
+                            foreign_keys: vec![],
+                            rls_enabled: false,
+                        },
+                    );
+                    changes += 1;
+                }
+
+                let after_table_name = after_table_name.trim_start();
+                let has_column_block =
+                    after_table_name.is_empty() || after_table_name.starts_with('(');
                 // Only track column extraction for tables that DON'T already
                 // have their types from schema.qail. Tables that existed before
                 // this migration already have correct types; overwriting them
                 // with ColumnType::Text would be a bug.
-                let after_table_name = after_table_name.trim_start();
-                let has_column_block =
-                    after_table_name.is_empty() || after_table_name.starts_with('(');
-                if has_column_block && self.tables.get(&name).is_none_or(|t| t.columns.is_empty()) {
-                    current_table = Some(name);
-                } else {
-                    current_table = None;
-                }
-                in_create_block = has_column_block;
-                paren_depth = 0;
-                if let Some(table) = current_table.clone() {
+                if has_column_block
+                    && (!table_existed
+                        || self.tables.get(&name).is_some_and(|t| t.columns.is_empty()))
+                {
                     for col in extract_inline_create_columns(line) {
-                        if let Some(t) = self.tables.get_mut(&table)
+                        if let Some(t) = self.tables.get_mut(&name)
                             && t.columns.insert(col, ColumnType::Text).is_none()
                         {
                             changes += 1;
                         }
                     }
                 }
-            }
-
-            if in_create_block {
-                let (open_parens, close_parens) = count_parens_outside_quotes(line);
-                paren_depth += open_parens;
-                paren_depth = paren_depth.saturating_sub(close_parens);
-
-                // Extract column name (first identifier after opening paren)
-                if let Some(col) = extract_column_from_create(line)
-                    && let Some(ref table) = current_table
-                    && let Some(t) = self.tables.get_mut(table)
-                    && t.columns.insert(col.clone(), ColumnType::Text).is_none()
-                {
-                    changes += 1;
-                }
-
-                if paren_depth == 0 && line.contains(')') {
-                    in_create_block = false;
-                    current_table = None;
-                }
+                continue;
             }
 
             // ALTER TABLE ... ADD [COLUMN] ...
@@ -1052,7 +937,6 @@ impl Schema {
 
             // ALTER TABLE ... RENAME COLUMN old TO new
             if line_upper.starts_with("ALTER TABLE")
-                && line_upper.contains(" RENAME ")
                 && let Some((table, old_col, new_col)) = extract_alter_rename_column(line)
                 && let Some(t) = self.tables.get_mut(&table)
             {
@@ -1070,8 +954,6 @@ impl Schema {
 
             // ALTER TABLE ... RENAME TO new_table
             if line_upper.starts_with("ALTER TABLE")
-                && line_upper.contains(" RENAME TO ")
-                && !line_upper.contains("RENAME COLUMN")
                 && let Some((old_table, new_table)) = extract_alter_rename_table(line)
                 && !self.tables.contains_key(&new_table)
                 && let Some(mut table) = self.tables.remove(&old_table)
@@ -1084,6 +966,23 @@ impl Schema {
 
         changes
     }
+}
+
+fn sql_migration_statements(sql: &str) -> Vec<String> {
+    let mut cleaned = String::new();
+    let mut in_block_comment = false;
+    let mut dollar_quote = None;
+
+    for raw_line in sql.lines() {
+        let line = strip_sql_migration_comments(raw_line, &mut in_block_comment, &mut dollar_quote);
+        if line.is_empty() {
+            continue;
+        }
+        cleaned.push_str(&line);
+        cleaned.push('\n');
+    }
+
+    split_sql_statements(&cleaned)
 }
 
 fn parse_build_enum_declaration<'a, I: Iterator<Item = &'a str>>(
@@ -1501,11 +1400,6 @@ fn extract_view_name(line: &str) -> Option<&str> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-/// Extract table name from CREATE TABLE statement
-fn extract_create_table_name(line: &str) -> Option<String> {
-    extract_create_table_name_with_tail(line).map(|(name, _)| name)
-}
-
 fn extract_create_table_name_with_tail(line: &str) -> Option<(String, &str)> {
     let rest = extract_create_table_target_start(line)?;
     let rest = strip_sql_if_not_exists(rest).unwrap_or(rest);
@@ -1710,26 +1604,78 @@ fn split_sql_top_level_csv(raw: &str) -> Vec<&str> {
     pieces
 }
 
+fn split_sql_statements(raw: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut dollar_quote: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < raw.len() {
+        if let Some(delim) = dollar_quote.as_deref() {
+            if raw[i..].starts_with(delim) {
+                i += delim.len();
+                dollar_quote = None;
+            } else {
+                i += raw[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            }
+            continue;
+        }
+
+        let Some(ch) = raw[i..].chars().next() else {
+            break;
+        };
+        match ch {
+            '\'' if !in_double => {
+                if in_single && raw[i + ch.len_utf8()..].starts_with('\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                if in_double && raw[i + ch.len_utf8()..].starts_with('"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = !in_double;
+            }
+            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(raw, i).is_some() => {
+                let delim = sql_dollar_quote_delimiter_at(raw, i).expect("delimiter checked");
+                dollar_quote = Some(delim.to_string());
+                i += delim.len();
+                continue;
+            }
+            ';' if !in_single && !in_double => {
+                let statement = raw[start..i].trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+        i += ch.len_utf8();
+    }
+
+    let tail = raw[start..].trim();
+    if !tail.is_empty() {
+        statements.push(tail.to_string());
+    }
+
+    statements
+}
+
 /// Extract table and columns from ALTER TABLE ... ADD [COLUMN] actions.
 fn extract_alter_add_columns(line: &str) -> Vec<(String, String)> {
     let line_upper = line.to_uppercase();
     if !line_upper.starts_with("ALTER TABLE") {
         return Vec::new();
     }
-    let Some(alter_pos) = line_upper.find("ALTER TABLE") else {
+    let Some((table, actions_part)) = extract_alter_table_ref_with_tail(&line[11..]) else {
         return Vec::new();
     };
-    let add_column_pos = line_upper.find("ADD COLUMN");
-    let add_pos = line_upper.find(" ADD ").map(|pos| pos + 1);
-    let Some(action_pos) = [add_column_pos, add_pos].into_iter().flatten().min() else {
-        return Vec::new();
-    };
-
-    let table_part = &line[alter_pos + 11..action_pos];
-    let Some(table) = extract_alter_table_ref(table_part) else {
-        return Vec::new();
-    };
-    let actions_part = &line[action_pos..];
 
     split_sql_top_level_csv(actions_part)
         .into_iter()
@@ -1791,20 +1737,9 @@ fn extract_alter_drop_columns(line: &str) -> Vec<(String, String)> {
     if !line_upper.starts_with("ALTER TABLE") {
         return Vec::new();
     }
-    let Some(alter_pos) = line_upper.find("ALTER TABLE") else {
+    let Some((table, actions_part)) = extract_alter_table_ref_with_tail(&line[11..]) else {
         return Vec::new();
     };
-    let drop_column_pos = line_upper.find("DROP COLUMN");
-    let drop_pos = line_upper.find(" DROP ").map(|pos| pos + 1);
-    let Some(action_pos) = [drop_column_pos, drop_pos].into_iter().flatten().min() else {
-        return Vec::new();
-    };
-
-    let table_part = &line[alter_pos + 11..action_pos];
-    let Some(table) = extract_alter_table_ref(table_part) else {
-        return Vec::new();
-    };
-    let actions_part = &line[action_pos..];
 
     split_sql_top_level_csv(actions_part)
         .into_iter()
@@ -1832,18 +1767,20 @@ fn extract_alter_drop_column_action(action: &str) -> Option<String> {
 
 fn extract_alter_rename_column(line: &str) -> Option<(String, String, String)> {
     let line_upper = line.to_uppercase();
-    let alter_pos = line_upper.find("ALTER TABLE")?;
-    let (rename_pos, rename_len) = if let Some(pos) = line_upper.find("RENAME COLUMN") {
+    if !line_upper.starts_with("ALTER TABLE") {
+        return None;
+    }
+    let (table, actions_part) = extract_alter_table_ref_with_tail(&line[11..])?;
+    let actions_upper = actions_part.to_uppercase();
+    let (rename_pos, rename_len) = if let Some(pos) = actions_upper.find("RENAME COLUMN") {
         (pos, "RENAME COLUMN".len())
     } else {
-        (line_upper.find(" RENAME ")? + 1, "RENAME".len())
+        (actions_upper.find("RENAME ")?, "RENAME".len())
     };
-    let to_pos = line_upper[rename_pos + rename_len..].find(" TO ")? + rename_pos + rename_len;
+    let to_pos = actions_upper[rename_pos + rename_len..].find(" TO ")? + rename_pos + rename_len;
 
-    let table_part = &line[alter_pos + 11..rename_pos];
-    let table = extract_alter_table_ref(table_part)?;
-    let old_part = &line[rename_pos + rename_len..to_pos];
-    let new_part = &line[to_pos + 4..];
+    let old_part = &actions_part[rename_pos + rename_len..to_pos];
+    let new_part = &actions_part[to_pos + 4..];
     let old_col = extract_sql_column_ref(old_part.trim())?;
     let new_col = extract_sql_column_ref(new_part.trim())?;
 
@@ -1852,12 +1789,14 @@ fn extract_alter_rename_column(line: &str) -> Option<(String, String, String)> {
 
 fn extract_alter_rename_table(line: &str) -> Option<(String, String)> {
     let line_upper = line.to_uppercase();
-    let alter_pos = line_upper.find("ALTER TABLE")?;
-    let rename_pos = line_upper.find(" RENAME TO ")?;
+    if !line_upper.starts_with("ALTER TABLE") {
+        return None;
+    }
+    let (old_table, actions_part) = extract_alter_table_ref_with_tail(&line[11..])?;
+    let actions_upper = actions_part.to_uppercase();
+    let rename_pos = actions_upper.find("RENAME TO ")?;
 
-    let table_part = &line[alter_pos + 11..rename_pos];
-    let old_table = extract_alter_table_ref(table_part)?;
-    let new_part = &line[rename_pos + " RENAME TO ".len()..];
+    let new_part = &actions_part[rename_pos + "RENAME TO ".len()..];
     let new_ref = extract_sql_table_ref(new_part.trim())?;
     let new_table = if new_ref.contains('.') {
         new_ref
@@ -1937,7 +1876,7 @@ fn parse_sql_identifier_segment(raw: &str) -> Option<(String, &str, bool)> {
     Some((name, tail, false))
 }
 
-fn extract_alter_table_ref(raw: &str) -> Option<String> {
+fn extract_alter_table_ref_with_tail(raw: &str) -> Option<(String, &str)> {
     let mut rest = raw.trim_start();
     let upper = rest.to_uppercase();
     if upper.starts_with("IF EXISTS")
@@ -1956,7 +1895,7 @@ fn extract_alter_table_ref(raw: &str) -> Option<String> {
         rest = rest.get("ONLY".len()..)?.trim_start();
     }
     let (table, tail) = extract_sql_table_ref_with_tail(rest)?;
-    tail.trim().is_empty().then_some(table)
+    Some((table, tail.trim_start()))
 }
 
 impl TableSchema {
@@ -2367,6 +2306,46 @@ ALTER TABLE users DROP COLUMN old_email, DROP IF EXISTS old_name;
         assert!(users.has_column("id"));
         assert!(!users.has_column("old_email"));
         assert!(!users.has_column("old_name"));
+    }
+
+    #[test]
+    fn sql_migration_handles_multiline_mixed_alter_actions() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid, old_email text, old_name text);
+ALTER TABLE users
+  ADD COLUMN email text,
+  DROP COLUMN old_email,
+  RENAME COLUMN old_name TO legacy_name;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
+        assert!(users.has_column("legacy_name"));
+        assert!(!users.has_column("old_email"));
+        assert!(!users.has_column("old_name"));
+    }
+
+    #[test]
+    fn sql_migration_handles_drop_then_recreate_order() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (stale text);
+DROP TABLE users;
+CREATE TABLE users (id uuid, email text);
+"#,
+        );
+
+        let users = schema
+            .table("users")
+            .expect("recreated table should remain in schema");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
+        assert!(!users.has_column("stale"));
     }
 
     #[test]
