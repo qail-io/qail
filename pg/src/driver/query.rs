@@ -147,115 +147,6 @@ impl SimpleFlowTracker {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    fn test_conn_with_peer() -> (PgConnection, tokio::net::UnixStream) {
-        use crate::driver::connection::StatementCache;
-        use crate::driver::stream::PgStream;
-        use bytes::BytesMut;
-        use std::collections::{HashMap, VecDeque};
-        use std::num::NonZeroUsize;
-        use tokio::net::UnixStream;
-
-        let (unix_stream, peer) = UnixStream::pair().expect("unix stream pair");
-        (
-            PgConnection {
-                stream: PgStream::Unix(unix_stream),
-                buffer: BytesMut::with_capacity(1024),
-                write_buf: BytesMut::with_capacity(1024),
-                sql_buf: BytesMut::with_capacity(256),
-                params_buf: Vec::new(),
-                prepared_statements: HashMap::new(),
-                stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
-                column_info_cache: HashMap::new(),
-                process_id: 0,
-                cancel_key_bytes: Vec::new(),
-                requested_protocol_minor: PgConnection::default_protocol_minor(),
-                negotiated_protocol_minor: PgConnection::default_protocol_minor(),
-                notifications: VecDeque::new(),
-                replication_stream_active: false,
-                replication_mode_enabled: false,
-                last_replication_wal_end: None,
-                io_desynced: false,
-                pending_statement_closes: Vec::new(),
-                draining_statement_closes: false,
-            },
-            peer,
-        )
-    }
-
-    #[cfg(unix)]
-    fn test_conn() -> PgConnection {
-        test_conn_with_peer().0
-    }
-
-    #[cfg(unix)]
-    fn push_backend_frame(conn: &mut PgConnection, msg_type: u8, payload: &[u8]) {
-        conn.buffer.extend_from_slice(&[msg_type]);
-        conn.buffer
-            .extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
-        conn.buffer.extend_from_slice(payload);
-    }
-
-    #[test]
-    fn prepared_buffer_sizing_rejects_too_many_params_before_allocation() {
-        let params = vec![None; i16::MAX as usize + 1];
-        let err = prepared_bind_execute_sync_wire_len("stmt", &params, PgEncoder::FORMAT_TEXT)
-            .expect_err("parameter overflow must be rejected");
-
-        assert!(matches!(err, PgError::Encode(msg) if msg.contains("Too many parameters")));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn streaming_callback_error_marks_query_connection_desynced() {
-        let mut conn = test_conn();
-
-        let err = return_callback_error_with_desync::<()>(
-            &mut conn,
-            PgError::Query("consumer stopped".to_string()),
-        )
-        .expect_err("callback error should be returned");
-
-        assert!(matches!(err, PgError::Query(msg) if msg == "consumer stopped"));
-        assert!(conn.is_io_desynced());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn protocol_order_error_marks_query_connection_desynced() {
-        let (mut conn, _peer) = test_conn_with_peer();
-        push_backend_frame(&mut conn, b'D', &0i16.to_be_bytes());
-        let stmt = super::super::PreparedStatement::from_sql("SELECT 1");
-
-        let err = conn
-            .query_prepared_single_count(&stmt, &[])
-            .await
-            .expect_err("out-of-order DataRow must fail");
-
-        assert!(err.to_string().contains("DataRow before BindComplete"));
-        assert!(conn.is_io_desynced());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn simple_flow_error_marks_query_connection_desynced() {
-        let (mut conn, _peer) = test_conn_with_peer();
-        push_backend_frame(&mut conn, b'Z', b"I");
-
-        let err = conn
-            .execute_simple("SELECT 1")
-            .await
-            .expect_err("ReadyForQuery before completion must fail");
-
-        assert!(err.to_string().contains("ReadyForQuery before completion"));
-        assert!(conn.is_io_desynced());
-    }
-}
-
 impl PgConnection {
     fn validate_param_type_arity(params: &[Option<Vec<u8>>], param_types: &[u32]) -> PgResult<()> {
         if !param_types.is_empty() && param_types.len() != params.len() {
@@ -1959,5 +1850,114 @@ impl PgConnection {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn test_conn_with_peer() -> (PgConnection, tokio::net::UnixStream) {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, peer) = UnixStream::pair().expect("unix stream pair");
+        (
+            PgConnection {
+                stream: PgStream::Unix(unix_stream),
+                buffer: BytesMut::with_capacity(1024),
+                write_buf: BytesMut::with_capacity(1024),
+                sql_buf: BytesMut::with_capacity(256),
+                params_buf: Vec::new(),
+                prepared_statements: HashMap::new(),
+                stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+                column_info_cache: HashMap::new(),
+                process_id: 0,
+                cancel_key_bytes: Vec::new(),
+                requested_protocol_minor: PgConnection::default_protocol_minor(),
+                negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+                notifications: VecDeque::new(),
+                replication_stream_active: false,
+                replication_mode_enabled: false,
+                last_replication_wal_end: None,
+                io_desynced: false,
+                pending_statement_closes: Vec::new(),
+                draining_statement_closes: false,
+            },
+            peer,
+        )
+    }
+
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        test_conn_with_peer().0
+    }
+
+    #[cfg(unix)]
+    fn push_backend_frame(conn: &mut PgConnection, msg_type: u8, payload: &[u8]) {
+        conn.buffer.extend_from_slice(&[msg_type]);
+        conn.buffer
+            .extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        conn.buffer.extend_from_slice(payload);
+    }
+
+    #[test]
+    fn prepared_buffer_sizing_rejects_too_many_params_before_allocation() {
+        let params = vec![None; i16::MAX as usize + 1];
+        let err = prepared_bind_execute_sync_wire_len("stmt", &params, PgEncoder::FORMAT_TEXT)
+            .expect_err("parameter overflow must be rejected");
+
+        assert!(matches!(err, PgError::Encode(msg) if msg.contains("Too many parameters")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_callback_error_marks_query_connection_desynced() {
+        let mut conn = test_conn();
+
+        let err = return_callback_error_with_desync::<()>(
+            &mut conn,
+            PgError::Query("consumer stopped".to_string()),
+        )
+        .expect_err("callback error should be returned");
+
+        assert!(matches!(err, PgError::Query(msg) if msg == "consumer stopped"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protocol_order_error_marks_query_connection_desynced() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        push_backend_frame(&mut conn, b'D', &0i16.to_be_bytes());
+        let stmt = super::super::PreparedStatement::from_sql("SELECT 1");
+
+        let err = conn
+            .query_prepared_single_count(&stmt, &[])
+            .await
+            .expect_err("out-of-order DataRow must fail");
+
+        assert!(err.to_string().contains("DataRow before BindComplete"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn simple_flow_error_marks_query_connection_desynced() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let err = conn
+            .execute_simple("SELECT 1")
+            .await
+            .expect_err("ReadyForQuery before completion must fail");
+
+        assert!(err.to_string().contains("ReadyForQuery before completion"));
+        assert!(conn.is_io_desynced());
     }
 }

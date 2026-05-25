@@ -517,10 +517,13 @@ fn default_expr_end(rest: &str) -> usize {
             }
             '(' if !in_single && !in_double => paren_depth += 1,
             ')' if !in_single && !in_double && paren_depth > 0 => paren_depth -= 1,
-            c if c.is_whitespace() && !in_single && !in_double && paren_depth == 0 => {
-                if starts_constraint_keyword(rest[idx..].trim_start()) {
-                    return idx;
-                }
+            c if c.is_whitespace()
+                && !in_single
+                && !in_double
+                && paren_depth == 0
+                && starts_constraint_keyword(rest[idx..].trim_start()) =>
+            {
+                return idx;
             }
             _ => {}
         }
