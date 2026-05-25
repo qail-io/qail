@@ -571,6 +571,32 @@ fn bearer_without_any_config_returns_denied() {
 }
 
 #[test]
+fn empty_bearer_token_returns_denied() {
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer ".parse().unwrap());
+
+    let auth = extract_auth_from_headers_with_jwks(&headers, None, &[]);
+
+    assert!(
+        auth.is_denied(),
+        "empty bearer credentials must fail closed instead of falling through to anonymous"
+    );
+}
+
+#[test]
+fn bearer_without_space_is_not_treated_as_jwt() {
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearerabc.def.ghi".parse().unwrap());
+
+    let auth = extract_auth_from_headers_with_jwks(&headers, None, &[]);
+
+    assert!(
+        !auth.is_denied(),
+        "non-Bearer scheme text must not be parsed as a malformed bearer token"
+    );
+}
+
+#[test]
 fn authenticated_user_without_tenant_scope_is_rejected() {
     let auth = AuthContext {
         user_id: "user-without-tenant".to_string(),

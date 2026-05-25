@@ -20,10 +20,12 @@ pub fn extract_auth_from_headers_with_jwks(
     // Try JWT first
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
-        && value.len() > 7
-        && value[..7].eq_ignore_ascii_case("Bearer ")
+        && let Some(token) = bearer_token_from_auth_header(value)
     {
-        let token = &value[7..];
+        if token.is_empty() {
+            tracing::warn!("Bearer authorization header is missing a token");
+            return AuthContext::denied();
+        }
         // Path A: JWKS — check if token has `kid` and we have a JWKS store
         if let Some(store) = jwks_store
             && let Some(kid) = crate::jwks::extract_kid_from_jwt(token)
@@ -178,6 +180,21 @@ pub fn extract_auth_from_headers_with_jwks(
         tenant_id,
         claims,
     }
+}
+
+fn bearer_token_from_auth_header(value: &str) -> Option<&str> {
+    if value.len() < "Bearer".len() || !value[.."Bearer".len()].eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+
+    let rest = &value["Bearer".len()..];
+    if rest.is_empty() {
+        return Some("");
+    }
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim())
 }
 
 /// Extract auth using state-aware JWT/JWKS settings and enrich tenant_id from cache.
