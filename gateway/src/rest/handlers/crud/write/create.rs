@@ -9,16 +9,19 @@ fn normalize_create_object_for_tenant(
         return Ok(obj.clone());
     };
 
-    if let Some(existing) = obj.get(tenant_column)
-        && existing != &Value::String(tid.to_string())
-    {
-        return Err(ApiError::forbidden(format!(
-            "Field '{}' must match authenticated tenant context",
-            tenant_column
-        )));
-    }
-
     let mut normalized = obj.clone();
+    for (key, existing) in obj {
+        if !identifier_matches_column(key, tenant_column) {
+            continue;
+        }
+        if existing != &Value::String(tid.to_string()) {
+            return Err(ApiError::forbidden(format!(
+                "Field '{}' must match authenticated tenant context",
+                tenant_column
+            )));
+        }
+        normalized.remove(key);
+    }
     normalized.insert(tenant_column.to_string(), Value::String(tid.to_string()));
     Ok(normalized)
 }
@@ -113,7 +116,7 @@ fn upsert_update_assignments<'a>(
 ) -> Vec<(&'a str, Expr)> {
     obj.keys()
         .filter(|k| !conflict_cols.contains(&k.as_str()))
-        .filter(|k| !enforce_tenant_column || k.as_str() != tenant_column)
+        .filter(|k| !enforce_tenant_column || !identifier_matches_column(k, tenant_column))
         .filter(|k| crate::rest::filters::is_safe_identifier(k))
         .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
         .collect()
@@ -795,6 +798,16 @@ mod tests {
     }
 
     #[test]
+    fn normalize_create_object_rejects_case_variant_tenant_column() {
+        let mut obj = Map::new();
+        obj.insert("Tenant_ID".to_string(), json!("tenant_b"));
+
+        let err =
+            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
     fn normalize_create_object_preserves_matching_tenant_column() {
         let mut obj = Map::new();
         obj.insert("tenant_id".to_string(), json!("tenant_a"));
@@ -804,6 +817,18 @@ mod tests {
             normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
         assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_a")));
         assert_eq!(normalized.get("name"), Some(&json!("alice")));
+    }
+
+    #[test]
+    fn normalize_create_object_canonicalizes_case_variant_tenant_column() {
+        let mut obj = Map::new();
+        obj.insert("Tenant_ID".to_string(), json!("tenant_a"));
+        obj.insert("name".to_string(), json!("alice"));
+
+        let normalized =
+            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
+        assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_a")));
+        assert!(!normalized.contains_key("Tenant_ID"));
     }
 
     #[test]
@@ -915,6 +940,20 @@ mod tests {
             cmd.on_conflict.expect("on conflict").action,
             ConflictAction::DoNothing
         ));
+    }
+
+    #[test]
+    fn upsert_update_assignments_exclude_case_variant_tenant_column() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("Tenant_ID".to_string(), json!("tenant-b"));
+        obj.insert("status".to_string(), json!("paid"));
+        let conflict_cols = vec!["id"];
+
+        let updates = upsert_update_assignments(&obj, &conflict_cols, true, "tenant_id");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "status");
     }
 
     #[test]

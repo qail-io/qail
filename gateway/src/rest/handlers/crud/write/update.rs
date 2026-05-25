@@ -5,7 +5,11 @@ fn reject_tenant_column_update(
     tenant_column: &str,
     tenant_id: Option<&str>,
 ) -> Result<(), ApiError> {
-    if tenant_id.is_some() && obj.contains_key(tenant_column) {
+    if tenant_id.is_some()
+        && obj
+            .keys()
+            .any(|key| identifier_matches_column(key, tenant_column))
+    {
         return Err(ApiError::forbidden(format!(
             "Field '{}' is server-managed and cannot be updated",
             tenant_column
@@ -343,6 +347,15 @@ mod tests {
     fn reject_tenant_column_update_blocks_scoped_mutation() {
         let mut obj = Map::new();
         obj.insert("tenant_id".to_string(), json!("tenant_b"));
+
+        let err = reject_tenant_column_update(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn reject_tenant_column_update_blocks_case_variant_mutation() {
+        let mut obj = Map::new();
+        obj.insert("Tenant_ID".to_string(), json!("tenant_b"));
 
         let err = reject_tenant_column_update(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);

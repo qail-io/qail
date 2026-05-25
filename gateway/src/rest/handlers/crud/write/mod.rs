@@ -51,11 +51,19 @@ fn branch_overlay_write_needs_base_lookup(
     }
 }
 
+fn identifier_leaf(identifier: &str) -> &str {
+    identifier.rsplit('.').next().unwrap_or(identifier)
+}
+
+fn identifier_matches_column(identifier: &str, column: &str) -> bool {
+    identifier_leaf(identifier).eq_ignore_ascii_case(identifier_leaf(column))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         branch_overlay_write_needs_base_lookup, ensure_path_mutation_affected,
-        mutation_needs_full_returning, project_mutation_returning_rows,
+        identifier_matches_column, mutation_needs_full_returning, project_mutation_returning_rows,
     };
     use crate::rest::branch::BranchOverlayRowState;
     use serde_json::json;
@@ -116,5 +124,12 @@ mod tests {
         let err = branch_overlay_write_needs_base_lookup(BranchOverlayRowState::Deleted, "row-1")
             .unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn identifier_matching_follows_postgres_unquoted_case_folding() {
+        assert!(identifier_matches_column("Tenant_ID", "tenant_id"));
+        assert!(identifier_matches_column("orders.Tenant_ID", "tenant_id"));
+        assert!(!identifier_matches_column("tenant_id_shadow", "tenant_id"));
     }
 }
