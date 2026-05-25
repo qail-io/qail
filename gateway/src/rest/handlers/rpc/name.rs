@@ -210,7 +210,12 @@ fn build_rpc_bound_call_target(
     let mut param_type_oids: RpcParamTypeOids = Vec::new();
 
     let args_sql = match args {
-        None => String::new(),
+        None => empty_variadic_arg_sql(&mut params, &mut param_type_oids, signature)?
+            .unwrap_or_default(),
+        Some(Value::Object(map)) if map.is_empty() => {
+            empty_variadic_arg_sql(&mut params, &mut param_type_oids, signature)?
+                .unwrap_or_default()
+        }
         Some(Value::Object(map)) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
@@ -236,6 +241,10 @@ fn build_rpc_bound_call_target(
                 parts.push(format!("{} => {}", quote_ident(&normalized_key), expr));
             }
             parts.join(", ")
+        }
+        Some(Value::Array(items)) if items.is_empty() => {
+            empty_variadic_arg_sql(&mut params, &mut param_type_oids, signature)?
+                .unwrap_or_default()
         }
         Some(Value::Array(items)) => {
             let mut parts: Vec<String> = Vec::with_capacity(items.len());
@@ -263,6 +272,31 @@ fn build_rpc_bound_call_target(
     };
 
     Ok((call_target, params, param_type_oids))
+}
+
+fn empty_variadic_arg_sql(
+    params: &mut Vec<Option<Vec<u8>>>,
+    param_type_oids: &mut RpcParamTypeOids,
+    signature: Option<&RpcCallableSignature>,
+) -> Result<Option<String>, ApiError> {
+    let Some(signature) = signature else {
+        return Ok(None);
+    };
+    if !signature.variadic || signature.total_args != 1 {
+        return Ok(None);
+    }
+
+    let oid = signature
+        .arg_type_oids
+        .first()
+        .copied()
+        .filter(|oid| *oid != 0)
+        .ok_or_else(|| {
+            ApiError::internal("Invalid RPC signature metadata: missing variadic array type OID")
+        })?;
+    params.push(Some(b"{}".to_vec()));
+    param_type_oids.push(oid);
+    Ok(Some(format!("VARIADIC ${}", params.len())))
 }
 
 fn build_rpc_param_expr(
@@ -462,4 +496,65 @@ pub(in super::super) fn enforce_rpc_name_contract(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RpcFunctionName, build_rpc_bound_sql};
+    use crate::server::RpcCallableSignature;
+    use serde_json::json;
+
+    fn variadic_int_signature() -> RpcCallableSignature {
+        RpcCallableSignature {
+            total_args: 1,
+            default_args: 0,
+            variadic: true,
+            arg_names: vec![Some("nums".to_string())],
+            arg_types: vec!["integer[]".to_string()],
+            arg_type_oids: vec![1007],
+            variadic_element_oid: Some(23),
+            identity_args: "VARIADIC nums integer[]".to_string(),
+            result_type: "integer".to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_object_call_binds_empty_variadic_array() {
+        let function = RpcFunctionName::parse("qail_test.sum_all").unwrap();
+        let args = json!({});
+        let query = build_rpc_bound_sql(
+            &function,
+            Some(&args),
+            Some(&variadic_int_signature()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.sql,
+            "SELECT * FROM \"qail_test\".\"sum_all\"(VARIADIC $1)"
+        );
+        assert_eq!(query.params[0].as_deref(), Some(b"{}".as_slice()));
+        assert_eq!(query.param_type_oids, vec![1007]);
+    }
+
+    #[test]
+    fn empty_array_call_binds_empty_variadic_array() {
+        let function = RpcFunctionName::parse("qail_test.sum_all").unwrap();
+        let args = json!([]);
+        let query = build_rpc_bound_sql(
+            &function,
+            Some(&args),
+            Some(&variadic_int_signature()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.sql,
+            "SELECT * FROM \"qail_test\".\"sum_all\"(VARIADIC $1)"
+        );
+        assert_eq!(query.params[0].as_deref(), Some(b"{}".as_slice()));
+        assert_eq!(query.param_type_oids, vec![1007]);
+    }
 }

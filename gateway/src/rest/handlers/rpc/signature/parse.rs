@@ -2,7 +2,46 @@ use super::super::RpcFunctionName;
 use super::types::normalize_pg_type_name;
 use crate::middleware::ApiError;
 use crate::server::RpcCallableSignature;
-use qail_core::ast::{Expr, Qail};
+
+pub(super) struct RpcSignatureLookupQuery {
+    pub sql: &'static str,
+    pub params: Vec<Option<Vec<u8>>>,
+}
+
+const RPC_SIGNATURE_LOOKUP_SQL: &str = "\
+SELECT \
+    p.pronargs::int4 AS total_args, \
+    p.pronargdefaults::int4 AS default_args, \
+    (p.provariadic <> 0) AS is_variadic, \
+    CASE WHEN p.provariadic = 0 THEN NULL ELSE p.provariadic::int8 END AS variadic_element_oid, \
+    COALESCE(to_jsonb(COALESCE(p.proargnames, ARRAY[]::text[])), '[]'::jsonb)::text AS arg_names_json, \
+    COALESCE(to_jsonb(COALESCE(p.proargmodes, ARRAY[]::\"char\"[])), '[]'::jsonb)::text AS arg_modes_json, \
+    COALESCE((\
+        SELECT jsonb_agg((arg_oid)::int8 ORDER BY ord) \
+        FROM unnest(\
+            CASE \
+                WHEN p.pronargs = 0 THEN ARRAY[]::oid[] \
+                ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] \
+            END\
+        ) WITH ORDINALITY AS args(arg_oid, ord)\
+    ), '[]'::jsonb)::text AS arg_type_oids_json, \
+    COALESCE((\
+        SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) \
+        FROM unnest(\
+            CASE \
+                WHEN p.pronargs = 0 THEN ARRAY[]::oid[] \
+                ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] \
+            END\
+        ) WITH ORDINALITY AS args(arg_oid, ord)\
+    ), '[]'::jsonb)::text AS arg_types_json, \
+    pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args, \
+    pg_catalog.pg_get_function_result(p.oid) AS result_type \
+FROM pg_catalog.pg_proc p \
+JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+WHERE p.prokind = 'f' \
+  AND n.nspname = $1::name \
+  AND p.proname = $2::name \
+ORDER BY p.oid";
 
 fn normalize_rpc_arg_name(name: Option<String>) -> Option<String> {
     name.and_then(|raw| {
@@ -60,45 +99,22 @@ pub(crate) fn parse_rpc_input_arg_names(
     Ok(input_arg_names)
 }
 
-pub(super) fn rpc_signature_lookup_cmd(function_name: &RpcFunctionName) -> Result<Qail, ApiError> {
+pub(super) fn rpc_signature_lookup_query(
+    function_name: &RpcFunctionName,
+) -> Result<RpcSignatureLookupQuery, ApiError> {
     let Some((schema, function)) = function_name.schema_and_name() else {
         return Err(ApiError::parse_error(
             "rpc_signature_check requires schema-qualified function names",
         ));
     };
 
-    Ok(Qail::get("pg_catalog.pg_proc p")
-        .columns_expr(vec![
-            Expr::Named("p.pronargs::int4 AS total_args".to_string()),
-            Expr::Named("p.pronargdefaults::int4 AS default_args".to_string()),
-            Expr::Named("(p.provariadic <> 0) AS is_variadic".to_string()),
-            Expr::Named(
-                "CASE WHEN p.provariadic = 0 THEN NULL ELSE p.provariadic::int8 END AS variadic_element_oid"
-                    .to_string(),
-            ),
-            Expr::Named(
-                "COALESCE(to_jsonb(COALESCE(p.proargnames, ARRAY[]::text[])), '[]'::jsonb)::text AS arg_names_json".to_string(),
-            ),
-            Expr::Named(
-                "COALESCE(to_jsonb(COALESCE(p.proargmodes, ARRAY[]::\"char\"[])), '[]'::jsonb)::text AS arg_modes_json".to_string(),
-            ),
-            Expr::Named(
-                "COALESCE((SELECT jsonb_agg(arg_oid ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_type_oids_json".to_string(),
-            ),
-            Expr::Named(
-                "COALESCE((SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_types_json".to_string(),
-            ),
-            Expr::Named(
-                "pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args"
-                    .to_string(),
-            ),
-            Expr::Named("pg_catalog.pg_get_function_result(p.oid) AS result_type".to_string()),
-        ])
-        .inner_join("pg_catalog.pg_namespace n", "n.oid", "p.pronamespace")
-        .eq("p.prokind", "f")
-        .eq("n.nspname", schema)
-        .eq("p.proname", function)
-        .order_asc("p.oid"))
+    Ok(RpcSignatureLookupQuery {
+        sql: RPC_SIGNATURE_LOOKUP_SQL,
+        params: vec![
+            Some(schema.as_bytes().to_vec()),
+            Some(function.as_bytes().to_vec()),
+        ],
+    })
 }
 
 pub(super) fn parse_rpc_signatures(

@@ -2,7 +2,7 @@ use super::super::{RpcFunctionName, build_rpc_bound_sql};
 use super::matcher::{
     format_signature_brief, select_matching_rpc_signature, signature_matches_call_shape,
 };
-use super::parse::{parse_rpc_signatures, rpc_signature_lookup_cmd};
+use super::parse::{parse_rpc_signatures, rpc_signature_lookup_query};
 use crate::GatewayState;
 use crate::middleware::ApiError;
 use crate::server::RpcCallableSignature;
@@ -178,10 +178,9 @@ pub(in super::super) async fn enforce_rpc_signature_contract(
         cached
     } else {
         crate::metrics::record_rpc_signature_cache_miss();
-        let mut cmd = rpc_signature_lookup_cmd(function_name)?;
-        state.optimize_qail_for_execution(&mut cmd);
+        let query = rpc_signature_lookup_query(function_name)?;
         let rows = conn
-            .fetch_all_uncached(&cmd)
+            .query_rows_with_params(query.sql, &query.params)
             .await
             .map_err(|e| ApiError::from_pg_driver_error(&e, None))?;
 

@@ -1,5 +1,4 @@
 use axum::{extract::State, response::Json};
-use qail_core::ast::{Expr, Operator, Qail, Value as AstValue};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -78,54 +77,70 @@ fn rpc_contract_catalog_row_limit(allowed_function_count: usize) -> i64 {
         .clamp(MIN_CONTRACT_ROWS, MAX_CONTRACT_ROWS) as i64
 }
 
-fn rpc_contract_catalog_cmd(allowed_rpc_names: &[String]) -> Qail {
-    let allowed_values = allowed_rpc_names
-        .iter()
-        .cloned()
-        .map(AstValue::String)
-        .collect();
+struct RpcContractCatalogQuery {
+    sql: &'static str,
+    params: Vec<Option<Vec<u8>>>,
+}
 
-    Qail::get("pg_catalog.pg_proc p")
-        .columns_expr(vec![
-            Expr::Named("n.nspname AS schema_name".to_string()),
-            Expr::Named("p.proname AS function_name".to_string()),
-            Expr::Named("p.pronargs::int4 AS total_args".to_string()),
-            Expr::Named("p.pronargdefaults::int4 AS default_args".to_string()),
-            Expr::Named("(p.provariadic <> 0) AS is_variadic".to_string()),
-            Expr::Named(
-                "COALESCE(to_jsonb(COALESCE(p.proargnames, ARRAY[]::text[])), '[]'::jsonb)::text AS arg_names_json".to_string(),
+const RPC_CONTRACT_CATALOG_SQL: &str = "\
+SELECT \
+    n.nspname::text AS schema_name, \
+    p.proname::text AS function_name, \
+    p.pronargs::int4 AS total_args, \
+    p.pronargdefaults::int4 AS default_args, \
+    (p.provariadic <> 0) AS is_variadic, \
+    COALESCE(to_jsonb(COALESCE(p.proargnames, ARRAY[]::text[])), '[]'::jsonb)::text AS arg_names_json, \
+    COALESCE(to_jsonb(COALESCE(p.proargmodes, ARRAY[]::\"char\"[])), '[]'::jsonb)::text AS arg_modes_json, \
+    COALESCE((\
+        SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) \
+        FROM unnest(\
+            CASE \
+                WHEN p.pronargs = 0 THEN ARRAY[]::oid[] \
+                ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] \
+            END\
+        ) WITH ORDINALITY AS args(arg_oid, ord)\
+    ), '[]'::jsonb)::text AS arg_types_json, \
+    pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args, \
+    pg_catalog.pg_get_function_result(p.oid) AS result_type \
+FROM pg_catalog.pg_proc p \
+JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+WHERE p.prokind = 'f' \
+  AND n.nspname NOT IN ('pg_catalog'::name, 'information_schema'::name) \
+  AND LOWER(n.nspname::text || '.' || p.proname::text) = ANY($1::text[]) \
+ORDER BY n.nspname, p.proname, p.oid \
+LIMIT $2::int8";
+
+fn encode_pg_text_array(values: &[String]) -> Vec<u8> {
+    let mut out = String::from("{");
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        for ch in value.chars() {
+            if ch == '"' || ch == '\\' {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+    }
+    out.push('}');
+    out.into_bytes()
+}
+
+fn rpc_contract_catalog_query(allowed_rpc_names: &[String]) -> RpcContractCatalogQuery {
+    RpcContractCatalogQuery {
+        sql: RPC_CONTRACT_CATALOG_SQL,
+        params: vec![
+            Some(encode_pg_text_array(allowed_rpc_names)),
+            Some(
+                rpc_contract_catalog_row_limit(allowed_rpc_names.len())
+                    .to_string()
+                    .into_bytes(),
             ),
-            Expr::Named(
-                "COALESCE(to_jsonb(COALESCE(p.proargmodes, ARRAY[]::\"char\"[])), '[]'::jsonb)::text AS arg_modes_json".to_string(),
-            ),
-            Expr::Named(
-                "COALESCE((SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_types_json".to_string(),
-            ),
-            Expr::Named(
-                "pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args"
-                    .to_string(),
-            ),
-            Expr::Named("pg_catalog.pg_get_function_result(p.oid) AS result_type".to_string()),
-        ])
-        .inner_join("pg_catalog.pg_namespace n", "n.oid", "p.pronamespace")
-        .eq("p.prokind", "f")
-        .filter(
-            "n.nspname",
-            Operator::NotIn,
-            AstValue::Array(vec![
-                AstValue::String("pg_catalog".to_string()),
-                AstValue::String("information_schema".to_string()),
-            ]),
-        )
-        .filter(
-            "LOWER(n.nspname || '.' || p.proname)",
-            Operator::In,
-            AstValue::Array(allowed_values),
-        )
-        .order_asc("n.nspname")
-        .order_asc("p.proname")
-        .order_asc("p.oid")
-        .limit(rpc_contract_catalog_row_limit(allowed_rpc_names.len()))
+        ],
+    }
 }
 
 fn required_non_negative_usize(
@@ -266,10 +281,9 @@ pub(crate) async fn rpc_contracts_handler(
 
     let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
-    let mut cmd = rpc_contract_catalog_cmd(&allowed_rpc_names);
-    state.optimize_qail_for_execution(&mut cmd);
+    let query = rpc_contract_catalog_query(&allowed_rpc_names);
     let rows = conn
-        .fetch_all_uncached(&cmd)
+        .query_rows_with_params(query.sql, &query.params)
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, None));
     conn.release().await;
@@ -292,11 +306,10 @@ pub(crate) async fn rpc_contracts_handler(
 mod tests {
     use super::{
         callable_rpc_allow_list_key, normalize_contract_arg_types, rpc_contract_allow_list_names,
-        rpc_contract_catalog_cmd, rpc_contract_catalog_row_limit, rpc_contract_from_row,
+        rpc_contract_catalog_query, rpc_contract_catalog_row_limit, rpc_contract_from_row,
     };
     use crate::middleware::ApiError;
     use crate::rest::handlers::minimum_required_rpc_args;
-    use qail_core::ast::{CageKind, Operator, Value as AstValue};
     use qail_pg::PgRow;
     use std::collections::HashSet;
 
@@ -424,27 +437,23 @@ mod tests {
     }
 
     #[test]
-    fn rpc_contract_catalog_cmd_filters_to_allow_list_before_row_cap() {
-        let cmd = rpc_contract_catalog_cmd(&[
+    fn rpc_contract_catalog_query_filters_to_allow_list_before_row_cap() {
+        let query = rpc_contract_catalog_query(&[
             "api.search_orders".to_string(),
             "public.reprice".to_string(),
         ]);
 
-        let allow_list_filter = cmd
-            .cages
-            .iter()
-            .filter(|cage| matches!(cage.kind, CageKind::Filter))
-            .flat_map(|cage| cage.conditions.iter())
-            .find(|condition| condition.left.to_string() == "LOWER(n.nspname || '.' || p.proname)")
-            .expect("catalog query should constrain functions to the allow-list");
-        assert_eq!(allow_list_filter.op, Operator::In);
         assert_eq!(
-            allow_list_filter.value,
-            AstValue::Array(vec![
-                AstValue::String("api.search_orders".to_string()),
-                AstValue::String("public.reprice".to_string())
-            ])
+            query.params[0].as_deref(),
+            Some(br#"{"api.search_orders","public.reprice"}"#.as_slice())
         );
+        assert_eq!(query.params[1].as_deref(), Some(b"5000".as_slice()));
+        assert!(
+            query
+                .sql
+                .contains("LOWER(n.nspname::text || '.' || p.proname::text) = ANY($1::text[])")
+        );
+        assert!(query.sql.contains("LIMIT $2::int8"));
     }
 
     #[test]

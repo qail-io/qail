@@ -354,6 +354,9 @@ impl PgConnection {
             result_format,
         )
         .map_err(|e| PgError::Encode(e.to_string()))?;
+        let describe_msg =
+            PgEncoder::try_encode_describe(true, "").map_err(|e| PgError::Encode(e.to_string()))?;
+        self.write_buf.extend_from_slice(&describe_msg);
         PgEncoder::encode_execute_to(&mut self.write_buf);
         PgEncoder::encode_sync_to(&mut self.write_buf);
         self.flush_write_buf().await?;
@@ -361,7 +364,8 @@ impl PgConnection {
         let mut rows: Vec<super::PgRow> = Vec::new();
         let mut column_info: Option<Arc<super::ColumnInfo>> = None;
         let mut error: Option<PgError> = None;
-        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
+        let mut flow =
+            ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_describe_portal_execute());
 
         loop {
             let msg = self.recv().await?;

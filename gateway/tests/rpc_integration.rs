@@ -9,7 +9,7 @@
 //!
 //! Run:
 //!   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/postgres" \
-//!     cargo test -p qail-gateway --test rpc_integration -- --nocapture
+//!     cargo test -p qail-gateway --features legacy-raw-tests --test rpc_integration -- --nocapture
 //!
 //! These tests use a dedicated `qail_test` schema, isolated from application
 //! tables. The schema is dropped and recreated at the start of each test
@@ -18,7 +18,6 @@
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use qail_core::ast::Qail;
 use qail_gateway::{GatewayConfig, GatewayState, create_router};
 use qail_pg::{PgConnection, PgPool, PoolConfig, ResultFormat};
 use serde_json::Value;
@@ -38,10 +37,8 @@ fn has_database_url() -> bool {
 
 /// Connect to the database specified by DATABASE_URL.
 /// Panics if the env var is set but connection fails.
-async fn connect() -> qail_pg::PgDriver {
-    qail_pg::PgDriver::connect_env()
-        .await
-        .expect("PG connection")
+async fn connect() -> PgConnection {
+    connect_sql().await
 }
 
 async fn connect_sql() -> PgConnection {
@@ -132,7 +129,20 @@ impl Drop for EnvGuard {
     }
 }
 
+fn init_test_tracing() {
+    static TRACING_INIT: Once = Once::new();
+    TRACING_INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 async fn build_rpc_router(allowlist: &[&str]) -> axum::Router {
+    init_test_tracing();
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = PgPool::connect(pool_config_from_database_url(&database_url))
         .await
@@ -141,6 +151,7 @@ async fn build_rpc_router(allowlist: &[&str]) -> axum::Router {
     let config = GatewayConfig {
         production_strict: false,
         require_auth: false,
+        bind_address: "127.0.0.1:0".to_string(),
         database_url,
         rpc_allowlist_path: Some(allowlist_path.to_string_lossy().into_owned()),
         ..GatewayConfig::default()
@@ -273,12 +284,10 @@ async fn ensure_schema() {
 }
 
 /// Execute a raw SQL query and return JSON rows using gateway's row_to_json.
-async fn query_json(pg: &mut qail_pg::PgDriver, sql: &str, format: ResultFormat) -> Vec<Value> {
+async fn query_json(pg: &mut PgConnection, sql: &str, format: ResultFormat) -> Vec<Value> {
     let trimmed = sql.trim().trim_end_matches(';');
-    let wrapped = format!("({}) qail_rpc_test_subq", trimmed);
-    let cmd = Qail::get(wrapped);
     let rows = pg
-        .fetch_all_uncached_with_format(&cmd, format)
+        .query_rows_with_result_format(trimmed, &[], result_format_wire_code(format))
         .await
         .unwrap_or_else(|e| panic!("query failed: {}\nSQL: {}", e, sql));
     rows.iter()
@@ -286,11 +295,18 @@ async fn query_json(pg: &mut qail_pg::PgDriver, sql: &str, format: ResultFormat)
         .collect()
 }
 
-async fn query_text(pg: &mut qail_pg::PgDriver, sql: &str) -> Vec<Value> {
+fn result_format_wire_code(format: ResultFormat) -> i16 {
+    match format {
+        ResultFormat::Text => 0,
+        ResultFormat::Binary => 1,
+    }
+}
+
+async fn query_text(pg: &mut PgConnection, sql: &str) -> Vec<Value> {
     query_json(pg, sql, ResultFormat::Text).await
 }
 
-async fn query_binary(pg: &mut qail_pg::PgDriver, sql: &str) -> Vec<Value> {
+async fn query_binary(pg: &mut PgConnection, sql: &str) -> Vec<Value> {
     query_json(pg, sql, ResultFormat::Binary).await
 }
 
@@ -764,15 +780,16 @@ async fn rpc_route_variadic_empty_object_executes_without_required_arg_error() {
                 .uri("/api/rpc/qail_test.sum_all")
                 .header("content-type", "application/json")
                 .header("x-user-id", "rpc-user")
-                .header("x-user-role", "operator")
+                .header("x-user-role", "administrator")
                 .body(Body::from("{}"))
                 .expect("request"),
         )
         .await
         .expect("router response");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "response body: {}", body);
     assert_eq!(body["data"][0]["sum_all"], 0);
 }
 
@@ -791,14 +808,20 @@ async fn rpc_route_custom_enum_and_domain_use_typed_probe_fallback() {
                 .uri("/api/rpc/qail_test.echo_priority")
                 .header("content-type", "application/json")
                 .header("x-user-id", "rpc-user")
-                .header("x-user-role", "operator")
+                .header("x-user-role", "administrator")
                 .body(Body::from(r#""high""#))
                 .expect("enum request"),
         )
         .await
         .expect("enum response");
-    assert_eq!(enum_response.status(), StatusCode::OK);
+    let enum_status = enum_response.status();
     let enum_body = response_json(enum_response).await;
+    assert_eq!(
+        enum_status,
+        StatusCode::OK,
+        "enum response body: {}",
+        enum_body
+    );
     assert_eq!(enum_body["data"][0]["echo_priority"], "high");
 
     let domain_app = build_rpc_router(&["qail_test.echo_short"]).await;
@@ -809,14 +832,20 @@ async fn rpc_route_custom_enum_and_domain_use_typed_probe_fallback() {
                 .uri("/api/rpc/qail_test.echo_short")
                 .header("content-type", "application/json")
                 .header("x-user-id", "rpc-user")
-                .header("x-user-role", "operator")
+                .header("x-user-role", "administrator")
                 .body(Body::from(r#""hello""#))
                 .expect("domain request"),
         )
         .await
         .expect("domain response");
-    assert_eq!(domain_response.status(), StatusCode::OK);
+    let domain_status = domain_response.status();
     let domain_body = response_json(domain_response).await;
+    assert_eq!(
+        domain_status,
+        StatusCode::OK,
+        "domain response body: {}",
+        domain_body
+    );
     assert_eq!(domain_body["data"][0]["echo_short"], "hello");
 }
 
@@ -841,8 +870,9 @@ async fn rpc_contracts_route_marks_variadic_tail_optional() {
         .await
         .expect("router response");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "response body: {}", body);
     let functions = body["functions"].as_array().expect("functions array");
     let sum_all = functions
         .iter()
