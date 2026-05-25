@@ -1049,7 +1049,7 @@ pub(super) fn enforce_contract_safety(
     let mut hits = Vec::<String>::new();
     for r in refs {
         let table = r.table.to_ascii_lowercase();
-        if drop_table_set.contains(&table) {
+        if dropped_table_matches(&drop_table_set, &table) {
             let kind = if matches!(r.query_type, QueryType::RawSql) {
                 "RAW SQL"
             } else {
@@ -1067,8 +1067,8 @@ pub(super) fn enforce_contract_safety(
         }
         for col in &r.columns {
             let normalized_col = col.trim_matches('"').to_ascii_lowercase();
-            if drop_col_set.contains(&(table.clone(), normalized_col.clone()))
-                || (col == "*" && drop_col_set.iter().any(|(t, _)| t == &table))
+            if dropped_column_matches(&drop_col_set, &table, &normalized_col)
+                || (col == "*" && dropped_table_has_any_column(&drop_col_set, &table))
             {
                 let kind = if matches!(r.query_type, QueryType::RawSql) {
                     "RAW SQL"
@@ -1111,4 +1111,34 @@ pub(super) fn enforce_contract_safety(
         migration_name,
         sample
     );
+}
+
+fn dropped_table_matches(drop_table_set: &std::collections::HashSet<String>, table: &str) -> bool {
+    drop_table_set.contains(table)
+        || table
+            .rsplit_once('.')
+            .is_some_and(|(_, bare)| drop_table_set.contains(bare))
+}
+
+fn dropped_column_matches(
+    drop_col_set: &std::collections::HashSet<(String, String)>,
+    table: &str,
+    column: &str,
+) -> bool {
+    drop_col_set.contains(&(table.to_string(), column.to_string()))
+        || table
+            .rsplit_once('.')
+            .is_some_and(|(_, bare)| drop_col_set.contains(&(bare.to_string(), column.to_string())))
+}
+
+fn dropped_table_has_any_column(
+    drop_col_set: &std::collections::HashSet<(String, String)>,
+    table: &str,
+) -> bool {
+    drop_col_set.iter().any(|(dropped_table, _)| {
+        dropped_table == table
+            || table
+                .rsplit_once('.')
+                .is_some_and(|(_, bare)| dropped_table == bare)
+    })
 }

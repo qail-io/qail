@@ -2,7 +2,9 @@
 
 #[cfg(test)]
 mod suite {
-    use super::super::backfill::{parse_backfill_spec, split_schema_table};
+    use super::super::backfill::{
+        enforce_contract_safety, parse_backfill_spec, split_schema_table,
+    };
     use super::super::codegen::{
         commands_to_sql, parse_qail_to_commands_strict, parse_qail_to_sql,
     };
@@ -701,6 +703,38 @@ function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END;
         let (tables, columns) = parse_drop_targets(sql);
         assert_eq!(tables, vec!["real_drop".to_string()]);
         assert!(columns.is_empty());
+    }
+
+    #[test]
+    fn test_contract_safety_matches_schema_qualified_qail_refs() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "qail_contract_schema_ref_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&root).expect("create temp codebase dir");
+        fs::write(
+            root.join("app.ts"),
+            r#"const q = "get app.users fields old_email";"#,
+        )
+        .expect("write code reference");
+
+        let err = enforce_contract_safety(
+            "contract_drop_email",
+            "ALTER TABLE app.users DROP COLUMN old_email;",
+            Some(root.to_str().expect("temp path utf8")),
+            false,
+        )
+        .expect_err("schema-qualified QAIL refs should block contract drop");
+
+        let _ = fs::remove_dir_all(&root);
+        let msg = err.to_string();
+        assert!(msg.contains("old_email"), "got: {msg}");
+        assert!(msg.contains("app.users"), "got: {msg}");
     }
 
     #[test]
