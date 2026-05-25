@@ -330,6 +330,14 @@ fn ssrf_rejects_non_global_special_ipv4_ranges() {
 }
 
 #[test]
+fn ssrf_rejects_legacy_numeric_ipv4_spellings() {
+    assert!(validate_webhook_url("http://2130706433/hook").is_err());
+    assert!(validate_webhook_url("http://0177.0.0.1/hook").is_err());
+    assert!(validate_webhook_url("http://0x7f.0.0.1/hook").is_err());
+    assert!(validate_webhook_url("http://127.1/hook").is_err());
+}
+
+#[test]
 fn ssrf_rejects_ipv6_documentation_and_multicast() {
     assert!(validate_webhook_url("http://[2001:db8::1]/hook").is_err());
     assert!(validate_webhook_url("http://[ff02::1]/hook").is_err());

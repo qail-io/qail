@@ -52,9 +52,13 @@ pub(super) fn validate_webhook_url(url: &str) -> Result<(), String> {
         }
     }
 
-    // Reject private and link-local IPs
+    // Reject private and link-local IPs. Also reject legacy numeric IPv4
+    // spellings that some system resolvers still interpret as addresses
+    // (for example 2130706433 or 0177.0.0.1 for loopback).
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         reject_private_ip(ip)?;
+    } else if looks_like_legacy_ipv4_literal(host) {
+        return Err(format!("Ambiguous numeric IPv4 host rejected: {}", host));
     }
 
     // Also check when url::Url parsed it as a bracketed IPv6 (e.g., [::ffff:127.0.0.1])
@@ -71,6 +75,21 @@ pub(super) fn validate_webhook_url(url: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn looks_like_legacy_ipv4_literal(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    (1..=4).contains(&labels.len())
+        && labels.iter().all(|label| {
+            if let Some(hex) = label
+                .strip_prefix("0x")
+                .or_else(|| label.strip_prefix("0X"))
+            {
+                !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
+            } else {
+                !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit())
+            }
+        })
 }
 
 /// Reject private, loopback, link-local, and cloud metadata IPs.
