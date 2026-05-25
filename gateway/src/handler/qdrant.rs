@@ -48,6 +48,9 @@ pub(super) async fn execute_qdrant_cmd(
     let (must_conditions, should_groups) = split_filter_conditions(&cmd);
     ensure_qdrant_conditions_finite(&must_conditions)?;
     ensure_qdrant_condition_groups_finite(&should_groups)?;
+    if matches!(cmd.action, Action::Search | Action::Scroll) {
+        validate_qdrant_read_filters(&must_conditions, &should_groups)?;
+    }
 
     // Extract limit from CageKind::Limit if present
     let limit_val = qdrant_limit_from_cmd(&cmd, state.config.max_result_rows)?;
@@ -779,6 +782,63 @@ fn ensure_qdrant_condition_groups_finite(
     Ok(())
 }
 
+fn validate_qdrant_read_filters(
+    conditions: &[qail_core::ast::Condition],
+    groups: &[Vec<qail_core::ast::Condition>],
+) -> Result<(), ApiError> {
+    for condition in conditions {
+        validate_qdrant_read_filter_condition(condition)?;
+    }
+    for group in groups {
+        for condition in group {
+            validate_qdrant_read_filter_condition(condition)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_qdrant_read_filter_condition(
+    condition: &qail_core::ast::Condition,
+) -> Result<(), ApiError> {
+    use qail_core::ast::{Expr, Operator, Value};
+
+    let field = match &condition.left {
+        Expr::Named(name) | Expr::Aliased { name, .. } => name.as_str(),
+        other => {
+            return Err(ApiError::bad_request(
+                "INVALID_QDRANT_FILTER",
+                format!("Qdrant read filters require named payload fields, got {other:?}"),
+            ));
+        }
+    };
+
+    if field.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "INVALID_QDRANT_FILTER",
+            "Qdrant read filter field cannot be empty",
+        ));
+    }
+
+    match (&condition.op, &condition.value) {
+        (Operator::Eq, Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_)) => {
+            Ok(())
+        }
+        (
+            Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte,
+            Value::Int(_) | Value::Float(_),
+        ) => Ok(()),
+        (Operator::Contains | Operator::Like, Value::String(_)) => Ok(()),
+        (Operator::IsNull, Value::Null) => Ok(()),
+        _ => Err(ApiError::bad_request(
+            "INVALID_QDRANT_FILTER",
+            format!(
+                "Qdrant read filter is not supported by the Qdrant transport: op={:?}, value={:?}",
+                condition.op, condition.value
+            ),
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QdrantUpsertFilterTarget<'a> {
     Id,
@@ -1358,7 +1418,7 @@ mod tests {
         qdrant_limit_from_cmd, qdrant_payload_matches_filter_cages, qdrant_point_id_to_json,
         qdrant_request_filter_cages, qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata,
         qdrant_scroll_offset_from_cmd, qdrant_upsert_filter_cages, scored_point_to_json,
-        split_filter_conditions, tenant_scoped_qdrant_point_id,
+        split_filter_conditions, tenant_scoped_qdrant_point_id, validate_qdrant_read_filters,
         verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
@@ -1865,6 +1925,76 @@ mod tests {
         }];
         let err = ensure_qdrant_conditions_finite(&conditions).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_read_filters_accept_encoder_supported_matrix() {
+        let conditions = vec![
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Eq,
+                value: Value::String("open".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("priority".to_string()),
+                op: Operator::Gte,
+                value: Value::Int(3),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("summary".to_string()),
+                op: Operator::Contains,
+                value: Value::String("refund".to_string()),
+                is_array_unnest: false,
+            },
+        ];
+        let groups = vec![vec![
+            Condition {
+                left: Expr::Named("archived".to_string()),
+                op: Operator::Eq,
+                value: Value::Bool(false),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("deleted_at".to_string()),
+                op: Operator::IsNull,
+                value: Value::Null,
+                is_array_unnest: false,
+            },
+        ]];
+
+        validate_qdrant_read_filters(&conditions, &groups).unwrap();
+    }
+
+    #[test]
+    fn qdrant_read_filters_reject_unsupported_in_before_driver() {
+        let conditions = vec![Condition {
+            left: Expr::Named("status".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![Value::String("open".to_string())]),
+            is_array_unnest: false,
+        }];
+
+        let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+    }
+
+    #[test]
+    fn qdrant_read_filters_reject_is_not_null_until_transport_supports_it() {
+        let conditions = vec![Condition {
+            left: Expr::Named("deleted_at".to_string()),
+            op: Operator::IsNotNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        }];
+
+        let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_FILTER");
     }
 
     #[test]
