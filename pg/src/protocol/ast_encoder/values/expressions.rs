@@ -1043,7 +1043,7 @@ pub fn encode_value(
                 if i > 0 {
                     arr_buf.push(b',');
                 }
-                write_value_to_array(&mut arr_buf, v);
+                write_value_to_array(&mut arr_buf, v)?;
             }
             arr_buf.push(b'}');
             params.push(Some(arr_buf));
@@ -1120,8 +1120,13 @@ pub fn encode_value(
     Ok(())
 }
 
-/// Write a Value as a literal into an array buffer.
-pub fn write_value_to_array(buf: &mut Vec<u8>, value: &Value) {
+/// Write a scalar data value into a PostgreSQL array text parameter.
+pub fn write_value_to_array(
+    buf: &mut Vec<u8>,
+    value: &Value,
+) -> Result<(), crate::protocol::EncodeError> {
+    use crate::protocol::EncodeError;
+
     match value {
         Value::Int(n) => {
             if (0..100).contains(n) {
@@ -1130,22 +1135,58 @@ pub fn write_value_to_array(buf: &mut Vec<u8>, value: &Value) {
                 buf.extend_from_slice(n.to_string().as_bytes());
             }
         }
-        Value::String(s) => {
-            buf.push(b'"');
-            for byte in s.bytes() {
-                if byte == b'"' {
-                    buf.push(b'\\');
-                }
-                buf.push(byte);
-            }
-            buf.push(b'"');
+        Value::String(s) | Value::Timestamp(s) | Value::Json(s) => {
+            write_quoted_array_element(buf, s)?
         }
         Value::Bool(b) => buf.extend_from_slice(if *b { b"t" } else { b"f" }),
-        Value::Null => buf.extend_from_slice(b"NULL"),
+        Value::Null | Value::NullUuid => buf.extend_from_slice(b"NULL"),
         Value::Float(f) => buf.extend_from_slice(f.to_string().as_bytes()),
         Value::Uuid(uuid) => buf.extend_from_slice(uuid.to_string().as_bytes()),
-        _ => buf.extend_from_slice(value.to_string().as_bytes()),
+        Value::Interval { amount, unit } => {
+            write_quoted_array_element(buf, &format!("{amount} {unit}"))?;
+        }
+        Value::Param(n) => {
+            return Err(EncodeError::InvalidAst(format!(
+                "unresolved positional parameter ${n} cannot be encoded inside array data"
+            )));
+        }
+        Value::NamedParam(name) => {
+            return Err(EncodeError::InvalidAst(format!(
+                "unresolved named parameter :{name} cannot be encoded inside array data"
+            )));
+        }
+        Value::Function(_)
+        | Value::Array(_)
+        | Value::Subquery(_)
+        | Value::Column(_)
+        | Value::Bytes(_)
+        | Value::Expr(_)
+        | Value::Vector(_) => {
+            return Err(EncodeError::InvalidAst(format!(
+                "unsupported array element value: {value:?}"
+            )));
+        }
     }
+    Ok(())
+}
+
+fn write_quoted_array_element(
+    buf: &mut Vec<u8>,
+    value: &str,
+) -> Result<(), crate::protocol::EncodeError> {
+    if value.as_bytes().contains(&0) {
+        return Err(crate::protocol::EncodeError::NullByte);
+    }
+
+    buf.push(b'"');
+    for byte in value.bytes() {
+        if byte == b'"' || byte == b'\\' {
+            buf.push(b'\\');
+        }
+        buf.push(byte);
+    }
+    buf.push(b'"');
+    Ok(())
 }
 
 /// Encode window frame (ROWS/RANGE BETWEEN ... AND ...)
@@ -1205,6 +1246,46 @@ mod tests {
             params[0].as_deref(),
             Some(b"{b0e72b4f-c883-42ce-a5a9-96de097d6c54}".as_slice())
         );
+    }
+
+    #[test]
+    fn encode_array_string_parameter_escapes_backslashes_and_quotes() {
+        let value = Value::Array(vec![Value::String("a\\b\"c".to_string())]);
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        encode_value(&value, &mut sql, &mut params).unwrap();
+
+        assert_eq!(sql.as_ref(), b"$1");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].as_deref(), Some(br#"{"a\\b\"c"}"#.as_slice()));
+    }
+
+    #[test]
+    fn encode_array_string_parameter_rejects_null_bytes() {
+        let value = Value::Array(vec![Value::String("bad\0value".to_string())]);
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        let err = encode_value(&value, &mut sql, &mut params).unwrap_err();
+
+        assert_eq!(err, crate::protocol::EncodeError::NullByte);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn encode_array_parameter_rejects_expression_only_values() {
+        let value = Value::Array(vec![Value::NamedParam("tenant_id".to_string())]);
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        let err = encode_value(&value, &mut sql, &mut params).unwrap_err();
+
+        assert!(
+            matches!(err, crate::protocol::EncodeError::InvalidAst(ref message) if message.contains("unresolved named parameter :tenant_id")),
+            "{err}"
+        );
+        assert!(params.is_empty());
     }
 
     #[test]
