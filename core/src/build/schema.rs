@@ -1039,27 +1039,13 @@ impl Schema {
                 }
             }
 
-            // ALTER TABLE ... DROP COLUMN
-            if line_upper.starts_with("ALTER TABLE")
-                && line_upper.contains("DROP COLUMN")
-                && let Some((table, col)) = extract_alter_drop_column(line)
-                && let Some(t) = self.tables.get_mut(&table)
-                && t.columns.remove(&col).is_some()
-            {
-                changes += 1;
-            }
-
-            // ALTER TABLE ... DROP (without COLUMN keyword - PostgreSQL style)
-            if line_upper.starts_with("ALTER TABLE")
-                && line_upper.contains(" DROP ")
-                && !line_upper.contains("DROP COLUMN")
-                && !line_upper.contains("DROP CONSTRAINT")
-                && !line_upper.contains("DROP INDEX")
-                && let Some((table, col)) = extract_alter_drop(line)
-                && let Some(t) = self.tables.get_mut(&table)
-                && t.columns.remove(&col).is_some()
-            {
-                changes += 1;
+            // ALTER TABLE ... DROP [COLUMN] ...
+            for (table, col) in extract_alter_drop_columns(line) {
+                if let Some(t) = self.tables.get_mut(&table)
+                    && t.columns.remove(&col).is_some()
+                {
+                    changes += 1;
+                }
             }
 
             // ALTER TABLE ... RENAME COLUMN old TO new
@@ -1796,42 +1782,49 @@ fn extract_drop_table_names(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Extract table and column from ALTER TABLE ... DROP COLUMN
-fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
+/// Extract table and columns from ALTER TABLE ... DROP [COLUMN] actions.
+fn extract_alter_drop_columns(line: &str) -> Vec<(String, String)> {
     let line_upper = line.to_uppercase();
-    let alter_pos = line_upper.find("ALTER TABLE")?;
-    let drop_pos = line_upper.find("DROP COLUMN")?;
-
-    // Table name between ALTER TABLE and DROP COLUMN
-    let table_part = &line[alter_pos + 11..drop_pos];
-    let table = extract_alter_table_ref(table_part)?;
-
-    // Column name after DROP COLUMN
-    let mut col_part = &line[drop_pos + 11..];
-    if let Some(stripped) = strip_sql_if_exists(col_part) {
-        col_part = stripped;
+    if !line_upper.starts_with("ALTER TABLE") {
+        return Vec::new();
     }
-    let col = extract_sql_column_ref(col_part.trim())?;
+    let Some(alter_pos) = line_upper.find("ALTER TABLE") else {
+        return Vec::new();
+    };
+    let drop_column_pos = line_upper.find("DROP COLUMN");
+    let drop_pos = line_upper.find(" DROP ").map(|pos| pos + 1);
+    let Some(action_pos) = [drop_column_pos, drop_pos].into_iter().flatten().min() else {
+        return Vec::new();
+    };
 
-    Some((table, col))
+    let table_part = &line[alter_pos + 11..action_pos];
+    let Some(table) = extract_alter_table_ref(table_part) else {
+        return Vec::new();
+    };
+    let actions_part = &line[action_pos..];
+
+    split_sql_top_level_csv(actions_part)
+        .into_iter()
+        .filter_map(|action| {
+            extract_alter_drop_column_action(action).map(|col| (table.clone(), col))
+        })
+        .collect()
 }
 
-/// Extract table and column from ALTER TABLE ... DROP (without COLUMN keyword)
-fn extract_alter_drop(line: &str) -> Option<(String, String)> {
-    let line_upper = line.to_uppercase();
-    let alter_pos = line_upper.find("ALTER TABLE")?;
-    let drop_pos = line_upper.find(" DROP ")?;
+fn extract_alter_drop_column_action(action: &str) -> Option<String> {
+    let mut col_part = strip_sql_keyword(action, "DROP")?;
+    col_part = strip_sql_keyword(col_part, "COLUMN").unwrap_or(col_part);
+    col_part = strip_sql_if_exists(col_part).unwrap_or(col_part);
 
-    let table_part = &line[alter_pos + 11..drop_pos];
-    let table = extract_alter_table_ref(table_part)?;
-
-    let mut col_part = &line[drop_pos + 6..];
-    if let Some(stripped) = strip_sql_if_exists(col_part) {
-        col_part = stripped;
+    let col_upper = col_part.trim_start().to_uppercase();
+    if ["CONSTRAINT", "INDEX"].iter().any(|keyword| {
+        col_upper.starts_with(keyword)
+            && col_upper[keyword.len()..].starts_with(char::is_whitespace)
+    }) {
+        return None;
     }
-    let col = extract_sql_column_ref(col_part.trim())?;
 
-    Some((table, col))
+    extract_sql_column_ref(col_part.trim())
 }
 
 fn extract_alter_rename_column(line: &str) -> Option<(String, String, String)> {
@@ -2354,5 +2347,21 @@ ALTER TABLE users ADD COLUMN email text, ADD IF NOT EXISTS name text;
         let users = schema.table("users").expect("users table should parse");
         assert!(users.has_column("email"));
         assert!(users.has_column("name"));
+    }
+
+    #[test]
+    fn sql_migration_handles_multiple_alter_drop_actions() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid, old_email text, old_name text);
+ALTER TABLE users DROP COLUMN old_email, DROP IF EXISTS old_name;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(!users.has_column("old_email"));
+        assert!(!users.has_column("old_name"));
     }
 }
