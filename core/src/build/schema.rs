@@ -963,11 +963,12 @@ impl Schema {
             }
 
             // DROP TABLE
-            if line_upper.starts_with("DROP TABLE")
-                && let Some(table_name) = extract_drop_table_name(line)
-                && self.tables.remove(&table_name).is_some()
-            {
-                changes += 1;
+            if line_upper.starts_with("DROP TABLE") {
+                for table_name in extract_drop_table_names(line) {
+                    if self.tables.remove(&table_name).is_some() {
+                        changes += 1;
+                    }
+                }
             }
 
             // ALTER TABLE ... DROP COLUMN
@@ -1603,18 +1604,26 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     }
 }
 
-/// Extract table name from DROP TABLE statement
-fn extract_drop_table_name(line: &str) -> Option<String> {
+/// Extract table names from DROP TABLE statement
+fn extract_drop_table_names(line: &str) -> Vec<String> {
     let line_upper = line.to_uppercase();
-    let rest = line_upper.strip_prefix("DROP TABLE")?;
+    let Some(rest) = line_upper.strip_prefix("DROP TABLE") else {
+        return Vec::new();
+    };
     let rest = rest.trim_start();
     let rest = if rest.starts_with("IF EXISTS") {
-        rest.strip_prefix("IF EXISTS")?.trim_start()
+        match rest.strip_prefix("IF EXISTS") {
+            Some(rest) => rest.trim_start(),
+            None => return Vec::new(),
+        }
     } else {
         rest
     };
 
-    extract_sql_table_ref(&line[line.len() - rest.len()..])
+    split_sql_top_level_csv(&line[line.len() - rest.len()..])
+        .into_iter()
+        .filter_map(extract_sql_table_ref)
+        .collect()
 }
 
 /// Extract table and column from ALTER TABLE ... DROP COLUMN
@@ -1812,5 +1821,20 @@ ALTER TABLE app.users ADD COLUMN email text;
         assert!(users.has_column("id"));
         assert!(users.has_column("email"));
         assert!(!users.has_column("check"));
+    }
+
+    #[test]
+    fn sql_migration_drops_multiple_tables() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE app.users (id uuid);
+CREATE TABLE app.posts (id uuid);
+DROP TABLE IF EXISTS app.users, app.posts CASCADE;
+"#,
+        );
+
+        assert!(!schema.has_table("app.users"));
+        assert!(!schema.has_table("app.posts"));
     }
 }
