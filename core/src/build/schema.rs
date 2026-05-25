@@ -1593,6 +1593,20 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     let table = extract_sql_table_ref(table_part)?;
 
     let col_part = &line[add_pos + 5..];
+    let col_upper = col_part.trim_start().to_uppercase();
+    if [
+        "CONSTRAINT",
+        "PRIMARY",
+        "UNIQUE",
+        "CHECK",
+        "FOREIGN",
+        "EXCLUDE",
+    ]
+    .iter()
+    .any(|keyword| col_upper.starts_with(keyword))
+    {
+        return None;
+    }
     let col: String = col_part
         .trim()
         .chars()
@@ -1859,5 +1873,23 @@ CREATE TABLE bookings (
         assert!(bookings.has_column("id"));
         assert!(!bookings.has_column("exclude"));
         assert!(!bookings.has_column("like"));
+    }
+
+    #[test]
+    fn sql_migration_ignores_alter_add_constraints() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid, email text);
+ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
+ALTER TABLE users ADD PRIMARY KEY (id);
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
+        assert!(!users.has_column("constraint"));
+        assert!(!users.has_column("primary"));
     }
 }
