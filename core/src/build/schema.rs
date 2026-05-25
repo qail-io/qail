@@ -72,11 +72,15 @@ fn strip_sql_line_comments(line: &str) -> &str {
     line[..idx].trim()
 }
 
-fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> String {
+fn strip_sql_migration_comments(
+    line: &str,
+    in_block_comment: &mut bool,
+    dollar_quote: &mut Option<String>,
+) -> String {
     let mut out = String::new();
     let mut in_single = false;
     let mut in_double = false;
-    let mut dollar_quote: Option<String> = None;
+    let mut suppress_dollar_content = dollar_quote.is_some();
     let mut i = 0usize;
 
     while i < line.len() {
@@ -92,11 +96,16 @@ fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> Stri
 
         if let Some(delim) = dollar_quote.as_deref() {
             if line[i..].starts_with(delim) {
-                out.push_str(delim);
+                if !suppress_dollar_content {
+                    out.push_str(delim);
+                }
                 i += delim.len();
-                dollar_quote = None;
+                *dollar_quote = None;
+                suppress_dollar_content = false;
             } else if let Some(ch) = line[i..].chars().next() {
-                out.push(ch);
+                if !suppress_dollar_content {
+                    out.push(ch);
+                }
                 i += ch.len_utf8();
             }
             continue;
@@ -153,7 +162,7 @@ fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> Stri
                 let delim = sql_dollar_quote_delimiter_at(line, i).expect("delimiter checked");
                 out.push_str(delim);
                 i += delim.len();
-                dollar_quote = Some(delim.to_string());
+                *dollar_quote = Some(delim.to_string());
             }
             '-' if line[i + ch.len_utf8()..].starts_with('-') => break,
             '/' if line[i + ch.len_utf8()..].starts_with('*') => {
@@ -900,8 +909,10 @@ impl Schema {
         // Extract CREATE TABLE statements
         // Pattern: CREATE TABLE [IF NOT EXISTS] table_name (columns...)
         let mut in_block_comment = false;
+        let mut dollar_quote = None;
         for raw_line in sql.lines() {
-            let line = strip_sql_migration_comments(raw_line, &mut in_block_comment);
+            let line =
+                strip_sql_migration_comments(raw_line, &mut in_block_comment, &mut dollar_quote);
             let line = line.as_str();
             if line.is_empty()
                 || line.starts_with("/*")
@@ -939,9 +950,11 @@ impl Schema {
         let mut in_create_block = false;
         let mut paren_depth = 0;
         let mut in_block_comment = false;
+        let mut dollar_quote = None;
 
         for raw_line in sql.lines() {
-            let line = strip_sql_migration_comments(raw_line, &mut in_block_comment);
+            let line =
+                strip_sql_migration_comments(raw_line, &mut in_block_comment, &mut dollar_quote);
             let line = line.as_str();
             if line.is_empty()
                 || line.starts_with("/*")
@@ -2129,5 +2142,23 @@ CREATE TABLE logs (id uuid, body text DEFAULT $$a,b)--not-comment$$, tag text);
         assert!(logs.has_column("tag"));
         assert!(!logs.has_column("b"));
         assert!(!logs.has_column("not"));
+    }
+
+    #[test]
+    fn sql_migration_ignores_multiline_dollar_quoted_bodies() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid);
+CREATE FUNCTION rebuild_hidden() RETURNS void AS $$
+BEGIN
+  CREATE TABLE hidden_from_function (id uuid);
+END;
+$$ LANGUAGE plpgsql;
+"#,
+        );
+
+        assert!(schema.has_table("users"));
+        assert!(!schema.has_table("hidden_from_function"));
     }
 }
