@@ -19,6 +19,30 @@ fn push_identifier_ref(buf: &mut BytesMut, ident: &str, allow_star: bool) {
     }
 }
 
+fn encode_text_search_vector(
+    expr: &Expr,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    super::super::dml::validate_text_search_columns("text search column", expr)?;
+
+    let Expr::Named(columns) = expr else {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "text search left side must be a comma-separated identifier list".to_string(),
+        ));
+    };
+
+    for (i, raw_column) in columns.split(',').enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b" || ' ' || ");
+        }
+        buf.extend_from_slice(b"coalesce(");
+        push_identifier_ref(buf, raw_column.trim(), false);
+        buf.extend_from_slice(b",'')");
+    }
+
+    Ok(())
+}
+
 fn encode_json_path_segment(
     key: &str,
     buf: &mut BytesMut,
@@ -1003,28 +1027,14 @@ pub fn encode_conditions(
                 // Full-text search: to_tsvector('english', coalesce(col1,'') || ' ' || coalesce(col2,'')) @@ websearch_to_tsquery('english', $N)
                 // The left expression contains comma-separated column names
                 // We need to rewrite the entire condition
-                let col_str = cond.left.to_string();
-                let cols: Vec<&str> = col_str.split(',').map(|s| s.trim()).collect();
-
-                // Clear what was already written for the left side
-                // We need to truncate back to before encode_expr wrote the left side
-                // Instead, we'll handle this specially by computing the full expression
-                let tsvector_parts: Vec<String> =
-                    cols.iter().map(|c| format!("coalesce({},'')", c)).collect();
-                let tsvector_expr = tsvector_parts.join(" || ' ' || ");
-
-                // We already wrote the left expr, so let's replace it
-                // Truncate to position before left was written
-                // For simplicity, we append the @@ and tsquery part
-                // The left side is already written as the column name(s)
-                // We need to wrap it. Since encode_expr already wrote, we'll
-                // rewrite by clearing and rebuilding this condition.
+                let mut tsvector_expr = BytesMut::new();
+                encode_text_search_vector(&cond.left, &mut tsvector_expr)?;
 
                 buf.truncate(left_start);
 
                 // Write the full tsvector expression
                 buf.extend_from_slice(b"to_tsvector('english', ");
-                buf.extend_from_slice(tsvector_expr.as_bytes());
+                buf.extend_from_slice(&tsvector_expr);
                 buf.extend_from_slice(b") @@ websearch_to_tsquery('english', ");
                 encode_value(&cond.value, buf, params)?;
                 buf.extend_from_slice(b")");

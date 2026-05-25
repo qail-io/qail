@@ -484,7 +484,7 @@ fn validate_condition(
     validate_value_ref(&format!("{field}.value"), &condition.value)
 }
 
-fn validate_text_search_columns(
+pub(crate) fn validate_text_search_columns(
     field: &str,
     expr: &Expr,
 ) -> Result<(), crate::protocol::EncodeError> {

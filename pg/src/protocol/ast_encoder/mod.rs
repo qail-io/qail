@@ -1492,6 +1492,24 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_text_search_quotes_reserved_column_csv() {
+        use qail_core::ast::Operator;
+
+        let cmd =
+            Qail::get("products").filter("order,description", Operator::TextSearch, "fast ferry");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains(
+                "to_tsvector('english', coalesce(\"order\",'') || ' ' || coalesce(description,'')) @@ websearch_to_tsquery('english', $1)"
+            ),
+            "text search must quote reserved CSV columns: {sql}"
+        );
+        assert_eq!(params, vec![Some(b"fast ferry".to_vec())]);
+    }
+
+    #[test]
     fn test_encode_text_search_rejects_unsafe_column_csv() {
         use qail_core::ast::Operator;
 
