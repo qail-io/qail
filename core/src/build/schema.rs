@@ -398,6 +398,7 @@ impl Schema {
                     let mut nullability_option: Option<&str> = None;
                     let mut generated_option: Option<&str> = None;
                     let mut has_foreign_key = false;
+                    let mut seen_fk_actions = HashSet::new();
 
                     let mut i = 2;
                     while i < parts.len() {
@@ -507,6 +508,12 @@ impl Schema {
                             if !has_foreign_key {
                                 return Err(format!(
                                     "{} requires a preceding foreign key for column '{}' in table '{}'",
+                                    part, col_name, table_name
+                                ));
+                            }
+                            if !seen_fk_actions.insert(part) {
+                                return Err(format!(
+                                    "duplicate {} action for column '{}' in table '{}'",
                                     part, col_name, table_name
                                 ));
                             }

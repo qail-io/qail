@@ -287,6 +287,21 @@ table posts {
 }
 
 #[test]
+fn test_parse_schema_rejects_duplicate_fk_actions() {
+    let content = r#"
+table posts {
+  user_id UUID references users(id) on_delete cascade on_delete restrict
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("duplicate fk action must fail");
+    assert!(
+        err.contains("duplicate on_delete action for column 'user_id' in table 'posts'"),
+        "{err}"
+    );
+}
+
+#[test]
 fn test_parse_schema_rejects_malformed_references_target() {
     for content in [
         r#"
