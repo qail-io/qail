@@ -640,6 +640,30 @@ mod tests {
     }
 
     #[test]
+    fn exists_condition_requires_subquery_value() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("users");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("ignored".to_string()),
+                op: Operator::Exists,
+                value: Value::Function("SELECT 1); DROP TABLE users; --".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("EXISTS with raw non-subquery value must fail closed");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("EXISTS condition requires a subquery value")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
         use qail_core::ast::{CTEDef, Expr, SetOp};
 

@@ -588,7 +588,9 @@ fn encode_conditions_inline(
                     ));
                 }
             } else {
-                encode_inline_value(&cond.value, buf)?;
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "EXISTS condition requires a subquery value".to_string(),
+                ));
             }
             buf.extend_from_slice(b")");
             continue;
@@ -922,8 +924,9 @@ pub fn encode_conditions(
                         super::super::dml::encode_select(q, buf, params)?;
                     }
                     _ => {
-                        // Fallback: render value as raw SQL
-                        buf.extend_from_slice(cond.value.to_string().as_bytes());
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "EXISTS condition requires a subquery value".to_string(),
+                        ));
                     }
                 }
                 buf.extend_from_slice(b")");
