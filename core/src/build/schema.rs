@@ -1752,8 +1752,9 @@ fn extract_alter_add_column_action(action: &str) -> Option<String> {
         "EXCLUDE",
     ]
     .iter()
-    .any(|keyword| col_upper.starts_with(keyword))
-    {
+    .any(|keyword| {
+        col_upper.starts_with(keyword) && col_upper[keyword.len()..].starts_with([' ', '('])
+    }) {
         return None;
     }
 
@@ -2363,5 +2364,20 @@ ALTER TABLE users DROP COLUMN old_email, DROP IF EXISTS old_name;
         assert!(users.has_column("id"));
         assert!(!users.has_column("old_email"));
         assert!(!users.has_column("old_name"));
+    }
+
+    #[test]
+    fn sql_migration_allows_alter_add_columns_with_constraint_prefixes() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid);
+ALTER TABLE users ADD COLUMN primary_contact text, ADD check_status text;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("primary_contact"));
+        assert!(users.has_column("check_status"));
     }
 }
