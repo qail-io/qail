@@ -649,7 +649,7 @@ fn extract_upsert_point_with_filter_fallback(
                 _ => continue,
             };
 
-            match field.rsplit('.').next().unwrap_or(field).trim_matches('"') {
+            match normalize_qdrant_field_name(field) {
                 "id" => {
                     if !can_infer_identity {
                         if id.is_none() {
@@ -989,6 +989,10 @@ fn qdrant_request_filter_cages(
     request_filters
 }
 
+fn normalize_qdrant_field_name(raw: &str) -> &str {
+    raw.trim().trim_matches('"')
+}
+
 fn qdrant_upsert_filter_target(
     condition: &qail_core::ast::Condition,
 ) -> Result<QdrantUpsertFilterTarget<'_>, ApiError> {
@@ -1003,7 +1007,7 @@ fn qdrant_upsert_filter_target(
             )));
         }
     };
-    let field = raw.rsplit('.').next().unwrap_or(raw).trim_matches('"');
+    let field = normalize_qdrant_field_name(raw);
     if field.is_empty() {
         return Err(ApiError::forbidden(
             "Qdrant upsert filter cannot be safely enforced for an empty payload field",
@@ -1155,6 +1159,33 @@ fn ast_value_matches_qdrant_payload(
     Ok(matches)
 }
 
+fn qdrant_payload_get_field<'a>(
+    payload: &'a qail_qdrant::Payload,
+    field: &str,
+) -> Option<&'a qail_qdrant::PayloadValue> {
+    let field = normalize_qdrant_field_name(field);
+    if !field.contains('.') {
+        return payload.get(field);
+    }
+
+    let mut segments = field.split('.').map(normalize_qdrant_field_name);
+    let first = segments.next()?;
+    if first.is_empty() {
+        return None;
+    }
+    let mut current = payload.get(first)?;
+    for segment in segments {
+        if segment.is_empty() {
+            return None;
+        }
+        let qail_qdrant::PayloadValue::Object(object) = current else {
+            return None;
+        };
+        current = object.get(segment)?;
+    }
+    Some(current)
+}
+
 fn qdrant_point_id_matches_filter_value(
     id: &qail_qdrant::PointId,
     payload: &qail_qdrant::Payload,
@@ -1211,7 +1242,7 @@ fn qdrant_point_matches_filter_condition(
         )?)),
         QdrantUpsertFilterTarget::Payload(field) => {
             validate_qdrant_upsert_filter_value(&condition.value)?;
-            let Some(actual) = point.payload.get(field) else {
+            let Some(actual) = qdrant_payload_get_field(point.payload, field) else {
                 return Ok(Some(false));
             };
             Ok(Some(ast_value_matches_qdrant_payload(
@@ -1740,6 +1771,78 @@ mod tests {
         }];
 
         enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing").unwrap();
+    }
+
+    #[test]
+    fn qdrant_payload_filter_matches_nested_payload_path() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("web".to_string()),
+        );
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata".to_string(),
+            qail_qdrant::PayloadValue::Object(metadata),
+        );
+        payload.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("mobile".to_string()),
+        );
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("metadata.source", "web")],
+            logical_op: LogicalOp::And,
+        }];
+
+        enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing").unwrap();
+    }
+
+    #[test]
+    fn qdrant_payload_filter_does_not_fall_back_to_last_path_segment() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("mobile".to_string()),
+        );
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata".to_string(),
+            qail_qdrant::PayloadValue::Object(metadata),
+        );
+        payload.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("web".to_string()),
+        );
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("metadata.source", "web")],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing")
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_payload_filter_dotted_path_ignores_literal_top_level_key() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata.source".to_string(),
+            qail_qdrant::PayloadValue::String("web".to_string()),
+        );
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("metadata.source", "web")],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing")
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
     #[test]
