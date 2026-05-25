@@ -396,6 +396,7 @@ impl Schema {
                     let mut seen_protected = false;
                     let mut seen_column_options = HashSet::new();
                     let mut nullability_option: Option<&str> = None;
+                    let mut generated_option: Option<&str> = None;
 
                     let mut i = 2;
                     while i < parts.len() {
@@ -432,6 +433,18 @@ impl Schema {
                                     ));
                                 }
                                 nullability_option = Some(part);
+                            }
+                            if matches!(
+                                part,
+                                "generated_identity" | "generated_by_default_identity"
+                            ) {
+                                if let Some(existing) = generated_option {
+                                    return Err(format!(
+                                        "conflicting generated options '{}' and '{}' for column '{}' in table '{}'",
+                                        existing, part, col_name, table_name
+                                    ));
+                                }
+                                generated_option = Some(part);
                             }
                             // Build-time validation only needs shape, type, policy, and relations.
                         } else if part == "default" {

@@ -163,6 +163,23 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_conflicting_generated_options() {
+    let content = r#"
+table users {
+  id UUID generated_identity generated_by_default_identity
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("conflicting generated options must fail");
+    assert!(
+        err.contains(
+            "conflicting generated options 'generated_identity' and 'generated_by_default_identity' for column 'id' in table 'users'"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
 fn test_parse_schema_rejects_duplicate_protected_option() {
     let content = r#"
 table users {
