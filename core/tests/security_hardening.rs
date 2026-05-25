@@ -675,6 +675,25 @@ fn operator_in_with_injection_values() {
 }
 
 #[test]
+fn operator_in_rejects_scalar_value() {
+    let cmd = select_where(
+        "users",
+        "role",
+        Operator::In,
+        Value::String("admin".to_string()),
+    );
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains(
+            "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */"
+        ),
+        "scalar IN must fail closed: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_is_null_no_value_leak() {
     let cmd = select_where("users", "deleted_at", Operator::IsNull, Value::Null);
     let sql = cmd.to_sql();
@@ -700,7 +719,13 @@ fn operator_not_in_with_empty_array() {
         ..Default::default()
     };
     let sql = cmd.to_sql();
-    assert!(sql.contains("SELECT"), "Must produce SQL: {}", sql);
+    assert!(
+        sql.contains(
+            "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */"
+        ),
+        "empty NOT IN must fail closed: {}",
+        sql
+    );
 }
 
 #[test]

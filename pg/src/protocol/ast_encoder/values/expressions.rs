@@ -605,6 +605,11 @@ fn encode_conditions_inline(
             Operator::In | Operator::NotIn => {
                 buf.extend_from_slice(b" ");
                 if let Value::Array(values) = &cond.value {
+                    if values.is_empty() {
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "IN condition requires a non-empty array or subquery value".to_string(),
+                        ));
+                    }
                     buf.extend_from_slice(b"(");
                     for (j, value) in values.iter().enumerate() {
                         if j > 0 {
@@ -613,8 +618,12 @@ fn encode_conditions_inline(
                         encode_inline_value(value, buf)?;
                     }
                     buf.extend_from_slice(b")");
-                } else {
+                } else if matches!(&cond.value, Value::Subquery(_)) {
                     encode_inline_value(&cond.value, buf)?;
+                } else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "IN condition requires a non-empty array or subquery value".to_string(),
+                    ));
                 }
             }
             Operator::Between | Operator::NotBetween => {
@@ -826,6 +835,11 @@ pub fn encode_conditions(
             Operator::NotILike => buf.extend_from_slice(b" NOT ILIKE "),
             Operator::In => {
                 if let Value::Array(vals) = &cond.value {
+                    if vals.is_empty() {
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "IN condition requires a non-empty array or subquery value".to_string(),
+                        ));
+                    }
                     buf.extend_from_slice(b" IN (");
                     for (j, v) in vals.iter().enumerate() {
                         if j > 0 {
@@ -835,11 +849,22 @@ pub fn encode_conditions(
                     }
                     buf.extend_from_slice(b")");
                     continue;
+                } else if matches!(&cond.value, Value::Subquery(_)) {
+                    buf.extend_from_slice(b" IN ");
+                    encode_value(&cond.value, buf, params)?;
+                    continue;
                 }
-                buf.extend_from_slice(b" IN ");
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "IN condition requires a non-empty array or subquery value".to_string(),
+                ));
             }
             Operator::NotIn => {
                 if let Value::Array(vals) = &cond.value {
+                    if vals.is_empty() {
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "IN condition requires a non-empty array or subquery value".to_string(),
+                        ));
+                    }
                     buf.extend_from_slice(b" NOT IN (");
                     for (j, v) in vals.iter().enumerate() {
                         if j > 0 {
@@ -849,8 +874,14 @@ pub fn encode_conditions(
                     }
                     buf.extend_from_slice(b")");
                     continue;
+                } else if matches!(&cond.value, Value::Subquery(_)) {
+                    buf.extend_from_slice(b" NOT IN ");
+                    encode_value(&cond.value, buf, params)?;
+                    continue;
                 }
-                buf.extend_from_slice(b" NOT IN ");
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "IN condition requires a non-empty array or subquery value".to_string(),
+                ));
             }
             Operator::IsNull => {
                 buf.extend_from_slice(b" IS NULL");

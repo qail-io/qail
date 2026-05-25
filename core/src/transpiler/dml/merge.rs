@@ -197,6 +197,11 @@ fn invalid_exists_condition_sql() -> String {
     "FALSE /* ERROR: EXISTS condition requires subquery value */".to_string()
 }
 
+fn invalid_in_condition_sql() -> String {
+    "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */"
+        .to_string()
+}
+
 fn invalid_between_condition_sql() -> String {
     "FALSE /* ERROR: BETWEEN condition requires exactly two array values */".to_string()
 }
@@ -221,7 +226,7 @@ fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String 
 
 fn in_condition_sql(condition: &Condition, left: &str, generator: &dyn SqlGenerator) -> String {
     match &condition.value {
-        Value::Array(values) => {
+        Value::Array(values) if !values.is_empty() => {
             let values = values
                 .iter()
                 .map(|value| value_sql(value, generator))
@@ -236,10 +241,14 @@ fn in_condition_sql(condition: &Condition, left: &str, generator: &dyn SqlGenera
                 value_sql(&condition.value, generator)
             )
         }
-        _ if condition.op == Operator::In => {
+        Value::Param(_) | Value::NamedParam(_) if condition.op == Operator::In => {
             generator.in_array(left, &value_sql(&condition.value, generator))
         }
-        _ => generator.not_in_array(left, &value_sql(&condition.value, generator)),
+        Value::Param(_) | Value::NamedParam(_) => {
+            generator.not_in_array(left, &value_sql(&condition.value, generator))
+        }
+        _ if condition.op == Operator::In => invalid_in_condition_sql(),
+        _ => invalid_in_condition_sql(),
     }
 }
 

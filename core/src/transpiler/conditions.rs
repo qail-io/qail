@@ -174,7 +174,7 @@ fn in_condition_sql(
     generator: &dyn SqlGenerator,
 ) -> String {
     match value {
-        Value::Array(values) => {
+        Value::Array(values) if !values.is_empty() => {
             let values = values
                 .iter()
                 .map(|value| condition_value_sql(value, generator))
@@ -189,13 +189,23 @@ fn in_condition_sql(
                 condition_value_sql(value, generator)
             )
         }
-        _ if op == Operator::In => generator.in_array(col, &condition_value_sql(value, generator)),
-        _ => generator.not_in_array(col, &condition_value_sql(value, generator)),
+        Value::Param(_) | Value::NamedParam(_) if op == Operator::In => {
+            generator.in_array(col, &condition_value_sql(value, generator))
+        }
+        Value::Param(_) | Value::NamedParam(_) => {
+            generator.not_in_array(col, &condition_value_sql(value, generator))
+        }
+        _ => invalid_in_condition_sql(),
     }
 }
 
 fn invalid_exists_condition_sql() -> String {
     "FALSE /* ERROR: EXISTS condition requires subquery value */".to_string()
+}
+
+fn invalid_in_condition_sql() -> String {
+    "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */"
+        .to_string()
 }
 
 fn invalid_between_condition_sql() -> String {
@@ -485,10 +495,28 @@ impl ConditionToSql for Condition {
             }
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),
-            Operator::In => generator.in_array(&col, &value_placeholder(&self.value, params)),
-            Operator::NotIn => {
-                generator.not_in_array(&col, &value_placeholder(&self.value, params))
-            }
+            Operator::In | Operator::NotIn => match &self.value {
+                Value::Array(values) if !values.is_empty() => {
+                    let value = value_placeholder(&self.value, params);
+                    if self.op == Operator::In {
+                        generator.in_array(&col, &value)
+                    } else {
+                        generator.not_in_array(&col, &value)
+                    }
+                }
+                Value::Subquery(cmd) => {
+                    format!("{} {} ({})", col, self.op.sql_symbol(), cmd.to_sql())
+                }
+                Value::Param(_) | Value::NamedParam(_) => {
+                    let value = value_placeholder(&self.value, params);
+                    if self.op == Operator::In {
+                        generator.in_array(&col, &value)
+                    } else {
+                        generator.not_in_array(&col, &value)
+                    }
+                }
+                _ => invalid_in_condition_sql(),
+            },
             Operator::Contains => {
                 generator.json_contains(&col, &value_placeholder(&self.value, params))
             }

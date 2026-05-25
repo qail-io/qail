@@ -688,6 +688,54 @@ mod tests {
     }
 
     #[test]
+    fn in_condition_rejects_scalar_value() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("users");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("role".to_string()),
+                op: Operator::In,
+                value: Value::String("admin".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let err =
+            AstEncoder::encode_cmd_sql(&cmd).expect_err("IN with scalar value must fail closed");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("IN condition requires a non-empty array or subquery value")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn in_condition_rejects_empty_array() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("users");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("role".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("NOT IN with empty literal array must fail closed");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("IN condition requires a non-empty array or subquery value")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
         use qail_core::ast::{CTEDef, Expr, SetOp};
 
