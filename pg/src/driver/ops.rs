@@ -501,32 +501,45 @@ impl PgDriver {
         // Must be in a transaction for cursors
         self.connection.begin_transaction().await?;
 
-        // Declare cursor
-        // Declare cursor with bind params — Extended Query Protocol handles $1, $2 etc.
-        self.connection
-            .declare_cursor(&cursor_name, &sql, &params)
-            .await?;
+        let stream_result = async {
+            // Declare cursor with bind params — Extended Query Protocol handles $1, $2 etc.
+            self.connection
+                .declare_cursor(&cursor_name, &sql, &params)
+                .await?;
 
-        // Fetch all batches
-        let mut all_batches = Vec::new();
-        while let Some(rows) = self
-            .connection
-            .fetch_cursor(&cursor_name, batch_size)
-            .await?
-        {
-            let pg_rows: Vec<PgRow> = rows
-                .into_iter()
-                .map(|cols| PgRow {
-                    columns: cols,
-                    column_info: None,
-                })
-                .collect();
-            all_batches.push(pg_rows);
+            // Fetch all batches
+            let mut all_batches = Vec::new();
+            while let Some(rows) = self
+                .connection
+                .fetch_cursor(&cursor_name, batch_size)
+                .await?
+            {
+                let pg_rows: Vec<PgRow> = rows
+                    .into_iter()
+                    .map(|cols| PgRow {
+                        columns: cols,
+                        column_info: None,
+                    })
+                    .collect();
+                all_batches.push(pg_rows);
+            }
+
+            self.connection.close_cursor(&cursor_name).await?;
+            Ok(all_batches)
         }
+        .await;
 
-        self.connection.close_cursor(&cursor_name).await?;
-        self.connection.commit().await?;
-
-        Ok(all_batches)
+        match stream_result {
+            Ok(all_batches) => {
+                self.connection.commit().await?;
+                Ok(all_batches)
+            }
+            Err(err) => {
+                if self.connection.rollback().await.is_err() {
+                    self.connection.mark_io_desynced();
+                }
+                Err(err)
+            }
+        }
     }
 }
