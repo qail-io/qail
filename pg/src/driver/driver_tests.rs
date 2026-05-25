@@ -357,8 +357,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_database_url_defaults_user_when_auth_omitted() {
+        let (host, port, user, db, pw) =
+            crate::driver::PgDriver::parse_database_url("postgres://localhost/mydb").unwrap();
+
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 5432);
+        assert_eq!(user, "postgres");
+        assert_eq!(db, "mydb");
+        assert_eq!(pw, None);
+    }
+
+    #[test]
     fn parse_database_url_rejects_invalid_scheme_and_missing_host() {
         assert!(crate::driver::PgDriver::parse_database_url("mysql://user@host/db").is_err());
+        assert!(crate::driver::PgDriver::parse_database_url("postgres://@host/db").is_err());
         assert!(crate::driver::PgDriver::parse_database_url("postgres://user@:5432/db").is_err());
         assert!(crate::driver::PgDriver::parse_database_url("postgres://user@host:0/db").is_err());
     }

@@ -272,7 +272,7 @@ impl PoolConfig {
         }
 
         // Optional URL query params for enterprise auth/TLS settings.
-        if let Some(query) = pg.url.split('?').nth(1) {
+        if let Some((_, query)) = pg.url.split_once('?') {
             apply_url_query_params(&mut config, query, &host)?;
         }
 
@@ -298,68 +298,68 @@ pub(crate) fn apply_url_query_params(
 
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let mut kv = pair.splitn(2, '=');
-        let key = kv.next().unwrap_or_default().trim();
-        let value = kv.next().unwrap_or_default().trim();
+        let key = percent_decode(kv.next().unwrap_or_default().trim());
+        let value = percent_decode(kv.next().unwrap_or_default().trim());
 
-        match key {
+        match key.as_str() {
             "sslmode" => {
-                let mode = TlsMode::parse_sslmode(value).ok_or_else(|| {
+                let mode = TlsMode::parse_sslmode(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid sslmode value: {}", value))
                 })?;
                 config.tls_mode = mode;
             }
             "gssencmode" => {
-                let mode = GssEncMode::parse_gssencmode(value).ok_or_else(|| {
+                let mode = GssEncMode::parse_gssencmode(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid gssencmode value: {}", value))
                 })?;
                 config.gss_enc_mode = mode;
             }
             "sslrootcert" => {
-                let ca_pem = std::fs::read(value).map_err(|e| {
+                let ca_pem = std::fs::read(&value).map_err(|e| {
                     PgError::Connection(format!("Failed to read sslrootcert '{}': {}", value, e))
                 })?;
                 config.tls_ca_cert_pem = Some(ca_pem);
             }
-            "sslcert" => sslcert = Some(value.to_string()),
-            "sslkey" => sslkey = Some(value.to_string()),
+            "sslcert" => sslcert = Some(value.clone()),
+            "sslkey" => sslkey = Some(value.clone()),
             "channel_binding" => {
-                let mode = ScramChannelBindingMode::parse(value).ok_or_else(|| {
+                let mode = ScramChannelBindingMode::parse(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid channel_binding value: {}", value))
                 })?;
                 config.auth_settings.channel_binding = mode;
             }
             "auth_scram" => {
-                let enabled = parse_bool_param(value).ok_or_else(|| {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid auth_scram value: {}", value))
                 })?;
                 config.auth_settings.allow_scram_sha_256 = enabled;
             }
             "auth_md5" => {
-                let enabled = parse_bool_param(value).ok_or_else(|| {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid auth_md5 value: {}", value))
                 })?;
                 config.auth_settings.allow_md5_password = enabled;
             }
             "auth_cleartext" => {
-                let enabled = parse_bool_param(value).ok_or_else(|| {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid auth_cleartext value: {}", value))
                 })?;
                 config.auth_settings.allow_cleartext_password = enabled;
             }
             "auth_kerberos" => {
-                let enabled = parse_bool_param(value).ok_or_else(|| {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid auth_kerberos value: {}", value))
                 })?;
                 config.auth_settings.allow_kerberos_v5 = enabled;
             }
             "auth_gssapi" => {
-                let enabled = parse_bool_param(value).ok_or_else(|| {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid auth_gssapi value: {}", value))
                 })?;
                 config.auth_settings.allow_gssapi = enabled;
             }
             "auth_sspi" => {
-                let enabled = parse_bool_param(value).ok_or_else(|| {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
                     PgError::Connection(format!("Invalid auth_sspi value: {}", value))
                 })?;
                 config.auth_settings.allow_sspi = enabled;
@@ -380,14 +380,14 @@ pub(crate) fn apply_url_query_params(
                     )));
                 }
             }
-            "gss_provider" => gss_provider = Some(value.to_string()),
+            "gss_provider" => gss_provider = Some(value.clone()),
             "gss_service" => {
                 if value.is_empty() {
                     return Err(PgError::Connection(
                         "gss_service must not be empty".to_string(),
                     ));
                 }
-                gss_service = value.to_string();
+                gss_service = value.clone();
             }
             // libpq alias for kerberos service principal name component.
             "krbsrvname" => {
@@ -396,7 +396,7 @@ pub(crate) fn apply_url_query_params(
                         "gss_service must not be empty".to_string(),
                     ));
                 }
-                gss_service = value.to_string();
+                gss_service = value.clone();
             }
             "gss_target" => {
                 if value.is_empty() {
@@ -404,7 +404,7 @@ pub(crate) fn apply_url_query_params(
                         "gss_target must not be empty".to_string(),
                     ));
                 }
-                gss_target = Some(value.to_string());
+                gss_target = Some(value.clone());
             }
             // libpq alias for GSS target hostname override.
             "gsshostname" => {
@@ -413,7 +413,7 @@ pub(crate) fn apply_url_query_params(
                         "gss_target must not be empty".to_string(),
                     ));
                 }
-                gss_target = Some(value.to_string());
+                gss_target = Some(value.clone());
             }
             // libpq compatibility knob; accepted values are validated but
             // provider selection remains controlled by qail `gss_provider`.

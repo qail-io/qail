@@ -24,6 +24,22 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
 }
 
 #[inline]
+fn prepared_bind_execute_sync_wire_len(
+    statement: &str,
+    params: &[Option<Vec<u8>>],
+    result_format: i16,
+) -> PgResult<usize> {
+    let needed = PgEncoder::bind_execute_sync_wire_len_with_formats(
+        statement,
+        params,
+        PgEncoder::FORMAT_TEXT,
+        result_format,
+    )
+    .map_err(|e| PgError::Encode(e.to_string()))?;
+    Ok(needed)
+}
+
+#[inline]
 fn reserve_prepared_single_write_buf(
     conn: &mut PgConnection,
     stmt: &super::PreparedStatement,
@@ -31,13 +47,7 @@ fn reserve_prepared_single_write_buf(
     result_format: i16,
 ) -> PgResult<()> {
     conn.write_buf.clear();
-    let needed = PgEncoder::bind_execute_sync_wire_len_with_formats(
-        &stmt.name,
-        params,
-        PgEncoder::FORMAT_TEXT,
-        result_format,
-    )
-    .map_err(|e| PgError::Encode(e.to_string()))?;
+    let needed = prepared_bind_execute_sync_wire_len(&stmt.name, params, result_format)?;
     conn.write_buf.reserve(needed);
     Ok(())
 }
@@ -117,6 +127,20 @@ impl SimpleFlowTracker {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_buffer_sizing_rejects_too_many_params_before_allocation() {
+        let params = vec![None; i16::MAX as usize + 1];
+        let err = prepared_bind_execute_sync_wire_len("stmt", &params, PgEncoder::FORMAT_TEXT)
+            .expect_err("parameter overflow must be rejected");
+
+        assert!(matches!(err, PgError::Encode(msg) if msg.contains("Too many parameters")));
     }
 }
 
@@ -686,26 +710,17 @@ impl PgConnection {
         let stmt_name = Self::sql_to_stmt_name(sql);
         let is_new = !self.prepared_statements.contains_key(&stmt_name);
 
-        // Pre-calculate buffer size for single allocation
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
-
-        let estimated_size = if is_new {
-            50 + sql.len() + stmt_name.len() * 2 + params_size
-        } else {
-            30 + stmt_name.len() + params_size
-        };
-
-        let mut buf = BytesMut::with_capacity(estimated_size);
+        let needed = prepared_bind_execute_sync_wire_len(&stmt_name, params, result_format)?;
+        let mut buf = BytesMut::with_capacity(needed);
 
         if is_new {
             // Evict LRU prepared statement if at capacity. This prevents
             // unbounded memory growth from dynamic batch filters while
             // preserving hot statements (unlike the old nuclear `.clear()`).
             self.evict_prepared_if_full();
-            buf.extend(PgEncoder::try_encode_parse(&stmt_name, sql, &[])?);
+            if let Err(e) = PgEncoder::try_encode_parse_to(&mut buf, &stmt_name, sql, &[]) {
+                return Err(PgError::Encode(e.to_string()));
+            }
             // Cache the SQL for debugging
             self.prepared_statements
                 .insert(stmt_name.clone(), sql.to_string());
@@ -1031,13 +1046,8 @@ impl PgConnection {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        // Pre-calculate buffer size for single allocation
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
-
-        let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
+        let needed = prepared_bind_execute_sync_wire_len(&stmt.name, params, result_format)?;
+        let mut buf = BytesMut::with_capacity(needed);
 
         // ZERO HASH, ZERO LOOKUP - just encode and send!
         PgEncoder::encode_bind_to_with_result_format(&mut buf, &stmt.name, params, result_format)

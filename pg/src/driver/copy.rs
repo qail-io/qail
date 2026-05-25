@@ -10,10 +10,45 @@ use bytes::BytesMut;
 use qail_core::ast::{Action, Qail};
 use std::future::Future;
 
-/// Quote a SQL identifier to prevent injection.
-/// Wraps in double-quotes, escapes embedded double-quotes, and strips NUL bytes.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
+/// Quote a single SQL identifier atom for COPY statements.
+pub(crate) fn quote_copy_column_ident(ident: &str) -> PgResult<String> {
+    if ident.is_empty() {
+        return Err(PgError::Query(
+            "COPY column identifier is empty".to_string(),
+        ));
+    }
+    if ident.contains('\0') {
+        return Err(PgError::Query(
+            "COPY column identifier contains NUL byte".to_string(),
+        ));
+    }
+    Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
+}
+
+/// Quote a COPY table reference, preserving schema-qualified names.
+pub(crate) fn quote_copy_table_ref(table: &str) -> PgResult<String> {
+    if table.is_empty() {
+        return Err(PgError::Query("COPY table identifier is empty".to_string()));
+    }
+    if table.contains('\0') {
+        return Err(PgError::Query(
+            "COPY table identifier contains NUL byte".to_string(),
+        ));
+    }
+
+    table
+        .split('.')
+        .map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return Err(PgError::Query(
+                    "COPY table identifier contains an empty path segment".to_string(),
+                ));
+            }
+            quote_copy_column_ident(part)
+        })
+        .collect::<PgResult<Vec<_>>>()
+        .map(|parts| parts.join("."))
 }
 
 fn parse_copy_text_row(line: &[u8]) -> Vec<String> {
@@ -144,6 +179,25 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+fn encode_copy_export_sql(cmd: &Qail) -> PgResult<String> {
+    if cmd.action != Action::Export {
+        return Err(PgError::Query(
+            "copy_export requires Qail::Export action".to_string(),
+        ));
+    }
+
+    let (sql, params) =
+        AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+    if !params.is_empty() {
+        return Err(PgError::Encode(format!(
+            "copy_export cannot encode parameterized export with {} bind parameter(s); use an unfiltered export, a prefiltered database view, or a raw COPY statement with trusted SQL",
+            params.len()
+        )));
+    }
+
+    Ok(sql)
+}
+
 fn drain_copy_text_rows<F>(pending: &mut Vec<u8>, chunk: &[u8], on_row: &mut F) -> PgResult<()>
 where
     F: FnMut(Vec<String>) -> PgResult<()>,
@@ -180,10 +234,13 @@ impl PgConnection {
     ) -> PgResult<u64> {
         use crate::protocol::try_encode_copy_batch;
 
-        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let cols: Vec<String> = columns
+            .iter()
+            .map(|c| quote_copy_column_ident(c))
+            .collect::<PgResult<_>>()?;
         let sql = format!(
             "COPY {} ({}) FROM STDIN",
-            quote_ident(table),
+            quote_copy_table_ref(table)?,
             cols.join(", ")
         );
 
@@ -287,10 +344,13 @@ impl PgConnection {
         columns: &[String],
         data: &[u8],
     ) -> PgResult<u64> {
-        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let cols: Vec<String> = columns
+            .iter()
+            .map(|c| quote_copy_column_ident(c))
+            .collect::<PgResult<_>>()?;
         let sql = format!(
             "COPY {} ({}) FROM STDIN",
-            quote_ident(table),
+            quote_copy_table_ref(table)?,
             cols.join(", ")
         );
 
@@ -522,8 +582,7 @@ impl PgConnection {
     /// # Example
     /// ```ignore
     /// let cmd = Qail::export("users")
-    ///     .columns(["id", "name"])
-    ///     .filter("active", true);
+    ///     .columns(["id", "name"]);
     /// let rows = conn.copy_export(&cmd).await?;
     /// ```
     pub async fn copy_export(&mut self, cmd: &Qail) -> PgResult<Vec<Vec<String>>> {
@@ -545,15 +604,7 @@ impl PgConnection {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = PgResult<()>>,
     {
-        if cmd.action != Action::Export {
-            return Err(PgError::Query(
-                "copy_export requires Qail::Export action".to_string(),
-            ));
-        }
-
-        // Encode command to SQL using AST encoder
-        let (sql, _params) =
-            AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+        let sql = encode_copy_export_sql(cmd)?;
 
         self.copy_out_raw_stream(&sql, on_chunk).await
     }
@@ -613,8 +664,12 @@ impl PgConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{drain_copy_text_rows, flush_pending_copy_text_row, parse_copy_text_row};
+    use super::{
+        drain_copy_text_rows, encode_copy_export_sql, flush_pending_copy_text_row,
+        parse_copy_text_row, quote_copy_column_ident, quote_copy_table_ref,
+    };
     use crate::driver::{PgError, PgResult};
+    use qail_core::ast::{Operator, Qail};
 
     #[test]
     fn parse_copy_text_row_splits_tabs() {
@@ -638,6 +693,28 @@ mod tests {
     fn parse_copy_text_row_maps_copy_null_marker_to_empty_string() {
         let row = parse_copy_text_row(b"a\t\\N\tb");
         assert_eq!(row, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn copy_table_quoting_preserves_schema_qualification() {
+        assert_eq!(
+            quote_copy_table_ref("tenant_a.users").unwrap(),
+            "\"tenant_a\".\"users\""
+        );
+    }
+
+    #[test]
+    fn copy_identifier_quoting_rejects_nul_bytes() {
+        assert!(quote_copy_table_ref("tenant\0.users").is_err());
+        assert!(quote_copy_column_ident("name\0").is_err());
+    }
+
+    #[test]
+    fn copy_export_rejects_parameterized_ast_before_streaming() {
+        let cmd = Qail::export("users").filter("active", Operator::Eq, true);
+        let err = encode_copy_export_sql(&cmd).expect_err("bind params cannot be ignored");
+
+        assert!(matches!(err, PgError::Encode(msg) if msg.contains("parameterized export")));
     }
 
     #[test]

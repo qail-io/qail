@@ -900,6 +900,24 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_batch_simple_rejects_parameterized_ast() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("users").filter("status", Operator::Eq, "active");
+
+        let err = AstEncoder::encode_batch_simple(&[cmd])
+            .expect_err("Simple Query Protocol cannot carry bind parameters");
+
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message)
+                if message.contains("simple query batch cannot encode command 1")
+                    && message.contains("bind parameter")
+                    && message.contains("extended-query pipeline")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_encode_session_set_escapes_value_and_name() {
         let cmd = Qail::session_set(
             "app.current_tenant_id",

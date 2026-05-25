@@ -416,13 +416,13 @@ impl PgDriver {
         table: &str,
         columns: &[String],
     ) -> PgResult<Vec<u8>> {
-        let quote_ident = |ident: &str| -> String {
-            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
-        };
-        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let cols: Vec<String> = columns
+            .iter()
+            .map(|c| super::copy::quote_copy_column_ident(c))
+            .collect::<PgResult<_>>()?;
         let sql = format!(
             "COPY {} ({}) TO STDOUT",
-            quote_ident(table),
+            super::copy::quote_copy_table_ref(table)?,
             cols.join(", ")
         );
 
@@ -442,13 +442,13 @@ impl PgDriver {
         F: FnMut(Vec<u8>) -> Fut,
         Fut: std::future::Future<Output = PgResult<()>>,
     {
-        let quote_ident = |ident: &str| -> String {
-            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
-        };
-        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let cols: Vec<String> = columns
+            .iter()
+            .map(|c| super::copy::quote_copy_column_ident(c))
+            .collect::<PgResult<_>>()?;
         let sql = format!(
             "COPY {} ({}) TO STDOUT",
-            quote_ident(table),
+            super::copy::quote_copy_table_ref(table)?,
             cols.join(", ")
         );
         self.connection.copy_out_raw_stream(&sql, on_chunk).await

@@ -320,7 +320,7 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
 
     let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
-    for cmd in cmds {
+    for (idx, cmd) in cmds.iter().enumerate() {
         params.clear();
 
         match cmd.action {
@@ -336,6 +336,14 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
                 Ok(())
             }
         }?;
+        if !params.is_empty() {
+            return Err(EncodeError::InvalidAst(format!(
+                "simple query batch cannot encode command {} ({:?}) because it requires {} bind parameter(s); use the extended-query pipeline",
+                idx + 1,
+                cmd.action,
+                params.len()
+            )));
+        }
         total_buf.extend_from_slice(b";");
     }
 

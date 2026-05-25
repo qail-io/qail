@@ -154,7 +154,7 @@ impl PgDriver {
         if let Some(pw) = &password {
             pool_cfg = pool_cfg.password(pw);
         }
-        if let Some(query) = url.split('?').nth(1) {
+        if let Some((_, query)) = url.split_once('?') {
             pool::apply_url_query_params(&mut pool_cfg, query, &host)?;
         }
 
@@ -170,7 +170,7 @@ impl PgDriver {
         };
 
         // Startup parameters not owned by PoolConfig parser.
-        if let Some(query) = url.split('?').nth(1) {
+        if let Some((_, query)) = url.split_once('?') {
             for pair in query.split('&') {
                 let mut kv = pair.splitn(2, '=');
                 let key = kv.next().unwrap_or_default().trim();
@@ -227,20 +227,32 @@ impl PgDriver {
 
         // Parse auth (user:password)
         let (user, password) = if let Some(auth) = auth_part {
+            if auth.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid DATABASE_URL: missing user".to_string(),
+                ));
+            }
             let parts: Vec<&str> = auth.splitn(2, ':').collect();
             if parts.len() == 2 {
                 // URL-decode both user and password
-                (
-                    Self::percent_decode(parts[0]),
-                    Some(Self::percent_decode(parts[1])),
-                )
+                let user = Self::percent_decode(parts[0]);
+                if user.is_empty() {
+                    return Err(PgError::Connection(
+                        "Invalid DATABASE_URL: missing user".to_string(),
+                    ));
+                }
+                (user, Some(Self::percent_decode(parts[1])))
             } else {
-                (Self::percent_decode(parts[0]), None)
+                let user = Self::percent_decode(parts[0]);
+                if user.is_empty() {
+                    return Err(PgError::Connection(
+                        "Invalid DATABASE_URL: missing user".to_string(),
+                    ));
+                }
+                (user, None)
             }
         } else {
-            return Err(PgError::Connection(
-                "Invalid DATABASE_URL: missing user".to_string(),
-            ));
+            ("postgres".to_string(), None)
         };
 
         // Parse host:port/database (strip query string if present)

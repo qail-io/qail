@@ -123,6 +123,15 @@ fn test_url_gssencmode_with_sslmode() {
 }
 
 #[test]
+fn test_url_query_params_are_percent_decoded() {
+    let mut config = PoolConfig::new("localhost", 5432, "u", "db");
+
+    apply_url_query_params(&mut config, "%73slmode=re%71uire", "localhost").unwrap();
+
+    assert_eq!(config.tls_mode, TlsMode::Require);
+}
+
+#[test]
 fn test_url_gssencmode_require_sslmode_require_is_valid() {
     // libpq allows this — negotiation resolves precedence, not config parsing.
     let mut config = PoolConfig::new("localhost", 5432, "u", "db");
