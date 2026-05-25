@@ -22,6 +22,12 @@ fn extract_kid_malformed_token_returns_none() {
 }
 
 #[test]
+fn extract_kid_rejects_oversized_header_segment() {
+    let token = format!("{}.payload.sig", "a".repeat(MAX_JWT_HEADER_B64_BYTES + 1));
+    assert_eq!(extract_kid_from_jwt(&token), None);
+}
+
+#[test]
 fn jwks_store_from_env_missing_returns_none() {
     if std::env::var("JWKS_URL").is_err() {
         assert!(JwksKeyStore::from_env().is_none());

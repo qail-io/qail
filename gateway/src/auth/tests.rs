@@ -709,6 +709,15 @@ fn detect_jwt_algorithm_malformed() {
 }
 
 #[test]
+fn detect_jwt_algorithm_rejects_oversized_header_segment() {
+    let token = format!(
+        "{}.payload.sig",
+        "a".repeat(jwt::MAX_JWT_HEADER_B64_BYTES + 1)
+    );
+    assert_eq!(detect_jwt_algorithm(&token), None);
+}
+
+#[test]
 fn lowercase_bearer_enters_jwt_path() {
     // "bearer" (lowercase) must NOT silently fall through to anonymous
     let mut headers = HeaderMap::new();

@@ -27,6 +27,7 @@ const DEFAULT_JWKS_REFRESH_SECS: u64 = 300;
 const MIN_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_JWKS_BODY_BYTES: usize = 1024 * 1024;
+const MAX_JWT_HEADER_B64_BYTES: usize = 16 * 1024;
 
 /// JWKS key store — caches DecodingKeys fetched from a JWKS endpoint.
 #[derive(Clone)]
@@ -204,6 +205,9 @@ fn parse_jwks_body(body: &[u8]) -> Result<JwkSet, String> {
 /// Used to select the correct JWKS key before validation.
 pub fn extract_kid_from_jwt(token: &str) -> Option<String> {
     let header_b64 = token.split('.').next()?;
+    if header_b64.len() > MAX_JWT_HEADER_B64_BYTES {
+        return None;
+    }
 
     // JWT base64url decode (no padding)
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

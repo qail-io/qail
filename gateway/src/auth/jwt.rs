@@ -3,6 +3,8 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 
 use super::{AuthContext, JwtClaims};
 
+pub(super) const MAX_JWT_HEADER_B64_BYTES: usize = 16 * 1024;
+
 pub struct JwtConfig {
     /// HMAC shared secret (for HS256/HS384/HS512).
     pub secret: Option<String>,
@@ -116,6 +118,9 @@ pub fn parse_allowed_algorithms(values: &[String]) -> Result<Vec<Algorithm>, Gat
 /// Detect JWT algorithm from token header without full validation.
 pub(super) fn detect_jwt_algorithm(token: &str) -> Option<Algorithm> {
     let header_b64 = token.split('.').next()?;
+    if header_b64.len() > MAX_JWT_HEADER_B64_BYTES {
+        return None;
+    }
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let header_json = URL_SAFE_NO_PAD.decode(header_b64).ok()?;
     let header: serde_json::Value = serde_json::from_slice(&header_json).ok()?;
