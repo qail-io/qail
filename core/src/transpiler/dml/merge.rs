@@ -187,11 +187,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
                 let keyword = condition.op.sql_symbol();
                 format!("{keyword} ({})", query.to_sql())
             }
-            _ => format!(
-                "{} ({})",
-                condition.op.sql_symbol(),
-                value_sql(&condition.value, generator)
-            ),
+            _ => invalid_exists_condition_sql(),
         },
         _ => format!(
             "{left} {} {}",
@@ -199,6 +195,10 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
             value_sql(&condition.value, generator)
         ),
     }
+}
+
+fn invalid_exists_condition_sql() -> String {
+    "FALSE /* ERROR: EXISTS condition requires subquery value */".to_string()
 }
 
 fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {

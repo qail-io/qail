@@ -194,6 +194,10 @@ fn in_condition_sql(
     }
 }
 
+fn invalid_exists_condition_sql() -> String {
+    "FALSE /* ERROR: EXISTS condition requires subquery value */".to_string()
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -349,7 +353,7 @@ impl ConditionToSql for Condition {
                     let subquery_sql = cmd.to_sql();
                     format!("EXISTS ({})", subquery_sql)
                 } else {
-                    format!("EXISTS ({})", self.value)
+                    invalid_exists_condition_sql()
                 }
             }
             Operator::NotExists => {
@@ -357,7 +361,7 @@ impl ConditionToSql for Condition {
                     let subquery_sql = cmd.to_sql();
                     format!("NOT EXISTS ({})", subquery_sql)
                 } else {
-                    format!("NOT EXISTS ({})", self.value)
+                    invalid_exists_condition_sql()
                 }
             }
             // Simple binary operators are handled above by is_simple_binary()
@@ -532,7 +536,7 @@ impl ConditionToSql for Condition {
                     let subquery_sql = cmd.to_sql();
                     format!("EXISTS ({})", subquery_sql)
                 } else {
-                    format!("EXISTS ({})", self.value)
+                    invalid_exists_condition_sql()
                 }
             }
             Operator::NotExists => {
@@ -540,7 +544,7 @@ impl ConditionToSql for Condition {
                     let subquery_sql = cmd.to_sql();
                     format!("NOT EXISTS ({})", subquery_sql)
                 } else {
-                    format!("NOT EXISTS ({})", self.value)
+                    invalid_exists_condition_sql()
                 }
             }
             // Simple operators (Ne, Gt, Gte, Lt, Lte, Like, NotLike, ILike, NotILike) use sql_symbol()

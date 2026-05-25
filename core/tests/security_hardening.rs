@@ -13,7 +13,7 @@
 //!   7. Combined / Multi-Vector attacks
 
 use qail_core::ast::*;
-use qail_core::transpiler::ToSql;
+use qail_core::transpiler::{ToSql, ToSqlParameterized};
 
 // ============================================================================
 // Helpers — same pattern as transpiler_correctness.rs
@@ -583,6 +583,53 @@ fn operator_exists_with_subquery() {
     let sql = cmd.to_sql();
     assert!(sql.contains("EXISTS"), "Must contain EXISTS: {}", sql);
     assert!(sql.contains("SELECT"), "Subquery must expand: {}", sql);
+}
+
+#[test]
+fn operator_exists_rejects_non_subquery_value() {
+    let cmd = select_where(
+        "users",
+        "id",
+        Operator::Exists,
+        Value::Function("SELECT 1); DROP TABLE users; --".into()),
+    );
+
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("FALSE /* ERROR: EXISTS condition requires subquery value */"),
+        "invalid EXISTS must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "invalid EXISTS value leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn operator_not_exists_rejects_non_subquery_value_parameterized() {
+    let cmd = select_where(
+        "users",
+        "id",
+        Operator::NotExists,
+        Value::NamedParam("unsafe_subquery".into()),
+    );
+
+    let result = cmd.to_sql_parameterized();
+
+    assert!(
+        result
+            .sql
+            .contains("FALSE /* ERROR: EXISTS condition requires subquery value */"),
+        "invalid NOT EXISTS must fail closed: {}",
+        result.sql
+    );
+    assert!(
+        result.params.is_empty() && result.named_params.is_empty(),
+        "invalid NOT EXISTS must not bind a fake subquery"
+    );
 }
 
 #[test]

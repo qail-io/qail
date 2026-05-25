@@ -1402,6 +1402,35 @@ fn test_merge_postgres_fuzzy_fallback_escapes_rendered_value() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_non_subquery_exists_condition() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("ignored".to_string()),
+                op: Operator::Exists,
+                value: Value::Function("SELECT 1); DROP TABLE users; --".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains(
+            "WHEN MATCHED AND FALSE /* ERROR: EXISTS condition requires subquery value */"
+        ),
+        "invalid MERGE EXISTS must fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "invalid MERGE EXISTS value leaked into SQL: {sql}"
+    );
+}
+
+#[test]
 fn test_merge_postgres_parameterized_fuzzy_binds_named_param() {
     use crate::transpiler::ToSqlParameterized;
 
