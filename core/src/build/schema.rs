@@ -1456,19 +1456,7 @@ fn extract_column_from_create(line: &str) -> Option<String> {
         return None;
     }
 
-    // First word is column name
-    let name: String = line
-        .trim_start_matches('(')
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-
-    if name.is_empty() || name.to_uppercase() == "IF" {
-        None
-    } else {
-        Some(name.to_lowercase())
-    }
+    extract_sql_column_ref(line.trim_start_matches('(').trim())
 }
 
 fn extract_inline_create_columns(line: &str) -> Vec<String> {
@@ -1570,17 +1558,9 @@ fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
     if col_upper.starts_with("IF NOT EXISTS") {
         col_part = &col_part.trim()[13..]; // skip "IF NOT EXISTS"
     }
-    let col: String = col_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let col = extract_sql_column_ref(col_part.trim())?;
 
-    if table.is_empty() || col.is_empty() {
-        None
-    } else {
-        Some((table, col.to_lowercase()))
-    }
+    Some((table, col))
 }
 
 /// Extract table and column from ALTER TABLE ... ADD (without COLUMN keyword)
@@ -1607,17 +1587,9 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    let col: String = col_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let col = extract_sql_column_ref(col_part.trim())?;
 
-    if table.is_empty() || col.is_empty() {
-        None
-    } else {
-        Some((table, col.to_lowercase()))
-    }
+    Some((table, col))
 }
 
 /// Extract table names from DROP TABLE statement
@@ -1663,17 +1635,9 @@ fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
     {
         col_part = &col_part.trim()["IF EXISTS".len()..];
     }
-    let col: String = col_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let col = extract_sql_column_ref(col_part.trim())?;
 
-    if table.is_empty() || col.is_empty() {
-        None
-    } else {
-        Some((table, col.to_lowercase()))
-    }
+    Some((table, col))
 }
 
 /// Extract table and column from ALTER TABLE ... DROP (without COLUMN keyword)
@@ -1695,27 +1659,72 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     {
         col_part = &col_part.trim()["IF EXISTS".len()..];
     }
-    let col: String = col_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let col = extract_sql_column_ref(col_part.trim())?;
 
-    if table.is_empty() || col.is_empty() {
-        None
-    } else {
-        Some((table, col.to_lowercase()))
-    }
+    Some((table, col))
 }
 
 fn extract_sql_table_ref(raw: &str) -> Option<String> {
-    let name: String = raw
-        .trim()
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
-        .collect();
-    let name = name.to_ascii_lowercase();
+    let mut rest = raw.trim_start();
+    let mut parts = Vec::new();
+
+    loop {
+        let (part, tail, _) = parse_sql_identifier_segment(rest)?;
+        parts.push(part.to_ascii_lowercase());
+        rest = tail.trim_start();
+        if let Some(tail) = rest.strip_prefix('.') {
+            rest = tail.trim_start();
+        } else {
+            break;
+        }
+    }
+
+    let name = parts.join(".");
     is_build_table_ref(&name).then_some(name)
+}
+
+fn extract_sql_column_ref(raw: &str) -> Option<String> {
+    let (name, rest, quoted) = parse_sql_identifier_segment(raw)?;
+    if rest.trim_start().starts_with('.') {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    if name.is_empty() || !is_build_identifier(&name) || (!quoted && name == "if") {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn parse_sql_identifier_segment(raw: &str) -> Option<(String, &str, bool)> {
+    let rest = raw.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = quoted.char_indices().peekable();
+        while let Some((idx, ch)) = chars.next() {
+            if ch == '"' {
+                if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    out.push('"');
+                    chars.next();
+                    continue;
+                }
+                let consumed = 1 + idx + ch.len_utf8();
+                return Some((out, &rest[consumed..], true));
+            }
+            out.push(ch);
+        }
+        return None;
+    }
+
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    let tail = &rest[name.len()..];
+    Some((name, tail, false))
 }
 
 fn extract_alter_table_ref(raw: &str) -> Option<String> {
@@ -1966,5 +1975,24 @@ ALTER TABLE users DROP IF EXISTS old_name;
         assert!(!users.has_column("old_email"));
         assert!(!users.has_column("old_name"));
         assert!(!users.has_column("if"));
+    }
+
+    #[test]
+    fn sql_migration_handles_quoted_table_and_column_identifiers() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE "app"."order" ("id" uuid, "select" text);
+ALTER TABLE "app"."order" ADD COLUMN "from" text;
+ALTER TABLE "app"."order" DROP COLUMN "select";
+"#,
+        );
+
+        let orders = schema
+            .table("app.order")
+            .expect("quoted schema-qualified table should parse");
+        assert!(orders.has_column("id"));
+        assert!(orders.has_column("from"));
+        assert!(!orders.has_column("select"));
     }
 }
