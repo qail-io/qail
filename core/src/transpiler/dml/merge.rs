@@ -211,6 +211,16 @@ fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
         Value::Column(column) => render_named_expr(column, generator),
         Value::Expr(expr) => expr_sql(expr, generator),
         Value::Subquery(query) => format!("({})", query.to_sql()),
+        Value::Function(function) => render_raw_function_value(function),
+        Value::NamedParam(name) => render_named_param(name),
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(|value| value_sql(value, generator))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
         _ => value.to_string(),
     }
 }
@@ -255,6 +265,7 @@ fn in_condition_sql(condition: &Condition, left: &str, generator: &dyn SqlGenera
 fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
     match value {
         Value::String(value) => format!("'%{}%'", escape_sql_string_literal(value)),
+        Value::Function(value) => format!("'%{}%'", escape_sql_string_literal(value)),
         Value::Param(index) => {
             let placeholder = generator.placeholder(*index);
             generator.string_concat(&["'%'", &placeholder, "'%'"])
@@ -315,7 +326,35 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator) -> Strin
 
 fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
     match expr {
+        Expr::Star => "*".to_string(),
         Expr::Named(name) => render_named_expr(name, generator),
+        Expr::Aliased { name, alias } => format!(
+            "{} AS {}",
+            render_named_expr(name, generator),
+            render_identifier_or_error(alias, generator)
+        ),
+        Expr::Aggregate {
+            col,
+            func,
+            distinct,
+            filter,
+            ..
+        } => {
+            let mut sql = if *distinct {
+                format!("{}(DISTINCT {})", func, render_named_expr(col, generator))
+            } else {
+                format!("{}({})", func, render_named_expr(col, generator))
+            };
+            if let Some(conditions) = filter
+                && !conditions.is_empty()
+            {
+                sql.push_str(" FILTER (WHERE ");
+                sql.push_str(&conditions_sql(conditions, generator));
+                sql.push(')');
+            }
+            sql
+        }
+        Expr::Literal(value) => value_sql(value, generator),
         Expr::Case {
             when_clauses,
             else_value,
@@ -352,12 +391,33 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             ),
         },
         Expr::FunctionCall { name, args, .. } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid function name */".to_string();
+            };
             let args = args
                 .iter()
                 .map(|arg| expr_sql(arg, generator))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}({})", name.to_uppercase(), args)
+            format!("{function}({args})")
+        }
+        Expr::SpecialFunction { name, args, .. } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid function name */".to_string();
+            };
+            let mut parts = Vec::new();
+            for (keyword, expr) in args {
+                let expr = expr_sql(expr, generator);
+                if let Some(keyword) = keyword {
+                    let Some(keyword) = render_sql_keyword(keyword) else {
+                        return "/* ERROR: Invalid function keyword */".to_string();
+                    };
+                    parts.push(format!("{keyword} {expr}"));
+                } else {
+                    parts.push(expr);
+                }
+            }
+            format!("{function}({})", parts.join(" "))
         }
         Expr::Cast {
             expr, target_type, ..
@@ -400,7 +460,94 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             expr_sql(expr, generator),
             render_identifier_or_error(field, generator)
         ),
-        _ => expr.to_string(),
+        Expr::ArrayConstructor { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(|element| expr_sql(element, generator))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ARRAY[{elements}]")
+        }
+        Expr::RowConstructor { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(|element| expr_sql(element, generator))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ROW({elements})")
+        }
+        Expr::Subscript { expr, index, .. } => {
+            format!(
+                "{}[{}]",
+                expr_sql(expr, generator),
+                expr_sql(index, generator)
+            )
+        }
+        Expr::Subquery { query, .. } => format!("({})", query.to_sql()),
+        Expr::Exists { query, negated, .. } => {
+            if *negated {
+                format!("NOT EXISTS ({})", query.to_sql())
+            } else {
+                format!("EXISTS ({})", query.to_sql())
+            }
+        }
+        Expr::Def { .. } | Expr::Mod { .. } | Expr::Window { .. } => {
+            "/* ERROR: Invalid MERGE expression */".to_string()
+        }
+    }
+}
+
+fn render_function_name(name: &str) -> Option<String> {
+    if name.is_empty()
+        || name.contains('\0')
+        || name.split('.').any(str::is_empty)
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        None
+    } else {
+        Some(name.to_uppercase())
+    }
+}
+
+fn render_sql_keyword(keyword: &str) -> Option<String> {
+    if keyword.is_empty()
+        || keyword.contains('\0')
+        || !keyword
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'_')
+    {
+        None
+    } else {
+        Some(keyword.to_uppercase())
+    }
+}
+
+fn render_named_param(name: &str) -> String {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return "/* ERROR: Invalid parameter name */".to_string();
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return "/* ERROR: Invalid parameter name */".to_string();
+    }
+    format!(":{}", name)
+}
+
+fn render_raw_function_value(value: &str) -> String {
+    if value.len() > 1024
+        || value.contains('\0')
+        || value.contains(';')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        "/* ERROR: Invalid function expression */".to_string()
+    } else {
+        value.to_string()
     }
 }
 

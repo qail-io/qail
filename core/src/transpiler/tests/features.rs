@@ -1340,6 +1340,59 @@ fn test_merge_postgres_rejects_invalid_cast_target_type() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_invalid_function_name() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[(
+            "name",
+            Expr::FunctionCall {
+                name: "coalesce); DROP TABLE users; --".to_string(),
+                args: vec![
+                    Expr::Named("s.name".to_string()),
+                    Expr::Named("users.name".to_string()),
+                ],
+                alias: None,
+            },
+        )]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+         WHEN MATCHED THEN UPDATE SET name = /* ERROR: Invalid function name */"
+    );
+}
+
+#[test]
+fn test_merge_postgres_rejects_raw_function_condition_value() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.updated_at".to_string()),
+                op: Operator::Lt,
+                value: Value::Function("NOW(); DROP TABLE users; --".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains("users.updated_at < /* ERROR: Invalid function expression */"),
+        "unsafe raw function value should fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe raw function value leaked into MERGE SQL: {sql}"
+    );
+}
+
+#[test]
 fn test_merge_postgres_preserves_special_condition_operators() {
     let cmd = Qail::merge_into("users")
         .target_alias("u")
