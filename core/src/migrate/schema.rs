@@ -1343,16 +1343,18 @@ fn dollar_quote_qail_body(body: &str) -> String {
     let delimiter = if !body.contains("$$") {
         "$$".to_string()
     } else {
-        (0..)
-            .map(|idx| {
-                if idx == 0 {
-                    "$qail$".to_string()
-                } else {
-                    format!("$qail{idx}$")
-                }
-            })
-            .find(|candidate| !body.contains(candidate))
-            .expect("infinite delimiter candidates should always find a match")
+        let mut idx = 0usize;
+        loop {
+            let candidate = if idx == 0 {
+                "$qail$".to_string()
+            } else {
+                format!("$qail{idx}$")
+            };
+            if !body.contains(&candidate) {
+                break candidate;
+            }
+            idx = idx.saturating_add(1);
+        }
     };
 
     format!("{delimiter}\n{body}\n{delimiter}")

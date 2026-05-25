@@ -263,8 +263,12 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
                 current.push(ch);
                 i += ch.len_utf8();
             }
-            '$' if sql_dollar_quote_delimiter_at(sql, i).is_some() => {
-                let delim = sql_dollar_quote_delimiter_at(sql, i).expect("delimiter checked");
+            '$' => {
+                let Some(delim) = sql_dollar_quote_delimiter_at(sql, i) else {
+                    current.push(ch);
+                    i += ch.len_utf8();
+                    continue;
+                };
                 current.push_str(delim);
                 i += delim.len();
                 dollar_quote = Some(delim.to_string());

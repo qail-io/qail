@@ -603,37 +603,41 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 branches,
                 default,
             } => {
-                let (selection, selected_steps, start_index, nested_cursor) =
-                    match cursor_frames.first() {
-                        Some(WorkflowCursorFrame::Branch { selection, index }) => (
-                            selection.clone(),
-                            selected_branch_steps(branches, default, selection)?,
-                            *index,
-                            &cursor_frames[1..],
-                        ),
-                        Some(_) => {
-                            return Err(invalid_cursor(
-                                "expected Branch frame for nested branch resume",
-                            ));
+                let (selection, selected_steps, start_index, nested_cursor) = match cursor_frames
+                    .first()
+                {
+                    Some(WorkflowCursorFrame::Branch { selection, index }) => (
+                        selection.clone(),
+                        selected_branch_steps(branches, default, selection)?,
+                        *index,
+                        &cursor_frames[1..],
+                    ),
+                    Some(_) => {
+                        return Err(invalid_cursor(
+                            "expected Branch frame for nested branch resume",
+                        ));
+                    }
+                    None => {
+                        let value = ctx
+                            .get_str(condition_key)
+                            .ok_or_else(|| WorkflowError::MissingContextKey(condition_key.clone()))?
+                            .to_string();
+                        match branches.iter().enumerate().find(|(_, (k, _))| k == &value) {
+                            Some((idx, (_, steps))) => (
+                                WorkflowBranchCursorSelection::Branch(idx),
+                                steps.as_slice(),
+                                0,
+                                &[][..],
+                            ),
+                            None => (
+                                WorkflowBranchCursorSelection::Default,
+                                default.as_slice(),
+                                0,
+                                &[][..],
+                            ),
                         }
-                        None => {
-                            let value = ctx.get_str(condition_key).unwrap_or("").to_string();
-                            match branches.iter().enumerate().find(|(_, (k, _))| k == &value) {
-                                Some((idx, (_, steps))) => (
-                                    WorkflowBranchCursorSelection::Branch(idx),
-                                    steps.as_slice(),
-                                    0,
-                                    &[][..],
-                                ),
-                                None => (
-                                    WorkflowBranchCursorSelection::Default,
-                                    default.as_slice(),
-                                    0,
-                                    &[][..],
-                                ),
-                            }
-                        }
-                    };
+                    }
+                };
 
                 if let Some(pause) = execute_steps(
                     executor,
@@ -1217,6 +1221,34 @@ mod tests {
 
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "resolved");
+    }
+
+    #[tokio::test]
+    async fn branch_missing_context_key_errors_instead_of_taking_default() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("branching_missing_key")
+            .initial_state("pending")
+            .transition(
+                "pending",
+                "resolved",
+                vec![WorkflowStep::branch(
+                    "payment.status",
+                    vec![("paid", vec![WorkflowStep::transition("resolved")])],
+                    vec![WorkflowStep::transition("fallback")],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-missing-branch-key", "pending");
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("missing branch context must not route to default");
+
+        match err {
+            WorkflowError::MissingContextKey(key) => assert_eq!(key, "payment.status"),
+            other => panic!("expected MissingContextKey, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "pending");
     }
 
     #[test]

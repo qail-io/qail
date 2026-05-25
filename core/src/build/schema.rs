@@ -156,8 +156,12 @@ fn strip_sql_migration_comments(
                 out.push(ch);
                 i += ch.len_utf8();
             }
-            '$' if sql_dollar_quote_delimiter_at(line, i).is_some() => {
-                let delim = sql_dollar_quote_delimiter_at(line, i).expect("delimiter checked");
+            '$' => {
+                let Some(delim) = sql_dollar_quote_delimiter_at(line, i) else {
+                    out.push(ch);
+                    i += ch.len_utf8();
+                    continue;
+                };
                 out.push_str(delim);
                 i += delim.len();
                 *dollar_quote = Some(delim.to_string());
@@ -1524,11 +1528,12 @@ fn find_matching_sql_paren(raw: &str, open_idx: usize) -> Option<usize> {
                 }
                 in_double = !in_double;
             }
-            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(raw, i).is_some() => {
-                let delim = sql_dollar_quote_delimiter_at(raw, i).expect("delimiter checked");
-                dollar_quote = Some(delim.to_string());
-                i += delim.len();
-                continue;
+            '$' if !in_single && !in_double => {
+                if let Some(delim) = sql_dollar_quote_delimiter_at(raw, i) {
+                    dollar_quote = Some(delim.to_string());
+                    i += delim.len();
+                    continue;
+                }
             }
             '(' if !in_single && !in_double => depth += 1,
             ')' if !in_single && !in_double => {
@@ -1583,11 +1588,12 @@ fn split_sql_top_level_csv(raw: &str) -> Vec<&str> {
                 }
                 in_double = !in_double;
             }
-            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(raw, i).is_some() => {
-                let delim = sql_dollar_quote_delimiter_at(raw, i).expect("delimiter checked");
-                dollar_quote = Some(delim.to_string());
-                i += delim.len();
-                continue;
+            '$' if !in_single && !in_double => {
+                if let Some(delim) = sql_dollar_quote_delimiter_at(raw, i) {
+                    dollar_quote = Some(delim.to_string());
+                    i += delim.len();
+                    continue;
+                }
             }
             '(' if !in_single && !in_double => depth += 1,
             ')' if !in_single && !in_double => depth = depth.saturating_sub(1),
@@ -1641,11 +1647,12 @@ fn split_sql_statements(raw: &str) -> Vec<String> {
                 }
                 in_double = !in_double;
             }
-            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(raw, i).is_some() => {
-                let delim = sql_dollar_quote_delimiter_at(raw, i).expect("delimiter checked");
-                dollar_quote = Some(delim.to_string());
-                i += delim.len();
-                continue;
+            '$' if !in_single && !in_double => {
+                if let Some(delim) = sql_dollar_quote_delimiter_at(raw, i) {
+                    dollar_quote = Some(delim.to_string());
+                    i += delim.len();
+                    continue;
+                }
             }
             ';' if !in_single && !in_double => {
                 let statement = raw[start..i].trim();

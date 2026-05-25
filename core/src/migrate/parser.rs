@@ -960,9 +960,9 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
             return Err(format!("Unclosed sequence block '{}'", name));
         }
 
-        let close_idx = tokens_str
-            .find('}')
-            .expect("found_closing_brace guarantees a sequence block terminator");
+        let Some(close_idx) = tokens_str.find('}') else {
+            return Err(format!("Unclosed sequence block '{}'", name));
+        };
         if !tokens_str[close_idx + 1..].trim().is_empty() {
             return Err("trailing content after sequence block".to_string());
         }

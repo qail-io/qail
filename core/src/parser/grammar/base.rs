@@ -101,10 +101,12 @@ fn parse_quoted_string(input: &str, quote: char) -> IResult<&str, Value> {
     let mut index = quote.len_utf8();
 
     while index < input.len() {
-        let ch = input[index..]
-            .chars()
-            .next()
-            .expect("index must remain on a char boundary");
+        let Some(ch) = input.get(index..).and_then(|s| s.chars().next()) else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Char,
+            )));
+        };
         index += ch.len_utf8();
 
         if ch == quote {

@@ -6,6 +6,7 @@ use anyhow::Result;
 use qail_core::migrate::{diff_schemas_checked, parse_qail, parse_qail_file};
 use qail_core::prelude::*;
 use qail_core::transpiler::Dialect;
+use std::path::Path;
 
 /// Output format for schema operations.
 #[derive(Clone)]
@@ -28,6 +29,19 @@ fn cmds_wire_json(cmds: &[Qail], dialect: Dialect) -> serde_json::Value {
         })
         .collect();
     serde_json::Value::Array(rows)
+}
+
+fn merge_migrations_for_source_audit(
+    build_schema: &mut qail_core::build::Schema,
+    migrations_dir: &str,
+) -> Result<usize> {
+    if !Path::new(migrations_dir).exists() {
+        return Ok(0);
+    }
+
+    build_schema
+        .merge_migrations(migrations_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to merge migrations from {}: {}", migrations_dir, e))
 }
 
 /// Validate a QAIL schema file with detailed error reporting.
@@ -108,17 +122,14 @@ pub fn check_schema(
                     .map_err(|e| anyhow::anyhow!("Failed to parse schema for audit: {}", e))?;
 
                 // Merge migrations if directory exists
-                let mig_path = std::path::Path::new(migrations_dir);
-                if mig_path.exists() {
-                    let merged = build_schema.merge_migrations(migrations_dir).unwrap_or(0);
-                    if merged > 0 {
-                        println!(
-                            "  {} Merged {} schema changes from {}",
-                            "✓".green(),
-                            merged,
-                            migrations_dir
-                        );
-                    }
+                let merged = merge_migrations_for_source_audit(&mut build_schema, migrations_dir)?;
+                if merged > 0 {
+                    println!(
+                        "  {} Merged {} schema changes from {}",
+                        "✓".green(),
+                        merged,
+                        migrations_dir
+                    );
                 }
 
                 // Show RLS-enabled tables
@@ -508,4 +519,39 @@ pub async fn diff_live(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("qail_schema_{name}_{nanos}"))
+    }
+
+    #[test]
+    fn source_audit_fails_when_migration_merge_fails() {
+        let mut build_schema =
+            qail_core::build::Schema::parse("table users {\n  id uuid primary_key\n}\n")
+                .expect("base schema should parse");
+        let dir = unique_temp_dir("bad_migration");
+        let migration_dir = dir.join("001_bad");
+        fs::create_dir_all(&migration_dir).expect("create migration dir");
+        fs::write(migration_dir.join("up.qail"), "table {\n").expect("write invalid migration");
+
+        let err = merge_migrations_for_source_audit(
+            &mut build_schema,
+            dir.to_str().expect("temp path should be utf8"),
+        )
+        .expect_err("invalid migration should fail source audit");
+
+        assert!(err.to_string().contains("Failed to merge migrations"));
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
 }

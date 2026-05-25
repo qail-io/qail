@@ -410,7 +410,9 @@ fn strip_sql_comments(input: &str) -> String {
         if bytes[i] == b'-' && i + 1 < input.len() && bytes[i + 1] == b'-' {
             i += 2;
             while i < input.len() {
-                let ch = input[i..].chars().next().expect("valid char boundary");
+                let Some(ch) = input.get(i..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
                 i += ch.len_utf8();
                 if ch == '\n' {
                     result.push('\n');
@@ -442,14 +444,20 @@ fn strip_sql_comments(input: &str) -> String {
 }
 
 fn push_char_at(input: &str, output: &mut String, index: &mut usize) {
-    let ch = input[*index..].chars().next().expect("valid char boundary");
-    output.push(ch);
-    *index += ch.len_utf8();
+    if let Some(ch) = input.get(*index..).and_then(|s| s.chars().next()) {
+        output.push(ch);
+        *index += ch.len_utf8();
+    } else {
+        *index = input.len();
+    }
 }
 
 fn advance_char(input: &str, index: &mut usize) {
-    let ch = input[*index..].chars().next().expect("valid char boundary");
-    *index += ch.len_utf8();
+    if let Some(ch) = input.get(*index..).and_then(|s| s.chars().next()) {
+        *index += ch.len_utf8();
+    } else {
+        *index = input.len();
+    }
 }
 
 fn dollar_quote_delimiter_len(bytes: &[u8], start: usize) -> Option<usize> {
