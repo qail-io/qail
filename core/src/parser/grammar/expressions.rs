@@ -8,7 +8,6 @@
 //! - `special_funcs`: SUBSTRING, EXTRACT, TRIM with keyword syntax
 
 use super::base::{parse_identifier, parse_value};
-use crate::ast::values::escape_sql_literal_body;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -24,6 +23,15 @@ pub use super::binary_ops::{parse_additive_expr, parse_concat_expr, parse_multip
 pub use super::case_when::parse_case;
 pub use super::functions::{parse_function_arg, parse_function_or_aggregate};
 pub use super::special_funcs::parse_special_function;
+
+pub(super) fn value_to_expr(value: Value) -> Expr {
+    match value {
+        Value::Expr(expr) => *expr,
+        Value::Column(column) => Expr::Named(column),
+        Value::Subquery(query) => Expr::Subquery { query, alias: None },
+        value => Expr::Literal(value),
+    }
+}
 
 /// Parse a general expression.
 /// Handles binary operators with precedence:
@@ -187,31 +195,7 @@ fn parse_star(input: &str) -> IResult<&str, Expr> {
 
 /// Parse literal values (strings, numbers, named params) as expressions
 fn parse_literal(input: &str) -> IResult<&str, Expr> {
-    map(parse_value, |v| match v {
-        Value::NamedParam(name) => Expr::Named(format!(":{}", name)),
-        Value::Param(n) => Expr::Named(format!("${}", n)),
-        Value::String(s) => Expr::Named(format!("'{}'", escape_sql_literal_body(&s))),
-        Value::Int(n) => Expr::Named(n.to_string()),
-        Value::Float(f) => {
-            // Ensure float always has decimal point (100.0 not 100)
-            let s = f.to_string();
-            if s.contains('.') {
-                Expr::Named(s)
-            } else {
-                Expr::Named(format!("{}.0", s))
-            }
-        }
-        Value::Bool(b) => Expr::Named(if b {
-            "TRUE".to_string()
-        } else {
-            "FALSE".to_string()
-        }),
-        Value::Null => Expr::Named("NULL".to_string()),
-        Value::Interval { amount, unit } => Expr::Named(format!("INTERVAL '{} {}'", amount, unit)),
-        // Fall back to Display for other variants
-        _ => Expr::Named(v.to_string()),
-    })
-    .parse(input)
+    map(parse_value, value_to_expr).parse(input)
 }
 
 fn parse_simple_ident(input: &str) -> IResult<&str, Expr> {

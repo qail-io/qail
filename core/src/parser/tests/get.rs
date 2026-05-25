@@ -33,6 +33,36 @@ fn test_v2_get_with_columns() {
 }
 
 #[test]
+fn test_v2_get_expression_literals_stay_structured() {
+    let cmd = parse(
+        "get users fields COALESCE(name, 'fallback'), CASE WHEN active = true THEN 1 ELSE 0 END",
+    )
+    .unwrap();
+
+    match &cmd.columns[0] {
+        Expr::FunctionCall { args, .. } => {
+            assert_eq!(
+                args[1],
+                Expr::Literal(Value::String("fallback".to_string()))
+            );
+        }
+        other => panic!("expected function call, got {other:?}"),
+    }
+
+    match &cmd.columns[1] {
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            assert_eq!(*when_clauses[0].1, Expr::Literal(Value::Int(1)));
+            assert_eq!(else_value.as_deref(), Some(&Expr::Literal(Value::Int(0))));
+        }
+        other => panic!("expected case expression, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_v2_get_with_filter() {
     let cmd = parse("get users fields * where active = true").unwrap();
     assert_eq!(cmd.cages.len(), 1);

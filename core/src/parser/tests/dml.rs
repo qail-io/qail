@@ -73,7 +73,10 @@ fn test_conflict_update_escapes_triple_quoted_string_assignment() {
     match on_conflict.action {
         ConflictAction::DoUpdate { assignments } => {
             assert_eq!(assignments[0].0, "name");
-            assert_eq!(assignments[0].1, Expr::Named("'O''Reilly'".to_string()));
+            assert_eq!(
+                assignments[0].1,
+                Expr::Literal(Value::String("O'Reilly".to_string()))
+            );
         }
         other => panic!("expected conflict update, got {other:?}"),
     }

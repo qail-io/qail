@@ -1,5 +1,4 @@
 use super::base::{parse_identifier, parse_value};
-use crate::ast::values::escape_sql_literal_body;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -170,34 +169,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
     // Try to parse a value first (handles :named_params, literals, etc.)
     // Then fall back to full expression parsing
     let (input, expr) = alt((
-        nom::combinator::map(parse_value, |v| match v {
-            Value::NamedParam(name) => Expr::Named(format!(":{}", name)),
-            Value::Param(n) => Expr::Named(format!("${}", n)),
-            Value::String(s) => Expr::Named(format!("'{}'", escape_sql_literal_body(&s))),
-            Value::Int(n) => Expr::Named(n.to_string()),
-            Value::Float(f) => Expr::Named(f.to_string()),
-            Value::Bool(b) => Expr::Named(b.to_string()),
-            Value::Null => Expr::Named("NULL".to_string()),
-            Value::Array(_) => Expr::Named("ARRAY".to_string()),
-            Value::Function(name) => Expr::Named(name),
-            Value::Subquery(_) => Expr::Named("(SUBQUERY)".to_string()),
-            Value::Column(col) => Expr::Named(col),
-            Value::Uuid(u) => Expr::Named(format!("'{}'", u)),
-            Value::NullUuid => Expr::Named("NULL".to_string()),
-            Value::Interval { amount, unit } => {
-                Expr::Named(format!("INTERVAL '{} {}'", amount, unit))
-            }
-            Value::Timestamp(ts) => Expr::Named(format!("'{}'", escape_sql_literal_body(&ts))),
-            Value::Bytes(bytes) => {
-                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                Expr::Named(format!("'\\x{}'", hex))
-            }
-            Value::Expr(expr) => (*expr).clone(),
-            Value::Vector(v) => Expr::Named(format!("[{} floats]", v.len())),
-            Value::Json(json) => {
-                Expr::Named(format!("'{}'::jsonb", escape_sql_literal_body(&json)))
-            }
-        }),
+        nom::combinator::map(parse_value, super::expressions::value_to_expr),
         // Fall back to full expression parsing
         parse_expression,
     ))

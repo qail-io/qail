@@ -486,6 +486,32 @@ mod tests {
     }
 
     #[test]
+    fn parsed_expression_literals_encode_as_literals() {
+        let cmd = qail_core::parser::parse(
+            "get users fields COALESCE(name, 'fallback'), CASE WHEN active = true THEN 1 ELSE 0 END",
+        )
+        .unwrap();
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(
+            sql,
+            "SELECT COALESCE(name, 'fallback'), CASE WHEN active = TRUE THEN 1 ELSE 0 END FROM users"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn parsed_expression_string_literals_reject_null_bytes() {
+        let cmd =
+            qail_core::parser::parse("get users fields COALESCE(name, 'bad\0value')").unwrap();
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("null byte literal must fail closed");
+
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
     fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
         use qail_core::ast::{CTEDef, Expr, SetOp};
 
