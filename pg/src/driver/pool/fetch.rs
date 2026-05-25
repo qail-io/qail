@@ -23,6 +23,17 @@ fn rollback_cache_miss_statement_registration(
     }
 }
 
+#[inline]
+fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    if matches!(
+        err,
+        PgError::Protocol(_) | PgError::Connection(_) | PgError::Timeout(_)
+    ) {
+        conn.mark_io_desynced();
+    }
+    Err(err)
+}
+
 async fn drain_extended_responses_after_rls_setup_error(conn: &mut PgConnection) -> PgResult<()> {
     loop {
         let msg = conn.recv().await?;
@@ -220,7 +231,9 @@ impl PooledConnection {
 
         loop {
             let msg = conn.recv().await?;
-            flow.validate(&msg, "pool fetch_all execute", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "pool fetch_all execute", error.is_some()) {
+                return return_with_desync(conn, err);
+            }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -250,7 +263,10 @@ impl PooledConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("pool fetch_all execute", &other));
+                    return return_with_desync(
+                        conn,
+                        unexpected_backend_message("pool fetch_all execute", &other),
+                    );
                 }
             }
         }
@@ -296,11 +312,13 @@ impl PooledConnection {
             let res = conn.recv_with_data_fast().await;
             match res {
                 Ok((msg_type, data)) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "pool fetch_all_fast execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(conn, err);
+                    }
                     match msg_type {
                         b'D' => {
                             if error.is_none()
@@ -565,7 +583,7 @@ impl PooledConnection {
                     conn.prepared_statements.remove(&stmt_name);
                     conn.column_info_cache.remove(&sql_hash);
                 }
-                return Err(err);
+                return return_with_desync(conn, err);
             }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete => {}
@@ -603,10 +621,13 @@ impl PooledConnection {
                         conn.stmt_cache.remove(&sql_hash);
                         conn.prepared_statements.remove(&stmt_name);
                         conn.column_info_cache.remove(&sql_hash);
-                        return Err(PgError::Protocol(
-                            "Cache miss query reached ReadyForQuery without ParseComplete"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            conn,
+                            PgError::Protocol(
+                                "Cache miss query reached ReadyForQuery without ParseComplete"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(rows);
                 }
@@ -622,10 +643,10 @@ impl PooledConnection {
                         conn.prepared_statements.remove(&stmt_name);
                         conn.column_info_cache.remove(&sql_hash);
                     }
-                    return Err(unexpected_backend_message(
-                        "pool fetch_all_cached execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        conn,
+                        unexpected_backend_message("pool fetch_all_cached execute", &other),
+                    );
                 }
             }
         }
@@ -837,7 +858,18 @@ impl PooledConnection {
                 | crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
                 msg if is_ignorable_session_message(&msg) => {}
-                other => return Err(unexpected_backend_message("pool rls setup", &other)),
+                other => {
+                    rollback_cache_miss_statement_registration(
+                        conn,
+                        is_cache_miss,
+                        sql_hash,
+                        &stmt_name,
+                    );
+                    return return_with_desync(
+                        conn,
+                        unexpected_backend_message("pool rls setup", &other),
+                    );
+                }
             }
         }
 
@@ -877,7 +909,7 @@ impl PooledConnection {
                         &stmt_name,
                     );
                 }
-                return Err(err);
+                return return_with_desync(conn, err);
             }
             match msg {
                 crate::protocol::BackendMessage::ParseComplete => {}
@@ -922,10 +954,13 @@ impl PooledConnection {
                             sql_hash,
                             &stmt_name,
                         );
-                        return Err(PgError::Protocol(
-                            "Cache miss query reached ReadyForQuery without ParseComplete"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            conn,
+                            PgError::Protocol(
+                                "Cache miss query reached ReadyForQuery without ParseComplete"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(rows);
                 }
@@ -944,10 +979,10 @@ impl PooledConnection {
                             &stmt_name,
                         );
                     }
-                    return Err(unexpected_backend_message(
-                        "pool fetch_all_with_rls execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        conn,
+                        unexpected_backend_message("pool fetch_all_with_rls execute", &other),
+                    );
                 }
             }
         }
@@ -956,7 +991,40 @@ impl PooledConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_export_table_sql;
+    use super::{copy_export_table_sql, return_with_desync};
+
+    #[cfg(unix)]
+    fn test_conn() -> crate::driver::PgConnection {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        crate::driver::PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: crate::driver::PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: crate::driver::PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
 
     #[test]
     fn pool_copy_export_table_sql_preserves_schema_qualified_table() {
@@ -976,5 +1044,20 @@ mod tests {
     fn pool_copy_export_table_sql_rejects_nul_bytes() {
         assert!(copy_export_table_sql("tenant\0.users", &["id".to_string()]).is_err());
         assert!(copy_export_table_sql("users", &["id\0".to_string()]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pool_return_with_desync_marks_protocol_error() {
+        let mut conn = test_conn();
+
+        let err = return_with_desync::<()>(
+            &mut conn,
+            crate::driver::PgError::Protocol("bad response ordering".to_string()),
+        )
+        .expect_err("protocol error must be returned");
+
+        assert!(err.to_string().contains("bad response ordering"));
+        assert!(conn.is_io_desynced());
     }
 }
