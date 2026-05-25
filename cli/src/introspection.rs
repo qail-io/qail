@@ -1729,21 +1729,22 @@ fn find_top_level_keyword(input: &str, keyword: &str) -> Option<usize> {
             }
             '(' if !in_single && !in_double => depth += 1,
             ')' if !in_single && !in_double && depth > 0 => depth -= 1,
-            _ if !in_single && !in_double && depth == 0 => {
-                if input
+            _ if !in_single
+                && !in_double
+                && depth == 0
+                && input
                     .get(idx..idx + keyword.len())
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
-                    && input[..idx]
-                        .chars()
-                        .next_back()
-                        .is_none_or(|prev| !is_ident_char(prev))
-                    && input[idx + keyword.len()..]
-                        .chars()
-                        .next()
-                        .is_none_or(|next| !is_ident_char(next))
-                {
-                    return Some(idx);
-                }
+                && input[..idx]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|prev| !is_ident_char(prev))
+                && input[idx + keyword.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !is_ident_char(next)) =>
+            {
+                return Some(idx);
             }
             _ => {}
         }
