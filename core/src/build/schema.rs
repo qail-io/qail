@@ -907,7 +907,7 @@ impl Schema {
         let mut changes = 0;
 
         // Extract CREATE TABLE statements
-        // Pattern: CREATE TABLE [IF NOT EXISTS] table_name (columns...)
+        // Pattern: CREATE [UNLOGGED] TABLE [IF NOT EXISTS] table_name (columns...)
         let mut in_block_comment = false;
         let mut dollar_quote = None;
         for raw_line in sql.lines() {
@@ -921,10 +921,7 @@ impl Schema {
             {
                 continue;
             }
-            let line_upper = line.to_uppercase();
-
-            if line_upper.starts_with("CREATE TABLE")
-                && let Some(table_name) = extract_create_table_name(line)
+            if let Some(table_name) = extract_create_table_name(line)
                 && !self.tables.contains_key(&table_name)
             {
                 self.tables.insert(
@@ -965,9 +962,7 @@ impl Schema {
             }
             let line_upper = line.to_uppercase();
 
-            if line_upper.starts_with("CREATE TABLE")
-                && let Some(name) = extract_create_table_name(line)
-            {
+            if let Some(name) = extract_create_table_name(line) {
                 // Only track column extraction for tables that DON'T already
                 // have their types from schema.qail. Tables that existed before
                 // this migration already have correct types; overwriting them
@@ -1502,16 +1497,42 @@ fn extract_view_name(line: &str) -> Option<&str> {
 
 /// Extract table name from CREATE TABLE statement
 fn extract_create_table_name(line: &str) -> Option<String> {
-    let line_upper = line.to_uppercase();
-    let rest = line_upper.strip_prefix("CREATE TABLE")?;
-    let rest = rest.trim_start();
-    let rest = if rest.starts_with("IF NOT EXISTS") {
-        rest.strip_prefix("IF NOT EXISTS")?.trim_start()
+    let rest = extract_create_table_target_start(line)?;
+    let rest = if let Some(after_if) = strip_sql_keyword(rest, "IF") {
+        let after_not = strip_sql_keyword(after_if, "NOT")?;
+        strip_sql_keyword(after_not, "EXISTS")?
     } else {
         rest
     };
 
-    extract_sql_table_ref(&line[line.len() - rest.len()..])
+    extract_sql_table_ref(rest)
+}
+
+fn extract_create_table_target_start(line: &str) -> Option<&str> {
+    let mut rest = strip_sql_keyword(line, "CREATE")?;
+
+    if let Some(after_unlogged) = strip_sql_keyword(rest, "UNLOGGED") {
+        rest = after_unlogged;
+    } else if strip_sql_keyword(rest, "TEMP")
+        .or_else(|| strip_sql_keyword(rest, "TEMPORARY"))
+        .is_some()
+    {
+        return None;
+    }
+
+    strip_sql_keyword(rest, "TABLE")
+}
+
+fn strip_sql_keyword<'a>(raw: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = raw.trim_start();
+    let tail = rest.get(keyword.len()..)?;
+    if rest[..keyword.len()].eq_ignore_ascii_case(keyword)
+        && (tail.is_empty() || tail.starts_with(char::is_whitespace))
+    {
+        Some(tail.trim_start())
+    } else {
+        None
+    }
 }
 
 /// Extract column name from a line inside CREATE TABLE block
@@ -2160,5 +2181,21 @@ $$ LANGUAGE plpgsql;
 
         assert!(schema.has_table("users"));
         assert!(!schema.has_table("hidden_from_function"));
+    }
+
+    #[test]
+    fn sql_migration_handles_unlogged_create_tables() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE UNLOGGED TABLE IF NOT EXISTS jobs (id uuid, status text);
+CREATE TEMP TABLE scratch_jobs (id uuid);
+"#,
+        );
+
+        let jobs = schema.table("jobs").expect("unlogged table should parse");
+        assert!(jobs.has_column("id"));
+        assert!(jobs.has_column("status"));
+        assert!(!schema.has_table("scratch_jobs"));
     }
 }
