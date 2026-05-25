@@ -1074,6 +1074,24 @@ impl Schema {
             {
                 changes += 1;
             }
+
+            // ALTER TABLE ... RENAME COLUMN old TO new
+            if line_upper.starts_with("ALTER TABLE")
+                && line_upper.contains("RENAME COLUMN")
+                && let Some((table, old_col, new_col)) = extract_alter_rename_column(line)
+                && let Some(t) = self.tables.get_mut(&table)
+            {
+                let old_type = t.columns.remove(&old_col);
+                if old_type.is_some() {
+                    changes += 1;
+                }
+                if t.columns
+                    .insert(new_col, old_type.unwrap_or(ColumnType::Text))
+                    .is_none()
+                {
+                    changes += 1;
+                }
+            }
         }
 
         changes
@@ -1816,6 +1834,22 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     Some((table, col))
 }
 
+fn extract_alter_rename_column(line: &str) -> Option<(String, String, String)> {
+    let line_upper = line.to_uppercase();
+    let alter_pos = line_upper.find("ALTER TABLE")?;
+    let rename_pos = line_upper.find("RENAME COLUMN")?;
+    let to_pos = line_upper[rename_pos..].find(" TO ")? + rename_pos;
+
+    let table_part = &line[alter_pos + 11..rename_pos];
+    let table = extract_alter_table_ref(table_part)?;
+    let old_part = &line[rename_pos + "RENAME COLUMN".len()..to_pos];
+    let new_part = &line[to_pos + 4..];
+    let old_col = extract_sql_column_ref(old_part.trim())?;
+    let new_col = extract_sql_column_ref(new_part.trim())?;
+
+    Some((table, old_col, new_col))
+}
+
 fn extract_sql_table_ref(raw: &str) -> Option<String> {
     let mut rest = raw.trim_start();
     let mut parts = Vec::new();
@@ -2197,5 +2231,21 @@ CREATE TEMP TABLE scratch_jobs (id uuid);
         assert!(jobs.has_column("id"));
         assert!(jobs.has_column("status"));
         assert!(!schema.has_table("scratch_jobs"));
+    }
+
+    #[test]
+    fn sql_migration_tracks_column_renames() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid, old_email text);
+ALTER TABLE users RENAME COLUMN old_email TO email;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
+        assert!(!users.has_column("old_email"));
     }
 }
