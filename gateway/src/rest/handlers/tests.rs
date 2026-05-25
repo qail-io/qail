@@ -103,6 +103,20 @@ mod suite {
     }
 
     #[test]
+    fn primary_sort_rejects_invalid_explicit_direction() {
+        let (col, desc) = primary_sort_for_cursor(Some("created_at:sideways"), "id");
+        assert_eq!(col, "id");
+        assert!(!desc);
+    }
+
+    #[test]
+    fn primary_sort_invalid_explicit_column_uses_default_asc() {
+        let (col, desc) = primary_sort_for_cursor(Some("bad-col:desc"), "id");
+        assert_eq!(col, "id");
+        assert!(!desc);
+    }
+
+    #[test]
     fn build_rpc_sql_named_args() {
         let args = serde_json::json!({
             "tenant_id": "abc",

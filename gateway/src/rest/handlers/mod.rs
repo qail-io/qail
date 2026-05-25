@@ -64,9 +64,16 @@ pub(super) fn primary_sort_for_cursor(sort: Option<&str>, default_column: &str) 
 
     if let Some((col, dir)) = first.split_once(':') {
         let col = col.trim();
-        let is_desc = dir.trim().eq_ignore_ascii_case("desc");
+        let dir = dir.trim();
+        let is_desc = if dir.eq_ignore_ascii_case("desc") {
+            true
+        } else if dir.eq_ignore_ascii_case("asc") {
+            false
+        } else {
+            return (fallback.to_string(), false);
+        };
         return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
-            (fallback.to_string(), is_desc)
+            (fallback.to_string(), false)
         } else {
             (col.to_string(), is_desc)
         };
