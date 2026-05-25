@@ -112,6 +112,218 @@ fn resolve_text_search_vector(
     }
 }
 
+fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option<&Qail>) -> String {
+    match expr {
+        Expr::Named(name) => {
+            if name.starts_with('{') && name.ends_with('}') {
+                name[1..name.len() - 1].to_string()
+            } else if let Some(cmd) = context {
+                resolve_col_syntax(name, cmd, generator)
+            } else {
+                generator.quote_identifier(name)
+            }
+        }
+        Expr::JsonAccess {
+            column,
+            path_segments,
+            ..
+        } => render_json_access(column, path_segments, generator),
+        Expr::Literal(value) => condition_value_sql(value, generator),
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            let mut sql = String::from("CASE");
+            for (condition, value) in when_clauses {
+                sql.push_str(&format!(
+                    " WHEN {} THEN {}",
+                    condition.to_sql(generator, context),
+                    condition_left_sql(value, generator, context)
+                ));
+            }
+            if let Some(value) = else_value {
+                sql.push_str(&format!(
+                    " ELSE {}",
+                    condition_left_sql(value, generator, context)
+                ));
+            }
+            sql.push_str(" END");
+            sql
+        }
+        Expr::Binary {
+            left, op, right, ..
+        } => {
+            let left = condition_left_sql(left, generator, context);
+            let right = condition_left_sql(right, generator, context);
+            match op {
+                BinaryOp::IsNull => format!("({left} IS NULL)"),
+                BinaryOp::IsNotNull => format!("({left} IS NOT NULL)"),
+                _ => format!("({left} {op} {right})"),
+            }
+        }
+        Expr::FunctionCall { name, args, .. } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid function name */".to_string();
+            };
+            let args = args
+                .iter()
+                .map(|arg| condition_left_sql(arg, generator, context))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{function}({args})")
+        }
+        Expr::SpecialFunction { name, args, .. } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid function name */".to_string();
+            };
+            let mut parts = Vec::new();
+            for (keyword, expr) in args {
+                let expr = condition_left_sql(expr, generator, context);
+                if let Some(keyword) = keyword {
+                    let Some(keyword) = render_sql_keyword(keyword) else {
+                        return "/* ERROR: Invalid function keyword */".to_string();
+                    };
+                    parts.push(format!("{keyword} {expr}"));
+                } else {
+                    parts.push(expr);
+                }
+            }
+            format!("{function}({})", parts.join(" "))
+        }
+        Expr::Cast {
+            expr, target_type, ..
+        } => {
+            let Some(target_type) = checked_sql_type_fragment(target_type) else {
+                return "/* ERROR: Invalid cast target type */".to_string();
+            };
+            format!(
+                "{}::{}",
+                condition_left_sql(expr, generator, context),
+                target_type
+            )
+        }
+        Expr::Collate {
+            expr, collation, ..
+        } => format!(
+            "{} COLLATE {}",
+            condition_left_sql(expr, generator, context),
+            render_qualified_identifier(collation, generator)
+        ),
+        Expr::FieldAccess { expr, field, .. } => format!(
+            "({}).{}",
+            condition_left_sql(expr, generator, context),
+            render_qualified_identifier(field, generator)
+        ),
+        Expr::ArrayConstructor { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(|element| condition_left_sql(element, generator, context))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ARRAY[{elements}]")
+        }
+        Expr::RowConstructor { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(|element| condition_left_sql(element, generator, context))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ROW({elements})")
+        }
+        Expr::Subscript { expr, index, .. } => format!(
+            "{}[{}]",
+            condition_left_sql(expr, generator, context),
+            condition_left_sql(index, generator, context)
+        ),
+        Expr::Subquery { query, .. } => format!("({})", query.to_sql()),
+        Expr::Exists { query, negated, .. } => {
+            if *negated {
+                format!("NOT EXISTS ({})", query.to_sql())
+            } else {
+                format!("EXISTS ({})", query.to_sql())
+            }
+        }
+        _ => "/* ERROR: Invalid condition expression */".to_string(),
+    }
+}
+
+fn render_function_name(name: &str) -> Option<String> {
+    if name.is_empty()
+        || name.contains('\0')
+        || name.split('.').any(str::is_empty)
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        None
+    } else {
+        Some(name.to_uppercase())
+    }
+}
+
+fn render_sql_keyword(keyword: &str) -> Option<String> {
+    if keyword.is_empty()
+        || keyword.contains('\0')
+        || !keyword
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'_')
+    {
+        None
+    } else {
+        Some(keyword.to_uppercase())
+    }
+}
+
+fn checked_sql_type_fragment(fragment: &str) -> Option<String> {
+    let fragment = fragment.trim();
+    if fragment.is_empty()
+        || fragment.contains('\0')
+        || fragment.contains(';')
+        || fragment.contains('\'')
+        || fragment.contains('"')
+        || fragment.contains("--")
+        || fragment.contains("/*")
+        || fragment.contains("*/")
+        || !fragment.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+                )
+        })
+    {
+        None
+    } else {
+        Some(fragment.to_string())
+    }
+}
+
+fn render_qualified_identifier(value: &str, generator: &dyn SqlGenerator) -> String {
+    if value.is_empty() || value.as_bytes().contains(&0) || value.split('.').any(str::is_empty) {
+        "/* ERROR: Invalid identifier */".to_string()
+    } else {
+        generator.quote_identifier(value)
+    }
+}
+
+fn render_json_access(
+    column: &str,
+    path_segments: &[(String, bool)],
+    generator: &dyn SqlGenerator,
+) -> String {
+    let mut result = generator.quote_identifier(column);
+    for (path, as_text) in path_segments {
+        let op = if *as_text { "->>" } else { "->" };
+        if path.parse::<i64>().is_ok() {
+            result.push_str(&format!("{}{}", op, path));
+        } else {
+            result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
+        }
+    }
+    result
+}
+
 fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
     match value {
         Value::String(s) => format!("'%{}%'", escape_sql_string_literal(s)),
@@ -163,6 +375,7 @@ fn condition_value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
                 .join(", ");
             format!("({values})")
         }
+        Value::Expr(expr) => condition_left_sql(expr, generator, None),
         v => v.to_string(),
     }
 }
@@ -231,34 +444,7 @@ pub trait ConditionToSql {
 impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
     fn to_sql(&self, generator: &dyn SqlGenerator, context: Option<&Qail>) -> String {
-        let col = match &self.left {
-            Expr::Named(name) => {
-                if name.starts_with('{') && name.ends_with('}') {
-                    name[1..name.len() - 1].to_string()
-                } else if let Some(cmd) = context {
-                    resolve_col_syntax(name, cmd, generator)
-                } else {
-                    generator.quote_identifier(name)
-                }
-            }
-            Expr::JsonAccess {
-                column,
-                path_segments,
-                ..
-            } => {
-                let mut result = generator.quote_identifier(column);
-                for (path, as_text) in path_segments {
-                    let op = if *as_text { "->>" } else { "->" };
-                    if path.parse::<i64>().is_ok() {
-                        result.push_str(&format!("{}{}", op, path));
-                    } else {
-                        result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
-                    }
-                }
-                result
-            }
-            expr => expr.to_string(),
-        };
+        let col = condition_left_sql(&self.left, generator, context);
 
         if self.is_array_unnest {
             let inner_condition = match self.op {
@@ -398,34 +584,7 @@ impl ConditionToSql for Condition {
         context: Option<&Qail>,
         params: &mut ParamContext,
     ) -> String {
-        let col = match &self.left {
-            Expr::Named(name) => {
-                if name.starts_with('{') && name.ends_with('}') {
-                    name[1..name.len() - 1].to_string()
-                } else if let Some(cmd) = context {
-                    resolve_col_syntax(name, cmd, generator)
-                } else {
-                    generator.quote_identifier(name)
-                }
-            }
-            Expr::JsonAccess {
-                column,
-                path_segments,
-                ..
-            } => {
-                let mut result = generator.quote_identifier(column);
-                for (path, as_text) in path_segments {
-                    let op = if *as_text { "->>" } else { "->" };
-                    if path.parse::<i64>().is_ok() {
-                        result.push_str(&format!("{}{}", op, path));
-                    } else {
-                        result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
-                    }
-                }
-                result
-            }
-            expr => expr.to_string(),
-        };
+        let col = condition_left_sql(&self.left, generator, context);
 
         // Helper to convert value to placeholder
         let value_placeholder = |v: &Value, p: &mut ParamContext| -> String {

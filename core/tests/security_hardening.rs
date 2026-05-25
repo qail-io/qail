@@ -1045,6 +1045,132 @@ fn select_window_order_escapes_collation_fragment() {
 }
 
 #[test]
+fn condition_left_cast_rejects_unsafe_target_type() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::Cast {
+                expr: Box::new(Expr::Named("name".to_string())),
+                target_type: "text); DROP TABLE users; --".to_string(),
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: Value::String("Ada".to_string()),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid cast target type */"),
+        "unsafe condition cast target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe condition cast target leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn condition_left_function_name_rejects_raw_sql_fragment() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::FunctionCall {
+                name: "lower); DROP TABLE users; --".to_string(),
+                args: vec![Expr::Named("name".to_string())],
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: Value::String("ada".to_string()),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid function name */"),
+        "unsafe condition function name must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe condition function name leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn condition_left_collate_escapes_identifier_fragment_parameterized() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::Collate {
+                expr: Box::new(Expr::Named("name".to_string())),
+                collation: "C\"; DROP TABLE users; --".to_string(),
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: Value::String("Ada".to_string()),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+    let result = cmd.to_sql_parameterized();
+
+    assert!(
+        result
+            .sql
+            .contains("COLLATE \"C\"\"; DROP TABLE users; --\""),
+        "condition collation identifier was not escaped: {}",
+        result.sql
+    );
+    assert!(
+        !result.sql.contains("COLLATE \"C\"; DROP"),
+        "condition collation identifier broke out of quotes: {}",
+        result.sql
+    );
+}
+
+#[test]
+fn condition_value_expr_rejects_unsafe_cast_target() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::Named("name".to_string()),
+            op: Operator::Eq,
+            value: Value::Expr(Box::new(Expr::Cast {
+                expr: Box::new(Expr::Named("display_name".to_string())),
+                target_type: "text); DROP TABLE users; --".to_string(),
+                alias: None,
+            })),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid cast target type */"),
+        "unsafe condition value expression cast target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe condition value expression cast target leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_is_null_no_value_leak() {
     let cmd = select_where("users", "deleted_at", Operator::IsNull, Value::Null);
     let sql = cmd.to_sql();
