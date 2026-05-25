@@ -92,13 +92,16 @@ impl<'a> Utf16Index<'a> {
             .get(line + 1)
             .copied()
             .unwrap_or(self.text.len());
+        let mut end = next_start;
         if next_start > start
             && self.text.as_bytes().get(next_start.saturating_sub(1)) == Some(&b'\n')
         {
-            Some(next_start.saturating_sub(1))
-        } else {
-            Some(next_start)
+            end = next_start.saturating_sub(1);
+            if end > start && self.text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\r') {
+                end = end.saturating_sub(1);
+            }
         }
+        Some(end)
     }
 
     fn prev_char_boundary(&self, mut offset: usize) -> usize {
@@ -146,5 +149,45 @@ mod tests {
             })
             .expect("offset for line end");
         assert_eq!(idx.offset_to_position(off_line_end).character, 3);
+    }
+
+    #[test]
+    fn crlf_line_end_does_not_count_carriage_return() {
+        let text = "abc\r\ndef\r\n";
+        let idx = Utf16Index::new(text);
+
+        assert_eq!(idx.line_len_utf16(0), Some(3));
+        assert_eq!(idx.line_len_utf16(1), Some(3));
+        assert_eq!(
+            idx.offset_to_position(text.find('\r').expect("first CR"))
+                .character,
+            3
+        );
+        assert_eq!(
+            idx.offset_to_position(text.find('\n').expect("first LF"))
+                .character,
+            3
+        );
+    }
+
+    #[test]
+    fn crlf_position_to_offset_stops_before_carriage_return() {
+        let text = "ab\r\ncd";
+        let idx = Utf16Index::new(text);
+
+        assert_eq!(
+            idx.position_to_offset(Position {
+                line: 0,
+                character: 2,
+            }),
+            Some(2)
+        );
+        assert_eq!(
+            idx.position_to_offset(Position {
+                line: 0,
+                character: 3,
+            }),
+            None
+        );
     }
 }
