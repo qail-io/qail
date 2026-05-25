@@ -1447,6 +1447,8 @@ fn extract_column_from_create(line: &str) -> Option<String> {
         || starts_with_keyword("UNIQUE")
         || starts_with_keyword("CHECK")
         || starts_with_keyword("CONSTRAINT")
+        || starts_with_keyword("EXCLUDE")
+        || starts_with_keyword("LIKE")
         || line_upper.starts_with(")")
         || line_upper.starts_with("(")
         || line.is_empty()
@@ -1836,5 +1838,26 @@ DROP TABLE IF EXISTS app.users, app.posts CASCADE;
 
         assert!(!schema.has_table("app.users"));
         assert!(!schema.has_table("app.posts"));
+    }
+
+    #[test]
+    fn sql_migration_ignores_create_table_non_column_clauses() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE bookings (
+  id uuid,
+  EXCLUDE USING gist (room WITH =),
+  LIKE booking_template INCLUDING ALL
+);
+"#,
+        );
+
+        let bookings = schema
+            .table("bookings")
+            .expect("bookings table should parse");
+        assert!(bookings.has_column("id"));
+        assert!(!bookings.has_column("exclude"));
+        assert!(!bookings.has_column("like"));
     }
 }
