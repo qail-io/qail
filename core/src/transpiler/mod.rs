@@ -568,11 +568,10 @@ fn session_setting_name_to_sql(name: &str) -> String {
 }
 
 fn quote_single_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('\0', "").replace('"', "\"\""))
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn dollar_quote_block(body: &str) -> String {
-    let body = body.replace('\0', "");
     for idx in 0..=body.len() {
         let tag = if idx == 0 {
             String::new()

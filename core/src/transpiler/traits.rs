@@ -68,8 +68,6 @@ pub fn escape_identifier(name: &str) -> String {
 
 /// Escape a single identifier part (no dots).
 fn escape_single_identifier(name: &str) -> String {
-    let name = &name.replace('\0', "");
-
     let lower = name.to_lowercase();
     let needs_escaping = RESERVED_WORDS.contains(&lower.as_str())
         || name.chars().any(|c| !c.is_alphanumeric() && c != '_')
@@ -84,10 +82,11 @@ fn escape_single_identifier(name: &str) -> String {
 
 /// Escape content placed inside a SQL single-quoted string literal.
 ///
-/// The core transpiler is string-based, so NULL bytes are stripped to match
-/// identifier escaping behavior and avoid emitting invalid PostgreSQL text.
+/// Interior NUL bytes are preserved so lower-level protocol encoders or C FFI
+/// output conversion reject invalid PostgreSQL text instead of silently
+/// executing a mutated statement.
 pub fn escape_sql_string_literal(value: &str) -> String {
-    value.replace('\0', "").replace('\'', "''")
+    value.replace('\'', "''")
 }
 
 fn is_sql_placeholder(value: &str) -> bool {

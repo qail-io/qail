@@ -1123,7 +1123,16 @@ impl PgConnection {
                     // entries that were not mirrored in stmt_cache.
                     self.stmt_cache.put(sql_hash, stmt_name.clone());
                 } else {
-                    let sql = String::from_utf8_lossy(sql_buf.as_ref()).to_string();
+                    let sql = match std::str::from_utf8(sql_buf.as_ref()) {
+                        Ok(sql) => sql.to_string(),
+                        Err(e) => {
+                            rollback_new_cached_statements(self, &new_stmt_hashes);
+                            return Err(PgError::Encode(format!(
+                                "encoded SQL is not UTF-8: {}",
+                                e
+                            )));
+                        }
+                    };
                     let parse_msg = match PgEncoder::try_encode_parse(&stmt_name, &sql, &[]) {
                         Ok(msg) => msg,
                         Err(e) => {

@@ -1,12 +1,19 @@
 //! Transaction control methods for PostgreSQL connection.
 
-use super::{PgConnection, PgResult};
+use super::{PgConnection, PgError, PgResult};
 
 /// Quote a SQL identifier (for savepoint names).
-/// Wraps in double-quotes and escapes embedded double-quotes and NUL bytes.
-fn quote_savepoint_name(name: &str) -> String {
-    let clean = name.replace('\0', "").replace('"', "\"\"");
-    format!("\"{}\"", clean)
+/// Wraps in double-quotes and escapes embedded double-quotes.
+fn quote_savepoint_name(name: &str) -> PgResult<String> {
+    if name.is_empty() {
+        return Err(PgError::Query("savepoint name is empty".to_string()));
+    }
+    if name.contains('\0') {
+        return Err(PgError::Query(
+            "savepoint name contains NUL byte".to_string(),
+        ));
+    }
+    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
 
 impl PgConnection {
@@ -33,7 +40,7 @@ impl PgConnection {
     /// Savepoints allow partial rollback within a transaction.
     /// Use `rollback_to()` to return to this savepoint.
     pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("SAVEPOINT {}", quote_savepoint_name(name)))
+        self.execute_simple(&format!("SAVEPOINT {}", quote_savepoint_name(name)?))
             .await
     }
 
@@ -43,14 +50,33 @@ impl PgConnection {
     pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
         self.execute_simple(&format!(
             "ROLLBACK TO SAVEPOINT {}",
-            quote_savepoint_name(name)
+            quote_savepoint_name(name)?
         ))
         .await
     }
 
     /// Release a savepoint (free resources, if no longer needed).
     pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("RELEASE SAVEPOINT {}", quote_savepoint_name(name)))
-            .await
+        self.execute_simple(&format!(
+            "RELEASE SAVEPOINT {}",
+            quote_savepoint_name(name)?
+        ))
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote_savepoint_name;
+
+    #[test]
+    fn quote_savepoint_name_escapes_quotes() {
+        assert_eq!(quote_savepoint_name("sp\"1").unwrap(), "\"sp\"\"1\"");
+    }
+
+    #[test]
+    fn quote_savepoint_name_rejects_empty_or_nul() {
+        assert!(quote_savepoint_name("").is_err());
+        assert!(quote_savepoint_name("sp\0shadow").is_err());
     }
 }

@@ -856,6 +856,15 @@ fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
         function_cmd.to_sql_with_dialect(Dialect::Postgres),
         "CREATE OR REPLACE FUNCTION notice_boom() RETURNS void LANGUAGE plpgsql AS $qail_body_1$ BEGIN RAISE NOTICE $$boom$$; END; $qail_body_1$"
     );
+
+    let nul_body = Qail {
+        action: Action::Do,
+        table: "plpgsql".to_string(),
+        payload: Some("BEGIN PERFORM '\0'; END;".to_string()),
+        ..Default::default()
+    };
+    let sql = nul_body.to_sql_with_dialect(Dialect::Postgres);
+    assert!(sql.contains('\0'));
 }
 
 #[test]
@@ -985,8 +994,18 @@ fn test_pubsub_and_savepoint_escape_names_and_payloads() {
     };
     assert_eq!(
         savepoint.to_sql_with_dialect(Dialect::Postgres),
-        "SAVEPOINT \"sp\"\"; DROP TABLE users; --tail\""
+        "SAVEPOINT \"sp\"\"; DROP TABLE users; --\0tail\""
     );
+
+    let nul_notify = Qail {
+        action: Action::Notify,
+        channel: Some("tenant\0events".to_string()),
+        payload: Some("ok\0payload".to_string()),
+        ..Default::default()
+    };
+    let sql = nul_notify.to_sql_with_dialect(Dialect::Postgres);
+    assert!(sql.contains('\0'));
+    assert_eq!(sql, "NOTIFY \"tenant\0events\", 'ok\0payload'");
 }
 
 // ============= Upsert Tests =============

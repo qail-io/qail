@@ -215,7 +215,11 @@ pub(crate) async fn explain_handler(
     let mut params_buf: Vec<Option<Vec<u8>>> = Vec::new();
     AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params_buf)
         .map_err(|e| ApiError::bad_request("ENCODE_ERROR", e.to_string()))?;
-    let sql = String::from_utf8_lossy(&sql_buf).to_string();
+    let sql = std::str::from_utf8(&sql_buf)
+        .map_err(|e| {
+            ApiError::bad_request("ENCODE_ERROR", format!("encoded SQL is not UTF-8: {}", e))
+        })?
+        .to_string();
 
     // Run EXPLAIN ANALYZE with bind parameters
     // SECURITY: `sql` contains $1, $2 placeholders — we MUST pass `params_buf`

@@ -365,16 +365,16 @@ fn like_very_long_pattern() {
 // ============================================================================
 
 #[test]
-fn encoding_null_byte_in_identifier_stripped() {
+fn encoding_null_byte_in_identifier_preserved_for_downstream_rejection() {
     let cmd = select_from("users\0injected");
     let sql = cmd.to_sql();
     assert!(
-        !sql.as_bytes().contains(&0u8),
-        "Null bytes must be stripped"
+        sql.as_bytes().contains(&0u8),
+        "Null bytes must reach protocol/FFI rejection boundary"
     );
     assert!(
-        sql.contains("usersinjected"),
-        "Name after stripping: {}",
+        !sql.contains("usersinjected"),
+        "Name must not silently collide after stripping: {}",
         sql
     );
 }
@@ -389,8 +389,8 @@ fn encoding_null_byte_in_column_name() {
     };
     let sql = cmd.to_sql();
     assert!(
-        !sql.as_bytes().contains(&0u8),
-        "Null bytes stripped from columns"
+        sql.as_bytes().contains(&0u8),
+        "Null bytes must reach protocol/FFI rejection boundary"
     );
 }
 

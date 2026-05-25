@@ -471,13 +471,13 @@ fn null_byte_in_identifier() {
         ..Default::default()
     };
     let sql = cmd.to_sql();
-    // Null bytes must be stripped from identifiers.
-    // PostgreSQL C-string protocol terminates at \0, which could allow
-    // identifier truncation attacks. The transpiler now strips \0.
+    // Null bytes must not be silently stripped from identifiers. Preserving the
+    // byte lets protocol encoders and FFI output conversion reject invalid SQL
+    // instead of executing a mutated identifier.
     let has_null = sql.as_bytes().contains(&0u8);
     assert!(
-        !has_null,
-        "Null bytes must not appear in generated SQL: {:?}",
+        has_null,
+        "Null bytes must reach downstream rejection: {:?}",
         sql.as_bytes()
     );
 }

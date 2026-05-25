@@ -316,7 +316,9 @@ impl AstEncoder {
         }
 
         Self::reject_sql_nul(&sql_buf)?;
-        let sql = String::from_utf8_lossy(&sql_buf).to_string();
+        let sql = std::str::from_utf8(&sql_buf)
+            .map_err(|e| EncodeError::InvalidAst(format!("encoded SQL is not UTF-8: {}", e)))?
+            .to_string();
         Ok((sql, params))
     }
 
@@ -3316,7 +3318,7 @@ mod tests {
         let unsafe_target = Qail {
             action: Action::CommentOn,
             table: "TABLE users; DROP TABLE users; --".to_string(),
-            columns: vec![Expr::Named("owner's note\0".to_string())],
+            columns: vec![Expr::Named("owner's note".to_string())],
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&unsafe_target).unwrap();
@@ -3325,6 +3327,16 @@ mod tests {
             "COMMENT ON TABLE \"TABLE users; DROP TABLE users; --\" IS 'owner''s note'"
         );
         assert!(params.is_empty());
+
+        let nul_comment = Qail {
+            action: Action::CommentOn,
+            table: "TABLE users".to_string(),
+            columns: vec![Expr::Named("owner's note\0".to_string())],
+            ..Default::default()
+        };
+        let err = AstEncoder::encode_cmd_sql(&nul_comment)
+            .expect_err("NUL comment text must fail closed");
+        assert_eq!(err, EncodeError::NullByte);
     }
 
     #[test]

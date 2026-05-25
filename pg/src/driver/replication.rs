@@ -388,6 +388,17 @@ fn build_standby_status_update_payload(
     payload
 }
 
+#[inline]
+fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    if matches!(
+        err,
+        PgError::Protocol(_) | PgError::Connection(_) | PgError::Timeout(_)
+    ) {
+        conn.mark_io_desynced();
+    }
+    Err(err)
+}
+
 impl PgConnection {
     #[inline]
     fn ensure_replication_mode(&self, operation: &str) -> PgResult<()> {
@@ -418,10 +429,13 @@ impl PgConnection {
         {
             self.replication_stream_active = false;
             self.last_replication_wal_end = None;
-            return Err(PgError::Protocol(format!(
-                "Replication {} wal_end regressed: previous {}, current {}",
-                source, prev_wal_end, wal_end
-            )));
+            return return_with_desync(
+                self,
+                PgError::Protocol(format!(
+                    "Replication {} wal_end regressed: previous {}, current {}",
+                    source, prev_wal_end, wal_end
+                )),
+            );
         }
         self.last_replication_wal_end = Some(wal_end);
         Ok(())
@@ -501,19 +515,25 @@ impl PgConnection {
                     column_formats,
                 } => {
                     if let Some(err) = startup_error {
-                        return Err(err);
+                        return return_with_desync(self, err);
                     }
                     if format != 0 {
-                        return Err(PgError::Protocol(format!(
-                            "START_REPLICATION returned unsupported CopyBothResponse format {} (expected 0/text)",
-                            format
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "START_REPLICATION returned unsupported CopyBothResponse format {} (expected 0/text)",
+                                format
+                            )),
+                        );
                     }
                     if !column_formats.is_empty() {
-                        return Err(PgError::Protocol(format!(
-                            "START_REPLICATION returned unexpected CopyBothResponse column formats (expected none, got {})",
-                            column_formats.len()
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "START_REPLICATION returned unexpected CopyBothResponse column formats (expected none, got {})",
+                                column_formats.len()
+                            )),
+                        );
                     }
                     self.replication_stream_active = true;
                     self.last_replication_wal_end = None;
@@ -523,11 +543,14 @@ impl PgConnection {
                     });
                 }
                 BackendMessage::ReadyForQuery(_) => {
-                    return Err(startup_error.unwrap_or_else(|| {
-                        PgError::Protocol(
-                            "START_REPLICATION ended before CopyBothResponse".to_string(),
-                        )
-                    }));
+                    return return_with_desync(
+                        self,
+                        startup_error.unwrap_or_else(|| {
+                            PgError::Protocol(
+                                "START_REPLICATION ended before CopyBothResponse".to_string(),
+                            )
+                        }),
+                    );
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if startup_error.is_none() {
@@ -535,7 +558,12 @@ impl PgConnection {
                     }
                 }
                 msg if is_ignorable_session_message(&msg) => {}
-                other => return Err(unexpected_backend_message("start replication", &other)),
+                other => {
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("start replication", &other),
+                    );
+                }
             }
         }
     }
@@ -566,7 +594,7 @@ impl PgConnection {
                     Err(err) => {
                         self.replication_stream_active = false;
                         self.last_replication_wal_end = None;
-                        return Err(err);
+                        return return_with_desync(self, err);
                     }
                 },
                 BackendMessage::ErrorResponse(err) => {
@@ -577,22 +605,29 @@ impl PgConnection {
                 BackendMessage::CopyDone => {
                     self.replication_stream_active = false;
                     self.last_replication_wal_end = None;
-                    return Err(PgError::Protocol(
-                        "Replication stream ended with CopyDone".to_string(),
-                    ));
+                    return return_with_desync(
+                        self,
+                        PgError::Protocol("Replication stream ended with CopyDone".to_string()),
+                    );
                 }
                 BackendMessage::ReadyForQuery(_) => {
                     self.replication_stream_active = false;
                     self.last_replication_wal_end = None;
-                    return Err(PgError::Protocol(
-                        "Replication stream ended with ReadyForQuery".to_string(),
-                    ));
+                    return return_with_desync(
+                        self,
+                        PgError::Protocol(
+                            "Replication stream ended with ReadyForQuery".to_string(),
+                        ),
+                    );
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
                     self.replication_stream_active = false;
                     self.last_replication_wal_end = None;
-                    return Err(unexpected_backend_message("replication stream", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("replication stream", &other),
+                    );
                 }
             }
         }
@@ -697,6 +732,39 @@ impl PgDriver {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: true,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
+
     fn text_row(values: &[Option<&str>]) -> PgRow {
         PgRow {
             columns: values
@@ -705,6 +773,23 @@ mod tests {
                 .collect(),
             column_info: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replication_wal_regression_marks_connection_desynced() {
+        let mut conn = test_conn();
+        conn.replication_stream_active = true;
+        conn.last_replication_wal_end = Some(20);
+
+        let err = conn
+            .advance_replication_wal_end("XLogData", 10)
+            .expect_err("wal regression must fail");
+
+        assert!(err.to_string().contains("wal_end regressed"));
+        assert!(!conn.replication_stream_active);
+        assert!(conn.last_replication_wal_end.is_none());
+        assert!(conn.is_io_desynced());
     }
 
     #[test]

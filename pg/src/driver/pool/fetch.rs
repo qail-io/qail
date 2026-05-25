@@ -34,6 +34,12 @@ fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
     Err(err)
 }
 
+#[inline]
+fn encoded_sql_str(sql_buf: &[u8]) -> PgResult<&str> {
+    std::str::from_utf8(sql_buf)
+        .map_err(|e| PgError::Encode(format!("encoded SQL is not UTF-8: {}", e)))
+}
+
 async fn drain_extended_responses_after_rls_setup_error(conn: &mut PgConnection) -> PgResult<()> {
     loop {
         let msg = conn.recv().await?;
@@ -507,7 +513,7 @@ impl PooledConnection {
 
             conn.evict_prepared_if_full();
 
-            let sql_str = std::str::from_utf8(&conn.sql_buf).unwrap_or("");
+            let sql_str = encoded_sql_str(&conn.sql_buf)?;
 
             use crate::protocol::PgEncoder;
             let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
@@ -764,7 +770,7 @@ impl PooledConnection {
 
             conn.evict_prepared_if_full();
 
-            let sql_str = std::str::from_utf8(&conn.sql_buf).unwrap_or("");
+            let sql_str = encoded_sql_str(&conn.sql_buf)?;
 
             use crate::protocol::PgEncoder;
             let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
@@ -991,7 +997,7 @@ impl PooledConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_export_table_sql, return_with_desync};
+    use super::{copy_export_table_sql, encoded_sql_str, return_with_desync};
 
     #[cfg(unix)]
     fn test_conn() -> crate::driver::PgConnection {
@@ -1044,6 +1050,12 @@ mod tests {
     fn pool_copy_export_table_sql_rejects_nul_bytes() {
         assert!(copy_export_table_sql("tenant\0.users", &["id".to_string()]).is_err());
         assert!(copy_export_table_sql("users", &["id\0".to_string()]).is_err());
+    }
+
+    #[test]
+    fn pool_encoded_sql_str_rejects_invalid_utf8() {
+        let err = encoded_sql_str(&[0xff]).expect_err("invalid SQL UTF-8 must fail");
+        assert!(err.to_string().contains("encoded SQL is not UTF-8"));
     }
 
     #[cfg(unix)]

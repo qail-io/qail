@@ -668,6 +668,16 @@ fn decode_command_complete_interior_null_returns_error() {
     );
 }
 
+#[test]
+fn decode_command_complete_invalid_utf8_returns_error() {
+    let buf = wire_msg(b'C', &[0xff, 0]);
+    assert!(
+        BackendMessage::decode(&buf)
+            .unwrap_err()
+            .contains("CommandComplete tag is not valid UTF-8")
+    );
+}
+
 // ========== Simple type tests ==========
 
 #[test]
@@ -811,6 +821,20 @@ fn decode_notification_missing_payload_terminator_returns_error() {
         BackendMessage::decode(&buf)
             .unwrap_err()
             .contains("payload null terminator")
+    );
+}
+
+#[test]
+fn decode_notification_invalid_utf8_returns_error() {
+    let mut payload = 1i32.to_be_bytes().to_vec();
+    payload.extend_from_slice(&[0xff, 0]);
+    payload.extend_from_slice(b"payload\0");
+    let buf = wire_msg(b'A', &payload);
+
+    assert!(
+        BackendMessage::decode(&buf)
+            .unwrap_err()
+            .contains("NotificationResponse channel is not valid UTF-8")
     );
 }
 

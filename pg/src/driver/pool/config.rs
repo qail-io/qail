@@ -298,8 +298,8 @@ pub(crate) fn apply_url_query_params(
 
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let mut kv = pair.splitn(2, '=');
-        let key = percent_decode(kv.next().unwrap_or_default().trim());
-        let value = percent_decode(kv.next().unwrap_or_default().trim());
+        let key = percent_decode(kv.next().unwrap_or_default().trim())?;
+        let value = percent_decode(kv.next().unwrap_or_default().trim())?;
 
         match key.as_str() {
             "sslmode" => {
@@ -571,7 +571,7 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
         let mut parts = host_part.splitn(2, '/');
         (
             parts.next().unwrap_or("localhost"),
-            percent_decode(parts.next().unwrap_or("postgres")),
+            percent_decode(parts.next().unwrap_or("postgres"))?,
         )
     } else {
         (host_part, "postgres".to_string())
@@ -653,11 +653,11 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
     let (user, password) = if let Some(creds) = credentials {
         if creds.contains(':') {
             let mut parts = creds.splitn(2, ':');
-            let u = percent_decode(parts.next().unwrap_or("postgres"));
-            let p = parts.next().map(percent_decode);
+            let u = percent_decode(parts.next().unwrap_or("postgres"))?;
+            let p = parts.next().map(percent_decode).transpose()?;
             (u, p)
         } else {
-            (percent_decode(creds), None)
+            (percent_decode(creds)?, None)
         }
     } else {
         ("postgres".to_string(), None)
@@ -666,7 +666,7 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
     Ok((host, port, user, database, password))
 }
 
-fn percent_decode(s: &str) -> String {
+fn percent_decode(s: &str) -> PgResult<String> {
     fn hex_value(byte: u8) -> Option<u8> {
         match byte {
             b'0'..=b'9' => Some(byte - b'0'),
@@ -693,7 +693,11 @@ fn percent_decode(s: &str) -> String {
         }
     }
 
-    String::from_utf8_lossy(&decoded).into_owned()
+    String::from_utf8(decoded).map_err(|_| {
+        PgError::Connection(
+            "Invalid PostgreSQL URL percent-encoding: decoded value is not UTF-8".to_string(),
+        )
+    })
 }
 
 pub(super) fn parse_bool_param(value: &str) -> Option<bool> {

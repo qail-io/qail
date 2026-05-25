@@ -235,15 +235,15 @@ impl PgDriver {
             let parts: Vec<&str> = auth.splitn(2, ':').collect();
             if parts.len() == 2 {
                 // URL-decode both user and password
-                let user = Self::percent_decode(parts[0]);
+                let user = Self::percent_decode(parts[0])?;
                 if user.is_empty() {
                     return Err(PgError::Connection(
                         "Invalid DATABASE_URL: missing user".to_string(),
                     ));
                 }
-                (user, Some(Self::percent_decode(parts[1])))
+                (user, Some(Self::percent_decode(parts[1])?))
             } else {
-                let user = Self::percent_decode(parts[0]);
+                let user = Self::percent_decode(parts[0])?;
                 if user.is_empty() {
                     return Err(PgError::Connection(
                         "Invalid DATABASE_URL: missing user".to_string(),
@@ -259,7 +259,7 @@ impl PgDriver {
         let (host_port, database) = if let Some(slash_pos) = host_db_part.find('/') {
             let raw_db = &host_db_part[slash_pos + 1..];
             // Strip ?query params — they're handled separately by connect_url
-            let db = Self::percent_decode(raw_db.split('?').next().unwrap_or(raw_db));
+            let db = Self::percent_decode(raw_db.split('?').next().unwrap_or(raw_db))?;
             (&host_db_part[..slash_pos], db)
         } else {
             return Err(PgError::Connection(
@@ -330,7 +330,7 @@ impl PgDriver {
 
     /// Decode URL percent-encoded string.
     /// Handles common encodings: %20 (space), %2B (+), %3D (=), %40 (@), %2F (/), etc.
-    pub(crate) fn percent_decode(s: &str) -> String {
+    pub(crate) fn percent_decode(s: &str) -> PgResult<String> {
         fn hex_value(byte: u8) -> Option<u8> {
             match byte {
                 b'0'..=b'9' => Some(byte - b'0'),
@@ -357,7 +357,11 @@ impl PgDriver {
             }
         }
 
-        String::from_utf8_lossy(&decoded).into_owned()
+        String::from_utf8(decoded).map_err(|_| {
+            PgError::Connection(
+                "Invalid DATABASE_URL percent-encoding: decoded value is not UTF-8".to_string(),
+            )
+        })
     }
 
     /// Connect to PostgreSQL with a connection timeout.

@@ -496,7 +496,9 @@ impl PgDriver {
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
         AstEncoder::encode_select_sql(cmd, &mut sql_buf, &mut params)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        let sql = String::from_utf8_lossy(&sql_buf).to_string();
+        let sql = std::str::from_utf8(&sql_buf)
+            .map_err(|e| PgError::Encode(format!("encoded SQL is not UTF-8: {}", e)))?
+            .to_string();
 
         // Must be in a transaction for cursors
         self.connection.begin_transaction().await?;

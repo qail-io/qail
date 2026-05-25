@@ -10,7 +10,7 @@
 //! - `recv_notification()` — block-wait for the next notification
 
 use super::{
-    PgConnection, PgResult, io::MAX_MESSAGE_SIZE, is_ignorable_session_message,
+    PgConnection, PgError, PgResult, io::MAX_MESSAGE_SIZE, is_ignorable_session_message,
     unexpected_backend_message,
 };
 use crate::protocol::PgEncoder;
@@ -24,6 +24,17 @@ pub struct Notification {
     pub channel: String,
     /// The payload (may be empty)
     pub payload: String,
+}
+
+#[inline]
+fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    if matches!(
+        err,
+        PgError::Protocol(_) | PgError::Connection(_) | PgError::Timeout(_)
+    ) {
+        conn.mark_io_desynced();
+    }
+    Err(err)
 }
 
 impl PgConnection {
@@ -91,23 +102,31 @@ impl PgConnection {
                 ]) as usize;
 
                 if msg_len < 4 {
-                    return Err(super::PgError::Protocol(format!(
-                        "Invalid message length: {} (minimum 4)",
-                        msg_len
-                    )));
+                    return return_with_desync(
+                        self,
+                        PgError::Protocol(format!(
+                            "Invalid message length: {} (minimum 4)",
+                            msg_len
+                        )),
+                    );
                 }
 
                 if msg_len > MAX_MESSAGE_SIZE {
-                    return Err(super::PgError::Protocol(format!(
-                        "Message too large: {} bytes (max {})",
-                        msg_len, MAX_MESSAGE_SIZE
-                    )));
+                    return return_with_desync(
+                        self,
+                        PgError::Protocol(format!(
+                            "Message too large: {} bytes (max {})",
+                            msg_len, MAX_MESSAGE_SIZE
+                        )),
+                    );
                 }
 
                 if self.buffer.len() > msg_len {
                     let msg_bytes = self.buffer.split_to(msg_len + 1);
-                    let (msg, _) =
-                        BackendMessage::decode(&msg_bytes).map_err(super::PgError::Protocol)?;
+                    let (msg, _) = match BackendMessage::decode(&msg_bytes) {
+                        Ok(decoded) => decoded,
+                        Err(err) => return return_with_desync(self, PgError::Protocol(err)),
+                    };
 
                     match msg {
                         BackendMessage::NotificationResponse {
@@ -134,11 +153,14 @@ impl PgConnection {
                             continue;
                         }
                         BackendMessage::ErrorResponse(err) => {
-                            return Err(super::PgError::QueryServer(err.into()));
+                            return Err(PgError::QueryServer(err.into()));
                         }
                         msg if is_ignorable_session_message(&msg) => continue,
                         other => {
-                            return Err(unexpected_backend_message("listen/notify wait", &other));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_message("listen/notify wait", &other),
+                            );
                         }
                     }
                 }
@@ -160,16 +182,74 @@ impl PgConnection {
                     self.read_with_timeout().await?
                 };
                 if n == 0 {
-                    return Err(super::PgError::Connection("Connection closed".to_string()));
+                    return return_with_desync(
+                        self,
+                        PgError::Connection("Connection closed".to_string()),
+                    );
                 }
             } else {
                 // Initial flush — use the normal timeout to avoid hanging
                 // if the server is unresponsive during the empty query
                 let n = self.read_with_timeout().await?;
                 if n == 0 {
-                    return Err(super::PgError::Connection("Connection closed".to_string()));
+                    return return_with_desync(
+                        self,
+                        PgError::Connection("Connection closed".to_string()),
+                    );
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::return_with_desync;
+    use crate::driver::{PgConnection, PgError};
+
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn notification_return_with_desync_marks_protocol_error() {
+        let mut conn = test_conn();
+
+        let err =
+            return_with_desync::<()>(&mut conn, PgError::Protocol("bad notify frame".to_string()))
+                .expect_err("protocol error must be returned");
+
+        assert!(err.to_string().contains("bad notify frame"));
+        assert!(conn.is_io_desynced());
     }
 }

@@ -212,15 +212,24 @@ fn test_timestamp_literal_escapes_quotes() {
 }
 
 #[test]
-fn test_string_literal_strips_nul_and_escapes_quotes() {
+fn test_string_literal_preserves_nul_for_downstream_rejection() {
     use crate::ast::{Operator, Qail};
 
     let cmd = Qail::get("users").filter("name", Operator::Eq, "Ana\0 O'Reilly");
+    let sql = cmd.to_sql();
 
-    assert_eq!(
-        cmd.to_sql(),
-        "SELECT * FROM users WHERE name = 'Ana O''Reilly'"
-    );
+    assert!(sql.contains('\0'));
+    assert_eq!(sql, "SELECT * FROM users WHERE name = 'Ana\0 O''Reilly'");
+}
+
+#[test]
+fn test_identifier_preserves_nul_for_downstream_rejection() {
+    use crate::ast::Qail;
+
+    let sql = Qail::get("users\0_archive").to_sql();
+
+    assert!(sql.contains('\0'));
+    assert_eq!(sql, "SELECT * FROM \"users\0_archive\"");
 }
 
 #[test]

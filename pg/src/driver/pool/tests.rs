@@ -132,6 +132,16 @@ fn test_url_query_params_are_percent_decoded() {
 }
 
 #[test]
+fn test_url_query_params_reject_invalid_percent_encoded_utf8() {
+    let mut config = PoolConfig::new("localhost", 5432, "u", "db");
+
+    let err = apply_url_query_params(&mut config, "sslmode=%FF", "localhost")
+        .expect_err("invalid percent-decoded UTF-8 must fail");
+
+    assert!(err.to_string().contains("percent-encoding"));
+}
+
+#[test]
 fn test_url_gssencmode_require_sslmode_require_is_valid() {
     // libpq allows this — negotiation resolves precedence, not config parsing.
     let mut config = PoolConfig::new("localhost", 5432, "u", "db");
@@ -494,6 +504,14 @@ fn test_parse_pg_url_decodes_utf8_percent_encoding() {
     assert_eq!(user, "café");
     assert_eq!(db, "app_✓");
     assert_eq!(password, Some("péss".to_string()));
+}
+
+#[test]
+fn test_parse_pg_url_rejects_invalid_percent_encoded_utf8() {
+    let err = parse_pg_url("postgresql://caf%C3%A9:%FF@db.internal/app")
+        .expect_err("invalid percent-decoded UTF-8 must fail");
+
+    assert!(err.to_string().contains("percent-encoding"));
 }
 
 #[test]

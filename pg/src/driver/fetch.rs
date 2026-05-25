@@ -22,6 +22,12 @@ fn return_with_desync<T>(driver: &mut PgDriver, err: PgError) -> PgResult<T> {
     Err(err)
 }
 
+#[inline]
+fn encoded_sql_str(sql_buf: &[u8]) -> PgResult<&str> {
+    std::str::from_utf8(sql_buf)
+        .map_err(|e| PgError::Encode(format!("encoded SQL is not UTF-8: {}", e)))
+}
+
 impl PgDriver {
     /// Execute a QAIL command and fetch all rows (CACHED + ZERO-ALLOC).
     /// **Default method** - uses prepared statement caching for best performance.
@@ -489,7 +495,7 @@ impl PgDriver {
             // Evict LRU before borrowing sql_buf to avoid borrow conflict
             self.connection.evict_prepared_if_full();
 
-            let sql_str = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
+            let sql_str = encoded_sql_str(&self.connection.sql_buf)?;
 
             // Buffer Parse + Describe(Statement) for first call
             use crate::protocol::PgEncoder;
@@ -787,6 +793,12 @@ impl PgDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_encoded_sql_str_rejects_invalid_utf8() {
+        let err = encoded_sql_str(&[0xff]).expect_err("invalid SQL UTF-8 must fail");
+        assert!(err.to_string().contains("encoded SQL is not UTF-8"));
+    }
 
     #[cfg(unix)]
     fn test_driver_with_peer() -> (PgDriver, tokio::net::UnixStream) {

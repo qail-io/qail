@@ -8,6 +8,12 @@ use super::types::*;
 /// usage fail-closed against oversized frames.
 pub(crate) const MAX_BACKEND_FRAME_LEN: usize = 64 * 1024 * 1024;
 
+fn decode_utf8(bytes: &[u8], context: &str) -> Result<String, String> {
+    std::str::from_utf8(bytes)
+        .map(str::to_string)
+        .map_err(|e| format!("{} is not valid UTF-8: {}", context, e))
+}
+
 impl BackendMessage {
     /// Decode a message from wire bytes.
     pub fn decode(buf: &[u8]) -> Result<(Self, usize), String> {
@@ -189,7 +195,7 @@ impl BackendMessage {
                         .position(|&b| b == 0)
                         .map(|p| pos + p)
                         .ok_or("SASL mechanism list missing null terminator")?;
-                    mechanisms.push(String::from_utf8_lossy(&payload[pos..end]).to_string());
+                    mechanisms.push(decode_utf8(&payload[pos..end], "SASL mechanism")?);
                     pos = end + 1;
                 }
                 if pos >= payload.len() {
@@ -237,8 +243,8 @@ impl BackendMessage {
             return Err("ParameterStatus has trailing bytes".to_string());
         }
         Ok(BackendMessage::ParameterStatus {
-            name: String::from_utf8_lossy(&payload[..name_end]).to_string(),
-            value: String::from_utf8_lossy(&payload[value_start..value_end]).to_string(),
+            name: decode_utf8(&payload[..name_end], "ParameterStatus name")?,
+            value: decode_utf8(&payload[value_start..value_end], "ParameterStatus value")?,
         })
     }
 
@@ -299,7 +305,10 @@ impl BackendMessage {
                 .position(|&b| b == 0)
                 .ok_or("NegotiateProtocolVersion option missing null terminator")?;
             let end = pos + rel_end;
-            options.push(String::from_utf8_lossy(&payload[pos..end]).to_string());
+            options.push(decode_utf8(
+                &payload[pos..end],
+                "NegotiateProtocolVersion option",
+            )?);
             pos = end + 1;
         }
 
@@ -345,7 +354,7 @@ impl BackendMessage {
                 .iter()
                 .position(|&b| b == 0)
                 .ok_or("Missing null terminator in field name")?;
-            let name = String::from_utf8_lossy(&payload[pos..pos + name_end]).to_string();
+            let name = decode_utf8(&payload[pos..pos + name_end], "RowDescription field name")?;
             pos += name_end + 1; // Skip null terminator
 
             // Ensure we have enough bytes for the fixed fields
@@ -473,7 +482,7 @@ impl BackendMessage {
         if tag_bytes.contains(&0) {
             return Err("CommandComplete contains interior null byte".to_string());
         }
-        let tag = String::from_utf8_lossy(tag_bytes).to_string();
+        let tag = decode_utf8(tag_bytes, "CommandComplete tag")?;
         Ok(BackendMessage::CommandComplete(tag))
     }
 
@@ -497,7 +506,7 @@ impl BackendMessage {
                 .position(|&b| b == 0)
                 .map(|p| p + i)
                 .ok_or("ErrorResponse field missing null terminator")?;
-            let value = String::from_utf8_lossy(&payload[i..end]).to_string();
+            let value = decode_utf8(&payload[i..end], "ErrorResponse field")?;
             i = end + 1;
 
             match field_type {
@@ -698,7 +707,7 @@ impl BackendMessage {
             .iter()
             .position(|&b| b == 0)
             .ok_or("NotificationResponse: missing channel null terminator")?;
-        let channel = String::from_utf8_lossy(&remaining[..channel_end]).to_string();
+        let channel = decode_utf8(&remaining[..channel_end], "NotificationResponse channel")?;
         i += channel_end + 1;
 
         // Payload (null-terminated)
@@ -707,7 +716,8 @@ impl BackendMessage {
             .iter()
             .position(|&b| b == 0)
             .ok_or("NotificationResponse: missing payload null terminator")?;
-        let notification_payload = String::from_utf8_lossy(&remaining[..payload_end]).to_string();
+        let notification_payload =
+            decode_utf8(&remaining[..payload_end], "NotificationResponse payload")?;
         if i + payload_end + 1 != payload.len() {
             return Err("NotificationResponse has trailing bytes".to_string());
         }

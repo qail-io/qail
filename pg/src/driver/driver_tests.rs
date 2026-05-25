@@ -391,6 +391,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_database_url_rejects_invalid_percent_encoded_utf8() {
+        let err = crate::driver::PgDriver::parse_database_url("postgres://user:%FF@localhost/app")
+            .expect_err("invalid percent-decoded UTF-8 must fail");
+
+        assert!(err.to_string().contains("percent-encoding"));
+    }
+
+    #[test]
     fn connect_options_with_logical_replication_replaces_existing_key() {
         let opts = crate::driver::ConnectOptions::default()
             .with_startup_param("Replication", "true")

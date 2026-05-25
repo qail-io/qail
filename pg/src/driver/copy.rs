@@ -51,7 +51,7 @@ pub(crate) fn quote_copy_table_ref(table: &str) -> PgResult<String> {
         .map(|parts| parts.join("."))
 }
 
-fn parse_copy_text_row(line: &[u8]) -> Vec<String> {
+fn parse_copy_text_row(line: &[u8]) -> PgResult<Vec<String>> {
     let line = if line.ends_with(b"\r") {
         &line[..line.len().saturating_sub(1)]
     } else {
@@ -62,17 +62,17 @@ fn parse_copy_text_row(line: &[u8]) -> Vec<String> {
     let mut start = 0;
     for (idx, byte) in line.iter().enumerate() {
         if *byte == b'\t' {
-            fields.push(decode_copy_text_field(&line[start..idx]));
+            fields.push(decode_copy_text_field(&line[start..idx])?);
             start = idx + 1;
         }
     }
-    fields.push(decode_copy_text_field(&line[start..]));
-    fields
+    fields.push(decode_copy_text_field(&line[start..])?);
+    Ok(fields)
 }
 
-fn decode_copy_text_field(field: &[u8]) -> String {
+fn decode_copy_text_field(field: &[u8]) -> PgResult<String> {
     if field == b"\\N" {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut out = Vec::with_capacity(field.len());
@@ -164,10 +164,8 @@ fn decode_copy_text_field(field: &[u8]) -> String {
         }
     }
 
-    String::from_utf8(out).unwrap_or_else(|err| {
-        let bytes = err.into_bytes();
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
+    String::from_utf8(out)
+        .map_err(|e| PgError::Protocol(format!("COPY text field is not valid UTF-8: {}", e)))
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -177,6 +175,17 @@ fn hex_nibble(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+#[inline]
+fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    if matches!(
+        err,
+        PgError::Protocol(_) | PgError::Connection(_) | PgError::Timeout(_)
+    ) {
+        conn.mark_io_desynced();
+    }
+    Err(err)
 }
 
 fn encode_copy_export_sql(cmd: &Qail) -> PgResult<String> {
@@ -206,7 +215,8 @@ where
     while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
         let line = pending[..pos].to_vec();
         pending.drain(..=pos);
-        on_row(parse_copy_text_row(&line))?;
+        let row = parse_copy_text_row(&line)?;
+        on_row(row)?;
     }
     Ok(())
 }
@@ -219,7 +229,8 @@ where
         return Ok(());
     }
     let line = std::mem::take(pending);
-    on_row(parse_copy_text_row(&line))
+    let row = parse_copy_text_row(&line)?;
+    on_row(row)
 }
 
 impl PgConnection {
@@ -259,17 +270,20 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyInResponse { .. } => {
                     if let Some(err) = startup_error {
-                        return Err(err);
+                        return return_with_desync(self, err);
                     }
                     break;
                 }
                 BackendMessage::ReadyForQuery(_) => {
-                    return Err(startup_error.unwrap_or_else(|| {
-                        PgError::Protocol(
-                            "COPY IN failed before CopyInResponse (unexpected ReadyForQuery)"
-                                .to_string(),
-                        )
-                    }));
+                    return return_with_desync(
+                        self,
+                        startup_error.unwrap_or_else(|| {
+                            PgError::Protocol(
+                                "COPY IN failed before CopyInResponse (unexpected ReadyForQuery)"
+                                    .to_string(),
+                            )
+                        }),
+                    );
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if startup_error.is_none() {
@@ -278,7 +292,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("copy-in startup", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("copy-in startup", &other),
+                    );
                 }
             }
         }
@@ -298,13 +315,19 @@ impl PgConnection {
             match msg {
                 BackendMessage::CommandComplete(tag) => {
                     if saw_command_complete {
-                        return Err(PgError::Protocol(
-                            "COPY IN received duplicate CommandComplete".to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "COPY IN received duplicate CommandComplete".to_string(),
+                            ),
+                        );
                     }
                     saw_command_complete = true;
                     if final_error.is_none() {
-                        affected = parse_affected_rows(&tag)?;
+                        match parse_affected_rows(&tag) {
+                            Ok(parsed) => affected = parsed,
+                            Err(err) => return return_with_desync(self, err),
+                        }
                     }
                 }
                 BackendMessage::ReadyForQuery(_) => {
@@ -312,10 +335,13 @@ impl PgConnection {
                         return Err(err);
                     }
                     if !saw_command_complete {
-                        return Err(PgError::Protocol(
-                            "COPY IN completion missing CommandComplete before ReadyForQuery"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "COPY IN completion missing CommandComplete before ReadyForQuery"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(affected);
                 }
@@ -326,7 +352,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("copy-in completion", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("copy-in completion", &other),
+                    );
                 }
             }
         }
@@ -365,17 +394,20 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyInResponse { .. } => {
                     if let Some(err) = startup_error {
-                        return Err(err);
+                        return return_with_desync(self, err);
                     }
                     break;
                 }
                 BackendMessage::ReadyForQuery(_) => {
-                    return Err(startup_error.unwrap_or_else(|| {
-                        PgError::Protocol(
-                            "COPY IN failed before CopyInResponse (unexpected ReadyForQuery)"
-                                .to_string(),
-                        )
-                    }));
+                    return return_with_desync(
+                        self,
+                        startup_error.unwrap_or_else(|| {
+                            PgError::Protocol(
+                                "COPY IN failed before CopyInResponse (unexpected ReadyForQuery)"
+                                    .to_string(),
+                            )
+                        }),
+                    );
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if startup_error.is_none() {
@@ -384,7 +416,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("copy-in raw startup", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("copy-in raw startup", &other),
+                    );
                 }
             }
         }
@@ -404,13 +439,19 @@ impl PgConnection {
             match msg {
                 BackendMessage::CommandComplete(tag) => {
                     if saw_command_complete {
-                        return Err(PgError::Protocol(
-                            "COPY IN raw received duplicate CommandComplete".to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "COPY IN raw received duplicate CommandComplete".to_string(),
+                            ),
+                        );
                     }
                     saw_command_complete = true;
                     if final_error.is_none() {
-                        affected = parse_affected_rows(&tag)?;
+                        match parse_affected_rows(&tag) {
+                            Ok(parsed) => affected = parsed,
+                            Err(err) => return return_with_desync(self, err),
+                        }
                     }
                 }
                 BackendMessage::ReadyForQuery(_) => {
@@ -418,10 +459,13 @@ impl PgConnection {
                         return Err(err);
                     }
                     if !saw_command_complete {
-                        return Err(PgError::Protocol(
-                            "COPY IN raw completion missing CommandComplete before ReadyForQuery"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "COPY IN raw completion missing CommandComplete before ReadyForQuery"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(affected);
                 }
@@ -432,7 +476,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("copy-in raw completion", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("copy-in raw completion", &other),
+                    );
                 }
             }
         }
@@ -473,17 +520,20 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyOutResponse { .. } => {
                     if let Some(err) = startup_error {
-                        return Err(err);
+                        return return_with_desync(self, err);
                     }
                     return Ok(());
                 }
                 BackendMessage::ReadyForQuery(_) => {
-                    return Err(startup_error.unwrap_or_else(|| {
-                        PgError::Protocol(format!(
-                            "{} failed before CopyOutResponse (unexpected ReadyForQuery)",
-                            context
-                        ))
-                    }));
+                    return return_with_desync(
+                        self,
+                        startup_error.unwrap_or_else(|| {
+                            PgError::Protocol(format!(
+                                "{} failed before CopyOutResponse (unexpected ReadyForQuery)",
+                                context
+                            ))
+                        }),
+                    );
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if startup_error.is_none() {
@@ -491,7 +541,9 @@ impl PgConnection {
                     }
                 }
                 msg if is_ignorable_session_message(&msg) => {}
-                other => return Err(unexpected_backend_message(context, &other)),
+                other => {
+                    return return_with_desync(self, unexpected_backend_message(context, &other));
+                }
             }
         }
     }
@@ -515,10 +567,13 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyData(chunk) => {
                     if saw_copy_done {
-                        return Err(PgError::Protocol(format!(
-                            "{} received CopyData after CopyDone",
-                            context
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "{} received CopyData after CopyDone",
+                                context
+                            )),
+                        );
                     }
                     if stream_error.is_none()
                         && callback_error.is_none()
@@ -529,19 +584,22 @@ impl PgConnection {
                 }
                 BackendMessage::CopyDone => {
                     if saw_copy_done {
-                        return Err(PgError::Protocol(format!(
-                            "{} received duplicate CopyDone",
-                            context
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!("{} received duplicate CopyDone", context)),
+                        );
                     }
                     saw_copy_done = true;
                 }
                 BackendMessage::CommandComplete(_) => {
                     if saw_command_complete {
-                        return Err(PgError::Protocol(format!(
-                            "{} received duplicate CommandComplete",
-                            context
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "{} received duplicate CommandComplete",
+                                context
+                            )),
+                        );
                     }
                     saw_command_complete = true;
                 }
@@ -553,16 +611,22 @@ impl PgConnection {
                         return Err(err);
                     }
                     if !saw_copy_done {
-                        return Err(PgError::Protocol(format!(
-                            "{} missing CopyDone before ReadyForQuery",
-                            context
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "{} missing CopyDone before ReadyForQuery",
+                                context
+                            )),
+                        );
                     }
                     if !saw_command_complete {
-                        return Err(PgError::Protocol(format!(
-                            "{} missing CommandComplete before ReadyForQuery",
-                            context
-                        )));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "{} missing CommandComplete before ReadyForQuery",
+                                context
+                            )),
+                        );
                     }
                     return Ok(());
                 }
@@ -572,7 +636,9 @@ impl PgConnection {
                     }
                 }
                 msg if is_ignorable_session_message(&msg) => {}
-                other => return Err(unexpected_backend_message(context, &other)),
+                other => {
+                    return return_with_desync(self, unexpected_backend_message(context, &other));
+                }
             }
         }
     }
@@ -666,33 +732,75 @@ impl PgConnection {
 mod tests {
     use super::{
         drain_copy_text_rows, encode_copy_export_sql, flush_pending_copy_text_row,
-        parse_copy_text_row, quote_copy_column_ident, quote_copy_table_ref,
+        parse_copy_text_row, quote_copy_column_ident, quote_copy_table_ref, return_with_desync,
     };
-    use crate::driver::{PgError, PgResult};
+    use crate::driver::{PgConnection, PgError, PgResult};
     use qail_core::ast::{Operator, Qail};
+
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: PgConnection::default_protocol_minor(),
+            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
 
     #[test]
     fn parse_copy_text_row_splits_tabs() {
-        let row = parse_copy_text_row(b"a\tb\tc");
+        let row = parse_copy_text_row(b"a\tb\tc").unwrap();
         assert_eq!(row, vec!["a", "b", "c"]);
     }
 
     #[test]
     fn parse_copy_text_row_trims_cr() {
-        let row = parse_copy_text_row(b"a\tb\r");
+        let row = parse_copy_text_row(b"a\tb\r").unwrap();
         assert_eq!(row, vec!["a", "b"]);
     }
 
     #[test]
     fn parse_copy_text_row_unescapes_copy_text_values() {
-        let row = parse_copy_text_row(b"a\\tb\tline\\nnext\tc\\\\d");
+        let row = parse_copy_text_row(b"a\\tb\tline\\nnext\tc\\\\d").unwrap();
         assert_eq!(row, vec!["a\tb", "line\nnext", "c\\d"]);
     }
 
     #[test]
     fn parse_copy_text_row_maps_copy_null_marker_to_empty_string() {
-        let row = parse_copy_text_row(b"a\t\\N\tb");
+        let row = parse_copy_text_row(b"a\t\\N\tb").unwrap();
         assert_eq!(row, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn parse_copy_text_row_rejects_invalid_utf8() {
+        let err = parse_copy_text_row(&[0xff]).expect_err("invalid UTF-8 must fail");
+        assert!(
+            err.to_string()
+                .contains("COPY text field is not valid UTF-8")
+        );
     }
 
     #[test]
@@ -715,6 +823,21 @@ mod tests {
         let err = encode_copy_export_sql(&cmd).expect_err("bind params cannot be ignored");
 
         assert!(matches!(err, PgError::Encode(msg) if msg.contains("parameterized export")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_return_with_desync_marks_protocol_error() {
+        let mut conn = test_conn();
+
+        let err = return_with_desync::<()>(
+            &mut conn,
+            PgError::Protocol("copy protocol ordering broke".to_string()),
+        )
+        .expect_err("protocol error must be returned");
+
+        assert!(err.to_string().contains("copy protocol ordering broke"));
+        assert!(conn.is_io_desynced());
     }
 
     #[test]
