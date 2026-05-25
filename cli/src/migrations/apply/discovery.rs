@@ -88,7 +88,7 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
     let mut tables = Vec::new();
     let mut columns = Vec::new();
 
-    for stmt in sql.split(';') {
+    for stmt in split_sql_statements(sql) {
         let normalized = stmt.replace(['\n', '\t'], " ");
         let tokens: Vec<String> = normalized
             .split_whitespace()
@@ -169,6 +169,155 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
     }
 
     (tables, columns)
+}
+
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut dollar_quote: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < sql.len() {
+        if in_line_comment {
+            let Some(ch) = sql[i..].chars().next() else {
+                break;
+            };
+            if ch == '\n' {
+                in_line_comment = false;
+                current.push(' ');
+            }
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if in_block_comment {
+            if sql[i..].starts_with("*/") {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += sql[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            }
+            continue;
+        }
+
+        if let Some(delim) = dollar_quote.as_deref() {
+            if sql[i..].starts_with(delim) {
+                current.push_str(delim);
+                i += delim.len();
+                dollar_quote = None;
+            } else if let Some(ch) = sql[i..].chars().next() {
+                current.push(ch);
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        let Some(ch) = sql[i..].chars().next() else {
+            break;
+        };
+
+        if in_single {
+            current.push(ch);
+            if ch == '\'' {
+                if sql[i + ch.len_utf8()..].starts_with('\'') {
+                    current.push('\'');
+                    i += ch.len_utf8() + 1;
+                } else {
+                    i += ch.len_utf8();
+                    in_single = false;
+                }
+            } else {
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        if in_double {
+            current.push(ch);
+            if ch == '"' {
+                if sql[i + ch.len_utf8()..].starts_with('"') {
+                    current.push('"');
+                    i += ch.len_utf8() + 1;
+                } else {
+                    i += ch.len_utf8();
+                    in_double = false;
+                }
+            } else {
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                current.push(ch);
+                i += ch.len_utf8();
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+                i += ch.len_utf8();
+            }
+            '$' if sql_dollar_quote_delimiter_at(sql, i).is_some() => {
+                let delim = sql_dollar_quote_delimiter_at(sql, i).expect("delimiter checked");
+                current.push_str(delim);
+                i += delim.len();
+                dollar_quote = Some(delim.to_string());
+            }
+            '-' if sql[i + ch.len_utf8()..].starts_with('-') => {
+                in_line_comment = true;
+                current.push(' ');
+                i += ch.len_utf8() + 1;
+            }
+            '/' if sql[i + ch.len_utf8()..].starts_with('*') => {
+                in_block_comment = true;
+                current.push(' ');
+                i += ch.len_utf8() + 1;
+            }
+            ';' => {
+                let statement = current.trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                current.clear();
+                i += ch.len_utf8();
+            }
+            _ => {
+                current.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+
+    let tail = current.trim();
+    if !tail.is_empty() {
+        statements.push(tail.to_string());
+    }
+
+    statements
+}
+
+fn sql_dollar_quote_delimiter_at(raw: &str, idx: usize) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    if bytes.get(idx) != Some(&b'$') {
+        return None;
+    }
+
+    let mut end = idx + 1;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'$' => return Some(&raw[idx..=end]),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => end += 1,
+            _ => return None,
+        }
+    }
+
+    None
 }
 
 /// Discover migration files in both flat and subdirectory layouts.

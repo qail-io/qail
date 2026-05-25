@@ -686,6 +686,24 @@ function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END;
     }
 
     #[test]
+    fn test_parse_drop_targets_ignores_quoted_and_dollar_quoted_sql() {
+        let sql = r#"
+            SELECT 'marker; DROP TABLE fake_table';
+            CREATE FUNCTION cleanup_later() RETURNS void AS $$
+            BEGIN
+                PERFORM 1;
+                DROP TABLE audit_logs;
+                ALTER TABLE users DROP COLUMN old_email;
+            END;
+            $$ LANGUAGE plpgsql;
+            DROP TABLE real_drop;
+        "#;
+        let (tables, columns) = parse_drop_targets(sql);
+        assert_eq!(tables, vec!["real_drop".to_string()]);
+        assert!(columns.is_empty());
+    }
+
+    #[test]
     fn test_parse_backfill_spec_directives() {
         let content = r#"
 -- @backfill.table: users
