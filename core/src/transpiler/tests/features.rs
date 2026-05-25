@@ -1481,6 +1481,32 @@ fn test_merge_postgres_rejects_scalar_in_condition() {
 }
 
 #[test]
+fn test_merge_postgres_collate_escapes_identifier_fragment() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[(
+            "name",
+            Expr::Collate {
+                expr: Box::new(Expr::Named("s.name".to_string())),
+                collation: "C\"; DROP TABLE users; --".to_string(),
+                alias: None,
+            },
+        )]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains("COLLATE \"C\"\"; DROP TABLE users; --\""),
+        "MERGE collation identifier was not escaped: {sql}"
+    );
+    assert!(
+        !sql.contains("COLLATE \"C\"; DROP"),
+        "MERGE collation escaped identifier broke out of quotes: {sql}"
+    );
+}
+
+#[test]
 fn test_merge_postgres_parameterized_fuzzy_binds_named_param() {
     use crate::transpiler::ToSqlParameterized;
 

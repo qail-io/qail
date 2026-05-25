@@ -694,6 +694,75 @@ fn operator_in_rejects_scalar_value() {
 }
 
 #[test]
+fn select_cast_rejects_unsafe_target_type() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![Expr::Cast {
+            expr: Box::new(Expr::Named("name".to_string())),
+            target_type: "text; DROP TABLE users; --".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid cast target type */"),
+        "unsafe cast target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe cast target leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn select_collate_and_field_access_quote_identifier_fragments() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        columns: vec![
+            Expr::Collate {
+                expr: Box::new(Expr::Named("name".to_string())),
+                collation: "C\"; DROP TABLE users; --".to_string(),
+                alias: Some("sorted".to_string()),
+            },
+            Expr::FieldAccess {
+                expr: Box::new(Expr::Named("profile".to_string())),
+                field: "field; DROP TABLE users; --".to_string(),
+                alias: Some("field_value".to_string()),
+            },
+        ],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("COLLATE \"C\"\"; DROP TABLE users; --\""),
+        "collation identifier was not escaped: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("COLLATE \"C\"; DROP"),
+        "collation escaped identifier broke out of quotes: {}",
+        sql
+    );
+    assert!(
+        sql.contains(").\"field; DROP TABLE users; --\""),
+        "field access identifier was not quoted: {}",
+        sql
+    );
+    assert!(
+        !sql.contains(").field; DROP"),
+        "field access identifier broke out unquoted: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_is_null_no_value_leak() {
     let cmd = select_where("users", "deleted_at", Operator::IsNull, Value::Null);
     let sql = cmd.to_sql();

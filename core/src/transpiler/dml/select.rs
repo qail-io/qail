@@ -167,7 +167,9 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                                                 }
                                             }
                                             Expr::Star => "*".to_string(),
-                                            _ => arg_str, // Binary, FunctionCall etc - use as-is
+                                            _ => {
+                                                render_expr_for_orderby(a, generator.as_ref(), cmd)
+                                            }
                                         }
                                     }
                                 })
@@ -221,11 +223,44 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         target_type,
                         alias,
                     } => {
-                        let cast_expr = format!("{}::{}", expr, target_type);
+                        let Some(target_type) = checked_sql_type_fragment(target_type) else {
+                            return "/* ERROR: Invalid cast target type */".to_string();
+                        };
+                        let cast_expr = format!(
+                            "{}::{}",
+                            render_expr_for_orderby(expr, generator.as_ref(), cmd),
+                            target_type
+                        );
                         if let Some(a) = alias {
                             format!("{} AS {}", cast_expr, generator.quote_identifier(a))
                         } else {
                             cast_expr
+                        }
+                    }
+                    Expr::Collate {
+                        expr,
+                        collation,
+                        alias,
+                    } => {
+                        let expr = render_expr_for_orderby(expr, generator.as_ref(), cmd);
+                        let collation = render_qualified_identifier(collation, generator.as_ref());
+                        let collate_expr = format!("{expr} COLLATE {collation}");
+                        if let Some(a) = alias {
+                            format!("{} AS {}", collate_expr, generator.quote_identifier(a))
+                        } else {
+                            collate_expr
+                        }
+                    }
+                    Expr::FieldAccess { expr, field, alias } => {
+                        let field_expr = format!(
+                            "({}).{}",
+                            render_expr_for_orderby(expr, generator.as_ref(), cmd),
+                            render_qualified_identifier(field, generator.as_ref())
+                        );
+                        if let Some(a) = alias {
+                            format!("{} AS {}", field_expr, generator.quote_identifier(a))
+                        } else {
+                            field_expr
                         }
                     }
                     Expr::Window {
@@ -730,7 +765,63 @@ fn render_expr_for_orderby(
             path_segments,
             ..
         } => render_json_access(column, path_segments, generator),
+        Expr::Cast {
+            expr, target_type, ..
+        } => {
+            let Some(target_type) = checked_sql_type_fragment(target_type) else {
+                return "/* ERROR: Invalid cast target type */".to_string();
+            };
+            format!(
+                "{}::{}",
+                render_expr_for_orderby(expr, generator, cmd),
+                target_type
+            )
+        }
+        Expr::Collate {
+            expr, collation, ..
+        } => format!(
+            "{} COLLATE {}",
+            render_expr_for_orderby(expr, generator, cmd),
+            render_qualified_identifier(collation, generator)
+        ),
+        Expr::FieldAccess { expr, field, .. } => format!(
+            "({}).{}",
+            render_expr_for_orderby(expr, generator, cmd),
+            render_qualified_identifier(field, generator)
+        ),
         _ => expr.to_string(), // Fallback for Star, Aliased, etc.
+    }
+}
+
+fn checked_sql_type_fragment(fragment: &str) -> Option<String> {
+    let fragment = fragment.trim();
+    if fragment.is_empty()
+        || fragment.contains('\0')
+        || fragment.contains(';')
+        || fragment.contains('\'')
+        || fragment.contains('"')
+        || fragment.contains("--")
+        || fragment.contains("/*")
+        || fragment.contains("*/")
+        || !fragment.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+                )
+        })
+    {
+        None
+    } else {
+        Some(fragment.to_string())
+    }
+}
+
+fn render_qualified_identifier(value: &str, generator: &dyn SqlGenerator) -> String {
+    if value.is_empty() || value.as_bytes().contains(&0) || value.split('.').any(str::is_empty) {
+        "/* ERROR: Invalid identifier */".to_string()
+    } else {
+        generator.quote_identifier(value)
     }
 }
 

@@ -388,7 +388,27 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             }
             sql
         }
+        Expr::Collate {
+            expr, collation, ..
+        } => format!(
+            "{} COLLATE {}",
+            expr_sql(expr, generator),
+            render_identifier_or_error(collation, generator)
+        ),
+        Expr::FieldAccess { expr, field, .. } => format!(
+            "({}).{}",
+            expr_sql(expr, generator),
+            render_identifier_or_error(field, generator)
+        ),
         _ => expr.to_string(),
+    }
+}
+
+fn render_identifier_or_error(value: &str, generator: &dyn SqlGenerator) -> String {
+    if value.is_empty() || value.as_bytes().contains(&0) || value.split('.').any(str::is_empty) {
+        "/* ERROR: Invalid identifier */".to_string()
+    } else {
+        generator.quote_identifier(value)
     }
 }
 
