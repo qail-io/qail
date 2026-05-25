@@ -24,6 +24,17 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
 }
 
 #[inline]
+fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
+    if matches!(
+        err,
+        PgError::Protocol(_) | PgError::Connection(_) | PgError::Timeout(_)
+    ) {
+        conn.mark_io_desynced();
+    }
+    Err(err)
+}
+
+#[inline]
 fn return_callback_error_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
     conn.mark_io_desynced();
     Err(err)
@@ -141,7 +152,7 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    fn test_conn() -> PgConnection {
+    fn test_conn_with_peer() -> (PgConnection, tokio::net::UnixStream) {
         use crate::driver::connection::StatementCache;
         use crate::driver::stream::PgStream;
         use bytes::BytesMut;
@@ -149,28 +160,44 @@ mod tests {
         use std::num::NonZeroUsize;
         use tokio::net::UnixStream;
 
-        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
-        PgConnection {
-            stream: PgStream::Unix(unix_stream),
-            buffer: BytesMut::with_capacity(1024),
-            write_buf: BytesMut::with_capacity(1024),
-            sql_buf: BytesMut::with_capacity(256),
-            params_buf: Vec::new(),
-            prepared_statements: HashMap::new(),
-            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
-            column_info_cache: HashMap::new(),
-            process_id: 0,
-            cancel_key_bytes: Vec::new(),
-            requested_protocol_minor: PgConnection::default_protocol_minor(),
-            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
-            notifications: VecDeque::new(),
-            replication_stream_active: false,
-            replication_mode_enabled: false,
-            last_replication_wal_end: None,
-            io_desynced: false,
-            pending_statement_closes: Vec::new(),
-            draining_statement_closes: false,
-        }
+        let (unix_stream, peer) = UnixStream::pair().expect("unix stream pair");
+        (
+            PgConnection {
+                stream: PgStream::Unix(unix_stream),
+                buffer: BytesMut::with_capacity(1024),
+                write_buf: BytesMut::with_capacity(1024),
+                sql_buf: BytesMut::with_capacity(256),
+                params_buf: Vec::new(),
+                prepared_statements: HashMap::new(),
+                stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+                column_info_cache: HashMap::new(),
+                process_id: 0,
+                cancel_key_bytes: Vec::new(),
+                requested_protocol_minor: PgConnection::default_protocol_minor(),
+                negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+                notifications: VecDeque::new(),
+                replication_stream_active: false,
+                replication_mode_enabled: false,
+                last_replication_wal_end: None,
+                io_desynced: false,
+                pending_statement_closes: Vec::new(),
+                draining_statement_closes: false,
+            },
+            peer,
+        )
+    }
+
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        test_conn_with_peer().0
+    }
+
+    #[cfg(unix)]
+    fn push_backend_frame(conn: &mut PgConnection, msg_type: u8, payload: &[u8]) {
+        conn.buffer.extend_from_slice(&[msg_type]);
+        conn.buffer
+            .extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        conn.buffer.extend_from_slice(payload);
     }
 
     #[test]
@@ -194,6 +221,37 @@ mod tests {
         .expect_err("callback error should be returned");
 
         assert!(matches!(err, PgError::Query(msg) if msg == "consumer stopped"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protocol_order_error_marks_query_connection_desynced() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        push_backend_frame(&mut conn, b'D', &0i16.to_be_bytes());
+        let stmt = super::super::PreparedStatement::from_sql("SELECT 1");
+
+        let err = conn
+            .query_prepared_single_count(&stmt, &[])
+            .await
+            .expect_err("out-of-order DataRow must fail");
+
+        assert!(err.to_string().contains("DataRow before BindComplete"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn simple_flow_error_marks_query_connection_desynced() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let err = conn
+            .execute_simple("SELECT 1")
+            .await
+            .expect_err("ReadyForQuery before completion must fail");
+
+        assert!(err.to_string().contains("ReadyForQuery before completion"));
         assert!(conn.is_io_desynced());
     }
 }
@@ -242,7 +300,9 @@ impl PgConnection {
 
         loop {
             let msg = self.recv().await?;
-            flow.validate(&msg, "extended-query execute", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "extended-query execute", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
@@ -268,7 +328,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("extended-query execute", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("extended-query execute", &other),
+                    );
                 }
             }
         }
@@ -305,11 +368,13 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "extended-query count execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'1' | b'2' | b'T' | b'D' | b'C' | b'n' => {}
                         b'Z' => {
@@ -320,10 +385,10 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "extended-query count execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type("extended-query count execute", other),
+                            );
                         }
                     }
                 }
@@ -447,7 +512,9 @@ impl PgConnection {
 
         loop {
             let msg = self.recv().await?;
-            flow.validate(&msg, "extended-query rows execute", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "extended-query rows execute", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
@@ -477,10 +544,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message(
-                        "extended-query rows execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("extended-query rows execute", &other),
+                    );
                 }
             }
         }
@@ -527,11 +594,13 @@ impl PgConnection {
         loop {
             match self.recv_fill_zerocopy_row_fast(&mut row).await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "extended-query visit bytes execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'1' | b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -552,10 +621,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "extended-query visit bytes execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "extended-query visit bytes execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -611,11 +683,13 @@ impl PgConnection {
                 .await
             {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "extended-query visit first-column execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'1' | b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -636,10 +710,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "extended-query visit first-column execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "extended-query visit first-column execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -685,7 +762,9 @@ impl PgConnection {
 
         loop {
             let msg = self.recv().await?;
-            flow.validate(&msg, "extended-query probe", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "extended-query probe", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
@@ -697,10 +776,13 @@ impl PgConnection {
                         return Err(err);
                     }
                     if !saw_describe_response {
-                        return Err(PgError::Protocol(
-                            "extended-query probe finished without RowDescription/NoData"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "extended-query probe finished without RowDescription/NoData"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(());
                 }
@@ -711,7 +793,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("extended-query probe", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("extended-query probe", &other),
+                    );
                 }
             }
         }
@@ -826,7 +911,7 @@ impl PgConnection {
                 if is_new && !flow.saw_parse_complete() {
                     self.prepared_statements.remove(&stmt_name);
                 }
-                return Err(err);
+                return return_with_desync(self, err);
             }
             match msg {
                 BackendMessage::ParseComplete => {
@@ -853,10 +938,13 @@ impl PgConnection {
                     }
                     if is_new && !flow.saw_parse_complete() {
                         self.prepared_statements.remove(&stmt_name);
-                        return Err(PgError::Protocol(
-                            "Cache miss query reached ReadyForQuery without ParseComplete"
-                                .to_string(),
-                        ));
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(
+                                "Cache miss query reached ReadyForQuery without ParseComplete"
+                                    .to_string(),
+                            ),
+                        );
                     }
                     return Ok(rows);
                 }
@@ -875,10 +963,10 @@ impl PgConnection {
                     if is_new && !flow.saw_parse_complete() {
                         self.prepared_statements.remove(&stmt_name);
                     }
-                    return Err(unexpected_backend_message(
-                        "extended-query cached execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("extended-query cached execute", &other),
+                    );
                 }
             }
         }
@@ -910,22 +998,32 @@ impl PgConnection {
                     // Some callers use execute_simple() with session-shaping SQL that
                     // can legally return rows (e.g., SELECT set_config(...)).
                     // Drain and ignore row data while preserving protocol ordering checks.
-                    flow.on_row_description("simple-query execute")?;
+                    if let Err(err) = flow.on_row_description("simple-query execute") {
+                        return return_with_desync(self, err);
+                    }
                 }
                 BackendMessage::DataRow(_) => {
-                    flow.on_data_row("simple-query execute")?;
+                    if let Err(err) = flow.on_data_row("simple-query execute") {
+                        return return_with_desync(self, err);
+                    }
                 }
                 BackendMessage::CommandComplete(_) => {
                     flow.on_command_complete();
                 }
                 BackendMessage::EmptyQueryResponse => {
-                    flow.on_empty_query_response("simple-query execute")?;
+                    if let Err(err) = flow.on_empty_query_response("simple-query execute") {
+                        return return_with_desync(self, err);
+                    }
                 }
                 BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
                         return Err(err);
                     }
-                    flow.on_ready_for_query("simple-query execute", error.is_some())?;
+                    if let Err(err) =
+                        flow.on_ready_for_query("simple-query execute", error.is_some())
+                    {
+                        return return_with_desync(self, err);
+                    }
                     return Ok(());
                 }
                 BackendMessage::ErrorResponse(err) => {
@@ -935,7 +1033,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("simple-query execute", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("simple-query execute", &other),
+                    );
                 }
             }
         }
@@ -966,11 +1067,15 @@ impl PgConnection {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::RowDescription(fields) => {
-                    flow.on_row_description("simple-query read")?;
+                    if let Err(err) = flow.on_row_description("simple-query read") {
+                        return return_with_desync(self, err);
+                    }
                     column_info = Some(Arc::new(super::ColumnInfo::from_fields(&fields)));
                 }
                 BackendMessage::DataRow(data) => {
-                    flow.on_data_row("simple-query read")?;
+                    if let Err(err) = flow.on_data_row("simple-query read") {
+                        return return_with_desync(self, err);
+                    }
                     if error.is_none() {
                         if rows.len() >= MAX_SIMPLE_QUERY_ROWS {
                             if error.is_none() {
@@ -993,14 +1098,19 @@ impl PgConnection {
                     column_info = None;
                 }
                 BackendMessage::EmptyQueryResponse => {
-                    flow.on_empty_query_response("simple-query read")?;
+                    if let Err(err) = flow.on_empty_query_response("simple-query read") {
+                        return return_with_desync(self, err);
+                    }
                     column_info = None;
                 }
                 BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
                         return Err(err);
                     }
-                    flow.on_ready_for_query("simple-query read", error.is_some())?;
+                    if let Err(err) = flow.on_ready_for_query("simple-query read", error.is_some())
+                    {
+                        return return_with_desync(self, err);
+                    }
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
@@ -1010,7 +1120,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message("simple-query read", &other));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("simple-query read", &other),
+                    );
                 }
             }
         }
@@ -1063,11 +1176,13 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single count execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'D' | b'C' | b'n' => {}
                         b'Z' => {
@@ -1078,10 +1193,10 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single count execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type("prepared single count execute", other),
+                            );
                         }
                     }
                 }
@@ -1122,7 +1237,9 @@ impl PgConnection {
 
         loop {
             let msg = self.recv().await?;
-            flow.validate(&msg, "prepared single execute", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "prepared single execute", error.is_some()) {
+                return return_with_desync(self, err);
+            }
             match msg {
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
@@ -1146,10 +1263,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message(
-                        "prepared single execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("prepared single execute", &other),
+                    );
                 }
             }
         }
@@ -1184,7 +1301,10 @@ impl PgConnection {
 
         loop {
             let msg = self.recv().await?;
-            flow.validate(&msg, "prepared single reuse execute", error.is_some())?;
+            if let Err(err) = flow.validate(&msg, "prepared single reuse execute", error.is_some())
+            {
+                return return_with_desync(self, err);
+            }
             match msg {
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
@@ -1208,10 +1328,10 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    return Err(unexpected_backend_message(
-                        "prepared single reuse execute",
-                        &other,
-                    ));
+                    return return_with_desync(
+                        self,
+                        unexpected_backend_message("prepared single reuse execute", &other),
+                    );
                 }
             }
         }
@@ -1254,11 +1374,13 @@ impl PgConnection {
         loop {
             match self.recv_fill_data_row_fast(&mut row_buf).await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single reuse visit execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1278,10 +1400,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single reuse visit execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single reuse visit execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1333,11 +1458,13 @@ impl PgConnection {
         loop {
             match self.recv_fill_zerocopy_row_fast(&mut row).await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single reuse visit bytes execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1358,10 +1485,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single reuse visit bytes execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single reuse visit bytes execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1413,11 +1543,13 @@ impl PgConnection {
                 .await
             {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single reuse visit first-column execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1438,10 +1570,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single reuse visit first-column execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single reuse visit first-column execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1493,11 +1628,13 @@ impl PgConnection {
                 .await
             {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single reuse visit first-four execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1523,10 +1660,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single reuse visit first-four execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single reuse visit first-four execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1584,11 +1724,13 @@ impl PgConnection {
         loop {
             match self.recv_fill_zerocopy_row_fast(&mut row).await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single encoded visit bytes execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1609,10 +1751,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single encoded visit bytes execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single encoded visit bytes execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1671,11 +1816,13 @@ impl PgConnection {
                 .await
             {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single encoded visit first-column execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1696,10 +1843,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single encoded visit first-column execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single encoded visit first-column execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1758,11 +1908,13 @@ impl PgConnection {
                 .await
             {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(
+                    if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "prepared single encoded visit first-four execute",
                         error.is_some(),
-                    )?;
+                    ) {
+                        return return_with_desync(self, err);
+                    }
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
@@ -1788,10 +1940,13 @@ impl PgConnection {
                         }
                         msg_type if is_ignorable_session_msg_type(msg_type) => {}
                         other => {
-                            return Err(unexpected_backend_msg_type(
-                                "prepared single encoded visit first-four execute",
-                                other,
-                            ));
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "prepared single encoded visit first-four execute",
+                                    other,
+                                ),
+                            );
                         }
                     }
                 }
