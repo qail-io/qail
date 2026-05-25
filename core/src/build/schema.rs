@@ -76,26 +76,48 @@ fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> Stri
     let mut out = String::new();
     let mut in_single = false;
     let mut in_double = false;
-    let mut chars = line.chars().peekable();
+    let mut dollar_quote: Option<String> = None;
+    let mut i = 0usize;
 
-    while let Some(ch) = chars.next() {
+    while i < line.len() {
         if *in_block_comment {
-            if ch == '*' && chars.peek().is_some_and(|next| *next == '/') {
-                chars.next();
+            if line[i..].starts_with("*/") {
+                i += 2;
                 *in_block_comment = false;
+            } else {
+                i += line[i..].chars().next().map(char::len_utf8).unwrap_or(1);
             }
             continue;
         }
 
+        if let Some(delim) = dollar_quote.as_deref() {
+            if line[i..].starts_with(delim) {
+                out.push_str(delim);
+                i += delim.len();
+                dollar_quote = None;
+            } else if let Some(ch) = line[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        let Some(ch) = line[i..].chars().next() else {
+            break;
+        };
+
         if in_single {
             out.push(ch);
             if ch == '\'' {
-                if chars.peek().is_some_and(|next| *next == '\'') {
+                if line[i + ch.len_utf8()..].starts_with('\'') {
                     out.push('\'');
-                    chars.next();
+                    i += ch.len_utf8() + 1;
                 } else {
+                    i += ch.len_utf8();
                     in_single = false;
                 }
+            } else {
+                i += ch.len_utf8();
             }
             continue;
         }
@@ -103,12 +125,15 @@ fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> Stri
         if in_double {
             out.push(ch);
             if ch == '"' {
-                if chars.peek().is_some_and(|next| *next == '"') {
+                if line[i + ch.len_utf8()..].starts_with('"') {
                     out.push('"');
-                    chars.next();
+                    i += ch.len_utf8() + 1;
                 } else {
+                    i += ch.len_utf8();
                     in_double = false;
                 }
+            } else {
+                i += ch.len_utf8();
             }
             continue;
         }
@@ -117,17 +142,28 @@ fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> Stri
             '\'' => {
                 in_single = true;
                 out.push(ch);
+                i += ch.len_utf8();
             }
             '"' => {
                 in_double = true;
                 out.push(ch);
+                i += ch.len_utf8();
             }
-            '-' if chars.peek().is_some_and(|next| *next == '-') => break,
-            '/' if chars.peek().is_some_and(|next| *next == '*') => {
-                chars.next();
+            '$' if sql_dollar_quote_delimiter_at(line, i).is_some() => {
+                let delim = sql_dollar_quote_delimiter_at(line, i).expect("delimiter checked");
+                out.push_str(delim);
+                i += delim.len();
+                dollar_quote = Some(delim.to_string());
+            }
+            '-' if line[i + ch.len_utf8()..].starts_with('-') => break,
+            '/' if line[i + ch.len_utf8()..].starts_with('*') => {
+                i += ch.len_utf8() + 1;
                 *in_block_comment = true;
             }
-            _ => out.push(ch),
+            _ => {
+                out.push(ch);
+                i += ch.len_utf8();
+            }
         }
     }
 
@@ -169,37 +205,74 @@ fn schema_comment_start(line: &str, hash_comments: bool) -> Option<usize> {
 }
 
 fn count_parens_outside_quotes(line: &str) -> (usize, usize) {
-    let bytes = line.as_bytes();
     let mut in_single = false;
     let mut in_double = false;
+    let mut dollar_quote: Option<String> = None;
     let mut opens = 0usize;
     let mut closes = 0usize;
     let mut i = 0usize;
 
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' if !in_double => {
-                if in_single && bytes.get(i + 1) == Some(&b'\'') {
+    while i < line.len() {
+        if let Some(delim) = dollar_quote.as_deref() {
+            if line[i..].starts_with(delim) {
+                i += delim.len();
+                dollar_quote = None;
+            } else {
+                i += line[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            }
+            continue;
+        }
+
+        let Some(ch) = line[i..].chars().next() else {
+            break;
+        };
+        match ch {
+            '\'' if !in_double => {
+                if in_single && line[i + ch.len_utf8()..].starts_with('\'') {
                     i += 2;
                     continue;
                 }
                 in_single = !in_single;
             }
-            b'"' if !in_single => {
-                if in_double && bytes.get(i + 1) == Some(&b'"') {
+            '"' if !in_single => {
+                if in_double && line[i + ch.len_utf8()..].starts_with('"') {
                     i += 2;
                     continue;
                 }
                 in_double = !in_double;
             }
-            b'(' if !in_single && !in_double => opens += 1,
-            b')' if !in_single && !in_double => closes += 1,
+            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(line, i).is_some() => {
+                let delim = sql_dollar_quote_delimiter_at(line, i).expect("delimiter checked");
+                dollar_quote = Some(delim.to_string());
+                i += delim.len();
+                continue;
+            }
+            '(' if !in_single && !in_double => opens += 1,
+            ')' if !in_single && !in_double => closes += 1,
             _ => {}
         }
-        i += 1;
+        i += ch.len_utf8();
     }
 
     (opens, closes)
+}
+
+fn sql_dollar_quote_delimiter_at(raw: &str, idx: usize) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    if bytes.get(idx) != Some(&b'$') {
+        return None;
+    }
+
+    let mut end = idx + 1;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'$' => return Some(&raw[idx..=end]),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => end += 1,
+            _ => return None,
+        }
+    }
+
+    None
 }
 
 impl Schema {
@@ -1475,33 +1548,54 @@ fn extract_inline_create_columns(line: &str) -> Vec<String> {
 
 fn find_matching_sql_paren(raw: &str, open_idx: usize) -> Option<usize> {
     let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut chars = raw[open_idx..].char_indices().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut dollar_quote: Option<String> = None;
+    let mut i = open_idx;
 
-    while let Some((relative_idx, ch)) = chars.next() {
-        let idx = open_idx + relative_idx;
-        if let Some(q) = quote {
-            if ch == q {
-                if chars.peek().is_some_and(|(_, next)| *next == q) {
-                    chars.next();
-                } else {
-                    quote = None;
-                }
+    while i < raw.len() {
+        if let Some(delim) = dollar_quote.as_deref() {
+            if raw[i..].starts_with(delim) {
+                i += delim.len();
+                dollar_quote = None;
+            } else {
+                i += raw[i..].chars().next().map(char::len_utf8).unwrap_or(1);
             }
             continue;
         }
 
+        let ch = raw[i..].chars().next()?;
         match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => {
+            '\'' if !in_double => {
+                if in_single && raw[i + ch.len_utf8()..].starts_with('\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                if in_double && raw[i + ch.len_utf8()..].starts_with('"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = !in_double;
+            }
+            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(raw, i).is_some() => {
+                let delim = sql_dollar_quote_delimiter_at(raw, i).expect("delimiter checked");
+                dollar_quote = Some(delim.to_string());
+                i += delim.len();
+                continue;
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
                 depth = depth.checked_sub(1)?;
                 if depth == 0 {
-                    return Some(idx);
+                    return Some(i);
                 }
             }
             _ => {}
         }
+        i += ch.len_utf8();
     }
 
     None
@@ -1511,31 +1605,55 @@ fn split_sql_top_level_csv(raw: &str) -> Vec<&str> {
     let mut pieces = Vec::new();
     let mut start = 0usize;
     let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut chars = raw.char_indices().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut dollar_quote: Option<String> = None;
+    let mut i = 0usize;
 
-    while let Some((idx, ch)) = chars.next() {
-        if let Some(q) = quote {
-            if ch == q {
-                if chars.peek().is_some_and(|(_, next)| *next == q) {
-                    chars.next();
-                } else {
-                    quote = None;
-                }
+    while i < raw.len() {
+        if let Some(delim) = dollar_quote.as_deref() {
+            if raw[i..].starts_with(delim) {
+                i += delim.len();
+                dollar_quote = None;
+            } else {
+                i += raw[i..].chars().next().map(char::len_utf8).unwrap_or(1);
             }
             continue;
         }
 
+        let Some(ch) = raw[i..].chars().next() else {
+            break;
+        };
         match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
+            '\'' if !in_double => {
+                if in_single && raw[i + ch.len_utf8()..].starts_with('\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                if in_double && raw[i + ch.len_utf8()..].starts_with('"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = !in_double;
+            }
+            '$' if !in_single && !in_double && sql_dollar_quote_delimiter_at(raw, i).is_some() => {
+                let delim = sql_dollar_quote_delimiter_at(raw, i).expect("delimiter checked");
+                dollar_quote = Some(delim.to_string());
+                i += delim.len();
+                continue;
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                pieces.push(raw[start..idx].trim());
-                start = idx + ch.len_utf8();
+                pieces.push(raw[start..i].trim());
+                start = i + ch.len_utf8();
             }
             _ => {}
         }
+        i += ch.len_utf8();
     }
 
     pieces.push(raw[start..].trim());
@@ -1994,5 +2112,22 @@ ALTER TABLE "app"."order" DROP COLUMN "select";
         assert!(orders.has_column("id"));
         assert!(orders.has_column("from"));
         assert!(!orders.has_column("select"));
+    }
+
+    #[test]
+    fn sql_migration_ignores_dollar_quoted_default_syntax() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE logs (id uuid, body text DEFAULT $$a,b)--not-comment$$, tag text);
+"#,
+        );
+
+        let logs = schema.table("logs").expect("logs table should parse");
+        assert!(logs.has_column("id"));
+        assert!(logs.has_column("body"));
+        assert!(logs.has_column("tag"));
+        assert!(!logs.has_column("b"));
+        assert!(!logs.has_column("not"));
     }
 }
