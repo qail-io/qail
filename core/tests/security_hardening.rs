@@ -853,6 +853,68 @@ fn insert_conflict_assignment_escapes_collation_fragment() {
 }
 
 #[test]
+fn update_set_rejects_non_named_column_expression() {
+    let cmd = Qail {
+        action: Action::Set,
+        table: "users".to_string(),
+        cages: vec![payload_cage(vec![Condition {
+            left: Expr::FieldAccess {
+                expr: Box::new(Expr::Named("profile".to_string())),
+                field: "field; DROP TABLE users; --".to_string(),
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: Value::String("Ada".to_string()),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid update column */"),
+        "non-column UPDATE target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains(").field; DROP"),
+        "non-column UPDATE target leaked raw expression: {}",
+        sql
+    );
+}
+
+#[test]
+fn update_returning_rejects_unsafe_cast_target() {
+    let cmd = Qail {
+        action: Action::Set,
+        table: "users".to_string(),
+        cages: vec![payload_cage(vec![cond(
+            "name",
+            Operator::Eq,
+            Value::String("Ada".to_string()),
+        )])],
+        returning: Some(vec![Expr::Cast {
+            expr: Box::new(Expr::Named("name".to_string())),
+            target_type: "text; DROP TABLE users; --".to_string(),
+            alias: None,
+        }]),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid cast target type */"),
+        "unsafe UPDATE RETURNING cast target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe UPDATE RETURNING cast target leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_is_null_no_value_leak() {
     let cmd = select_where("users", "deleted_at", Operator::IsNull, Value::Null);
     let sql = cmd.to_sql();
