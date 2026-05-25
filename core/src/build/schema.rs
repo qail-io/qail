@@ -1562,7 +1562,7 @@ fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
 
     // Table name between ALTER TABLE and ADD COLUMN
     let table_part = &line[alter_pos + 11..add_pos];
-    let table = extract_sql_table_ref(table_part)?;
+    let table = extract_alter_table_ref(table_part)?;
 
     // Column name after ADD COLUMN [IF NOT EXISTS]
     let mut col_part = &line[add_pos + 10..];
@@ -1590,7 +1590,7 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     let add_pos = line_upper.find(" ADD ")?;
 
     let table_part = &line[alter_pos + 11..add_pos];
-    let table = extract_sql_table_ref(table_part)?;
+    let table = extract_alter_table_ref(table_part)?;
 
     let col_part = &line[add_pos + 5..];
     let col_upper = col_part.trim_start().to_uppercase();
@@ -1650,7 +1650,7 @@ fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
 
     // Table name between ALTER TABLE and DROP COLUMN
     let table_part = &line[alter_pos + 11..drop_pos];
-    let table = extract_sql_table_ref(table_part)?;
+    let table = extract_alter_table_ref(table_part)?;
 
     // Column name after DROP COLUMN
     let col_part = &line[drop_pos + 11..];
@@ -1674,7 +1674,7 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     let drop_pos = line_upper.find(" DROP ")?;
 
     let table_part = &line[alter_pos + 11..drop_pos];
-    let table = extract_sql_table_ref(table_part)?;
+    let table = extract_alter_table_ref(table_part)?;
 
     let col_part = &line[drop_pos + 6..];
     let col: String = col_part
@@ -1698,6 +1698,27 @@ fn extract_sql_table_ref(raw: &str) -> Option<String> {
         .collect();
     let name = name.to_ascii_lowercase();
     is_build_table_ref(&name).then_some(name)
+}
+
+fn extract_alter_table_ref(raw: &str) -> Option<String> {
+    let mut rest = raw.trim_start();
+    let upper = rest.to_uppercase();
+    if upper.starts_with("IF EXISTS")
+        && rest
+            .get("IF EXISTS".len()..)
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    {
+        rest = rest.get("IF EXISTS".len()..)?.trim_start();
+    }
+    let upper = rest.to_uppercase();
+    if upper.starts_with("ONLY")
+        && rest
+            .get("ONLY".len()..)
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    {
+        rest = rest.get("ONLY".len()..)?.trim_start();
+    }
+    extract_sql_table_ref(rest)
 }
 
 impl TableSchema {
@@ -1891,5 +1912,23 @@ ALTER TABLE users ADD PRIMARY KEY (id);
         assert!(users.has_column("email"));
         assert!(!users.has_column("constraint"));
         assert!(!users.has_column("primary"));
+    }
+
+    #[test]
+    fn sql_migration_handles_alter_table_modifiers() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid);
+ALTER TABLE ONLY users ADD COLUMN email text;
+ALTER TABLE IF EXISTS users DROP COLUMN id;
+"#,
+        );
+
+        assert!(!schema.has_table("only"));
+        assert!(!schema.has_table("if"));
+        let users = schema.table("users").expect("users table should parse");
+        assert!(!users.has_column("id"));
+        assert!(users.has_column("email"));
     }
 }
