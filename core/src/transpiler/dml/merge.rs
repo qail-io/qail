@@ -155,15 +155,11 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
         }
         Operator::JsonQuery => {
             let path = json_path_arg(condition, generator);
-            generator.json_query(&left, &path)
+            format!("{} IS NOT NULL", generator.json_query(&left, &path))
         }
         Operator::JsonValue => {
             let path = json_path_arg(condition, generator);
-            format!(
-                "{} = {}",
-                generator.json_value(&left, &path),
-                value_sql(&condition.value, generator)
-            )
+            format!("{} IS NOT NULL", generator.json_value(&left, &path))
         }
         Operator::Between | Operator::NotBetween => {
             if let Value::Array(values) = &condition.value

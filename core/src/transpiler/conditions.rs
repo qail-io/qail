@@ -1,6 +1,7 @@
 use super::ToSql;
 use super::traits::{SqlGenerator, escape_sql_string_literal};
 use crate::ast::*;
+use crate::transpiler::identifier::qualifier_for_column_reference;
 
 /// Context for parameterized query building.
 #[derive(Debug, Default)]
@@ -56,22 +57,20 @@ fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> St
 
     let first = parts[0];
 
-    if first == cmd.table {
-        // table.col
+    if let Some(sql_qualifier) = qualifier_for_column_reference(&cmd.table, first) {
         return format!(
             "{}.{}",
-            generator.quote_identifier(first),
-            generator.quote_identifier(parts[1])
+            generator.quote_identifier(sql_qualifier),
+            generator.quote_identifier(&parts[1..].join("."))
         );
     }
 
     for join in &cmd.joins {
-        if first == join.table {
-            // join_table.col
+        if let Some(sql_qualifier) = qualifier_for_column_reference(&join.table, first) {
             return format!(
                 "{}.{}",
-                generator.quote_identifier(first),
-                generator.quote_identifier(parts[1])
+                generator.quote_identifier(sql_qualifier),
+                generator.quote_identifier(&parts[1..].join("."))
             );
         }
     }
@@ -639,15 +638,11 @@ impl ConditionToSql for Condition {
             }
             Operator::JsonQuery => {
                 let path = json_path_arg(self, generator);
-                generator.json_query(&col, &path)
+                format!("{} IS NOT NULL", generator.json_query(&col, &path))
             }
             Operator::JsonValue => {
                 let path = json_path_arg(self, generator);
-                format!(
-                    "{} = {}",
-                    generator.json_value(&col, &path),
-                    self.to_value_sql(generator)
-                )
+                format!("{} IS NOT NULL", generator.json_value(&col, &path))
             }
             Operator::Between => {
                 // Value is Array with 2 elements [min, max]
@@ -820,15 +815,11 @@ impl ConditionToSql for Condition {
             }
             Operator::JsonQuery => {
                 let path = value_placeholder(&self.value, params);
-                generator.json_query(&col, &path)
+                format!("{} IS NOT NULL", generator.json_query(&col, &path))
             }
             Operator::JsonValue => {
                 let path = value_placeholder(&self.value, params);
-                format!(
-                    "{} = {}",
-                    generator.json_value(&col, &path),
-                    value_placeholder(&self.value, params)
-                )
+                format!("{} IS NOT NULL", generator.json_value(&col, &path))
             }
             Operator::Between => {
                 if let Value::Array(vals) = &self.value

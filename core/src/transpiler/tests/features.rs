@@ -1924,8 +1924,10 @@ fn test_json_query() {
     });
 
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
-    println!("JSON_QUERY: {}", sql);
-    assert!(sql.contains("JSON_QUERY("));
+    assert_eq!(
+        sql,
+        "SELECT * FROM users WHERE JSON_QUERY(settings, '$.notifications') IS NOT NULL"
+    );
 }
 
 #[test]
@@ -1943,8 +1945,58 @@ fn test_json_value() {
     });
 
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
-    println!("JSON_VALUE: {}", sql);
-    assert!(sql.contains("JSON_VALUE("));
+    assert_eq!(
+        sql,
+        "SELECT * FROM users WHERE JSON_VALUE(profile, '$.name') IS NOT NULL"
+    );
+}
+
+#[test]
+fn test_json_value_parameterized_path_is_not_reused_as_comparison_value() {
+    use crate::transpiler::ToSqlParameterized;
+
+    let mut cmd = Qail::get("users");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![Condition {
+            left: Expr::Named("profile".to_string()),
+            op: Operator::JsonValue,
+            value: Value::NamedParam("json_path".to_string()),
+            is_array_unnest: false,
+        }],
+        logical_op: LogicalOp::And,
+    });
+
+    let result = cmd.to_sql_parameterized();
+    assert_eq!(
+        result.sql,
+        "SELECT * FROM users WHERE JSON_VALUE(profile, $1) IS NOT NULL"
+    );
+    assert_eq!(result.named_params, vec!["json_path"]);
+}
+
+#[test]
+fn test_merge_json_value_condition_is_boolean_predicate() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.profile".to_string()),
+                op: Operator::JsonValue,
+                value: Value::String("$.status".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("profile", Expr::Named("s.profile".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+         WHEN MATCHED AND JSON_VALUE(users.profile, '$.status') IS NOT NULL \
+         THEN UPDATE SET profile = s.profile"
+    );
 }
 
 // ============= Set Operations (UNION, INTERSECT, EXCEPT) =============
@@ -2411,5 +2463,33 @@ fn test_distinct_on() {
         sql.starts_with("SELECT DISTINCT ON (department, role)"),
         "SQL was: {}",
         sql
+    );
+}
+
+#[test]
+fn test_table_alias_renders_as_reference_and_qualifies_filters() {
+    let cmd = Qail::get("users").table_alias("u").eq("u.active", true);
+
+    assert_eq!(cmd.to_sql(), "SELECT * FROM users u WHERE u.active = true");
+}
+
+#[test]
+fn test_join_alias_renders_as_reference_and_qualifies_filters() {
+    let cmd = Qail::get("orders")
+        .table_alias("o")
+        .left_join_conds(
+            "inventory inv",
+            vec![Condition {
+                left: Expr::Named("inv.order_id".to_string()),
+                op: Operator::Eq,
+                value: Value::Column("o.id".to_string()),
+                is_array_unnest: false,
+            }],
+        )
+        .eq("inv.capacity", 10);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM orders o LEFT JOIN inventory inv ON inv.order_id = o.id WHERE inv.capacity = 10"
     );
 }

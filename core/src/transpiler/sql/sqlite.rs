@@ -5,7 +5,10 @@ pub struct SqliteGenerator;
 
 impl SqlGenerator for SqliteGenerator {
     fn quote_identifier(&self, id: &str) -> String {
-        format!("\"{}\"", id)
+        id.split('.')
+            .map(|part| format!("\"{}\"", part.replace('\0', "").replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     fn placeholder(&self, _index: usize) -> String {

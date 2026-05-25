@@ -183,30 +183,26 @@ fn build_update(cmd: &Qail) -> Result<String, String> {
     let mut first = true;
 
     for cage in &cmd.cages {
-        // In current parser, [key=val] updates come as Filter cages
-        match cage.kind {
-            CageKind::Payload | CageKind::Filter => {
-                for cond in &cage.conditions {
-                    if !first {
-                        update_doc.push_str(", ");
-                    }
-                    let col_str = match &cond.left {
-                        Expr::Named(name) => name.clone(),
-                        expr => {
-                            return Err(format!(
-                                "MongoDB update fields must be named, got expression `{expr}`"
-                            ));
-                        }
-                    };
-                    update_doc.push_str(&format!(
-                        "{}: {}",
-                        js_string(&col_str),
-                        value_to_json(&cond.value)?
-                    ));
-                    first = false;
+        if let CageKind::Payload = cage.kind {
+            for cond in &cage.conditions {
+                if !first {
+                    update_doc.push_str(", ");
                 }
+                let col_str = match &cond.left {
+                    Expr::Named(name) => name.clone(),
+                    expr => {
+                        return Err(format!(
+                            "MongoDB update fields must be named, got expression `{expr}`"
+                        ));
+                    }
+                };
+                update_doc.push_str(&format!(
+                    "{}: {}",
+                    js_string(&col_str),
+                    value_to_json(&cond.value)?
+                ));
+                first = false;
             }
-            _ => {}
         }
     }
     if first {
@@ -226,32 +222,27 @@ fn build_insert(cmd: &Qail) -> Result<String, String> {
     let mut doc = String::from("{ ");
     let mut first = true;
 
-    // Assuming cages contain the payload for insert
     for cage in &cmd.cages {
-        // In current parser, [key=val] inserts come as Filter cages
-        match cage.kind {
-            CageKind::Payload | CageKind::Filter => {
-                for cond in &cage.conditions {
-                    if !first {
-                        doc.push_str(", ");
-                    }
-                    let col_str = match &cond.left {
-                        Expr::Named(name) => name.clone(),
-                        expr => {
-                            return Err(format!(
-                                "MongoDB insert fields must be named, got expression `{expr}`"
-                            ));
-                        }
-                    };
-                    doc.push_str(&format!(
-                        "{}: {}",
-                        js_string(&col_str),
-                        value_to_json(&cond.value)?
-                    ));
-                    first = false;
+        if let CageKind::Payload = cage.kind {
+            for cond in &cage.conditions {
+                if !first {
+                    doc.push_str(", ");
                 }
+                let col_str = match &cond.left {
+                    Expr::Named(name) => name.clone(),
+                    expr => {
+                        return Err(format!(
+                            "MongoDB insert fields must be named, got expression `{expr}`"
+                        ));
+                    }
+                };
+                doc.push_str(&format!(
+                    "{}: {}",
+                    js_string(&col_str),
+                    value_to_json(&cond.value)?
+                ));
+                first = false;
             }
-            _ => {}
         }
     }
     if first {
@@ -275,29 +266,26 @@ fn build_upsert(cmd: &Qail) -> Result<String, String> {
     let mut first = true;
 
     for cage in &cmd.cages {
-        match cage.kind {
-            CageKind::Payload | CageKind::Filter => {
-                for cond in &cage.conditions {
-                    if !first {
-                        update_doc.push_str(", ");
-                    }
-                    let col_str = match &cond.left {
-                        Expr::Named(name) => name.clone(),
-                        expr => {
-                            return Err(format!(
-                                "MongoDB upsert fields must be named, got expression `{expr}`"
-                            ));
-                        }
-                    };
-                    update_doc.push_str(&format!(
-                        "{}: {}",
-                        js_string(&col_str),
-                        value_to_json(&cond.value)?
-                    ));
-                    first = false;
+        if let CageKind::Payload = cage.kind {
+            for cond in &cage.conditions {
+                if !first {
+                    update_doc.push_str(", ");
                 }
+                let col_str = match &cond.left {
+                    Expr::Named(name) => name.clone(),
+                    expr => {
+                        return Err(format!(
+                            "MongoDB upsert fields must be named, got expression `{expr}`"
+                        ));
+                    }
+                };
+                update_doc.push_str(&format!(
+                    "{}: {}",
+                    js_string(&col_str),
+                    value_to_json(&cond.value)?
+                ));
+                first = false;
             }
-            _ => {}
         }
     }
     if first {
@@ -326,54 +314,73 @@ fn build_delete(cmd: &Qail) -> Result<String, String> {
 }
 
 fn build_query_filter(cmd: &Qail) -> Result<String, String> {
-    let mut query_parts = Vec::new();
+    let mut and_clauses = Vec::new();
 
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
+            let mut cage_clauses = Vec::new();
             for cond in &cage.conditions {
-                let op = match cond.op {
-                    Operator::Eq => "$eq",
-                    Operator::Ne => "$ne",
-                    Operator::Gt => "$gt",
-                    Operator::Lt => "$lt",
-                    Operator::Gte => "$gte",
-                    Operator::Lte => "$lte",
-                    _ => return Err(format!("unsupported MongoDB filter operator {:?}", cond.op)),
-                };
+                cage_clauses.push(mongo_condition_clause(cond)?);
+            }
 
-                let col_str = match &cond.left {
-                    Expr::Named(name) => name.clone(),
-                    expr => {
-                        return Err(format!(
-                            "MongoDB filters require named fields, got expression `{expr}`"
-                        ));
+            if cage_clauses.is_empty() {
+                continue;
+            }
+
+            match cage.logical_op {
+                LogicalOp::And => and_clauses.extend(cage_clauses),
+                LogicalOp::Or => {
+                    if cage_clauses.len() == 1 {
+                        and_clauses.push(cage_clauses[0].clone());
+                    } else {
+                        and_clauses.push(format!("{{ \"$or\": [{}] }}", cage_clauses.join(", ")));
                     }
-                };
-
-                // If simple equality, clean syntax { key: val }
-                if let Operator::Eq = cond.op {
-                    query_parts.push(format!(
-                        "{}: {}",
-                        js_string(&col_str),
-                        value_to_json(&cond.value)?
-                    ));
-                } else {
-                    query_parts.push(format!(
-                        "{}: {{ \"{}\": {} }}",
-                        js_string(&col_str),
-                        op,
-                        value_to_json(&cond.value)?
-                    ));
                 }
             }
         }
     }
 
-    if query_parts.is_empty() {
-        return Ok("{}".to_string());
+    match and_clauses.len() {
+        0 => Ok("{}".to_string()),
+        1 => Ok(and_clauses.remove(0)),
+        _ => Ok(format!("{{ \"$and\": [{}] }}", and_clauses.join(", "))),
     }
+}
 
-    Ok(format!("{{ {} }}", query_parts.join(", ")))
+fn mongo_condition_clause(cond: &Condition) -> Result<String, String> {
+    let op = match cond.op {
+        Operator::Eq => "$eq",
+        Operator::Ne => "$ne",
+        Operator::Gt => "$gt",
+        Operator::Lt => "$lt",
+        Operator::Gte => "$gte",
+        Operator::Lte => "$lte",
+        _ => return Err(format!("unsupported MongoDB filter operator {:?}", cond.op)),
+    };
+
+    let col_str = match &cond.left {
+        Expr::Named(name) => name.clone(),
+        expr => {
+            return Err(format!(
+                "MongoDB filters require named fields, got expression `{expr}`"
+            ));
+        }
+    };
+
+    if let Operator::Eq = cond.op {
+        Ok(format!(
+            "{{ {}: {} }}",
+            js_string(&col_str),
+            value_to_json(&cond.value)?
+        ))
+    } else {
+        Ok(format!(
+            "{{ {}: {{ \"{}\": {} }} }}",
+            js_string(&col_str),
+            op,
+            value_to_json(&cond.value)?
+        ))
+    }
 }
 
 fn build_projection(cmd: &Qail) -> Result<String, String> {

@@ -489,6 +489,51 @@ fn test_mongo_preserves_array_payload_values() {
 }
 
 #[test]
+fn test_mongo_update_does_not_write_filter_fields_into_set_payload() {
+    use crate::ast::Qail;
+
+    let update = Qail::set("users")
+        .set_value("name", "Ana")
+        .eq("id", 1)
+        .to_mongo();
+
+    assert_eq!(
+        update,
+        "db.users.updateMany({ \"id\": 1 }, { $set: { \"name\": \"Ana\" } })"
+    );
+}
+
+#[test]
+fn test_mongo_or_filters_are_rendered_as_or_clauses() {
+    use crate::ast::{Operator, Qail};
+
+    let find = Qail::get("events")
+        .or_filter("city", Operator::Eq, "London")
+        .or_filter("city", Operator::Eq, "Paris")
+        .to_mongo();
+
+    assert_eq!(
+        find,
+        "db.events.find({ \"$or\": [{ \"city\": \"London\" }, { \"city\": \"Paris\" }] }, {})"
+    );
+}
+
+#[test]
+fn test_mongo_repeated_field_and_filters_are_not_flattened() {
+    use crate::ast::{Operator, Qail};
+
+    let find = Qail::get("events")
+        .filter("score", Operator::Gte, 10)
+        .filter("score", Operator::Lt, 20)
+        .to_mongo();
+
+    assert_eq!(
+        find,
+        "db.events.find({ \"$and\": [{ \"score\": { \"$gte\": 10 } }, { \"score\": { \"$lt\": 20 } }] }, {})"
+    );
+}
+
+#[test]
 fn test_dynamo_json_and_expression_names_are_escaped() {
     use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 

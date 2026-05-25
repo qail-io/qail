@@ -9,6 +9,7 @@ pub mod ddl;
 pub mod dialect;
 /// DML statement transpilation (INSERT, UPDATE, DELETE).
 pub mod dml;
+pub(crate) mod identifier;
 /// RLS policy transpilation (CREATE POLICY).
 pub mod policy;
 /// Core SQL generation utilities.

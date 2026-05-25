@@ -3,6 +3,9 @@
 use crate::ast::*;
 use crate::transpiler::conditions::{ConditionToSql, read_only_subquery_sql};
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::identifier::{
+    render_table_reference, table_reference_base, table_reference_sql_qualifier,
+};
 use crate::transpiler::traits::{SqlGenerator, escape_sql_string_literal};
 
 /// Generate SELECT SQL from a QAIL command, including CTEs, joins, filtering, grouping, and ordering.
@@ -425,7 +428,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     } else {
         sql.push_str(" FROM ");
     }
-    sql.push_str(&generator.quote_identifier(&cmd.table));
+    sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     // TABLESAMPLE
     let sample = cmd.sample.or_else(|| {
@@ -457,11 +460,21 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             JoinKind::Cross => ("CROSS", false),
         };
         // Join: target.source_singular_id = source.id
-        let source_singular = cmd.table.trim_end_matches('s');
+        let source_base = table_reference_base(&cmd.table);
+        let source_singular = source_base
+            .rsplit('.')
+            .next()
+            .unwrap_or(source_base)
+            .trim_end_matches('s');
 
-        let target_table = generator.quote_identifier(&join.table);
+        let target_table = render_table_reference(&join.table, generator.as_ref());
+        let target_qualifier = table_reference_sql_qualifier(&join.table)
+            .map(|qualifier| generator.quote_identifier(qualifier))
+            .unwrap_or_else(|| generator.quote_identifier(&join.table));
         let source_fk = format!("{}_id", source_singular);
-        let source_table = generator.quote_identifier(&cmd.table);
+        let source_table = table_reference_sql_qualifier(&cmd.table)
+            .map(|qualifier| generator.quote_identifier(qualifier))
+            .unwrap_or_else(|| generator.quote_identifier(&cmd.table));
 
         if let Some(on_conds) = &join.on {
             let on_sql: Vec<String> = on_conds
@@ -482,7 +495,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                 " {} JOIN {} ON {}.{} = {}.id",
                 kind,
                 target_table,
-                target_table,
+                target_qualifier,
                 generator.quote_identifier(&source_fk),
                 source_table
             ));
