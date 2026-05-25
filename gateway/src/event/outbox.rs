@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use qail_pg::{PgError, PgPool, PgRow, PooledConnection};
 
-use super::delivery::{WebhookDeliveryResult, deliver_webhook_once};
+use super::delivery::{WebhookDeliveryResult, deliver_webhook_once, validate_delivery_headers};
 use super::ssrf::validate_webhook_url;
 use super::{MAX_WEBHOOK_RETRIES, WebhookPayload, retry_delay};
 
@@ -292,6 +292,11 @@ fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxIt
             reason: format!("invalid headers JSON: {}", e),
             locked_at: locked_at.clone(),
         })?;
+    validate_delivery_headers(&headers).map_err(|e| MalformedOutboxItem {
+        id: id.clone(),
+        reason: format!("invalid headers: {}", e),
+        locked_at: locked_at.clone(),
+    })?;
     let payload_raw = required_string(row, 4, &id, "payload", &locked_at)?;
     let payload =
         serde_json::from_str::<WebhookPayload>(&payload_raw).map_err(|e| MalformedOutboxItem {
@@ -511,6 +516,26 @@ mod tests {
         let err = parse_claimed_outbox_row(&row).expect_err("headers must be rejected");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("invalid headers JSON"));
+        assert_eq!(err.locked_at, "2026-01-01 00:00:00+00");
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_with_reserved_headers() {
+        let row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some(r#"{"Content-Type":"text/plain"}"#),
+            Some(&payload_json()),
+            Some("3"),
+            Some("0"),
+            Some("2026-01-01 00:00:00+00"),
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("reserved headers must be rejected");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("invalid headers"));
+        assert!(err.reason.contains("reserved header"));
         assert_eq!(err.locked_at, "2026-01-01 00:00:00+00");
     }
 
