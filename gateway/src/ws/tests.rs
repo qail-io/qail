@@ -144,6 +144,19 @@ fn manual_notify_channel_rejects_over_pg_identifier_limit() {
 }
 
 #[test]
+fn manual_notify_channel_rejects_empty_fragment() {
+    let err = build_manual_notify_channel("tenant", "").expect_err("empty channel must reject");
+    assert!(err.contains("cannot be empty"));
+}
+
+#[test]
+fn manual_notify_channel_rejects_unicode_fragment() {
+    let err = build_manual_notify_channel("tenant", "café")
+        .expect_err("manual channel names must stay ASCII");
+    assert!(err.contains("ASCII alphanumeric"));
+}
+
+#[test]
 fn manual_notify_channel_prevents_tenant_channel_collisions() {
     let a = build_manual_notify_channel("acme", "eu_orders").expect("first channel");
     let b = build_manual_notify_channel("acme_eu", "orders").expect("second channel");

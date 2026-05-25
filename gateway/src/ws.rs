@@ -275,10 +275,24 @@ fn ensure_pg_channel_name_limit(channel: &str) -> Result<(), String> {
     ))
 }
 
+fn validate_manual_channel_fragment(channel_fragment: &str) -> Result<(), String> {
+    if channel_fragment.is_empty() {
+        return Err("Channel name cannot be empty".to_string());
+    }
+    if !channel_fragment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err("Invalid channel name — ASCII alphanumeric and underscores only".to_string());
+    }
+    Ok(())
+}
+
 pub(super) fn build_manual_notify_channel(
     tenant_id: &str,
     channel_fragment: &str,
 ) -> Result<String, String> {
+    validate_manual_channel_fragment(channel_fragment)?;
     let scoped = tenant_scoped_channel(tenant_id, channel_fragment)?;
     ensure_pg_channel_name_limit(&scoped)?;
     Ok(scoped)

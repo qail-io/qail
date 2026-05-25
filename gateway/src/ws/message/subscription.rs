@@ -31,10 +31,15 @@ pub(super) async fn handle_subscribe(
         }
     };
 
-    if !channel.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if channel.is_empty()
+        || !channel
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         let _ = tx
             .send(WsServerMessage::Error {
-                message: "Invalid channel name — alphanumeric and underscores only".to_string(),
+                message: "Invalid channel name — ASCII alphanumeric and underscores only"
+                    .to_string(),
             })
             .await;
         return;
