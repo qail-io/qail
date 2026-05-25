@@ -397,6 +397,7 @@ impl Schema {
                     let mut seen_column_options = HashSet::new();
                     let mut nullability_option: Option<&str> = None;
                     let mut generated_option: Option<&str> = None;
+                    let mut has_foreign_key = false;
 
                     let mut i = 2;
                     while i < parts.len() {
@@ -472,6 +473,7 @@ impl Schema {
                                 ref_column,
                                 table_name,
                             )?;
+                            has_foreign_key = true;
                         } else if part == "references" {
                             if i + 1 >= parts.len() {
                                 return Err(format!(
@@ -489,6 +491,7 @@ impl Schema {
                                 ref_column,
                                 table_name,
                             )?;
+                            has_foreign_key = true;
                         } else if let Some(ref_target) = part.strip_prefix("references") {
                             let (ref_table, ref_column) =
                                 parse_build_references_target(ref_target, col_name, table_name)?;
@@ -499,7 +502,14 @@ impl Schema {
                                 ref_column,
                                 table_name,
                             )?;
+                            has_foreign_key = true;
                         } else if matches!(part, "on_delete" | "on_update") {
+                            if !has_foreign_key {
+                                return Err(format!(
+                                    "{} requires a preceding foreign key for column '{}' in table '{}'",
+                                    part, col_name, table_name
+                                ));
+                            }
                             if i + 1 >= parts.len() {
                                 return Err(format!(
                                     "{} requires a foreign key action for column '{}' in table '{}'",

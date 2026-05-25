@@ -255,6 +255,23 @@ table posts {
 }
 
 #[test]
+fn test_parse_schema_rejects_fk_actions_without_reference() {
+    let content = r#"
+table posts {
+  user_id UUID on_delete cascade
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("fk action without reference must fail");
+    assert!(
+        err.contains(
+            "on_delete requires a preceding foreign key for column 'user_id' in table 'posts'"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
 fn test_parse_schema_rejects_malformed_references_target() {
     for content in [
         r#"
