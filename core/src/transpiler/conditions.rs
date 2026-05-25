@@ -236,15 +236,147 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             condition_left_sql(expr, generator, context),
             condition_left_sql(index, generator, context)
         ),
-        Expr::Subquery { query, .. } => format!("({})", query.to_sql()),
+        Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
         Expr::Exists { query, negated, .. } => {
             if *negated {
-                format!("NOT EXISTS ({})", query.to_sql())
+                format!("NOT EXISTS ({})", read_only_subquery_sql(query))
             } else {
-                format!("EXISTS ({})", query.to_sql())
+                format!("EXISTS ({})", read_only_subquery_sql(query))
             }
         }
         _ => "/* ERROR: Invalid condition expression */".to_string(),
+    }
+}
+
+fn read_only_subquery_sql(query: &Qail) -> String {
+    if let Some(error) = validate_read_only_subquery(query) {
+        format!("/* ERROR: {error} */")
+    } else {
+        query.to_sql()
+    }
+}
+
+fn validate_read_only_subquery(query: &Qail) -> Option<String> {
+    if !matches!(query.action, Action::Get | Action::Cnt | Action::With) {
+        return Some(format!(
+            "subquery must be read-only SELECT, got {}",
+            query.action
+        ));
+    }
+
+    for column in &query.columns {
+        if let Some(error) = validate_read_only_expr(column) {
+            return Some(error);
+        }
+    }
+    for expr in &query.distinct_on {
+        if let Some(error) = validate_read_only_expr(expr) {
+            return Some(error);
+        }
+    }
+    for cage in &query.cages {
+        for condition in &cage.conditions {
+            if let Some(error) = validate_read_only_condition(condition) {
+                return Some(error);
+            }
+        }
+    }
+    for condition in &query.having {
+        if let Some(error) = validate_read_only_condition(condition) {
+            return Some(error);
+        }
+    }
+    for join in &query.joins {
+        if let Some(conditions) = &join.on {
+            for condition in conditions {
+                if let Some(error) = validate_read_only_condition(condition) {
+                    return Some(error);
+                }
+            }
+        }
+    }
+    for cte in &query.ctes {
+        if let Some(error) = validate_read_only_subquery(&cte.base_query) {
+            return Some(error);
+        }
+        if let Some(recursive_query) = &cte.recursive_query
+            && let Some(error) = validate_read_only_subquery(recursive_query)
+        {
+            return Some(error);
+        }
+    }
+    for (_, set_query) in &query.set_ops {
+        if let Some(error) = validate_read_only_subquery(set_query) {
+            return Some(error);
+        }
+    }
+    if let Some(source_query) = &query.source_query
+        && let Some(error) = validate_read_only_subquery(source_query)
+    {
+        return Some(error);
+    }
+    if let Some(returning) = &query.returning {
+        for expr in returning {
+            if let Some(error) = validate_read_only_expr(expr) {
+                return Some(error);
+            }
+        }
+    }
+
+    None
+}
+
+fn validate_read_only_condition(condition: &Condition) -> Option<String> {
+    validate_read_only_expr(&condition.left).or_else(|| validate_read_only_value(&condition.value))
+}
+
+fn validate_read_only_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Subquery(query) => validate_read_only_subquery(query),
+        Value::Expr(expr) => validate_read_only_expr(expr),
+        Value::Array(values) => values.iter().find_map(validate_read_only_value),
+        _ => None,
+    }
+}
+
+fn validate_read_only_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            for (condition, value) in when_clauses {
+                if let Some(error) = validate_read_only_condition(condition)
+                    .or_else(|| validate_read_only_expr(value))
+                {
+                    return Some(error);
+                }
+            }
+            else_value
+                .as_ref()
+                .and_then(|expr| validate_read_only_expr(expr))
+        }
+        Expr::Binary { left, right, .. } => {
+            validate_read_only_expr(left).or_else(|| validate_read_only_expr(right))
+        }
+        Expr::FunctionCall { args, .. } => args.iter().find_map(validate_read_only_expr),
+        Expr::SpecialFunction { args, .. } => args
+            .iter()
+            .find_map(|(_, expr)| validate_read_only_expr(expr)),
+        Expr::Cast { expr, .. } | Expr::FieldAccess { expr, .. } | Expr::Collate { expr, .. } => {
+            validate_read_only_expr(expr)
+        }
+        Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+            elements.iter().find_map(validate_read_only_expr)
+        }
+        Expr::Subscript { expr, index, .. } => {
+            validate_read_only_expr(expr).or_else(|| validate_read_only_expr(index))
+        }
+        Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+            validate_read_only_subquery(query)
+        }
+        _ => None,
     }
 }
 
@@ -353,10 +485,7 @@ fn condition_value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
         Value::Param(n) => generator.placeholder(*n),
         Value::String(s) => format!("'{}'", escape_sql_string_literal(s)),
         Value::Bool(b) => generator.bool_literal(*b),
-        Value::Subquery(cmd) => {
-            use crate::transpiler::ToSql;
-            format!("({})", cmd.to_sql())
-        }
+        Value::Subquery(cmd) => format!("({})", read_only_subquery_sql(cmd)),
         Value::Column(col) => {
             if col.contains('.') {
                 col.split('.')
@@ -550,7 +679,7 @@ impl ConditionToSql for Condition {
             Operator::Exists => {
                 // EXISTS takes subquery, col is ignored
                 if let Value::Subquery(cmd) = &self.value {
-                    let subquery_sql = cmd.to_sql();
+                    let subquery_sql = read_only_subquery_sql(cmd);
                     format!("EXISTS ({})", subquery_sql)
                 } else {
                     invalid_exists_condition_sql()
@@ -558,7 +687,7 @@ impl ConditionToSql for Condition {
             }
             Operator::NotExists => {
                 if let Value::Subquery(cmd) = &self.value {
-                    let subquery_sql = cmd.to_sql();
+                    let subquery_sql = read_only_subquery_sql(cmd);
                     format!("NOT EXISTS ({})", subquery_sql)
                 } else {
                     invalid_exists_condition_sql()
@@ -663,9 +792,12 @@ impl ConditionToSql for Condition {
                         generator.not_in_array(&col, &value)
                     }
                 }
-                Value::Subquery(cmd) => {
-                    format!("{} {} ({})", col, self.op.sql_symbol(), cmd.to_sql())
-                }
+                Value::Subquery(cmd) => format!(
+                    "{} {} ({})",
+                    col,
+                    self.op.sql_symbol(),
+                    read_only_subquery_sql(cmd)
+                ),
                 Value::Param(_) | Value::NamedParam(_) => {
                     let value = value_placeholder(&self.value, params);
                     if self.op == Operator::In {
@@ -720,7 +852,7 @@ impl ConditionToSql for Condition {
             }
             Operator::Exists => {
                 if let Value::Subquery(cmd) = &self.value {
-                    let subquery_sql = cmd.to_sql();
+                    let subquery_sql = read_only_subquery_sql(cmd);
                     format!("EXISTS ({})", subquery_sql)
                 } else {
                     invalid_exists_condition_sql()
@@ -728,7 +860,7 @@ impl ConditionToSql for Condition {
             }
             Operator::NotExists => {
                 if let Value::Subquery(cmd) = &self.value {
-                    let subquery_sql = cmd.to_sql();
+                    let subquery_sql = read_only_subquery_sql(cmd);
                     format!("NOT EXISTS ({})", subquery_sql)
                 } else {
                     invalid_exists_condition_sql()

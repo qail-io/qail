@@ -627,6 +627,99 @@ fn operator_exists_rejects_non_subquery_value() {
 }
 
 #[test]
+fn operator_in_rejects_mutating_subquery_value() {
+    let mut subquery = Qail::del("audit_log");
+    subquery = subquery.filter("tenant_id", Operator::Eq, Value::String("tenant_a".into()));
+
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::In,
+            value: Value::Subquery(Box::new(subquery)),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: subquery must be read-only SELECT, got DEL */"),
+        "mutating subquery must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DELETE FROM"),
+        "mutating subquery SQL leaked into parent query: {}",
+        sql
+    );
+}
+
+#[test]
+fn operator_exists_rejects_mutating_subquery_parameterized() {
+    let subquery = Qail::set("users").set_value("role", Value::String("admin".into()));
+    let cmd = Qail {
+        action: Action::Get,
+        table: "sessions".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::Named("ignored".to_string()),
+            op: Operator::Exists,
+            value: Value::Subquery(Box::new(subquery)),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+
+    let result = cmd.to_sql_parameterized();
+
+    assert!(
+        result
+            .sql
+            .contains("/* ERROR: subquery must be read-only SELECT, got SET */"),
+        "mutating parameterized subquery must fail closed: {}",
+        result.sql
+    );
+    assert!(
+        !result.sql.contains("UPDATE users"),
+        "mutating parameterized subquery SQL leaked: {}",
+        result.sql
+    );
+}
+
+#[test]
+fn condition_left_subquery_rejects_mutating_query() {
+    let cmd = Qail {
+        action: Action::Get,
+        table: "users".to_string(),
+        cages: vec![filter_cage(vec![Condition {
+            left: Expr::Subquery {
+                query: Box::new(Qail::del("sessions")),
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: Value::Int(1),
+            is_array_unnest: false,
+        }])],
+        ..Default::default()
+    };
+
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("(/* ERROR: subquery must be read-only SELECT, got DEL */) = 1"),
+        "mutating condition-left subquery must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DELETE FROM"),
+        "mutating condition-left subquery SQL leaked: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_not_exists_rejects_non_subquery_value_parameterized() {
     let cmd = select_where(
         "users",
