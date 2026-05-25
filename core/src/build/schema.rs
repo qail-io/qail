@@ -1415,17 +1415,7 @@ fn extract_create_table_name(line: &str) -> Option<String> {
         rest
     };
 
-    // Get table name (first identifier)
-    let name: String = line[line.len() - rest.len()..]
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_lowercase())
-    }
+    extract_sql_table_ref(&line[line.len() - rest.len()..])
 }
 
 /// Extract column name from a line inside CREATE TABLE block
@@ -1477,11 +1467,7 @@ fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
 
     // Table name between ALTER TABLE and ADD COLUMN
     let table_part = &line[alter_pos + 11..add_pos];
-    let table: String = table_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let table = extract_sql_table_ref(table_part)?;
 
     // Column name after ADD COLUMN [IF NOT EXISTS]
     let mut col_part = &line[add_pos + 10..];
@@ -1498,7 +1484,7 @@ fn extract_alter_add_column(line: &str) -> Option<(String, String)> {
     if table.is_empty() || col.is_empty() {
         None
     } else {
-        Some((table.to_lowercase(), col.to_lowercase()))
+        Some((table, col.to_lowercase()))
     }
 }
 
@@ -1509,11 +1495,7 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     let add_pos = line_upper.find(" ADD ")?;
 
     let table_part = &line[alter_pos + 11..add_pos];
-    let table: String = table_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let table = extract_sql_table_ref(table_part)?;
 
     let col_part = &line[add_pos + 5..];
     let col: String = col_part
@@ -1525,7 +1507,7 @@ fn extract_alter_add(line: &str) -> Option<(String, String)> {
     if table.is_empty() || col.is_empty() {
         None
     } else {
-        Some((table.to_lowercase(), col.to_lowercase()))
+        Some((table, col.to_lowercase()))
     }
 }
 
@@ -1540,17 +1522,7 @@ fn extract_drop_table_name(line: &str) -> Option<String> {
         rest
     };
 
-    // Get table name (first identifier)
-    let name: String = line[line.len() - rest.len()..]
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_lowercase())
-    }
+    extract_sql_table_ref(&line[line.len() - rest.len()..])
 }
 
 /// Extract table and column from ALTER TABLE ... DROP COLUMN
@@ -1561,11 +1533,7 @@ fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
 
     // Table name between ALTER TABLE and DROP COLUMN
     let table_part = &line[alter_pos + 11..drop_pos];
-    let table: String = table_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let table = extract_sql_table_ref(table_part)?;
 
     // Column name after DROP COLUMN
     let col_part = &line[drop_pos + 11..];
@@ -1578,7 +1546,7 @@ fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
     if table.is_empty() || col.is_empty() {
         None
     } else {
-        Some((table.to_lowercase(), col.to_lowercase()))
+        Some((table, col.to_lowercase()))
     }
 }
 
@@ -1589,11 +1557,7 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     let drop_pos = line_upper.find(" DROP ")?;
 
     let table_part = &line[alter_pos + 11..drop_pos];
-    let table: String = table_part
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let table = extract_sql_table_ref(table_part)?;
 
     let col_part = &line[drop_pos + 6..];
     let col: String = col_part
@@ -1605,8 +1569,18 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     if table.is_empty() || col.is_empty() {
         None
     } else {
-        Some((table.to_lowercase(), col.to_lowercase()))
+        Some((table, col.to_lowercase()))
     }
+}
+
+fn extract_sql_table_ref(raw: &str) -> Option<String> {
+    let name: String = raw
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+    let name = name.to_ascii_lowercase();
+    is_build_table_ref(&name).then_some(name)
 }
 
 impl TableSchema {
@@ -1712,5 +1686,26 @@ CREATE TABLE hidden_table (
         assert!(users.has_column("id"));
         assert!(!users.has_column("hidden"));
         assert!(!schema.has_table("hidden_table"));
+    }
+
+    #[test]
+    fn sql_migration_preserves_schema_qualified_table_names() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE app.users (
+  id uuid
+);
+
+ALTER TABLE app.users ADD COLUMN email text;
+"#,
+        );
+
+        assert!(!schema.has_table("app"));
+        let users = schema
+            .table("app.users")
+            .expect("schema-qualified table should parse");
+        assert!(users.has_column("id"));
+        assert!(users.has_column("email"));
     }
 }
