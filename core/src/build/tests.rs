@@ -272,6 +272,21 @@ table posts {
 }
 
 #[test]
+fn test_parse_schema_rejects_unknown_fk_action() {
+    let content = r#"
+table posts {
+  user_id UUID references users(id) on_delete cascad
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("unknown fk action must fail");
+    assert!(
+        err.contains("unknown foreign key action 'cascad' for column 'user_id' in table 'posts'"),
+        "{err}"
+    );
+}
+
+#[test]
 fn test_parse_schema_rejects_malformed_references_target() {
     for content in [
         r#"

@@ -517,6 +517,12 @@ impl Schema {
                                 ));
                             }
                             i += 1;
+                            if !is_build_fk_action(parts[i]) {
+                                return Err(format!(
+                                    "unknown foreign key action '{}' for column '{}' in table '{}'",
+                                    parts[i], col_name, table_name
+                                ));
+                            }
                         } else if part == "check_name" {
                             if i + 1 >= parts.len() {
                                 return Err(format!(
@@ -1127,6 +1133,13 @@ fn is_build_identifier(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn is_build_fk_action(value: &str) -> bool {
+    matches!(
+        value,
+        "cascade" | "set_null" | "set_default" | "restrict" | "no_action"
+    )
 }
 
 fn resource_block_content_before_closing(content: &str) -> Result<Option<String>, String> {
