@@ -106,14 +106,31 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
             {
                 idx += 2;
             }
-            if let Some(name) = tokens.get(idx) {
-                tables.push(unquote_sql_ident(name));
+            while let Some(name) = tokens.get(idx) {
+                if upper
+                    .get(idx)
+                    .is_some_and(|t| matches!(t.as_str(), "CASCADE" | "RESTRICT"))
+                {
+                    break;
+                }
+                for part in name.split(',') {
+                    let target = unquote_sql_ident(part);
+                    if !target.is_empty() {
+                        tables.push(target);
+                    }
+                }
+                idx += 1;
             }
             continue;
         }
 
         if upper.len() >= 6 && upper[0] == "ALTER" && upper[1] == "TABLE" {
             let mut table_idx = 2usize;
+            if upper.get(table_idx).is_some_and(|t| t == "IF")
+                && upper.get(table_idx + 1).is_some_and(|t| t == "EXISTS")
+            {
+                table_idx += 2;
+            }
             if upper.get(table_idx).is_some_and(|t| t == "ONLY") {
                 table_idx += 1;
             }
@@ -122,20 +139,31 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
             };
             let table = unquote_sql_ident(table_token);
 
-            let drop_idx = upper.iter().position(|t| t == "DROP");
-            let col_idx = upper.iter().position(|t| t == "COLUMN");
-            if let (Some(d_idx), Some(c_idx)) = (drop_idx, col_idx)
-                && d_idx + 1 == c_idx
-            {
-                let mut idx = c_idx + 1;
+            let mut idx = table_idx + 1;
+            while idx < upper.len() {
+                let Some(relative_drop_idx) = upper[idx..].iter().position(|t| t == "DROP") else {
+                    break;
+                };
+                idx += relative_drop_idx + 1;
+                if upper.get(idx).is_some_and(|t| t == "COLUMN") {
+                    idx += 1;
+                }
                 if upper.get(idx).is_some_and(|t| t == "IF")
                     && upper.get(idx + 1).is_some_and(|t| t == "EXISTS")
                 {
                     idx += 2;
                 }
-                if let Some(col_token) = tokens.get(idx) {
-                    columns.push((table, unquote_sql_ident(col_token)));
+                if upper
+                    .get(idx)
+                    .is_some_and(|t| matches!(t.as_str(), "CONSTRAINT" | "INDEX"))
+                {
+                    idx += 1;
+                    continue;
                 }
+                if let Some(col_token) = tokens.get(idx) {
+                    columns.push((table.clone(), unquote_sql_ident(col_token)));
+                }
+                idx += 1;
             }
         }
     }

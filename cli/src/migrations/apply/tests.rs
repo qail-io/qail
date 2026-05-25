@@ -664,6 +664,28 @@ function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END;
     }
 
     #[test]
+    fn test_parse_drop_targets_collects_multi_action_drops() {
+        let sql = r#"
+            ALTER TABLE IF EXISTS ONLY users
+                DROP COLUMN old_email,
+                DROP COLUMN IF EXISTS old_name;
+            DROP TABLE IF EXISTS audit_logs, old_events CASCADE;
+        "#;
+        let (tables, columns) = parse_drop_targets(sql);
+        assert_eq!(
+            tables,
+            vec!["audit_logs".to_string(), "old_events".to_string()]
+        );
+        assert_eq!(
+            columns,
+            vec![
+                ("users".to_string(), "old_email".to_string()),
+                ("users".to_string(), "old_name".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn test_parse_backfill_spec_directives() {
         let content = r#"
 -- @backfill.table: users
