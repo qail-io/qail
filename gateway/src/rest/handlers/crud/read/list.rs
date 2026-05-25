@@ -1269,6 +1269,46 @@ fn string_contains(value: &Value, pattern: &QailValue) -> bool {
     actual.contains(expected)
 }
 
+fn json_contains_json(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            expected.iter().all(|(key, expected_value)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual_value| json_contains_json(actual_value, expected_value))
+            })
+        }
+        (Value::Array(actual), Value::Array(expected)) => expected.iter().all(|expected_value| {
+            actual
+                .iter()
+                .any(|actual_value| json_contains_json(actual_value, expected_value))
+        }),
+        _ => actual == expected,
+    }
+}
+
+fn json_contains_qail(value: &Value, expected: &QailValue) -> bool {
+    match value {
+        Value::Array(actual) => match expected {
+            QailValue::Array(items) => items.iter().all(|item| {
+                actual
+                    .iter()
+                    .any(|actual_value| qail_value_matches_json(item, actual_value))
+            }),
+            item => actual
+                .iter()
+                .any(|actual_value| qail_value_matches_json(item, actual_value)),
+        },
+        Value::Object(_) => match expected {
+            QailValue::Json(raw) | QailValue::String(raw) => serde_json::from_str::<Value>(raw)
+                .is_ok_and(|expected_json| json_contains_json(value, &expected_json)),
+            _ => false,
+        },
+        Value::String(_) => string_contains(value, expected),
+        _ => false,
+    }
+}
+
 fn present_non_null_json(value: Option<&Value>) -> Option<&Value> {
     value.filter(|value| !value.is_null())
 }
@@ -1317,7 +1357,7 @@ fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailVa
                 _ => false,
             }),
         Operator::Like => value.is_some_and(|value| string_like(value, expected, false)),
-        Operator::Contains => value.is_some_and(|value| string_contains(value, expected)),
+        Operator::Contains => value.is_some_and(|value| json_contains_qail(value, expected)),
         Operator::ILike => value.is_some_and(|value| string_like(value, expected, true)),
         Operator::Fuzzy => value.is_some_and(|value| string_fuzzy(value, expected)),
         Operator::NotLike => {
@@ -1736,6 +1776,60 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows, vec![json!({"id": 1, "name": "Beta"})]);
+    }
+
+    #[test]
+    fn branch_read_constraints_contains_matches_array_members() {
+        let filters = vec![(
+            "tags".to_string(),
+            Operator::Contains,
+            QailValue::String("premium".to_string()),
+        )];
+        let mut rows = vec![
+            json!({"id": 1, "tags": ["premium", "vip"]}),
+            json!({"id": 2, "tags": ["standard"]}),
+            json!({"id": 3, "tags": null}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![json!({"id": 1, "tags": ["premium", "vip"]})]);
+    }
+
+    #[test]
+    fn branch_read_constraints_contains_matches_json_subset() {
+        let filters = vec![(
+            "metadata".to_string(),
+            Operator::Contains,
+            QailValue::String(r#"{"theme":"dark","flags":["beta"]}"#.to_string()),
+        )];
+        let mut rows = vec![
+            json!({"id": 1, "metadata": {"theme": "dark", "flags": ["alpha", "beta"], "extra": true}}),
+            json!({"id": 2, "metadata": {"theme": "light", "flags": ["beta"]}}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                json!({"id": 1, "metadata": {"theme": "dark", "flags": ["alpha", "beta"], "extra": true}})
+            ]
+        );
     }
 
     #[test]
