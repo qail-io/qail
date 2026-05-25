@@ -358,6 +358,24 @@ table tickets {
 }
 
 #[test]
+fn test_parse_schema_rejects_invalid_enum_names() {
+    let err = Schema::parse("enum bad-name { draft }").expect_err("invalid enum name must fail");
+    assert!(err.contains("Invalid enum name 'bad-name'"));
+
+    let schema = Schema::parse(
+        r#"
+enum app.ticket_status { draft, active }
+
+table tickets {
+  status app.ticket_status
+}
+"#,
+    )
+    .expect("schema-qualified enum names should parse");
+    assert!(schema.table("tickets").unwrap().has_column("status"));
+}
+
+#[test]
 fn test_parse_schema_rejects_malformed_table_headers() {
     let missing_name = r#"
 table {

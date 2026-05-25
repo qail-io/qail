@@ -925,6 +925,9 @@ fn parse_build_enum_declaration<'a, I: Iterator<Item = &'a str>>(
     if name.is_empty() {
         return Err("enum name is missing before '{'".to_string());
     }
+    if !is_build_table_ref(name) {
+        return Err(format!("Invalid enum name '{}'", name));
+    }
 
     let mut body = body_start.to_string();
     while build_enum_body_before_closing_brace(&body)?.is_none() {
