@@ -683,7 +683,7 @@ fn encode_select_with_columns(
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
                 buf.extend_from_slice(b" ");
-                encode_join_value(&cond.value, buf);
+                encode_join_value(&cond.value, buf, params)?;
             }
         }
     }

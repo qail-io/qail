@@ -716,7 +716,11 @@ pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) -> Result<(), crate::protoco
 }
 
 /// Encode JOIN ON value - AST-native, no allocations for column references.
-pub fn encode_join_value(value: &Value, buf: &mut BytesMut) {
+pub fn encode_join_value(
+    value: &Value,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     match value {
         Value::Column(col) => buf.extend_from_slice(col.as_bytes()),
         Value::String(s) if s.contains('.') => buf.extend_from_slice(s.as_bytes()),
@@ -729,8 +733,9 @@ pub fn encode_join_value(value: &Value, buf: &mut BytesMut) {
                 buf.extend_from_slice(n.to_string().as_bytes());
             }
         }
-        _ => buf.extend_from_slice(value.to_string().as_bytes()),
+        _ => encode_value(value, buf, params)?,
     }
+    Ok(())
 }
 
 /// Encode WHERE conditions with parameter extraction.

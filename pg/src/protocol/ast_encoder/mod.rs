@@ -545,6 +545,65 @@ mod tests {
     }
 
     #[test]
+    fn join_condition_placeholders_fail_closed() {
+        use qail_core::ast::{Condition, Expr, JoinKind, Operator, Value};
+
+        let cmd = Qail::get("users u").left_join_conds(
+            "profiles p",
+            vec![Condition {
+                left: Expr::Named("p.user_id".to_string()),
+                op: Operator::Eq,
+                value: Value::Param(1),
+                is_array_unnest: false,
+            }],
+        );
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("JOIN placeholders must not be emitted without a bind value");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("unresolved positional parameter $1")),
+            "{err}"
+        );
+
+        let cmd = Qail::get("users u").join_conds(
+            JoinKind::Left,
+            "profiles p",
+            vec![Condition {
+                left: Expr::Named("p.user_id".to_string()),
+                op: Operator::Eq,
+                value: Value::NamedParam("uid".to_string()),
+                is_array_unnest: false,
+            }],
+        );
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("JOIN named placeholders must not be emitted without a bind value");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("unresolved named parameter :uid")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn join_condition_string_literals_reject_null_bytes() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let cmd = Qail::get("users u").left_join_conds(
+            "profiles p",
+            vec![Condition {
+                left: Expr::Named("p.nickname".to_string()),
+                op: Operator::Eq,
+                value: Value::String("bad\0value".to_string()),
+                is_array_unnest: false,
+            }],
+        );
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("JOIN string literal with null byte must fail closed");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
     fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
         use qail_core::ast::{CTEDef, Expr, SetOp};
 
