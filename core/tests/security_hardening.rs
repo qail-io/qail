@@ -763,6 +763,96 @@ fn select_collate_and_field_access_quote_identifier_fragments() {
 }
 
 #[test]
+fn insert_column_list_quotes_identifier_fragments() {
+    let cmd = Qail {
+        action: Action::Add,
+        table: "users".to_string(),
+        columns: vec![Expr::Named("name); DROP TABLE users; --".to_string())],
+        cages: vec![payload_cage(vec![cond(
+            "name",
+            Operator::Eq,
+            Value::String("Ada".to_string()),
+        )])],
+        returning: Some(vec![]),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("\"name); DROP TABLE users; --\""),
+        "insert column identifier was not quoted: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("(name); DROP"),
+        "insert column identifier broke out unquoted: {}",
+        sql
+    );
+}
+
+#[test]
+fn insert_returning_rejects_unsafe_cast_target() {
+    let cmd = Qail {
+        action: Action::Add,
+        table: "users".to_string(),
+        columns: vec![Expr::Named("name".to_string())],
+        cages: vec![payload_cage(vec![cond(
+            "name",
+            Operator::Eq,
+            Value::String("Ada".to_string()),
+        )])],
+        returning: Some(vec![Expr::Cast {
+            expr: Box::new(Expr::Named("name".to_string())),
+            target_type: "text; DROP TABLE users; --".to_string(),
+            alias: None,
+        }]),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid cast target type */"),
+        "unsafe INSERT RETURNING cast target must fail closed: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe INSERT RETURNING cast target leaked into SQL: {}",
+        sql
+    );
+}
+
+#[test]
+fn insert_conflict_assignment_escapes_collation_fragment() {
+    let cmd = Qail::add("users")
+        .set_value("id", 1)
+        .set_value("name", "Ada")
+        .on_conflict_update(
+            &["id"],
+            &[(
+                "name",
+                Expr::Collate {
+                    expr: Box::new(Expr::Named("EXCLUDED.name".to_string())),
+                    collation: "C\"; DROP TABLE users; --".to_string(),
+                    alias: None,
+                },
+            )],
+        );
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("COLLATE \"C\"\"; DROP TABLE users; --\""),
+        "ON CONFLICT collation identifier was not escaped: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("COLLATE \"C\"; DROP"),
+        "ON CONFLICT collation identifier broke out of quotes: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_is_null_no_value_leak() {
     let cmd = select_where("users", "deleted_at", Operator::IsNull, Value::Null);
     let sql = cmd.to_sql();
