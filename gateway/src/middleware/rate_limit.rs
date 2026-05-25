@@ -6,6 +6,7 @@ use axum::{
 };
 use std::{
     collections::HashMap,
+    net::IpAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -106,6 +107,15 @@ fn trust_proxy_headers() -> bool {
     })
 }
 
+fn parse_proxy_ip_key(value: &str) -> Option<String> {
+    let ip = value.trim().parse::<IpAddr>().ok()?;
+    Some(ip.to_string())
+}
+
+fn first_forwarded_for_ip_key(value: &str) -> Option<String> {
+    value.split(',').find_map(parse_proxy_ip_key)
+}
+
 fn client_ip_key(request: &Request<axum::body::Body>) -> String {
     if let Some(ci) = request
         .extensions()
@@ -122,13 +132,13 @@ fn client_ip_key(request: &Request<axum::body::Body>) -> String {
         .headers()
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
+        .and_then(parse_proxy_ip_key)
         .or_else(|| {
             request
                 .headers()
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.split(',').next().unwrap_or("unknown").trim().to_string())
+                .and_then(first_forwarded_for_ip_key)
         })
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -205,4 +215,37 @@ pub async fn rate_limit_middleware(
     let duration = start.elapsed().as_secs_f64();
     crate::metrics::record_http_request(&method, status, duration);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_proxy_ip_key_rejects_non_ip_values() {
+        assert_eq!(
+            parse_proxy_ip_key("203.0.113.10"),
+            Some("203.0.113.10".to_string())
+        );
+        assert_eq!(
+            parse_proxy_ip_key(" 2001:db8::1 "),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(parse_proxy_ip_key("203.0.113.10:443"), None);
+        assert_eq!(parse_proxy_ip_key("attacker-controlled-bucket"), None);
+        assert_eq!(parse_proxy_ip_key(""), None);
+    }
+
+    #[test]
+    fn forwarded_for_uses_first_valid_ip_literal_only() {
+        assert_eq!(
+            first_forwarded_for_ip_key(" 198.51.100.1, 10.0.0.2 "),
+            Some("198.51.100.1".to_string())
+        );
+        assert_eq!(
+            first_forwarded_for_ip_key("bad-bucket, 198.51.100.2"),
+            Some("198.51.100.2".to_string())
+        );
+        assert_eq!(first_forwarded_for_ip_key("bad-bucket, also-bad"), None);
+    }
 }
