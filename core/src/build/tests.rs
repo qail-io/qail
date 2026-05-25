@@ -592,6 +592,14 @@ bucket { provider s3 }
 }
 
 #[test]
+fn test_parse_schema_rejects_invalid_resource_names() {
+    let content = "bucket bad-name { provider s3 }";
+
+    let err = Schema::parse(content).expect_err("invalid resource name must fail");
+    assert!(err.contains("Invalid bucket resource name 'bad-name'"));
+}
+
+#[test]
 fn test_parse_schema_rejects_trailing_resource_content_without_block() {
     let content = "bucket avatars provider s3";
 

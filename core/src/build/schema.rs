@@ -202,6 +202,9 @@ impl Schema {
                 if name.is_empty() {
                     return Err(format!("Missing name for {} declaration", kind));
                 }
+                if !is_build_identifier(&name) {
+                    return Err(format!("Invalid {} resource name '{}'", kind, name));
+                }
                 let mut provider = None;
                 let mut properties = HashMap::new();
 
