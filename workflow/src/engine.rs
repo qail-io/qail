@@ -710,7 +710,10 @@ fn execute_step<'a, E: WorkflowExecutor>(
                     )
                     .await
                     {
-                        Ok(Some(pause)) => return Ok(StepOutcome::Paused(pause)),
+                        Ok(Some(pause)) => {
+                            restore_for_each_item(ctx, previous_item);
+                            return Ok(StepOutcome::Paused(pause));
+                        }
                         Ok(None) => {
                             restore_for_each_item(ctx, previous_item);
                         }
@@ -1593,6 +1596,127 @@ mod tests {
                 ("+628222".to_string(), "summary".to_string()),
             ],
             "inner ForEach must not delete the outer item binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_for_each_wait_restores_item_binding_across_resume() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("nested_for_each_wait_items")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::for_each(
+                        "operators",
+                        vec![
+                            WorkflowStep::for_each(
+                                "tasks",
+                                vec![
+                                    WorkflowStep::wait(
+                                        "task_done",
+                                        std::time::Duration::from_secs(3600),
+                                    ),
+                                    WorkflowStep::notify(
+                                        ChannelKind::WhatsApp,
+                                        "task",
+                                        "item.phone",
+                                    ),
+                                ],
+                            ),
+                            WorkflowStep::notify(ChannelKind::WhatsApp, "summary", "item.phone"),
+                        ],
+                    ),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-nested-wait-items", "active");
+        ctx.set(
+            "operators",
+            serde_json::json!([
+                {"name": "Captain A", "phone": "+628111"},
+                {"name": "Captain B", "phone": "+628222"}
+            ]),
+        );
+        ctx.set(
+            "tasks",
+            serde_json::json!([
+                {"name": "Task 1", "phone": "+629999"}
+            ]),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+        assert!(
+            ctx.get("item").is_none(),
+            "paused workflow state must not persist an active loop item"
+        );
+
+        let result = resume_workflow(
+            &executor,
+            &wf,
+            "wf-nested-wait-items",
+            serde_json::json!({"event": "task_done"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "active");
+        assert!(
+            executor
+                .saved_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|ctx| ctx.get("item"))
+                .is_none(),
+            "paused resume state must keep item reconstruction cursor-driven"
+        );
+
+        {
+            let notifs = executor.notifications.lock().unwrap();
+            assert_eq!(
+                notifs.as_slice(),
+                &[
+                    ("+629999".to_string(), "task".to_string()),
+                    ("+628111".to_string(), "summary".to_string()),
+                ],
+                "inner wait resume must restore the outer item before summary"
+            );
+        }
+
+        let result = resume_workflow(
+            &executor,
+            &wf,
+            "wf-nested-wait-items",
+            serde_json::json!({"event": "task_done"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "done");
+
+        let notifs = executor.notifications.lock().unwrap();
+        assert_eq!(
+            notifs.as_slice(),
+            &[
+                ("+629999".to_string(), "task".to_string()),
+                ("+628111".to_string(), "summary".to_string()),
+                ("+629999".to_string(), "task".to_string()),
+                ("+628222".to_string(), "summary".to_string()),
+            ],
+            "nested for_each wait must not leak the inner item into the outer loop"
+        );
+        assert!(
+            executor
+                .saved_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|ctx| ctx.get("item"))
+                .is_none(),
+            "completed workflow state must not retain a stale loop item"
         );
     }
 
