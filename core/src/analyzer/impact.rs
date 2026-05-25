@@ -89,26 +89,23 @@ impl MigrationImpact {
             match cmd.action {
                 Action::Drop => {
                     // Table being dropped
-                    if let Some(refs) = table_refs.get(&cmd.table)
-                        && !refs.is_empty()
-                    {
+                    let refs = cloned_refs_for_table(&table_refs, &cmd.table);
+                    if !refs.is_empty() {
                         impact.breaking_changes.push(BreakingChange::DroppedTable {
                             table: cmd.table.clone(),
-                            references: refs.iter().map(|r| (*r).clone()).collect(),
+                            references: refs,
                         });
                     }
                 }
                 Action::AlterDrop => {
                     for col_expr in &cmd.columns {
                         if let crate::ast::Expr::Named(col_name) = col_expr {
-                            let key = (cmd.table.clone(), col_name.clone());
-                            if let Some(refs) = column_refs.get(&key)
-                                && !refs.is_empty()
-                            {
+                            let refs = cloned_refs_for_column(&column_refs, &cmd.table, col_name);
+                            if !refs.is_empty() {
                                 impact.breaking_changes.push(BreakingChange::DroppedColumn {
                                     table: cmd.table.clone(),
                                     column: col_name.clone(),
-                                    references: refs.iter().map(|r| (*r).clone()).collect(),
+                                    references: refs,
                                 });
                             }
                         }
@@ -118,14 +115,13 @@ impl MigrationImpact {
                     // Rename operation - check for references to old name
                     // Would need to parse the rename details from the command
                     // For now, flag any table with Mod action
-                    if let Some(refs) = table_refs.get(&cmd.table)
-                        && !refs.is_empty()
-                    {
+                    let refs = cloned_refs_for_table(&table_refs, &cmd.table);
+                    if !refs.is_empty() {
                         impact.breaking_changes.push(BreakingChange::RenamedColumn {
                             table: cmd.table.clone(),
                             old_name: "unknown".to_string(),
                             new_name: "unknown".to_string(),
-                            references: refs.iter().map(|r| (*r).clone()).collect(),
+                            references: refs,
                         });
                     }
                 }
@@ -264,6 +260,75 @@ impl MigrationImpact {
     }
 }
 
+fn cloned_refs_for_table(
+    table_refs: &HashMap<String, Vec<&CodeReference>>,
+    table: &str,
+) -> Vec<CodeReference> {
+    let mut out = Vec::new();
+    for (ref_table, refs) in table_refs {
+        if table_name_matches(table, ref_table) {
+            push_unique_refs(&mut out, refs);
+        }
+    }
+    out
+}
+
+fn cloned_refs_for_column(
+    column_refs: &HashMap<(String, String), Vec<&CodeReference>>,
+    table: &str,
+    column: &str,
+) -> Vec<CodeReference> {
+    let mut out = Vec::new();
+    let column = normalize_ident(column);
+    for ((ref_table, ref_column), refs) in column_refs {
+        let ref_column = normalize_ident(ref_column);
+        if table_name_matches(table, ref_table) && (ref_column == column || ref_column == "*") {
+            push_unique_refs(&mut out, refs);
+        }
+    }
+    out
+}
+
+fn push_unique_refs(out: &mut Vec<CodeReference>, refs: &[&CodeReference]) {
+    for reference in refs {
+        let duplicate = out.iter().any(|existing| {
+            existing.file == reference.file
+                && existing.line == reference.line
+                && existing.table == reference.table
+                && existing.snippet == reference.snippet
+        });
+        if !duplicate {
+            out.push((*reference).clone());
+        }
+    }
+}
+
+fn table_name_matches(command_table: &str, ref_table: &str) -> bool {
+    let command_table = normalize_ident(command_table);
+    let ref_table = normalize_ident(ref_table);
+    if command_table == ref_table {
+        return true;
+    }
+
+    let command_has_schema = command_table.contains('.');
+    let ref_has_schema = ref_table.contains('.');
+    (!command_has_schema || !ref_has_schema)
+        && bare_table_name(&command_table) == bare_table_name(&ref_table)
+}
+
+fn bare_table_name(table: &str) -> &str {
+    table.rsplit_once('.').map_or(table, |(_, bare)| bare)
+}
+
+fn normalize_ident(ident: &str) -> String {
+    ident
+        .split('.')
+        .map(|part| part.trim().trim_matches('"'))
+        .collect::<Vec<_>>()
+        .join(".")
+        .to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +358,58 @@ mod tests {
 
         assert!(!impact.safe_to_run);
         assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_schema_qualified_drop_matches_bare_raw_sql_reference() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "app.users".to_string(),
+            columns: vec![crate::ast::Expr::Named("old_email".to_string())],
+            ..Default::default()
+        };
+
+        let code_ref = CodeReference {
+            file: PathBuf::from("src/reporting.ts"),
+            line: 17,
+            table: "users".to_string(),
+            columns: vec!["old_email".to_string()],
+            query_type: super::super::scanner::QueryType::RawSql,
+            snippet: r#"SELECT old_email FROM "app"."users""#.to_string(),
+        };
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &[code_ref], &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run);
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_schema_qualified_drop_ignores_different_schema_reference() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: r#""app"."users""#.to_string(),
+            ..Default::default()
+        };
+
+        let code_ref = CodeReference {
+            file: PathBuf::from("src/admin.rs"),
+            line: 24,
+            table: "admin.users".to_string(),
+            columns: vec!["id".to_string()],
+            query_type: super::super::scanner::QueryType::RawSql,
+            snippet: r#"SELECT id FROM "admin"."users""#.to_string(),
+        };
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &[code_ref], &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run);
+        assert_eq!(impact.breaking_changes.len(), 0);
     }
 }
