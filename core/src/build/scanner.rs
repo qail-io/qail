@@ -22,6 +22,10 @@ pub struct QailUsage {
     pub columns: Vec<String>,
     /// CRUD action (GET, SET, ADD, DEL, PUT).
     pub action: String,
+    /// Additional static tables referenced by the chain.
+    ///
+    /// This is used for secondary relation slots such as `MERGE USING table`.
+    pub related_tables: Vec<String>,
     /// Whether this references a CTE rather than a real table.
     pub is_cte_ref: bool,
     /// Whether this query chain includes `.with_rls(` call
@@ -2144,9 +2148,18 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
             let columns =
                 extract_columns_with_bindings(&chain.full_chain, substitutions, &literal_bindings);
             let columns_key = columns.join("\x1f");
+            let related_tables = extract_related_tables_with_bindings(
+                &chain.full_chain,
+                substitutions,
+                &literal_bindings,
+            )
+            .into_iter()
+            .filter(|table| !file_cte_names.contains(table))
+            .collect::<Vec<_>>();
+            let related_tables_key = related_tables.join("\x1d");
 
             for table in resolved_tables {
-                let variant_key = format!("{table}\x1e{columns_key}");
+                let variant_key = format!("{table}\x1e{columns_key}\x1e{related_tables_key}");
                 if !seen_variants.insert(variant_key) {
                     continue;
                 }
@@ -2159,6 +2172,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                     is_dynamic_table: false,
                     columns: columns.clone(),
                     action: action.to_string(),
+                    related_tables: related_tables.clone(),
                     is_cte_ref,
                     has_rls,
                     has_explicit_tenant_scope,
@@ -2300,6 +2314,47 @@ fn extract_columns_with_bindings(
                     }
                 }
             }
+            "merge_on_column" => {
+                for col in resolve_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
+                    columns.push(col);
+                }
+            }
+            "when_matched_update" | "when_not_matched_by_source_update" => {
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    0,
+                    substitutions,
+                    bindings,
+                ));
+            }
+            "when_matched_update_if" => {
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    1,
+                    substitutions,
+                    bindings,
+                ));
+            }
+            "when_not_matched_insert" => {
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    0,
+                    substitutions,
+                    bindings,
+                ));
+            }
+            "when_not_matched_insert_if" => {
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    1,
+                    substitutions,
+                    bindings,
+                ));
+            }
             _ => {}
         }
     }
@@ -2334,6 +2389,37 @@ fn extract_columns_with_bindings(
         .collect();
 
     columns
+}
+
+fn resolve_array_string_arg(
+    args: &str,
+    index: usize,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    split_top_level_args(args)
+        .get(index)
+        .map(|arg| resolve_array_string_values(arg, substitutions, bindings))
+        .unwrap_or_default()
+}
+
+fn extract_related_tables_with_bindings(
+    line: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut tables = Vec::new();
+    for call in scan_chain_method_calls(line) {
+        if matches!(call.name, "using_table" | "using_table_as") {
+            tables.extend(resolve_string_values(
+                extract_first_argument(call.args),
+                substitutions,
+                bindings,
+            ));
+        }
+    }
+    dedupe_values(&mut tables);
+    tables
 }
 
 fn chain_has_rls(chain: &str) -> bool {
@@ -2387,10 +2473,6 @@ pub(crate) fn append_scanned_columns(cmd: &mut crate::ast::Qail, columns: &[Stri
     use crate::ast::Expr;
 
     for col in columns {
-        // Skip qualified columns (CTE refs like cte.column)
-        if col.contains('.') {
-            continue;
-        }
         // Skip SQL function expressions (e.g., count(*), SUM(amount))
         // and wildcard (*) — these are valid SQL, not schema columns
         if col.contains('(') || col == "*" {

@@ -4,7 +4,7 @@ use qail_core::analyzer::{
     QueryCall, TextLiteral, detect_query_calls, extract_text_literals, looks_like_qail_query,
     looks_like_sql_query, trim_query_bounds,
 };
-use qail_core::ast::{Condition, Expr, Qail, Value};
+use qail_core::ast::{Condition, Expr, MergeAction, MergeSource, Qail, Value};
 use qail_core::build::{
     QailUsage, Schema as BuildSchema, ValidationDiagnosticKind, scan_source_text,
     validate_against_schema_diagnostics,
@@ -502,6 +502,7 @@ fn collect_rust_document_usages(
             is_dynamic_table: false,
             columns: collect_usage_columns(&cmd),
             action: action_to_usage_tag(&cmd).to_string(),
+            related_tables: collect_usage_related_tables(&cmd),
             is_cte_ref: false,
             has_rls: rust_query_chain_has_rls(text, &query),
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
@@ -590,6 +591,7 @@ fn collect_text_document_usages(
             is_dynamic_table: false,
             columns: collect_usage_columns(&cmd),
             action: action_to_usage_tag(&cmd).to_string(),
+            related_tables: collect_usage_related_tables(&cmd),
             is_cte_ref: false,
             has_rls: false,
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
@@ -623,6 +625,7 @@ fn collect_text_document_usages(
             is_dynamic_table: false,
             columns: collect_usage_columns(&cmd),
             action: action_to_usage_tag(&cmd).to_string(),
+            related_tables: collect_usage_related_tables(&cmd),
             is_cte_ref: false,
             has_rls: false,
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
@@ -641,6 +644,7 @@ fn action_to_usage_tag(cmd: &Qail) -> &'static str {
         qail_core::ast::Action::Set => "SET",
         qail_core::ast::Action::Del => "DEL",
         qail_core::ast::Action::Put => "PUT",
+        qail_core::ast::Action::Merge => "MERGE",
         _ => "GET",
     }
 }
@@ -685,7 +689,45 @@ fn collect_usage_columns(cmd: &Qail) -> Vec<String> {
         }
     }
 
+    if let Some(merge) = &cmd.merge {
+        for cond in &merge.on {
+            collect_columns_from_condition(cond, &mut push);
+        }
+        for clause in &merge.clauses {
+            for cond in &clause.condition {
+                collect_columns_from_condition(cond, &mut push);
+            }
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (column, expr) in assignments {
+                        push(column);
+                        collect_columns_from_expr(expr, &mut push);
+                    }
+                }
+                MergeAction::Insert { columns, values } => {
+                    for column in columns {
+                        push(column);
+                    }
+                    for expr in values {
+                        collect_columns_from_expr(expr, &mut push);
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
+        }
+    }
+
     columns
+}
+
+fn collect_usage_related_tables(cmd: &Qail) -> Vec<String> {
+    let Some(merge) = &cmd.merge else {
+        return Vec::new();
+    };
+    match &merge.source {
+        MergeSource::Table { name, .. } if !name.trim().is_empty() => vec![name.clone()],
+        _ => Vec::new(),
+    }
 }
 
 fn collect_columns_from_condition(cond: &Condition, push: &mut dyn FnMut(&str)) {

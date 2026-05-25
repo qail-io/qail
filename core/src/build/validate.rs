@@ -153,6 +153,14 @@ pub fn validate_against_schema_diagnostics(
                 }
             }
         }
+        for related_table in &query.related_tables {
+            if let Err(e) = validator.validate_table(related_table) {
+                push_unique(ValidationDiagnostic::schema_error(format!(
+                    "{}:{}: {}",
+                    query.file, query.line, e
+                )));
+            }
+        }
 
         // RLS Audit: warn if query targets RLS-enabled table without .with_rls()
         if schema.is_rls_table(&query.table) && !query.has_rls {

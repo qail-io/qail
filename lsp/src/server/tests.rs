@@ -139,6 +139,23 @@ fn rust_semantic_usages_include_typed_builder_chain() {
 }
 
 #[test]
+fn parsed_merge_usage_preserves_ir_columns_and_source_table() {
+    let cmd = Qail::merge_into("orders")
+        .using_table("staging_orders")
+        .merge_on_column("id", qail_core::ast::Operator::Eq, "staging.order_id")
+        .when_matched_update(&[("status", Expr::Named("staging.status".to_string()))]);
+
+    assert_eq!(action_to_usage_tag(&cmd), "MERGE");
+
+    let columns = collect_usage_columns(&cmd);
+    assert!(columns.iter().any(|column| column == "id"));
+    assert!(columns.iter().any(|column| column == "status"));
+
+    let related_tables = collect_usage_related_tables(&cmd);
+    assert_eq!(related_tables, vec!["staging_orders".to_string()]);
+}
+
+#[test]
 fn rust_semantic_diagnostics_cover_qail_builder_chain() {
     let schema = BuildSchema::parse(
         r#"

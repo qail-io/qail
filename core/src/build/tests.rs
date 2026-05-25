@@ -1068,6 +1068,18 @@ fn test_extract_columns_on_conflict() {
 }
 
 #[test]
+fn test_extract_columns_merge_actions() {
+    let line = r#"Qail::merge_into("orders")
+        .merge_on_column("id", Operator::Eq, "source.order_id")
+        .when_matched_update(&[("status", Expr::Named("source.status".into()))])
+        .when_not_matched_insert(&["id", "status"], &[Expr::Named("source.order_id".into()), Expr::Named("source.status".into())])"#;
+    let cols = extract_columns(line);
+
+    assert!(cols.contains(&"id".to_string()));
+    assert!(cols.contains(&"status".to_string()));
+}
+
+#[test]
 fn test_validate_against_schema_diagnostics_casted_column_no_false_positive() {
     let schema = Schema::parse(
         r#"
@@ -1194,6 +1206,7 @@ table users {
         is_dynamic_table: false,
         columns: vec!["id".to_string()],
         action: "GET".to_string(),
+        related_tables: Vec::new(),
         is_cte_ref: false,
         has_rls: false,
         has_explicit_tenant_scope: false,
@@ -1228,6 +1241,7 @@ table users {
         is_dynamic_table: false,
         columns: vec!["id".to_string()],
         action: "GET".to_string(),
+        related_tables: Vec::new(),
         is_cte_ref: false,
         has_rls: false,
         has_explicit_tenant_scope: false,
@@ -1240,6 +1254,110 @@ table users {
             .iter()
             .any(|d| matches!(d.kind, ValidationDiagnosticKind::SchemaError)),
         "static unknown table must fail validation even without underscore"
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_qualified_column_typos() {
+    let schema = Schema::parse(
+        r#"
+table users {
+  id UUID
+  email TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("users").column("users.emial");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Column 'emial' not found in table 'users'")),
+        "qualified column typos should remain visible to schema validation: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_merge_action_column_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+
+table staging_orders {
+  order_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::merge_into("orders")
+        .using_table("staging_orders")
+        .merge_on_column("id", Operator::Eq, "staging.order_id")
+        .when_matched_update(&[("statuz", Expr::Named("staging.status".into()))]);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Column 'statuz' not found in table 'orders'")),
+        "MERGE target action columns should be represented in IR: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_merge_source_table_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+}
+
+table staging_orders {
+  order_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::merge_into("orders")
+        .using_table("stagin_orders")
+        .merge_on_column("id", Operator::Eq, "staging.order_id")
+        .when_matched_do_nothing();
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("Table 'stagin_orders' not found")),
+        "MERGE source tables should be represented in IR: {:?}",
+        diagnostics
     );
 }
 
@@ -1262,6 +1380,7 @@ table users {
         is_dynamic_table: true,
         columns: vec!["id".to_string()],
         action: "GET".to_string(),
+        related_tables: Vec::new(),
         is_cte_ref: false,
         has_rls: false,
         has_explicit_tenant_scope: false,

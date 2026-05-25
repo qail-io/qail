@@ -13,6 +13,7 @@ pub(crate) struct QueryIr {
     pub(crate) line: usize,
     pub(crate) action: String,
     pub(crate) table: String,
+    pub(crate) related_tables: Vec<String>,
     pub(crate) is_dynamic_table: bool,
     pub(crate) cmd: crate::ast::Qail,
     pub(crate) has_rls: bool,
@@ -52,6 +53,7 @@ pub(crate) fn build_query_ir(usages: &[QailUsage]) -> (Vec<QueryIr>, Vec<String>
             line: usage.line,
             action: usage.action.clone(),
             table: usage.table.clone(),
+            related_tables: usage.related_tables.clone(),
             is_dynamic_table: usage.is_dynamic_table,
             cmd,
             has_rls,
@@ -76,6 +78,7 @@ mod tests {
             is_dynamic_table: false,
             columns: vec!["id".to_string()],
             action: action.to_string(),
+            related_tables: Vec::new(),
             is_cte_ref: false,
             has_rls: false,
             has_explicit_tenant_scope: false,
@@ -91,5 +94,24 @@ mod tests {
         assert_eq!(ir[0].action, "GET");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("unknown scanner action"));
+    }
+
+    #[test]
+    fn build_query_ir_preserves_qualified_columns_for_validator() {
+        let mut qualified = usage("GET");
+        qualified.columns = vec!["users.email".to_string()];
+
+        let (ir, errors) = build_query_ir(&[qualified]);
+
+        assert!(errors.is_empty());
+        assert_eq!(ir.len(), 1);
+        assert!(
+            ir[0]
+                .cmd
+                .columns
+                .iter()
+                .any(|expr| matches!(expr, crate::ast::Expr::Named(name) if name == "users.email")),
+            "qualified table columns must stay in the IR so Validator can check known table prefixes"
+        );
     }
 }
