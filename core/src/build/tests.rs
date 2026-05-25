@@ -358,6 +358,28 @@ table tickets {
 }
 
 #[test]
+fn test_parse_schema_supports_quoted_empty_enum_values() {
+    let schema = Schema::parse(
+        r#"
+enum ticket_status { "", draft }
+
+table tickets {
+  status ticket_status
+}
+"#,
+    )
+    .expect("quoted empty enum values should parse");
+    let status = schema
+        .table("tickets")
+        .and_then(|table| table.column_type("status"))
+        .expect("status column should exist");
+    let ColumnType::Enum { values, .. } = status else {
+        panic!("expected enum column type, got {:?}", status);
+    };
+    assert_eq!(values, &["", "draft"]);
+}
+
+#[test]
 fn test_parse_schema_rejects_invalid_enum_names() {
     let err = Schema::parse("enum bad-name { draft }").expect_err("invalid enum name must fail");
     assert!(err.contains("Invalid enum name 'bad-name'"));

@@ -1025,8 +1025,13 @@ fn parse_build_enum_values(raw: &str) -> Result<Vec<String>, String> {
 }
 
 fn push_build_enum_value(values: &mut Vec<String>, raw: &str) -> Result<(), String> {
+    let was_quoted = raw
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '\'' | '"'));
     let value = parse_build_enum_value(raw)?;
-    if value.is_empty() {
+    if value.is_empty() && !was_quoted {
         return Err("enum value is empty".to_string());
     }
     values.push(value);
