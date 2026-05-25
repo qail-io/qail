@@ -86,6 +86,18 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_rejects_invalid_column_names() {
+    let content = r#"
+table users {
+  bad-name UUID
+}
+"#;
+
+    let err = Schema::parse(content).expect_err("invalid column name must fail");
+    assert!(err.contains("Invalid column name 'bad-name' in table 'users'"));
+}
+
+#[test]
 fn test_parse_schema_rejects_column_without_type() {
     let content = r#"
 table users {

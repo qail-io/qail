@@ -347,6 +347,13 @@ impl Schema {
             else if current_table.is_some() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(col_name) = parts.first() {
+                    if !is_build_identifier(col_name) {
+                        let table_name = current_table.as_deref().unwrap_or("<unknown>");
+                        return Err(format!(
+                            "Invalid column name '{}' in table '{}'",
+                            col_name, table_name
+                        ));
+                    }
                     if current_columns.contains_key(*col_name) {
                         let table_name = current_table.as_deref().unwrap_or("<unknown>");
                         return Err(format!(
