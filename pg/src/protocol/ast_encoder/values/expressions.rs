@@ -653,6 +653,30 @@ fn encode_inline_value(
         Value::Bool(value) => buf.extend_from_slice(if *value { b"TRUE" } else { b"FALSE" }),
         Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
         Value::Expr(expr) => encode_column_expr(expr, buf)?,
+        Value::Param(n) => {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "unresolved positional parameter ${n} cannot be encoded without a bind value"
+            )));
+        }
+        Value::NamedParam(name) => {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "unresolved named parameter :{name} cannot be encoded by the PostgreSQL AST encoder"
+            )));
+        }
+        Value::Function(function) => {
+            if function.len() > 1024
+                || function.contains(';')
+                || function.contains("--")
+                || function.contains("/*")
+                || function.contains("*/")
+            {
+                return Err(crate::protocol::EncodeError::UnsafeExpression(format!(
+                    "Value::Function rejected: suspicious content in '{}'",
+                    &function[..function.len().min(80)]
+                )));
+            }
+            buf.extend_from_slice(function.as_bytes());
+        }
         Value::Subquery(query) => {
             let mut sub_params = Vec::new();
             buf.extend_from_slice(b"(");

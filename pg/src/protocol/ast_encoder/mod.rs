@@ -512,6 +512,39 @@ mod tests {
     }
 
     #[test]
+    fn parsed_expression_placeholders_fail_closed() {
+        let positional = qail_core::parser::parse("get users fields COALESCE(name, $1)").unwrap();
+        let err = AstEncoder::encode_cmd_sql(&positional)
+            .expect_err("expression placeholder must not be emitted without a bind value");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("unresolved positional parameter $1")),
+            "{err}"
+        );
+
+        let named = qail_core::parser::parse("get users fields COALESCE(name, :fallback)").unwrap();
+        let err = AstEncoder::encode_cmd_sql(&named)
+            .expect_err("named expression placeholder must not be emitted without a bind value");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("unresolved named parameter :fallback")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn inline_literal_function_fragments_fail_closed() {
+        let cmd = Qail::get("users").column_expr(qail_core::ast::Expr::Literal(
+            qail_core::ast::Value::Function("now(); DROP TABLE users; --".to_string()),
+        ));
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("unsafe inline function literal must fail closed");
+
+        assert!(
+            matches!(err, EncodeError::UnsafeExpression(message) if message.contains("Value::Function rejected"))
+        );
+    }
+
+    #[test]
     fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
         use qail_core::ast::{CTEDef, Expr, SetOp};
 
