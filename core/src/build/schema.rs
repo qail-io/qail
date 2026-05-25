@@ -962,17 +962,18 @@ impl Schema {
             }
             let line_upper = line.to_uppercase();
 
-            if let Some(name) = extract_create_table_name(line) {
+            if let Some((name, after_table_name)) = extract_create_table_name_with_tail(line) {
                 // Only track column extraction for tables that DON'T already
                 // have their types from schema.qail. Tables that existed before
                 // this migration already have correct types; overwriting them
                 // with ColumnType::Text would be a bug.
-                if self.tables.get(&name).is_none_or(|t| t.columns.is_empty()) {
+                let has_column_block = after_table_name.trim_start().starts_with('(');
+                if has_column_block && self.tables.get(&name).is_none_or(|t| t.columns.is_empty()) {
                     current_table = Some(name);
                 } else {
                     current_table = None;
                 }
-                in_create_block = true;
+                in_create_block = has_column_block;
                 paren_depth = 0;
                 if let Some(table) = current_table.clone() {
                     for col in extract_inline_create_columns(line) {
@@ -1528,10 +1529,14 @@ fn extract_view_name(line: &str) -> Option<&str> {
 
 /// Extract table name from CREATE TABLE statement
 fn extract_create_table_name(line: &str) -> Option<String> {
+    extract_create_table_name_with_tail(line).map(|(name, _)| name)
+}
+
+fn extract_create_table_name_with_tail(line: &str) -> Option<(String, &str)> {
     let rest = extract_create_table_target_start(line)?;
     let rest = strip_sql_if_not_exists(rest).unwrap_or(rest);
 
-    extract_sql_table_ref(rest)
+    extract_sql_table_ref_with_tail(rest)
 }
 
 fn extract_create_table_target_start(line: &str) -> Option<&str> {
@@ -1884,6 +1889,10 @@ fn extract_alter_rename_table(line: &str) -> Option<(String, String)> {
 }
 
 fn extract_sql_table_ref(raw: &str) -> Option<String> {
+    extract_sql_table_ref_with_tail(raw).map(|(name, _)| name)
+}
+
+fn extract_sql_table_ref_with_tail(raw: &str) -> Option<(String, &str)> {
     let mut rest = raw.trim_start();
     let mut parts = Vec::new();
 
@@ -1899,7 +1908,7 @@ fn extract_sql_table_ref(raw: &str) -> Option<String> {
     }
 
     let name = parts.join(".");
-    is_build_table_ref(&name).then_some(name)
+    is_build_table_ref(&name).then_some((name, rest))
 }
 
 fn extract_sql_column_ref(raw: &str) -> Option<String> {
@@ -2329,5 +2338,20 @@ ALTER TABLE users RENAME old_email TO email;
         let users = schema.table("users").expect("users table should parse");
         assert!(users.has_column("email"));
         assert!(!users.has_column("old_email"));
+    }
+
+    #[test]
+    fn sql_migration_does_not_treat_create_table_as_select_as_column_block() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE reports AS SELECT id FROM users;
+ALTER TABLE reports ADD COLUMN status text;
+"#,
+        );
+
+        let reports = schema.table("reports").expect("reports table should parse");
+        assert!(reports.has_column("status"));
+        assert!(!reports.has_column("alter"));
     }
 }
