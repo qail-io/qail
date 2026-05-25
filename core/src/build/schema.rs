@@ -1301,11 +1301,15 @@ fn parse_explicit_alter_add_column_line(
     match column_expr {
         Expr::Def {
             name, data_type, ..
-        } => Ok((
-            table.to_string(),
-            name,
-            data_type.parse::<ColumnType>().unwrap_or(ColumnType::Text),
-        )),
+        } => {
+            let column_type = data_type.parse::<ColumnType>().map_err(|_| {
+                format!(
+                    "unknown column type '{}' for column '{}' in alter '{}'",
+                    data_type, name, table
+                )
+            })?;
+            Ok((table.to_string(), name, column_type))
+        }
         _ => Err("expected column definition after 'add'".to_string()),
     }
 }
