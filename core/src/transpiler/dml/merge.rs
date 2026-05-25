@@ -167,7 +167,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
         }
         Operator::Between | Operator::NotBetween => {
             if let Value::Array(values) = &condition.value
-                && values.len() >= 2
+                && values.len() == 2
             {
                 return format!(
                     "{left} {} {} AND {}",
@@ -176,11 +176,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
                     value_sql(&values[1], generator)
                 );
             }
-            format!(
-                "{left} {} {}",
-                condition.op.sql_symbol(),
-                value_sql(&condition.value, generator)
-            )
+            invalid_between_condition_sql()
         }
         Operator::Exists | Operator::NotExists => match &condition.value {
             Value::Subquery(query) => {
@@ -199,6 +195,10 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
 
 fn invalid_exists_condition_sql() -> String {
     "FALSE /* ERROR: EXISTS condition requires subquery value */".to_string()
+}
+
+fn invalid_between_condition_sql() -> String {
+    "FALSE /* ERROR: BETWEEN condition requires exactly two array values */".to_string()
 }
 
 fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {

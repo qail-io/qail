@@ -619,15 +619,16 @@ fn encode_conditions_inline(
             }
             Operator::Between | Operator::NotBetween => {
                 if let Value::Array(values) = &cond.value
-                    && values.len() >= 2
+                    && values.len() == 2
                 {
                     buf.extend_from_slice(b" ");
                     encode_inline_value(&values[0], buf)?;
                     buf.extend_from_slice(b" AND ");
                     encode_inline_value(&values[1], buf)?;
                 } else {
-                    buf.extend_from_slice(b" ");
-                    encode_inline_value(&cond.value, buf)?;
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "BETWEEN condition requires exactly two array values".to_string(),
+                    ));
                 }
             }
             _ => {
@@ -861,7 +862,7 @@ pub fn encode_conditions(
             }
             Operator::Between => {
                 if let Value::Array(vals) = &cond.value
-                    && vals.len() >= 2
+                    && vals.len() == 2
                 {
                     buf.extend_from_slice(b" BETWEEN ");
                     encode_value(&vals[0], buf, params)?;
@@ -869,11 +870,13 @@ pub fn encode_conditions(
                     encode_value(&vals[1], buf, params)?;
                     continue;
                 }
-                buf.extend_from_slice(b" = ");
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "BETWEEN condition requires exactly two array values".to_string(),
+                ));
             }
             Operator::NotBetween => {
                 if let Value::Array(vals) = &cond.value
-                    && vals.len() >= 2
+                    && vals.len() == 2
                 {
                     buf.extend_from_slice(b" NOT BETWEEN ");
                     encode_value(&vals[0], buf, params)?;
@@ -881,7 +884,9 @@ pub fn encode_conditions(
                     encode_value(&vals[1], buf, params)?;
                     continue;
                 }
-                buf.extend_from_slice(b" = ");
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "BETWEEN condition requires exactly two array values".to_string(),
+                ));
             }
             Operator::Regex => buf.extend_from_slice(b" ~ "),
             Operator::RegexI => buf.extend_from_slice(b" ~* "),

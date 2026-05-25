@@ -557,6 +557,24 @@ fn operator_between_with_injection() {
 }
 
 #[test]
+fn operator_between_rejects_wrong_arity() {
+    let cmd = select_where(
+        "orders",
+        "price",
+        Operator::Between,
+        Value::Array(vec![Value::Int(100)]),
+    );
+
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("FALSE /* ERROR: BETWEEN condition requires exactly two array values */"),
+        "invalid BETWEEN must fail closed: {}",
+        sql
+    );
+}
+
+#[test]
 fn operator_exists_with_subquery() {
     let subquery = Box::new(Qail {
         action: Action::Get,

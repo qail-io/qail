@@ -198,6 +198,10 @@ fn invalid_exists_condition_sql() -> String {
     "FALSE /* ERROR: EXISTS condition requires subquery value */".to_string()
 }
 
+fn invalid_between_condition_sql() -> String {
+    "FALSE /* ERROR: BETWEEN condition requires exactly two array values */".to_string()
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -323,7 +327,7 @@ impl ConditionToSql for Condition {
             Operator::Between => {
                 // Value is Array with 2 elements [min, max]
                 if let Value::Array(vals) = &self.value
-                    && vals.len() >= 2
+                    && vals.len() == 2
                 {
                     return format!(
                         "{} BETWEEN {} AND {}",
@@ -332,11 +336,11 @@ impl ConditionToSql for Condition {
                         condition_value_sql(&vals[1], generator)
                     );
                 }
-                format!("{} BETWEEN {}", col, self.value)
+                invalid_between_condition_sql()
             }
             Operator::NotBetween => {
                 if let Value::Array(vals) = &self.value
-                    && vals.len() >= 2
+                    && vals.len() == 2
                 {
                     return format!(
                         "{} NOT BETWEEN {} AND {}",
@@ -345,7 +349,7 @@ impl ConditionToSql for Condition {
                         condition_value_sql(&vals[1], generator)
                     );
                 }
-                format!("{} NOT BETWEEN {}", col, self.value)
+                invalid_between_condition_sql()
             }
             Operator::Exists => {
                 // EXISTS takes subquery, col is ignored
@@ -509,27 +513,23 @@ impl ConditionToSql for Condition {
             }
             Operator::Between => {
                 if let Value::Array(vals) = &self.value
-                    && vals.len() >= 2
+                    && vals.len() == 2
                 {
                     let low = value_placeholder(&vals[0], params);
                     let high = value_placeholder(&vals[1], params);
                     return format!("{} BETWEEN {} AND {}", col, low, high);
                 }
-                format!("{} BETWEEN {}", col, value_placeholder(&self.value, params))
+                invalid_between_condition_sql()
             }
             Operator::NotBetween => {
                 if let Value::Array(vals) = &self.value
-                    && vals.len() >= 2
+                    && vals.len() == 2
                 {
                     let low = value_placeholder(&vals[0], params);
                     let high = value_placeholder(&vals[1], params);
                     return format!("{} NOT BETWEEN {} AND {}", col, low, high);
                 }
-                format!(
-                    "{} NOT BETWEEN {}",
-                    col,
-                    value_placeholder(&self.value, params)
-                )
+                invalid_between_condition_sql()
             }
             Operator::Exists => {
                 if let Value::Subquery(cmd) = &self.value {

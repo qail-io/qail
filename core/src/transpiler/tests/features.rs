@@ -1431,6 +1431,31 @@ fn test_merge_postgres_rejects_non_subquery_exists_condition() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_between_wrong_arity() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.score".to_string()),
+                op: Operator::Between,
+                value: Value::Array(vec![Value::Int(10)]),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains(
+            "WHEN MATCHED AND FALSE /* ERROR: BETWEEN condition requires exactly two array values */"
+        ),
+        "invalid MERGE BETWEEN must fail closed: {sql}"
+    );
+}
+
+#[test]
 fn test_merge_postgres_parameterized_fuzzy_binds_named_param() {
     use crate::transpiler::ToSqlParameterized;
 
