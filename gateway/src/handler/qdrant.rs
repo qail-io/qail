@@ -160,7 +160,7 @@ pub(super) async fn execute_qdrant_cmd(
                 qdrant_request_filter_cages(&upsert_filter_cages, &update_policy_filter_cages);
             let mut point = extract_upsert_point_with_filter_fallback(&cmd, &request_filter_cages)?;
             if let Some(tenant_id) = auth.tenant_id.as_deref() {
-                prepare_tenant_scoped_qdrant_upsert_point(&mut point, tenant_id);
+                prepare_tenant_scoped_qdrant_upsert_point(&mut point, tenant_id, &tenant_col);
             }
 
             if auth.tenant_id.is_some()
@@ -552,11 +552,19 @@ fn qdrant_point_id_payload_value(id: &qail_qdrant::PointId) -> qail_qdrant::Payl
     }
 }
 
-fn prepare_tenant_scoped_qdrant_upsert_point(point: &mut qail_qdrant::Point, tenant_id: &str) {
+fn prepare_tenant_scoped_qdrant_upsert_point(
+    point: &mut qail_qdrant::Point,
+    tenant_id: &str,
+    tenant_col: &str,
+) {
     let original_id = point.id.clone();
     point.payload.insert(
         ORIGINAL_POINT_ID_PAYLOAD_KEY.to_string(),
         qdrant_point_id_payload_value(&original_id),
+    );
+    point.payload.insert(
+        tenant_col.to_string(),
+        qail_qdrant::PayloadValue::String(tenant_id.to_string()),
     );
     point.id = tenant_scoped_qdrant_point_id(&original_id, tenant_id);
 }
@@ -1445,11 +1453,12 @@ mod tests {
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
         ensure_qdrant_conditions_finite, ensure_qdrant_score_threshold_finite,
         ensure_qdrant_vector_finite, extract_upsert_point,
-        extract_upsert_point_with_filter_fallback, prepare_tenant_scoped_qdrant_upsert_point,
-        qdrant_limit_from_cmd, qdrant_payload_matches_filter_cages, qdrant_point_id_to_json,
-        qdrant_request_filter_cages, qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata,
-        qdrant_scroll_offset_from_cmd, qdrant_upsert_filter_cages, scored_point_to_json,
-        split_filter_conditions, tenant_scoped_qdrant_point_id, validate_qdrant_read_filters,
+        extract_upsert_point_with_filter_fallback, inject_qdrant_tenant_scope,
+        prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
+        qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
+        qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd,
+        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
+        tenant_scoped_qdrant_point_id, validate_qdrant_read_filters,
         verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
@@ -1539,12 +1548,16 @@ mod tests {
     fn tenant_scoped_qdrant_upsert_preserves_original_id_payload() {
         let mut point = qail_qdrant::Point::new_num(7, vec![0.1, 0.2]);
 
-        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a");
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a", "tenant_id");
 
         assert_ne!(point.id, qail_qdrant::PointId::Num(7));
         assert_eq!(
             point.payload.get(ORIGINAL_POINT_ID_PAYLOAD_KEY),
             Some(&qail_qdrant::PayloadValue::Integer(7))
+        );
+        assert_eq!(
+            point.payload.get("tenant_id"),
+            Some(&qail_qdrant::PayloadValue::String("tenant-a".to_string()))
         );
     }
 
@@ -1556,11 +1569,48 @@ mod tests {
             qail_qdrant::PayloadValue::String("victim-id".to_string()),
         );
 
-        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a");
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a", "tenant_id");
 
         assert_eq!(
             point.payload.get(ORIGINAL_POINT_ID_PAYLOAD_KEY),
             Some(&qail_qdrant::PayloadValue::Integer(7))
+        );
+    }
+
+    #[test]
+    fn tenant_scoped_qdrant_upsert_overwrites_client_tenant_payload() {
+        let mut point = qail_qdrant::Point::new_num(7, vec![0.1, 0.2]);
+        point.payload.insert(
+            "tenant_id".to_string(),
+            qail_qdrant::PayloadValue::String("tenant-b".to_string()),
+        );
+
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a", "tenant_id");
+
+        assert_eq!(
+            point.payload.get("tenant_id"),
+            Some(&qail_qdrant::PayloadValue::String("tenant-a".to_string()))
+        );
+    }
+
+    #[test]
+    fn tenant_scoped_qdrant_upsert_cannot_be_overridden_by_later_payload_cage() {
+        let mut cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]));
+        cmd.cages.push(Cage {
+            kind: CageKind::Payload,
+            conditions: vec![cond("tenant_id", "tenant-b")],
+            logical_op: LogicalOp::And,
+        });
+
+        inject_qdrant_tenant_scope(&mut cmd, "tenant_id", "tenant-a");
+        let mut point = extract_upsert_point(&cmd).expect("point should extract");
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a", "tenant_id");
+
+        assert_eq!(
+            point.payload.get("tenant_id"),
+            Some(&qail_qdrant::PayloadValue::String("tenant-a".to_string()))
         );
     }
 
@@ -2292,7 +2342,7 @@ mod tests {
     #[test]
     fn qdrant_upsert_id_filter_honors_tenant_original_point_id() {
         let mut point = qail_qdrant::Point::new_num(7, vec![0.1, 0.2]);
-        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a");
+        prepare_tenant_scoped_qdrant_upsert_point(&mut point, "tenant-a", "tenant_id");
         let upsert_filters = vec![Cage {
             kind: CageKind::Filter,
             conditions: vec![value_cond("id", Value::Int(7))],
