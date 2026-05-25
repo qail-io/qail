@@ -2416,4 +2416,67 @@ ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
         assert!(users.has_column("email"));
         assert!(users.has_column("not"));
     }
+
+    #[test]
+    fn sql_migration_chaos_mixed_postgres_syntax() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE SCHEMA app;
+CREATE UNLOGGED TABLE IF NOT EXISTS "app"."users"
+(
+  id uuid,
+  old_email text,
+  old_name text,
+  "select" text,
+  "not" text
+);
+CREATE TEMP TABLE scratch_jobs (id uuid);
+ALTER TABLE ONLY "app"."users" ADD COLUMN primary_contact text, ADD check_status text;
+ALTER TABLE "app"."users" ADD IF NOT EXISTS guarded text;
+ALTER TABLE "app"."users" DROP COLUMN "select", DROP IF EXISTS guarded, DROP COLUMN IF EXISTS old_name;
+ALTER TABLE "app"."users" RENAME old_email TO email;
+ALTER TABLE "app"."users" ALTER COLUMN email DROP NOT NULL;
+ALTER TABLE "app"."users" RENAME TO customers;
+
+CREATE TABLE app.logs (id uuid, body text DEFAULT $$a,b)--not-comment$$, tag text);
+CREATE FUNCTION app.rebuild_hidden() RETURNS void AS $$
+BEGIN
+  CREATE TABLE hidden_from_function (id uuid);
+END;
+$$ LANGUAGE plpgsql;
+CREATE TABLE app.reports AS SELECT id FROM app.customers;
+ALTER TABLE app.reports ADD COLUMN status text;
+"#,
+        );
+
+        assert!(!schema.has_table("scratch_jobs"));
+        assert!(!schema.has_table("app.users"));
+        assert!(!schema.has_table("hidden_from_function"));
+
+        let customers = schema
+            .table("app.customers")
+            .expect("renamed schema-qualified table should parse");
+        assert!(customers.has_column("id"));
+        assert!(customers.has_column("email"));
+        assert!(customers.has_column("not"));
+        assert!(customers.has_column("primary_contact"));
+        assert!(customers.has_column("check_status"));
+        assert!(!customers.has_column("old_email"));
+        assert!(!customers.has_column("old_name"));
+        assert!(!customers.has_column("select"));
+        assert!(!customers.has_column("guarded"));
+
+        let logs = schema.table("app.logs").expect("logs table should parse");
+        assert!(logs.has_column("id"));
+        assert!(logs.has_column("body"));
+        assert!(logs.has_column("tag"));
+        assert!(!logs.has_column("b"));
+
+        let reports = schema
+            .table("app.reports")
+            .expect("ctas table should parse");
+        assert!(reports.has_column("status"));
+        assert!(!reports.has_column("alter"));
+    }
 }
