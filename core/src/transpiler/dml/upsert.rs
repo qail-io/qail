@@ -83,7 +83,10 @@ pub fn build_upsert(cmd: &Qail, dialect: Dialect) -> String {
                 sql.push_str(
                     &pk_cols
                         .iter()
-                        .map(|c| format!("{} = EXCLUDED.{}", c, c))
+                        .map(|c| {
+                            let quoted = generator.quote_identifier(c);
+                            format!("{} = EXCLUDED.{}", quoted, quoted)
+                        })
                         .collect::<Vec<_>>()
                         .join(", "),
                 );

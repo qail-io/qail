@@ -7,8 +7,17 @@ use qail_core::ast::{
     CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value,
     WindowFrame,
 };
+use qail_core::transpiler::escape_identifier;
 
 use super::super::helpers::{NUMERIC_VALUES, i64_to_bytes, write_param_placeholder};
+
+fn push_identifier_ref(buf: &mut BytesMut, ident: &str, allow_star: bool) {
+    if allow_star && ident == "*" {
+        buf.extend_from_slice(b"*");
+    } else {
+        buf.extend_from_slice(escape_identifier(ident).as_bytes());
+    }
+}
 
 fn encode_json_path_segment(
     key: &str,
@@ -84,11 +93,11 @@ fn encode_column_expr_inner(
 ) -> Result<(), crate::protocol::EncodeError> {
     match col {
         Expr::Star => buf.extend_from_slice(b"*"),
-        Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
+        Expr::Named(name) => push_identifier_ref(buf, name, true),
         Expr::Aliased { name, alias } => {
-            buf.extend_from_slice(name.as_bytes());
+            push_identifier_ref(buf, name, true);
             buf.extend_from_slice(b" AS ");
-            buf.extend_from_slice(alias.as_bytes());
+            push_identifier_ref(buf, alias, false);
         }
         Expr::Aggregate {
             col,
@@ -102,7 +111,7 @@ fn encode_column_expr_inner(
             if *distinct {
                 buf.extend_from_slice(b"DISTINCT ");
             }
-            buf.extend_from_slice(col.as_bytes());
+            push_identifier_ref(buf, col, true);
             buf.extend_from_slice(b")");
 
             // FILTER (WHERE ...) clause for aggregates
@@ -120,7 +129,7 @@ fn encode_column_expr_inner(
 
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::FunctionCall { name, args, alias } => {
@@ -135,7 +144,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Cast {
@@ -148,7 +157,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(target_type.as_bytes());
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Binary {
@@ -166,7 +175,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Literal(val) => {
@@ -197,7 +206,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b" END");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::SpecialFunction { name, args, alias } => {
@@ -223,7 +232,7 @@ fn encode_column_expr_inner(
             }
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::JsonAccess {
@@ -233,7 +242,7 @@ fn encode_column_expr_inner(
         } => {
             // Wrap in parentheses to avoid operator precedence issues with || (concat)
             buf.extend_from_slice(b"(");
-            buf.extend_from_slice(column.as_bytes());
+            push_identifier_ref(buf, column, false);
             for (key, as_text) in path_segments {
                 // Check if key is an integer (array index)
                 let is_integer = key.parse::<i64>().is_ok();
@@ -259,7 +268,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Window {
@@ -285,7 +294,7 @@ fn encode_column_expr_inner(
                     if i > 0 {
                         buf.extend_from_slice(b", ");
                     }
-                    buf.extend_from_slice(col.as_bytes());
+                    push_identifier_ref(buf, col, false);
                 }
             }
             if !order.is_empty() {
@@ -298,7 +307,7 @@ fn encode_column_expr_inner(
                         buf.extend_from_slice(b", ");
                     }
                     if let Some(cond) = cage.conditions.first() {
-                        buf.extend_from_slice(cond.left.to_string().as_bytes());
+                        encode_column_expr_inner(&cond.left, buf, params.as_deref_mut())?;
                     }
                     if let CageKind::Sort(sort) = &cage.kind {
                         match sort {
@@ -322,7 +331,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if !name.is_empty() {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(name.as_bytes());
+                push_identifier_ref(buf, name, false);
             }
         }
         Expr::ArrayConstructor { elements, alias } => {
@@ -336,7 +345,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"]");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::RowConstructor { elements, alias } => {
@@ -350,7 +359,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Subscript { expr, index, alias } => {
@@ -360,7 +369,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"]");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Collate {
@@ -369,22 +378,21 @@ fn encode_column_expr_inner(
             alias,
         } => {
             encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
-            buf.extend_from_slice(b" COLLATE \"");
-            buf.extend_from_slice(collation.as_bytes());
-            buf.extend_from_slice(b"\"");
+            buf.extend_from_slice(b" COLLATE ");
+            push_identifier_ref(buf, collation, false);
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::FieldAccess { expr, field, alias } => {
             buf.extend_from_slice(b"(");
             encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b").");
-            buf.extend_from_slice(field.as_bytes());
+            push_identifier_ref(buf, field, false);
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Subquery { query, alias } => {
@@ -410,7 +418,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Exists {
@@ -442,7 +450,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
-                buf.extend_from_slice(a.as_bytes());
+                push_identifier_ref(buf, a, false);
             }
         }
         Expr::Def {
@@ -450,7 +458,7 @@ fn encode_column_expr_inner(
             data_type,
             constraints,
         } => {
-            buf.extend_from_slice(name.as_bytes());
+            push_identifier_ref(buf, name, false);
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(data_type.to_uppercase().as_bytes());
             for c in constraints {
@@ -542,7 +550,7 @@ fn encode_case_condition_value(
     let mut params = params;
     match value {
         Value::Expr(expr) => encode_column_expr_inner(expr, buf, params.as_deref_mut())?,
-        Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
+        Value::Column(column) => push_identifier_ref(buf, column, false),
         Value::Array(values) => {
             buf.extend_from_slice(b"(");
             for (i, value) in values.iter().enumerate() {
@@ -604,7 +612,19 @@ fn encode_conditions_inline(
             continue;
         }
 
+        let left_start = buf.len();
         encode_expr(&cond.left, buf)?;
+
+        if matches!(
+            cond.op,
+            Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue
+        ) {
+            let left = buf[left_start..].to_vec();
+            buf.truncate(left_start);
+            encode_json_sql_condition(cond.op, &left, &cond.value, buf, None)?;
+            continue;
+        }
+
         buf.extend_from_slice(b" ");
         encode_operator(&cond.op, buf);
 
@@ -679,7 +699,7 @@ fn encode_inline_value(
             buf.extend_from_slice(b"'::jsonb");
         }
         Value::Bool(value) => buf.extend_from_slice(if *value { b"TRUE" } else { b"FALSE" }),
-        Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
+        Value::Column(column) => push_identifier_ref(buf, column, false),
         Value::Expr(expr) => encode_column_expr(expr, buf)?,
         Value::Param(n) => {
             return Err(crate::protocol::EncodeError::InvalidAst(format!(
@@ -734,9 +754,9 @@ fn encode_inline_value(
 /// Encode simple expression (for WHERE left side).
 pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) -> Result<(), crate::protocol::EncodeError> {
     match expr {
-        Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
+        Expr::Named(name) => push_identifier_ref(buf, name, true),
         Expr::Star => buf.extend_from_slice(b"*"),
-        Expr::Aliased { name, .. } => buf.extend_from_slice(name.as_bytes()),
+        Expr::Aliased { name, .. } => push_identifier_ref(buf, name, true),
         // Delegate complex expressions to the full encoder
         _ => encode_column_expr(expr, buf)?,
     }
@@ -750,8 +770,8 @@ pub fn encode_join_value(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     match value {
-        Value::Column(col) => buf.extend_from_slice(col.as_bytes()),
-        Value::String(s) if s.contains('.') => buf.extend_from_slice(s.as_bytes()),
+        Value::Column(col) => push_identifier_ref(buf, col, false),
+        Value::String(s) if s.contains('.') => push_identifier_ref(buf, s, false),
         Value::Null => buf.extend_from_slice(b"NULL"),
         Value::Bool(b) => buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" }),
         Value::Int(n) => {
@@ -946,7 +966,10 @@ pub fn encode_conditions(
             Operator::JsonPathText => buf.extend_from_slice(b" #>> "),
             Operator::ArrayElemContainedInText => buf.extend_from_slice(b" = "),
             Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue => {
-                buf.extend_from_slice(b" = ");
+                let left = buf[left_start..].to_vec();
+                buf.truncate(left_start);
+                encode_json_sql_condition(cond.op, &left, &cond.value, buf, Some(&mut *params))?;
+                continue;
             }
             Operator::Exists | Operator::NotExists => {
                 // EXISTS/NOT EXISTS: rewrite as a standalone subquery check.
@@ -1011,6 +1034,42 @@ pub fn encode_conditions(
 
         encode_value(&cond.value, buf, params)?;
     }
+    Ok(())
+}
+
+fn encode_json_sql_condition(
+    op: Operator,
+    left: &[u8],
+    path: &Value,
+    buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let function = match op {
+        Operator::JsonExists => b"JSON_EXISTS" as &[u8],
+        Operator::JsonQuery => b"JSON_QUERY" as &[u8],
+        Operator::JsonValue => b"JSON_VALUE" as &[u8],
+        _ => {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "expected SQL/JSON condition operator".to_string(),
+            ));
+        }
+    };
+
+    buf.extend_from_slice(function);
+    buf.extend_from_slice(b"(");
+    buf.extend_from_slice(left);
+    buf.extend_from_slice(b", ");
+    if let Some(params) = params {
+        encode_value(path, buf, params)?;
+    } else {
+        encode_inline_value(path, buf)?;
+    }
+    buf.extend_from_slice(b")");
+
+    if matches!(op, Operator::JsonQuery | Operator::JsonValue) {
+        buf.extend_from_slice(b" IS NOT NULL");
+    }
+
     Ok(())
 }
 
@@ -1111,7 +1170,7 @@ pub fn encode_value(
             buf.extend_from_slice(f.as_bytes());
         }
         Value::Column(col) => {
-            buf.extend_from_slice(col.as_bytes());
+            push_identifier_ref(buf, col, false);
         }
         Value::Subquery(q) => {
             buf.extend_from_slice(b"(");

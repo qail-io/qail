@@ -1028,6 +1028,16 @@ fn test_upsert_postgres() {
 }
 
 #[test]
+fn test_upsert_single_reserved_pk_column_quotes_fallback_update() {
+    let cmd = Qail::put("events").columns(["order"]).set_value("order", 1);
+
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "INSERT INTO events (\"order\") VALUES (1) ON CONFLICT (\"order\") DO UPDATE SET \"order\" = EXCLUDED.\"order\" RETURNING *"
+    );
+}
+
+#[test]
 fn test_merge_postgres_builder() {
     let cmd = Qail::merge_into("users")
         .target_alias("u")
@@ -1794,6 +1804,34 @@ fn test_json_table_postgres_standalone_has_no_dual_table() {
         "SELECT jt.* FROM JSON_TABLE(items, '$[*]' COLUMNS (name TEXT PATH '$.product', qty TEXT PATH '$.quantity')) AS jt"
     );
     assert!(!sql.contains("dual"));
+}
+
+#[test]
+fn test_json_table_postgres_quotes_standalone_source_column() {
+    let mut cmd = Qail::get("items\"; DROP TABLE users; --");
+    cmd.action = Action::JsonTable;
+    cmd.columns = vec![Expr::Named("name=$.product".to_string())];
+
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "SELECT jt.* FROM JSON_TABLE(\"items\"\"; DROP TABLE users; --\", '$[*]' COLUMNS (name TEXT PATH '$.product')) AS jt"
+    );
+}
+
+#[test]
+fn test_json_table_postgres_rejects_unsafe_column_type() {
+    let mut cmd = Qail::get("items");
+    cmd.action = Action::JsonTable;
+    cmd.columns = vec![Expr::Def {
+        name: "name".to_string(),
+        data_type: "TEXT); DROP TABLE users; --".to_string(),
+        constraints: vec![],
+    }];
+
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid JSON_TABLE column type */"
+    );
 }
 
 #[test]

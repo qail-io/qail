@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;
-use crate::transpiler::traits::SqlGenerator;
+use crate::transpiler::traits::{SqlGenerator, escape_sql_string_literal};
 
 struct JsonTableColumn {
     name: String,
@@ -55,17 +55,15 @@ pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
     };
 
     let json_columns = json_table_columns(cmd);
-    let column_defs: Vec<String> = json_columns
+    let column_defs = json_columns
         .iter()
-        .map(|column| {
-            format!(
-                "{} {} PATH '{}'",
-                generator.quote_identifier(&column.name),
-                column.data_type,
-                escape_sql_string(&column.path)
-            )
-        })
-        .collect();
+        .map(|column| json_table_column_def(column, generator.as_ref()))
+        .collect::<Result<Vec<_>, _>>();
+
+    let column_defs = match column_defs {
+        Ok(column_defs) => column_defs,
+        Err(error) => return error,
+    };
 
     if column_defs.is_empty() {
         return "/* ERROR: JSON_TABLE requires column definitions (e.g., :name=$.path) */"
@@ -73,7 +71,7 @@ pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     let source_ref = if source_table == "_" {
-        source_col
+        generator.quote_identifier(&source_col)
     } else {
         format!(
             "{}.{}",
@@ -161,5 +159,45 @@ fn build_postgres_json_table(
 }
 
 fn escape_sql_string(value: &str) -> String {
-    value.replace('\'', "''")
+    escape_sql_string_literal(value)
+}
+
+fn json_table_column_def(
+    column: &JsonTableColumn,
+    generator: &dyn SqlGenerator,
+) -> Result<String, String> {
+    let Some(data_type) = checked_sql_type_fragment(&column.data_type) else {
+        return Err("/* ERROR: Invalid JSON_TABLE column type */".to_string());
+    };
+
+    Ok(format!(
+        "{} {} PATH '{}'",
+        generator.quote_identifier(&column.name),
+        data_type,
+        escape_sql_string(&column.path)
+    ))
+}
+
+fn checked_sql_type_fragment(fragment: &str) -> Option<String> {
+    let fragment = fragment.trim();
+    if fragment.is_empty()
+        || fragment.contains('\0')
+        || fragment.contains(';')
+        || fragment.contains('\'')
+        || fragment.contains('"')
+        || fragment.contains("--")
+        || fragment.contains("/*")
+        || fragment.contains("*/")
+        || !fragment.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b' ' | b'(' | b')' | b',' | b'[' | b']' | b'%' | b'+' | b'-'
+                )
+        })
+    {
+        None
+    } else {
+        Some(fragment.to_string())
+    }
 }

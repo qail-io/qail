@@ -1002,6 +1002,45 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_dml_quotes_reserved_and_numeric_identifiers() {
+        use qail_core::ast::{Operator, Value};
+
+        let cmd = Qail::get("order").columns(["select", "9lives"]).filter(
+            "where",
+            Operator::Eq,
+            Value::Column("from".to_string()),
+        );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(
+            sql,
+            "SELECT \"select\", \"9lives\" FROM \"order\" WHERE \"where\" = \"from\""
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_upsert_quotes_reserved_conflict_identifiers() {
+        use qail_core::ast::Expr;
+
+        let cmd = Qail::add("order")
+            .set_value("select", "paid")
+            .on_conflict_update(
+                &["select"],
+                &[("where", Expr::Named("EXCLUDED.where".to_string()))],
+            );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"order\" (\"select\") VALUES ($1) ON CONFLICT (\"select\") DO UPDATE SET \"where\" = EXCLUDED.\"where\""
+        );
+        assert_eq!(params, vec![Some(b"paid".to_vec())]);
+    }
+
+    #[test]
     fn test_encode_json_access_escapes_path_segment_quotes() {
         use qail_core::ast::Expr;
 
@@ -1038,6 +1077,27 @@ mod tests {
 
         let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("NUL path segment must fail");
         assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
+    fn test_encode_sql_json_conditions_as_function_predicates() {
+        use qail_core::ast::Operator;
+
+        let value_cmd = Qail::get("users").filter("profile", Operator::JsonValue, "$.name");
+        let (value_sql, value_params) = AstEncoder::encode_cmd_sql(&value_cmd).unwrap();
+        assert_eq!(
+            value_sql,
+            "SELECT * FROM users WHERE JSON_VALUE(profile, $1) IS NOT NULL"
+        );
+        assert_eq!(value_params, vec![Some(b"$.name".to_vec())]);
+
+        let exists_cmd = Qail::get("users").filter("profile", Operator::JsonExists, "$.name");
+        let (exists_sql, exists_params) = AstEncoder::encode_cmd_sql(&exists_cmd).unwrap();
+        assert_eq!(
+            exists_sql,
+            "SELECT * FROM users WHERE JSON_EXISTS(profile, $1)"
+        );
+        assert_eq!(exists_params, vec![Some(b"$.name".to_vec())]);
     }
 
     #[test]
@@ -2327,6 +2387,33 @@ mod tests {
              THEN INSERT (id, name, score, tier, status) VALUES (s.external_id::integer, COALESCE(s.name, 'unknown'), (s.score + 1), (s.profile->>'tier'), 'new')"
         );
         assert_eq!(params, vec![Some(b"gold".to_vec()), Some(b"0".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_merge_sql_json_condition_is_boolean_predicate() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let cmd = Qail::merge_into("users")
+            .using_table_as("staging_users", "s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+            .when_matched_update_if(
+                vec![Condition {
+                    left: Expr::Named("users.profile".to_string()),
+                    op: Operator::JsonValue,
+                    value: Value::String("$.status".to_string()),
+                    is_array_unnest: false,
+                }],
+                &[("profile", Expr::Named("s.profile".to_string()))],
+            );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "MERGE INTO users USING staging_users AS s ON users.id = s.id \
+             WHEN MATCHED AND JSON_VALUE(users.profile, $1) IS NOT NULL \
+             THEN UPDATE SET profile = s.profile"
+        );
+        assert_eq!(params, vec![Some(b"$.status".to_vec())]);
     }
 
     #[test]
