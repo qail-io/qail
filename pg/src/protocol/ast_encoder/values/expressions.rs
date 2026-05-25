@@ -32,6 +32,9 @@ pub fn encode_columns(
     columns: &[Expr],
     buf: &mut BytesMut,
 ) -> Result<(), crate::protocol::EncodeError> {
+    for column in columns {
+        super::super::dml::validate_expr_ref("columns", column)?;
+    }
     encode_columns_with_params(columns, buf, None)
 }
 
@@ -41,6 +44,10 @@ pub fn encode_columns_with_params(
     buf: &mut BytesMut,
     params: Option<&mut Vec<Option<Vec<u8>>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    for column in columns {
+        super::super::dml::validate_expr_ref("columns", column)?;
+    }
+
     if columns.is_empty() {
         buf.extend_from_slice(b"*");
         return Ok(());
@@ -62,6 +69,7 @@ pub fn encode_column_expr(
     col: &Expr,
     buf: &mut BytesMut,
 ) -> Result<(), crate::protocol::EncodeError> {
+    super::super::dml::validate_expr_ref("column", col)?;
     encode_column_expr_inner(col, buf, None)
 }
 

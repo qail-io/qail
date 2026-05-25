@@ -134,7 +134,10 @@ fn is_positional_placeholder(expr: &Expr) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn validate_expr_ref(field: &str, expr: &Expr) -> Result<(), crate::protocol::EncodeError> {
+pub(crate) fn validate_expr_ref(
+    field: &str,
+    expr: &Expr,
+) -> Result<(), crate::protocol::EncodeError> {
     match expr {
         Expr::Star => Ok(()),
         Expr::Named(name) => validate_qualified_ident(field, name, true),

@@ -1849,6 +1849,54 @@ mod tests {
     }
 
     #[test]
+    fn direct_column_encoder_rejects_unsafe_function_name() {
+        use qail_core::ast::Expr;
+
+        let expr = Expr::FunctionCall {
+            name: "now); DROP TABLE users; --".to_string(),
+            args: vec![],
+            alias: None,
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        let err = super::values::encode_column_expr(&expr, &mut buf)
+            .expect_err("direct column expression encoder must validate function names");
+
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("unsafe identifier")),
+            "unexpected error: {err}"
+        );
+        assert!(
+            buf.is_empty(),
+            "unsafe expression must not be partially encoded"
+        );
+    }
+
+    #[test]
+    fn direct_columns_encoder_rejects_unsafe_nested_cast_target() {
+        use qail_core::ast::Expr;
+
+        let expr = Expr::Cast {
+            expr: Box::new(Expr::Named("name".to_string())),
+            target_type: "text); DROP TABLE users; --".to_string(),
+            alias: None,
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        let err = super::values::encode_columns(&[expr], &mut buf)
+            .expect_err("direct column list encoder must validate nested cast targets");
+
+        assert!(
+            matches!(&err, EncodeError::InvalidAst(message) if message.contains("SQL type")),
+            "unexpected error: {err}"
+        );
+        assert!(
+            buf.is_empty(),
+            "unsafe expression must not be partially encoded"
+        );
+    }
+
+    #[test]
     fn test_encode_def_expr() {
         use qail_core::ast::{Constraint, Expr};
 
