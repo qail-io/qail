@@ -64,11 +64,74 @@ fn strip_schema_comments(line: &str) -> &str {
     line[..idx].trim()
 }
 
+#[cfg(test)]
 fn strip_sql_line_comments(line: &str) -> &str {
     let Some(idx) = schema_comment_start(line, false) else {
         return line.trim();
     };
     line[..idx].trim()
+}
+
+fn strip_sql_migration_comments(line: &str, in_block_comment: &mut bool) -> String {
+    let mut out = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if *in_block_comment {
+            if ch == '*' && chars.peek().is_some_and(|next| *next == '/') {
+                chars.next();
+                *in_block_comment = false;
+            }
+            continue;
+        }
+
+        if in_single {
+            out.push(ch);
+            if ch == '\'' {
+                if chars.peek().is_some_and(|next| *next == '\'') {
+                    out.push('\'');
+                    chars.next();
+                } else {
+                    in_single = false;
+                }
+            }
+            continue;
+        }
+
+        if in_double {
+            out.push(ch);
+            if ch == '"' {
+                if chars.peek().is_some_and(|next| *next == '"') {
+                    out.push('"');
+                    chars.next();
+                } else {
+                    in_double = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                out.push(ch);
+            }
+            '-' if chars.peek().is_some_and(|next| *next == '-') => break,
+            '/' if chars.peek().is_some_and(|next| *next == '*') => {
+                chars.next();
+                *in_block_comment = true;
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out.trim().to_string()
 }
 
 fn schema_comment_start(line: &str, hash_comments: bool) -> Option<usize> {
@@ -763,8 +826,10 @@ impl Schema {
 
         // Extract CREATE TABLE statements
         // Pattern: CREATE TABLE [IF NOT EXISTS] table_name (columns...)
+        let mut in_block_comment = false;
         for raw_line in sql.lines() {
-            let line = strip_sql_line_comments(raw_line);
+            let line = strip_sql_migration_comments(raw_line, &mut in_block_comment);
+            let line = line.as_str();
             if line.is_empty()
                 || line.starts_with("/*")
                 || line.starts_with('*')
@@ -800,9 +865,11 @@ impl Schema {
         let mut current_table: Option<String> = None;
         let mut in_create_block = false;
         let mut paren_depth = 0;
+        let mut in_block_comment = false;
 
         for raw_line in sql.lines() {
-            let line = strip_sql_line_comments(raw_line);
+            let line = strip_sql_migration_comments(raw_line, &mut in_block_comment);
+            let line = line.as_str();
             if line.is_empty()
                 || line.starts_with("/*")
                 || line.starts_with('*')
@@ -1621,5 +1688,29 @@ CREATE TABLE logs (
         assert!(logs.has_column("message"));
         assert!(logs.has_column("tag"));
         assert!(logs.has_column("level"));
+    }
+
+    #[test]
+    fn sql_migration_ignores_multiline_block_comments() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (
+  id uuid
+);
+
+/*
+ALTER TABLE users ADD COLUMN hidden text;
+CREATE TABLE hidden_table (
+  id uuid
+);
+*/
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(!users.has_column("hidden"));
+        assert!(!schema.has_table("hidden_table"));
     }
 }
