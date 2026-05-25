@@ -1092,6 +1092,19 @@ impl Schema {
                     changes += 1;
                 }
             }
+
+            // ALTER TABLE ... RENAME TO new_table
+            if line_upper.starts_with("ALTER TABLE")
+                && line_upper.contains(" RENAME TO ")
+                && !line_upper.contains("RENAME COLUMN")
+                && let Some((old_table, new_table)) = extract_alter_rename_table(line)
+                && !self.tables.contains_key(&new_table)
+                && let Some(mut table) = self.tables.remove(&old_table)
+            {
+                table.name = new_table.clone();
+                self.tables.insert(new_table, table);
+                changes += 1;
+            }
         }
 
         changes
@@ -1850,6 +1863,26 @@ fn extract_alter_rename_column(line: &str) -> Option<(String, String, String)> {
     Some((table, old_col, new_col))
 }
 
+fn extract_alter_rename_table(line: &str) -> Option<(String, String)> {
+    let line_upper = line.to_uppercase();
+    let alter_pos = line_upper.find("ALTER TABLE")?;
+    let rename_pos = line_upper.find(" RENAME TO ")?;
+
+    let table_part = &line[alter_pos + 11..rename_pos];
+    let old_table = extract_alter_table_ref(table_part)?;
+    let new_part = &line[rename_pos + " RENAME TO ".len()..];
+    let new_ref = extract_sql_table_ref(new_part.trim())?;
+    let new_table = if new_ref.contains('.') {
+        new_ref
+    } else if let Some((schema, _)) = old_table.rsplit_once('.') {
+        format!("{schema}.{new_ref}")
+    } else {
+        new_ref
+    };
+
+    Some((old_table, new_table))
+}
+
 fn extract_sql_table_ref(raw: &str) -> Option<String> {
     let mut rest = raw.trim_start();
     let mut parts = Vec::new();
@@ -2247,5 +2280,23 @@ ALTER TABLE users RENAME COLUMN old_email TO email;
         assert!(users.has_column("id"));
         assert!(users.has_column("email"));
         assert!(!users.has_column("old_email"));
+    }
+
+    #[test]
+    fn sql_migration_tracks_table_renames() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE app.users (id uuid, email text);
+ALTER TABLE app.users RENAME TO customers;
+"#,
+        );
+
+        assert!(!schema.has_table("app.users"));
+        let customers = schema
+            .table("app.customers")
+            .expect("schema-qualified table rename should parse");
+        assert!(customers.has_column("id"));
+        assert!(customers.has_column("email"));
     }
 }
