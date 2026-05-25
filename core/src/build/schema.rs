@@ -1653,7 +1653,16 @@ fn extract_alter_drop_column(line: &str) -> Option<(String, String)> {
     let table = extract_alter_table_ref(table_part)?;
 
     // Column name after DROP COLUMN
-    let col_part = &line[drop_pos + 11..];
+    let mut col_part = &line[drop_pos + 11..];
+    let col_upper = col_part.trim().to_uppercase();
+    if col_upper.starts_with("IF EXISTS")
+        && col_part
+            .trim()
+            .get("IF EXISTS".len()..)
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    {
+        col_part = &col_part.trim()["IF EXISTS".len()..];
+    }
     let col: String = col_part
         .trim()
         .chars()
@@ -1676,7 +1685,16 @@ fn extract_alter_drop(line: &str) -> Option<(String, String)> {
     let table_part = &line[alter_pos + 11..drop_pos];
     let table = extract_alter_table_ref(table_part)?;
 
-    let col_part = &line[drop_pos + 6..];
+    let mut col_part = &line[drop_pos + 6..];
+    let col_upper = col_part.trim().to_uppercase();
+    if col_upper.starts_with("IF EXISTS")
+        && col_part
+            .trim()
+            .get("IF EXISTS".len()..)
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    {
+        col_part = &col_part.trim()["IF EXISTS".len()..];
+    }
     let col: String = col_part
         .trim()
         .chars()
@@ -1930,5 +1948,23 @@ ALTER TABLE IF EXISTS users DROP COLUMN id;
         let users = schema.table("users").expect("users table should parse");
         assert!(!users.has_column("id"));
         assert!(users.has_column("email"));
+    }
+
+    #[test]
+    fn sql_migration_handles_drop_column_if_exists() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid, old_email text, old_name text);
+ALTER TABLE users DROP COLUMN IF EXISTS old_email;
+ALTER TABLE users DROP IF EXISTS old_name;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("id"));
+        assert!(!users.has_column("old_email"));
+        assert!(!users.has_column("old_name"));
+        assert!(!users.has_column("if"));
     }
 }
