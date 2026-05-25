@@ -3,7 +3,7 @@
 use crate::ast::{
     Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
-use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::conditions::{ConditionToSql, read_only_subquery_sql};
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::traits::escape_sql_string_literal;
 use crate::transpiler::{SqlGenerator, ToSql};
@@ -181,7 +181,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
         Operator::Exists | Operator::NotExists => match &condition.value {
             Value::Subquery(query) => {
                 let keyword = condition.op.sql_symbol();
-                format!("{keyword} ({})", query.to_sql())
+                format!("{keyword} ({})", read_only_subquery_sql(query))
             }
             _ => invalid_exists_condition_sql(),
         },
@@ -210,7 +210,7 @@ fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
     match value {
         Value::Column(column) => render_named_expr(column, generator),
         Value::Expr(expr) => expr_sql(expr, generator),
-        Value::Subquery(query) => format!("({})", query.to_sql()),
+        Value::Subquery(query) => format!("({})", read_only_subquery_sql(query)),
         Value::Function(function) => render_raw_function_value(function),
         Value::NamedParam(name) => render_named_param(name),
         Value::Array(values) => {
@@ -483,12 +483,12 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
                 expr_sql(index, generator)
             )
         }
-        Expr::Subquery { query, .. } => format!("({})", query.to_sql()),
+        Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
         Expr::Exists { query, negated, .. } => {
             if *negated {
-                format!("NOT EXISTS ({})", query.to_sql())
+                format!("NOT EXISTS ({})", read_only_subquery_sql(query))
             } else {
-                format!("EXISTS ({})", query.to_sql())
+                format!("EXISTS ({})", read_only_subquery_sql(query))
             }
         }
         Expr::Def { .. } | Expr::Mod { .. } | Expr::Window { .. } => {

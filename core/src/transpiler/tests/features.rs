@@ -1393,6 +1393,60 @@ fn test_merge_postgres_rejects_raw_function_condition_value() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_mutating_action_subquery() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[(
+            "name",
+            Expr::Subquery {
+                query: Box::new(Qail::del("audit_log")),
+                alias: None,
+            },
+        )]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains("name = (/* ERROR: subquery must be read-only SELECT, got DEL */)"),
+        "mutating MERGE action subquery must fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DELETE FROM"),
+        "mutating MERGE action subquery leaked: {sql}"
+    );
+}
+
+#[test]
+fn test_merge_postgres_rejects_mutating_condition_subquery() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.id".to_string()),
+                op: Operator::In,
+                value: Value::Subquery(Box::new(
+                    Qail::set("audit_log").set_value("seen", Value::Bool(true)),
+                )),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains("users.id IN (/* ERROR: subquery must be read-only SELECT, got SET */)"),
+        "mutating MERGE condition subquery must fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("UPDATE audit_log"),
+        "mutating MERGE condition subquery leaked: {sql}"
+    );
+}
+
+#[test]
 fn test_merge_postgres_preserves_special_condition_operators() {
     let cmd = Qail::merge_into("users")
         .target_alias("u")

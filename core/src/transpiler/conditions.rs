@@ -248,7 +248,7 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
     }
 }
 
-fn read_only_subquery_sql(query: &Qail) -> String {
+pub(crate) fn read_only_subquery_sql(query: &Qail) -> String {
     if let Some(error) = validate_read_only_subquery(query) {
         format!("/* ERROR: {error} */")
     } else {
