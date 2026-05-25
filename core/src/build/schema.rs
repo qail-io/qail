@@ -1955,7 +1955,8 @@ fn extract_alter_table_ref(raw: &str) -> Option<String> {
     {
         rest = rest.get("ONLY".len()..)?.trim_start();
     }
-    extract_sql_table_ref(rest)
+    let (table, tail) = extract_sql_table_ref_with_tail(rest)?;
+    tail.trim().is_empty().then_some(table)
 }
 
 impl TableSchema {
@@ -2399,5 +2400,20 @@ CREATE TABLE users
         let users = schema.table("users").expect("users table should parse");
         assert!(users.has_column("id"));
         assert!(users.has_column("email"));
+    }
+
+    #[test]
+    fn sql_migration_does_not_treat_alter_column_drop_as_column_drop() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE users (id uuid, email text, not text);
+ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
+"#,
+        );
+
+        let users = schema.table("users").expect("users table should parse");
+        assert!(users.has_column("email"));
+        assert!(users.has_column("not"));
     }
 }
