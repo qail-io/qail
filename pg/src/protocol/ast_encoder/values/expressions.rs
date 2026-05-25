@@ -531,28 +531,36 @@ fn encode_case_condition_value(
     buf: &mut BytesMut,
     params: Option<&mut Vec<Option<Vec<u8>>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    let mut params = params;
     match value {
-        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params)?,
+        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params.as_deref_mut())?,
         Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
-        Value::String(s) => {
-            buf.extend_from_slice(b"'");
-            buf.extend_from_slice(s.replace('\'', "''").as_bytes());
-            buf.extend_from_slice(b"'");
-        }
-        Value::Bool(value) => {
-            buf.extend_from_slice(if *value { b"TRUE" } else { b"FALSE" });
-        }
         Value::Array(values) => {
             buf.extend_from_slice(b"(");
             for (i, value) in values.iter().enumerate() {
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_case_condition_value(value, buf, None)?;
+                encode_case_condition_value(value, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b")");
         }
-        _ => buf.extend_from_slice(value.to_string().as_bytes()),
+        Value::Subquery(query) => {
+            buf.extend_from_slice(b"(");
+            if let Some(params) = params.as_deref_mut() {
+                super::super::dml::encode_select(query, buf, params)?;
+            } else {
+                let mut sub_params = Vec::new();
+                super::super::dml::encode_select(query, buf, &mut sub_params)?;
+                if !sub_params.is_empty() {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "CASE condition subquery requires a parameter context".to_string(),
+                    ));
+                }
+            }
+            buf.extend_from_slice(b")");
+        }
+        _ => encode_inline_value(value, buf)?,
     }
     Ok(())
 }

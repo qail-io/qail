@@ -604,6 +604,42 @@ mod tests {
     }
 
     #[test]
+    fn case_condition_placeholders_fail_closed() {
+        let positional =
+            qail_core::parser::parse("get users fields CASE WHEN name = $1 THEN 1 ELSE 0 END")
+                .unwrap();
+        let err = AstEncoder::encode_cmd_sql(&positional)
+            .expect_err("CASE placeholder must not be emitted without a bind value");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("unresolved positional parameter $1")),
+            "{err}"
+        );
+
+        let named = qail_core::parser::parse(
+            "get users fields CASE WHEN name = :fallback THEN 1 ELSE 0 END",
+        )
+        .unwrap();
+        let err = AstEncoder::encode_cmd_sql(&named)
+            .expect_err("CASE named placeholder must not be emitted without a bind value");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("unresolved named parameter :fallback")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn case_condition_string_literals_reject_null_bytes() {
+        let cmd = qail_core::parser::parse(
+            "get users fields CASE WHEN name = 'bad\0value' THEN 1 ELSE 0 END",
+        )
+        .unwrap();
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("CASE condition string literal with null byte must fail closed");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
     fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
         use qail_core::ast::{CTEDef, Expr, SetOp};
 
