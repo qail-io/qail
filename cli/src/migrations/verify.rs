@@ -342,7 +342,9 @@ async fn smoke_read_checks(
     }
 
     for table in &smoke_tables {
-        let cmd = Qail::get(table).column("1").limit(1);
+        let cmd = Qail::get(table)
+            .column_expr(crate::util::qail_exists_projection())
+            .limit(1);
         driver
             .fetch_all(&cmd)
             .await

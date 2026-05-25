@@ -1018,7 +1018,7 @@ fn extract_column_names(columns: &[Expr]) -> Vec<String> {
 async fn table_exists(pg: &mut qail_pg::PgDriver, table: &str) -> Result<bool> {
     let (schema, table_name) = split_schema_ident(table);
     let cmd = Qail::get("information_schema.tables")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", schema)
         .where_eq("table_name", table_name)
         .limit(1);
@@ -1052,7 +1052,7 @@ fn collect_policy_final_expectations(cmds: &[Qail]) -> HashMap<(String, String),
 async fn column_exists(pg: &mut qail_pg::PgDriver, table: &str, column: &str) -> Result<bool> {
     let (schema, table_name) = split_schema_ident(table);
     let cmd = Qail::get("information_schema.columns")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", schema)
         .where_eq("table_name", table_name)
         .where_eq("column_name", column)
@@ -1216,7 +1216,7 @@ async fn column_has_constraint_type(
 ) -> Result<bool> {
     let (schema, table_name) = split_schema_ident(table);
     let cmd = Qail::get("information_schema.table_constraints tc")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .join(
             JoinKind::Inner,
             "information_schema.key_column_usage kcu",
@@ -1242,7 +1242,7 @@ async fn column_has_constraint_type(
 async fn index_exists(pg: &mut qail_pg::PgDriver, index_name: &str) -> Result<bool> {
     let (schema, name) = split_schema_ident(index_name);
     let cmd = Qail::get("pg_class c")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
         .where_eq("n.nspname", schema)
         .where_eq("c.relname", name)
@@ -1257,7 +1257,7 @@ async fn index_exists(pg: &mut qail_pg::PgDriver, index_name: &str) -> Result<bo
 async fn policy_exists(pg: &mut qail_pg::PgDriver, table: &str, policy_name: &str) -> Result<bool> {
     let (schema, table_name) = split_schema_ident(table);
     let cmd = Qail::get("pg_policies")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("schemaname", schema)
         .where_eq("tablename", table_name)
         .where_eq("policyname", policy_name)

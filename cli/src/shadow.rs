@@ -111,7 +111,7 @@ impl ShadowState {
 /// Ensure _qail_shadow_state table exists in primary database
 async fn ensure_shadow_state_table(driver: &mut PgDriver) -> Result<()> {
     let exists_cmd = Qail::get("information_schema.tables")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", "public")
         .where_eq("table_name", "_qail_shadow_state")
         .limit(1);

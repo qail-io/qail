@@ -4,7 +4,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{Action, Constraint, Expr, Operator, Qail};
+use qail_core::ast::{Action, AggregateFunc, Constraint, Expr, Operator, Qail};
 use qail_pg::driver::PgDriver;
 use std::path::PathBuf;
 
@@ -171,7 +171,7 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<Migrati
 /// Count rows in a table using AST-native query
 async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
     // SELECT COUNT(*) FROM table (using AST)
-    let cmd = Qail::get(table).column("count(*)");
+    let cmd = count_table_rows_cmd(table);
 
     let rows = driver
         .fetch_all(&cmd)
@@ -185,10 +185,20 @@ async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
     Err(anyhow!("Missing table row count result"))
 }
 
+fn count_table_rows_cmd(table: &str) -> Qail {
+    Qail::get(table).column_expr(Expr::Aggregate {
+        col: "*".to_string(),
+        func: AggregateFunc::Count,
+        distinct: false,
+        filter: None,
+        alias: None,
+    })
+}
+
 /// Count non-null values in a column using AST-native query
 async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -> Result<u64> {
     // SELECT COUNT(column) FROM table WHERE column IS NOT NULL
-    let cmd = Qail::get(table).column(format!("count({})", column));
+    let cmd = count_column_values_cmd(table, column);
 
     let rows = driver
         .fetch_all(&cmd)
@@ -200,6 +210,16 @@ async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -
     }
 
     Err(anyhow!("Missing column value count result"))
+}
+
+fn count_column_values_cmd(table: &str, column: &str) -> Qail {
+    Qail::get(table).column_expr(Expr::Aggregate {
+        col: column.to_string(),
+        func: AggregateFunc::Count,
+        distinct: false,
+        filter: None,
+        alias: None,
+    })
 }
 
 fn alter_type_target(cmd: &Qail) -> Option<(String, String)> {
@@ -546,7 +566,7 @@ pub fn data_snapshots_ddl() -> String {
 /// Ensure data snapshots table exists
 pub async fn ensure_snapshots_table(driver: &mut PgDriver) -> Result<()> {
     let exists_cmd = Qail::get("information_schema.tables")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", "public")
         .where_eq("table_name", "_qail_data_snapshots")
         .limit(1);
@@ -879,20 +899,7 @@ pub async fn list_snapshots(
     driver: &mut PgDriver,
     migration_version: Option<&str>,
 ) -> Result<Vec<(String, String, String, u64)>> {
-    use qail_core::ast::Operator;
-
-    let mut cmd = Qail::get("_qail_data_snapshots").columns([
-        "migration_version",
-        "table_name",
-        "column_name",
-        "count(*)",
-    ]);
-
-    if let Some(version) = migration_version {
-        cmd = cmd.filter("migration_version", Operator::Eq, version);
-    }
-
-    cmd = cmd.group_by(["migration_version", "table_name", "column_name"]);
+    let cmd = list_snapshots_cmd(migration_version);
 
     let rows = driver
         .fetch_all(&cmd)
@@ -913,14 +920,37 @@ pub async fn list_snapshots(
     Ok(results)
 }
 
+fn list_snapshots_cmd(migration_version: Option<&str>) -> Qail {
+    let mut cmd = Qail::get("_qail_data_snapshots").columns_expr([
+        Expr::Named("migration_version".to_string()),
+        Expr::Named("table_name".to_string()),
+        Expr::Named("column_name".to_string()),
+        Expr::Aggregate {
+            col: "*".to_string(),
+            func: AggregateFunc::Count,
+            distinct: false,
+            filter: None,
+            alias: None,
+        },
+    ]);
+
+    if let Some(version) = migration_version {
+        cmd = cmd.filter("migration_version", Operator::Eq, version);
+    }
+
+    cmd.group_by(["migration_version", "table_name", "column_name"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MigrationImpact, backup_row_tsv, columns_requiring_snapshot, escape_tsv_field,
-        is_narrowing_type_change, normalize_type_for_cast, parse_count_text,
-        required_backup_row_string, snapshot_column_label, snapshot_filename_component,
-        snapshot_json_string, snapshot_label, snapshot_row_json,
+        MigrationImpact, backup_row_tsv, columns_requiring_snapshot, count_column_values_cmd,
+        count_table_rows_cmd, escape_tsv_field, is_narrowing_type_change, list_snapshots_cmd,
+        normalize_type_for_cast, parse_count_text, required_backup_row_string,
+        snapshot_column_label, snapshot_filename_component, snapshot_json_string, snapshot_label,
+        snapshot_row_json,
     };
+    use qail_pg::protocol::AstEncoder;
 
     #[test]
     fn normalize_type_for_cast_maps_information_schema_names() {
@@ -967,6 +997,34 @@ mod tests {
         assert!(parse_count_text(None, "table row").is_err());
         assert!(parse_count_text(Some("not-a-count".to_string()), "table row").is_err());
         assert!(parse_count_text(Some("-1".to_string()), "table row").is_err());
+    }
+
+    #[test]
+    fn count_queries_use_structured_aggregate_ast() {
+        let (sql, params) = AstEncoder::encode_cmd_sql(&count_table_rows_cmd("users")).unwrap();
+        assert_eq!(sql, "SELECT COUNT(*) FROM users");
+        assert!(params.is_empty());
+
+        let (sql, params) =
+            AstEncoder::encode_cmd_sql(&count_column_values_cmd("users", "email")).unwrap();
+        assert_eq!(sql, "SELECT COUNT(email) FROM users");
+        assert!(params.is_empty());
+
+        let err =
+            AstEncoder::encode_cmd_sql(&count_column_values_cmd("users", "email) FROM secrets --"))
+                .expect_err("unsafe aggregate column must fail closed");
+        assert!(err.to_string().contains("unsafe identifier"));
+    }
+
+    #[test]
+    fn list_snapshots_query_uses_structured_count_projection() {
+        let (sql, params) =
+            AstEncoder::encode_cmd_sql(&list_snapshots_cmd(Some("20260525120000"))).unwrap();
+
+        assert!(sql.contains("SELECT migration_version, table_name, column_name, COUNT(*)"));
+        assert!(sql.contains("FROM _qail_data_snapshots"));
+        assert!(sql.contains("GROUP BY migration_version, table_name, column_name"));
+        assert_eq!(params, vec![Some(b"20260525120000".to_vec())]);
     }
 
     #[test]

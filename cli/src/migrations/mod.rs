@@ -160,7 +160,7 @@ pub fn stable_cmds_checksum(cmds: &[Qail]) -> String {
 /// Ensure migration table exists and has the latest receipt columns.
 pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()> {
     let exists_cmd = Qail::get("information_schema.tables")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", "public")
         .where_eq("table_name", "_qail_migrations")
         .limit(1);

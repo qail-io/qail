@@ -17,7 +17,7 @@ use crate::util::{parse_pg_url, redact_url};
 
 async fn migration_history_table_exists(driver: &mut PgDriver) -> Result<bool> {
     let exists_cmd = qail_core::prelude::Qail::get("information_schema.tables")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", "public")
         .where_eq("table_name", "_qail_migrations")
         .limit(1);
@@ -233,7 +233,7 @@ mod tests {
 
     async fn table_exists(pg: &mut PgDriver, table: &str) -> bool {
         let cmd = Qail::get("information_schema.tables")
-            .column("1")
+            .column_expr(crate::util::qail_exists_projection())
             .where_eq("table_schema", "public")
             .where_eq("table_name", table)
             .limit(1);

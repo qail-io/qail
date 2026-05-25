@@ -286,7 +286,7 @@ fn parse_where_is_null(raw: &str) -> Result<Option<String>> {
 
 async fn ensure_backfill_checkpoint_table(pg: &mut qail_pg::PgDriver) -> Result<()> {
     let exists_cmd = Qail::get("information_schema.tables")
-        .column("1")
+        .column_expr(crate::util::qail_exists_projection())
         .where_eq("table_schema", "public")
         .where_eq("table_name", "_qail_backfill_checkpoints")
         .limit(1);
@@ -358,7 +358,7 @@ async fn ensure_backfill_checkpoint_table(pg: &mut qail_pg::PgDriver) -> Result<
     } else {
         // Cutover helper: add text checkpoint column for uuid/text PK runners.
         let col_exists_cmd = Qail::get("information_schema.columns")
-            .column("1")
+            .column_expr(crate::util::qail_exists_projection())
             .where_eq("table_schema", "public")
             .where_eq("table_name", "_qail_backfill_checkpoints")
             .where_eq("column_name", "last_pk_text")

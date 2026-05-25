@@ -3,6 +3,11 @@
 use anyhow::Result;
 use url::Url;
 
+/// Projection used by existence probes (`SELECT 1 ... LIMIT 1`).
+pub fn qail_exists_projection() -> qail_core::ast::Expr {
+    qail_core::prelude::int(1)
+}
+
 /// Parse a PostgreSQL URL into (host, port, user, password, database).
 ///
 /// Handles: `postgres://user:pass@host:port/database`
@@ -148,6 +153,17 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qail_exists_projection_encodes_as_literal_select_one() {
+        let cmd = qail_core::prelude::Qail::get("users")
+            .column_expr(qail_exists_projection())
+            .limit(1);
+        let (sql, params) = qail_pg::protocol::AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(sql, "SELECT 1 FROM users LIMIT 1");
+        assert!(params.is_empty());
+    }
 
     #[test]
     fn test_redact_url_with_password() {
