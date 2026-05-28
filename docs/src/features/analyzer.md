@@ -116,17 +116,21 @@ This outputs GitHub Actions annotations that appear inline in PR diffs:
 
 ## Best Practices
 
-1. **Always run before `migrate up`**
+1. **Always run before the contract phase**
    ```bash
    qail migrate analyze old.qail:new.qail --codebase ./src
-   qail migrate up old.qail:new.qail $DATABASE_URL
+   qail migrate apply --phase expand --url $DATABASE_URL
+   qail migrate apply --phase backfill --url $DATABASE_URL
+   qail migrate apply --phase contract --codebase ./src --url $DATABASE_URL
    ```
 
 2. **Use with `migrate plan` for full preview**
    ```bash
    qail migrate plan old.qail:new.qail     # See SQL
    qail migrate analyze old.qail:new.qail  # Check codebase
-   qail migrate up old.qail:new.qail $URL  # Apply
+   qail migrate apply --phase expand --url $URL
+   qail migrate apply --phase backfill --url $URL
+   qail migrate apply --phase contract --codebase ./src --url $URL
    ```
 
 3. **Handle irreversible changes carefully**

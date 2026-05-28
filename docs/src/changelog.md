@@ -4,6 +4,12 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
+## Current Highlights (v1.2.1)
+
+- **Schema parser compatibility**: pulled PostgreSQL schemas now accept table-level `enable_rls` and `force_rls` directives.
+- **PostgreSQL type parsing**: multi-word types such as `DOUBLE PRECISION` and `TIMESTAMP WITH TIME ZONE` parse correctly from pulled schemas.
+- **Comment parsing**: schema comments containing quoted examples no longer break parsing.
+
 ## Current Highlights (v1.2.0)
 
 - **PostgreSQL protocol safety**: COPY, LISTEN/NOTIFY, replication, pooled fetch, driver fetch, query, and pipeline paths now fail closed and desynchronize bad connections on malformed backend state.
@@ -11,6 +17,12 @@ For the full project changelog, see the repository file:
 - **Real database validation**: PostgreSQL 18 lab coverage passed for MERGE, set operations, recursive CTEs, cursor cleanup, COPY callback recovery, LISTEN/NOTIFY payloads, savepoint rejection, and NUL query rejection.
 
 ## Current Highlights (v1.1.1)
+
+- **Live migration introspection**: schema pulls and shadow verification now account for generated columns, identity defaults, expression indexes, enum extensions, and composite foreign-key drift.
+- **Migration replay safety**: post-apply checks compare constraints, defaults, generated expressions, indexes, and extension dependencies against the real database state.
+- **Branch overlay coverage**: live PostgreSQL audit paths verify merge, set-operation, recursive-CTE behavior, and bad overlay replay failure modes.
+
+## Current Highlights (v1.1.0)
 
 - **Workflow engine hardening**: fixed nested loop context preservation, wait-event resume validation, timeout fallbacks, and transition checkpointing.
 - **Gateway security hardening**: tightened tenant guards, RLS policy injection, write-side column policies, idempotency, transaction paths, branch overlays, and REST mutation/event semantics.

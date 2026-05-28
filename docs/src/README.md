@@ -6,12 +6,13 @@ QAIL compiles typed query ASTs directly to database wire protocols. No applicati
 
 ## Latest Updates (May 2026)
 
-- QAIL is now on the `v1.2.0` stable line across the Rust workspace crates and CLI.
+- QAIL is now on the `v1.2.1` stable line across the Rust workspace crates and CLI.
 - The public API is the AST/DSL path: `Qail::get/add/set/del`, typed expressions, relation helpers, RLS contexts, and driver/pool execution.
 - Compatibility aliases that hid fallible behavior were removed: use `with_rls(&ctx)?` and `join_on(...)?` directly.
 - Legacy raw SQL builder APIs remain out of the normal runtime path; use AST-native commands and session AST helpers instead.
 - PostgreSQL cancel-key APIs are bytes-native, matching protocol `3.0` and `3.2` behavior.
-- Gateway/API responses now carry response metadata, and the Qdrant engine has a generation-counted reconnect state machine for concurrent reconnect safety.
+- Pulled PostgreSQL schema parsing now accepts table-level RLS directives, multi-word types, and quoted comment text.
+- Migration docs now use the expand/backfill/contract apply model instead of presenting up/down as the primary workflow.
 
 ## Philosophy: AST = Meaning
 
@@ -32,7 +33,7 @@ Some search engines still surface old QAIL pages showing symbolic forms such as 
 
 Those pages are from historical pre-1.0 releases and are not the current API guidance.
 
-Current QAIL `1.2.0` application code should use the native AST/DSL path:
+Current QAIL `1.2.1` application code should use the native AST/DSL path:
 
 ```rust
 let query = Qail::get("users")

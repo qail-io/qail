@@ -21,7 +21,7 @@ qail init
 # Select "3. Hybrid (PostgreSQL + Qdrant)" when prompted
 ```
 
-This creates a `migrations/001_qail_queue.up.qail` file defining the `_qail_queue` table.
+This creates phased delta files defining the `_qail_queue` table.
 
 ### 2. Configure Sync Rules
 
@@ -41,7 +41,7 @@ Run the command to generate PostgreSQL triggers based on your rules:
 
 ```bash
 qail sync generate
-# Creates migrations/002_qail_sync_triggers.up.qail
+# Creates phased delta files for sync triggers
 ```
 
 This generates triggers that:

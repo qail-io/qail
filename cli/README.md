@@ -38,11 +38,13 @@ qail migrate create add_users_table --author "dev"
 # Preview migration SQL
 qail migrate plan old.qail:new.qail
 
-# Apply migrations
-qail migrate up old.qail:new.qail postgres://...
+# Apply phased migrations from deltas/
+qail migrate apply --phase expand
+qail migrate apply --phase backfill --backfill-chunk-size 10000
+qail migrate apply --phase contract --codebase ./src
 
-# Rollback migrations
-qail migrate down postgres://...
+# Explicit rollback when needed
+qail migrate rollback --to base --url postgres://...
 ```
 
 ### Query REPL

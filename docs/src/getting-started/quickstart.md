@@ -71,9 +71,11 @@ qail pull postgres://user:pass@localhost/db > schema.qail
 # Create a new version with changes
 # (edit schema.qail manually)
 
-# Diff and apply
+# Diff and apply through the safe phased model
 qail diff old.qail new.qail
-qail migrate up old.qail:new.qail postgres://...
+qail migrate apply --phase expand
+qail migrate apply --phase backfill --backfill-chunk-size 10000
+qail migrate apply --phase contract --codebase ./src
 ```
 
 ## Schema Layout Examples (Single vs Modular)

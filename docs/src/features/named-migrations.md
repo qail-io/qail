@@ -12,7 +12,7 @@ Output:
 ```
 📝 Creating Named Migration
 
-  ✓ Created: migrations/20251226071129_add_user_avatars.qail
+  ✓ Created: deltas/20251226071129_add_user_avatars/expand.qail
 
   Migration: 20251226071129_add_user_avatars
   Depends:   002_add_users

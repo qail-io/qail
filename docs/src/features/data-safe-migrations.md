@@ -16,7 +16,7 @@ QAIL provides enterprise-grade migration safety features that protect your data 
 When running migrations with destructive operations, QAIL analyzes the impact:
 
 ```
-$ qail migrate up old.qail:new.qail postgres://...
+$ qail migrate apply --phase contract --codebase ./src --url postgres://...
 
 🚨 Migration Impact Analysis
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -70,8 +70,8 @@ CREATE TABLE _qail_data_snapshots (
 After migration, you can restore data:
 
 ```bash
-# Schema rollback (adds column back)
-qail migrate down new.qail:old.qail postgres://...
+# Schema rollback (uses applied migration history)
+qail migrate rollback --to 20260527090000_add_user_name.expand.up.qail --url postgres://...
 
 # Data rollback (restores values)
 # Coming in future release: qail rollback --data

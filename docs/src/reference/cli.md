@@ -1,6 +1,6 @@
 # CLI Commands
 
-The `qail` command-line tool — v1.2.0.
+The `qail` command-line tool — v1.2.1.
 
 ## Installation
 
@@ -182,24 +182,32 @@ qail migrate status postgres://...
 # └──────────┴────────────────────┴─────────────────────┴──────────────┘
 ```
 
-### `qail migrate up`
+### `qail migrate apply`
 
-Apply migrations:
-
-```bash
-qail migrate up v1.qail:v2.qail postgres://...
-
-# With codebase check (warns about breaking references)
-qail migrate up v1.qail:v2.qail postgres://... -c ./src
-```
-
-### `qail migrate down`
-
-Rollback migrations:
+Apply file-based migrations from `deltas/` with the expand/backfill/contract model:
 
 ```bash
-qail migrate down v1.qail:v2.qail postgres://...
+# Add compatible schema first
+qail migrate apply --phase expand
+
+# Move existing data in resumable chunks
+qail migrate apply --phase backfill --backfill-chunk-size 10000
+
+# Remove old schema only after code references are gone
+qail migrate apply --phase contract --codebase ./src
 ```
+
+Phased migrations may be stored as:
+
+```text
+deltas/
+  20260527090000_add_user_name/
+    expand.qail
+    backfill.qail
+    contract.qail
+```
+
+Use `--phase all` only when a release is safe to run through all phases in order. For rollback, use `qail migrate rollback --to <version>` or apply explicit down files with `qail migrate apply --direction down`.
 
 ### `qail migrate plan`
 
@@ -233,15 +241,15 @@ qail migrate analyze old.qail:new.qail --codebase ./src
 # └────────────────────────────────────────────────────┘
 ```
 
-### `qail migrate apply`
+### `qail migrate apply --phase all`
 
-Apply file-based migrations from `migrations/` directory:
+Apply all pending file-based migration phases from `deltas/`:
 
 ```bash
 qail migrate apply
 # → Found 1 migrations to apply
 # ✓ Connected to mydb
-#   → 001_qail_queue.up.qail... ✓
+#   → 20260527090000_add_user_name/expand.qail... ✓
 # ✓ All migrations applied successfully!
 ```
 
@@ -331,7 +339,7 @@ Generate trigger migrations from `[[sync]]` rules in `qail.toml` (Hybrid mode):
 
 ```bash
 qail sync generate
-# ✓ Created migrations/002_qail_sync_triggers.up.qail
+# ✓ Created phased delta files for sync triggers
 ```
 
 ### `qail worker`

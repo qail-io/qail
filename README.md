@@ -6,7 +6,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.0-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.1-green)](CHANGELOG.md)
 
 ---
 
@@ -16,8 +16,8 @@ If you are searching for a **Rust PostgreSQL driver**, start with `qail-pg` + `q
 
 ```toml
 [dependencies]
-qail-core = "1.2.0"
-qail-pg = "1.2.0"
+qail-core = "1.2.1"
+qail-pg = "1.2.1"
 ```
 
 ```rust
@@ -157,7 +157,9 @@ qail init --name myapp --mode postgres --url postgres://localhost/mydb
 qail exec "get users'id'email[active=true]" --url postgres://localhost/mydb
 qail pull postgres://localhost/mydb              # Introspect → schema.qail
 qail diff _ schema.qail --live --url postgres://...    # Drift detection
-qail migrate up v1:v2 postgres://...             # Apply migrations
+qail migrate apply --phase expand                # Add compatible schema
+qail migrate apply --phase backfill              # Move data in chunks
+qail migrate apply --phase contract --codebase ./src # Remove old shape safely
 qail types schema.qail > src/generated/schema.rs # Typed codegen
 ```
 

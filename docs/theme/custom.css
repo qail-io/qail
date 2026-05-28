@@ -84,8 +84,11 @@ html {
 }
 
 .logo-icon {
-    font-size: 1.5rem;
-    line-height: 1;
+    display: block;
+    width: 28px;
+    height: auto;
+    object-fit: contain;
+    flex-shrink: 0;
 }
 
 .logo-text {

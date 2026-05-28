@@ -450,6 +450,11 @@ impl Schema {
             // New format with FK: "user_id UUID ref:users.id"
             // New format with Policy: "password_hash TEXT protected"
             else if current_table.is_some() {
+                if matches!(line, "enable_rls" | "force_rls") {
+                    current_rls_flag = true;
+                    continue;
+                }
+
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(col_name) = parts.first() {
                     if !is_build_identifier(col_name) {
@@ -467,27 +472,19 @@ impl Schema {
                         ));
                     }
                     let table_name = current_table.as_deref().unwrap_or("<unknown>");
-                    let Some(col_type_str) = parts.get(1).copied() else {
+                    let Some((col_type, type_end)) =
+                        parse_build_column_type_prefix(&parts, &enum_types)
+                    else {
+                        let Some(col_type_str) = parts.get(1).copied() else {
+                            return Err(format!(
+                                "Missing type for column '{}' in table '{}'",
+                                col_name, table_name
+                            ));
+                        };
                         return Err(format!(
-                            "Missing type for column '{}' in table '{}'",
-                            col_name, table_name
+                            "Unknown column type '{}' for column '{}' in table '{}'",
+                            col_type_str, col_name, table_name
                         ));
-                    };
-                    let col_type = match col_type_str.parse::<ColumnType>() {
-                        Ok(col_type) => col_type,
-                        Err(_) => {
-                            if let Some(values) = enum_types.get(col_type_str) {
-                                ColumnType::Enum {
-                                    name: col_type_str.to_string(),
-                                    values: values.clone(),
-                                }
-                            } else {
-                                return Err(format!(
-                                    "Unknown column type '{}' for column '{}' in table '{}'",
-                                    col_type_str, col_name, table_name
-                                ));
-                            }
-                        }
                     };
                     current_columns.insert(col_name.to_string(), col_type);
 
@@ -500,7 +497,7 @@ impl Schema {
                     let mut has_foreign_key = false;
                     let mut seen_fk_actions = HashSet::new();
 
-                    let mut i = 2;
+                    let mut i = type_end;
                     while i < parts.len() {
                         let part = parts[i];
                         if part == "protected" {
@@ -987,6 +984,29 @@ fn sql_migration_statements(sql: &str) -> Vec<String> {
     }
 
     split_sql_statements(&cleaned)
+}
+
+fn parse_build_column_type_prefix(
+    parts: &[&str],
+    enum_types: &HashMap<String, Vec<String>>,
+) -> Option<(ColumnType, usize)> {
+    let max_end = parts.len().min(5);
+    for end in (2..=max_end).rev() {
+        let type_str = parts[1..end].join(" ");
+        if let Ok(column_type) = type_str.parse::<ColumnType>() {
+            return Some((column_type, end));
+        }
+        if let Some(values) = enum_types.get(&type_str) {
+            return Some((
+                ColumnType::Enum {
+                    name: type_str,
+                    values: values.clone(),
+                },
+                end,
+            ));
+        }
+    }
+    None
 }
 
 fn parse_build_enum_declaration<'a, I: Iterator<Item = &'a str>>(
@@ -1941,7 +1961,7 @@ impl TableSchema {
 
 #[cfg(test)]
 mod comment_tests {
-    use super::{Schema, strip_schema_comments, strip_sql_line_comments};
+    use super::{ColumnType, Schema, strip_schema_comments, strip_sql_line_comments};
 
     #[test]
     fn schema_comment_stripping_ignores_markers_inside_quotes() {
@@ -1984,6 +2004,52 @@ CREATE TABLE logs (
         assert!(logs.has_column("message"));
         assert!(logs.has_column("tag"));
         assert!(logs.has_column("level"));
+    }
+
+    #[test]
+    fn schema_parse_accepts_pulled_rls_directives() {
+        let schema = Schema::parse(
+            r#"
+table agents {
+  id UUID
+  tenant_id UUID
+  enable_rls
+  force_rls
+}
+"#,
+        )
+        .expect("pulled schema RLS directives should parse");
+
+        let agents = schema.table("agents").expect("agents table should parse");
+        assert!(agents.has_column("id"));
+        assert!(agents.rls_enabled);
+        assert!(!agents.has_column("enable_rls"));
+        assert!(!agents.has_column("force_rls"));
+    }
+
+    #[test]
+    fn schema_parse_accepts_multi_word_column_types() {
+        let schema = Schema::parse(
+            r#"
+table car_fullday_reseller_pricing {
+  percentage_markup DOUBLE PRECISION
+  starts_at TIMESTAMP WITH TIME ZONE
+}
+"#,
+        )
+        .expect("pulled schema multi-word types should parse");
+
+        let pricing = schema
+            .table("car_fullday_reseller_pricing")
+            .expect("pricing table should parse");
+        assert_eq!(
+            pricing.column_type("percentage_markup"),
+            Some(&ColumnType::Float)
+        );
+        assert_eq!(
+            pricing.column_type("starts_at"),
+            Some(&ColumnType::Timestamptz)
+        );
     }
 
     #[test]

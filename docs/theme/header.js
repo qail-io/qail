@@ -28,6 +28,14 @@ document.addEventListener('DOMContentLoaded', function () {
         return currentPath === href || currentPath.startsWith(href + '/');
     }
 
+    const iconLink = document.querySelector('link[rel="shortcut icon"]');
+    const logoSrc =
+        iconLink && iconLink.getAttribute('href')
+            ? iconLink.getAttribute('href')
+            : typeof path_to_root === 'string'
+              ? `${path_to_root}favicon.png`
+              : '/docs/favicon.png';
+
     const nav = document.createElement('nav');
     nav.className = 'nav';
 
@@ -42,7 +50,15 @@ document.addEventListener('DOMContentLoaded', function () {
     nav.innerHTML = `
         <div class="nav-container">
             <a href="/" class="nav-logo">
-                <span class="logo-icon">🪝</span>
+                <img
+                    src="${logoSrc}"
+                    alt="QAIL logo"
+                    class="logo-icon"
+                    width="28"
+                    height="27"
+                    loading="eager"
+                    decoding="async"
+                />
                 <span class="logo-text">QAIL</span>
             </a>
             <div class="nav-links">

@@ -285,29 +285,11 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     }
 
     let name = parts[0].to_string();
-    let type_str = parts[1];
-
-    // Try standard type first, then check enum types
-    let data_type: ColumnType = match type_str.parse() {
-        Ok(t) => t,
-        Err(_) => {
-            if let Some(et) = enum_types.iter().find(|e| e.name == type_str) {
-                ColumnType::Enum {
-                    name: et.name.clone(),
-                    values: et.values.clone(),
-                }
-            } else {
-                return Err(format!(
-                    "Unknown column type '{}' for column '{}'",
-                    type_str, name
-                ));
-            }
-        }
-    };
+    let (data_type, type_end) = parse_column_type_prefix(&parts, enum_types, &name)?;
 
     let mut col = Column::new(&name, data_type);
 
-    let mut i = 2;
+    let mut i = type_end;
     let mut seen_primary_key = false;
     let mut nullability_option: Option<&str> = None;
     let mut seen_default = false;
@@ -543,6 +525,34 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     }
 
     Ok(col)
+}
+
+fn parse_column_type_prefix(
+    parts: &[&str],
+    enum_types: &[EnumType],
+    column_name: &str,
+) -> Result<(ColumnType, usize), String> {
+    let max_end = parts.len().min(5);
+    for end in (2..=max_end).rev() {
+        let type_str = parts[1..end].join(" ");
+        if let Ok(data_type) = type_str.parse::<ColumnType>() {
+            return Ok((data_type, end));
+        }
+        if let Some(et) = enum_types.iter().find(|e| e.name == type_str) {
+            return Ok((
+                ColumnType::Enum {
+                    name: et.name.clone(),
+                    values: et.values.clone(),
+                },
+                end,
+            ));
+        }
+    }
+
+    Err(format!(
+        "Unknown column type '{}' for column '{}'",
+        parts[1], column_name
+    ))
 }
 
 /// Parse an index definition.
@@ -893,6 +903,10 @@ fn parse_comment_text(raw: &str) -> Result<String, String> {
 
             let after = idx + ch.len_utf8();
             if !raw[after..].trim().is_empty() {
+                if raw[after..].contains('"') {
+                    text.push('"');
+                    continue;
+                }
                 return Err("trailing content after comment text".to_string());
             }
             return Ok(text);
@@ -2979,6 +2993,17 @@ rename users.username -> users.name
     }
 
     #[test]
+    fn test_parse_comment_accepts_pulled_inner_quotes() {
+        let input =
+            r##"comment on pickup_zones.ribbon_color "Hex color (e.g., "#f97316" for orange)""##;
+        let schema = parse_qail(input).expect("pulled comments with inner quotes should parse");
+        assert_eq!(
+            schema.comments[0].text,
+            r##"Hex color (e.g., "#f97316" for orange)"##
+        );
+    }
+
+    #[test]
     fn test_parse_sequence_simple() {
         let input = "sequence order_number_seq";
         let schema = parse_qail(input).unwrap();
@@ -4283,6 +4308,23 @@ table users {
 "#;
         let err = parse_qail(input).expect_err("unknown column option should fail");
         assert!(err.contains("unknown column option 'uniq' for column 'email'"));
+    }
+
+    #[test]
+    fn test_parse_column_accepts_multi_word_type() {
+        let input = r#"
+table docks {
+  latitude DOUBLE PRECISION
+  created_at TIMESTAMP WITH TIME ZONE
+}
+"#;
+        let schema = parse_qail(input).expect("multi-word types should parse");
+        let table = schema
+            .tables
+            .get("docks")
+            .expect("docks table should parse");
+        assert_eq!(table.columns[0].data_type, ColumnType::Float);
+        assert_eq!(table.columns[1].data_type, ColumnType::Timestamptz);
     }
 
     #[test]

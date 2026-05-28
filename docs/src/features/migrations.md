@@ -2,7 +2,7 @@
 
 QAIL supports two migration workflows:
 1. **Schema-Diff (State-Based):** Compare standard schema files (good for evolving production DBs)
-2. **File-Based (Sequential):** Apply `.qail` files from `migrations/` directory (good for hybrid setups)
+2. **File-Based Phased Migrations:** Apply `.qail` files from `deltas/` through expand, backfill, and contract phases
 
 ---
 
@@ -82,36 +82,42 @@ qail diff v1.qail v2.qail
 ### 4. Apply Migration
 
 ```bash
-qail migrate up v1.qail:v2.qail postgres://...
+qail migrate apply --phase expand
+qail migrate apply --phase backfill --backfill-chunk-size 10000
+qail migrate apply --phase contract --codebase ./src
 ```
 
 ### 5. Rollback (if needed)
 
 ```bash
-qail migrate down v1.qail:v2.qail postgres://...
+qail migrate rollback --to 20260527090000_add_user_name.expand.up.qail
+# or apply explicit down files
+qail migrate apply --direction down
 ```
 
 ---
 
-## 2. File-Based Workflow (Sequential)
+## 2. File-Based Workflow (Expand / Backfill / Contract)
 
-For hybrid projects or simple setups, you can use sequential `.qail` files in the `migrations/` directory.
+For hybrid projects or simple setups, use phased `.qail` files in the `deltas/` directory.
 
 ### Structure
 
 ```text
-migrations/
-  ├── 001_initial_schema.up.qail
-  ├── 001_initial_schema.down.qail
-  ├── 002_add_users.up.qail
-  └── 002_add_users.down.qail
+deltas/
+  └── 20260527090000_add_user_name/
+      ├── expand.qail
+      ├── backfill.qail
+      └── contract.qail
 ```
 
 ### Applying Migrations
 
 ```bash
-# Applies all pending .up.qail files
-qail migrate apply
+# Apply one safety phase at a time
+qail migrate apply --phase expand
+qail migrate apply --phase backfill --backfill-chunk-size 10000
+qail migrate apply --phase contract --codebase ./src
 ```
 
 ### Generating from Sync Rules
@@ -120,7 +126,7 @@ Hybrid projects can auto-generate migrations for sync triggers:
 
 ```bash
 qail sync generate
-# Creates: migrations/00X_qail_sync_triggers.up.qail
+# Creates phased delta files for qail sync triggers
 ```
 ## Migration Hints
 

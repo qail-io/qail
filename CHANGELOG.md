@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-05-28
+
+### Fixed
+- **Schema parser compatibility:** Accept pulled PostgreSQL schema details including table-level `enable_rls`/`force_rls` directives, multi-word column types such as `DOUBLE PRECISION` and `TIMESTAMP WITH TIME ZONE`, and comment text containing quoted examples.
+
 ## [1.2.0] - 2026-05-26
 
 ### Fixed
