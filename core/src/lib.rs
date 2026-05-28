@@ -7,6 +7,8 @@
 //! let cmd = Qail::get("users").column("name").filter("active", Operator::Eq, true);
 //! ```
 
+/// Native vertical access policy checks for QAIL commands.
+pub mod access;
 #[cfg(feature = "analyzer")]
 pub mod analyzer;
 /// Abstract syntax tree types.
@@ -126,6 +128,7 @@ pub mod prelude {
     pub use crate::ast::*;
 
     pub use crate::Qail;
+    pub use crate::access::*;
     pub use crate::error::*;
     pub use crate::parser::parse;
     pub use crate::transpiler::ToSql;
