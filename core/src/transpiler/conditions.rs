@@ -255,7 +255,7 @@ pub(crate) fn read_only_subquery_sql(query: &Qail) -> String {
     }
 }
 
-fn validate_read_only_subquery(query: &Qail) -> Option<String> {
+pub(crate) fn validate_read_only_subquery(query: &Qail) -> Option<String> {
     if !matches!(query.action, Action::Get | Action::Cnt | Action::With) {
         return Some(format!(
             "subquery must be read-only SELECT, got {}",

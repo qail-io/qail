@@ -1175,6 +1175,25 @@ fn test_merge_postgres_rejects_mutating_source_cte_to_sql() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_mutating_source_expression_subquery_to_sql() {
+    let mut source = Qail::get("incoming").columns(["id"]);
+    source.columns.push(Expr::Subquery {
+        query: Box::new(Qail::add("audit_log")),
+        alias: Some("audit_id".to_string()),
+    });
+    let cmd = Qail::merge_into("users")
+        .using_query_as(source, "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "/* ERROR: MERGE source query must be read-only SELECT, got ADD */"
+    );
+}
+
+#[test]
 fn test_merge_postgres_renders_complex_action_expressions() {
     let cmd = Qail::merge_into("users")
         .target_alias("u")

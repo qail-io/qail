@@ -3,7 +3,9 @@
 use crate::ast::{
     Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
-use crate::transpiler::conditions::{ConditionToSql, read_only_subquery_sql};
+use crate::transpiler::conditions::{
+    ConditionToSql, read_only_subquery_sql, validate_read_only_subquery,
+};
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::traits::escape_sql_string_literal;
 use crate::transpiler::{SqlGenerator, ToSql};
@@ -704,20 +706,11 @@ fn validate_merge_source_query(query: &Qail) -> Option<String> {
         ));
     }
 
-    for cte in &query.ctes {
-        if let Some(error) = validate_merge_source_query(&cte.base_query) {
-            return Some(error);
-        }
-        if let Some(ref recursive_query) = cte.recursive_query
-            && let Some(error) = validate_merge_source_query(recursive_query)
-        {
-            return Some(error);
-        }
-    }
-    for (_, set_query) in &query.set_ops {
-        if let Some(error) = validate_merge_source_query(set_query) {
-            return Some(error);
-        }
+    if let Some(error) = validate_read_only_subquery(query) {
+        return Some(match error.strip_prefix("subquery ") {
+            Some(rest) => format!("MERGE source query {}", rest),
+            None => format!("MERGE source query is not read-only: {}", error),
+        });
     }
 
     None
