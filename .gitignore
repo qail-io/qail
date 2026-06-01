@@ -87,6 +87,7 @@ pg/examples/pgx_benchmark
 qail.toml
 multi_ops_agent_plan.md
 GAP.md
+docs/internal/audit_flow_map.md
 schema.qail
 policies.yaml
 events.yaml
