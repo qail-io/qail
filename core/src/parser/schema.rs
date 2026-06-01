@@ -911,26 +911,85 @@ fn parse_policy_string(input: &str) -> IResult<&str, Expr> {
 
 /// Parse numeric literal
 fn parse_policy_number(input: &str) -> IResult<&str, Expr> {
+    let original = input;
     let (input, digits) = take_while1(|c: char| c.is_ascii_digit() || c == '.')(input)?;
     // Make sure it starts with digit (not just '.')
     if digits.starts_with('.') || digits.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
-            input,
+            original,
             nom::error::ErrorKind::Digit,
         )));
     }
-    if let Ok(n) = digits.parse::<i64>() {
-        Ok((input, Expr::Literal(AstValue::Int(n))))
-    } else if let Ok(f) = digits.parse::<f64>() {
-        Ok((input, Expr::Literal(AstValue::Float(f))))
-    } else {
-        Ok((input, Expr::Named(digits.to_string())))
+
+    if !digits.contains('.') {
+        return digits
+            .parse::<i64>()
+            .map(|n| (input, Expr::Literal(AstValue::Int(n))))
+            .map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(
+                    original,
+                    nom::error::ErrorKind::Digit,
+                ))
+            });
     }
+
+    if digits.matches('.').count() > 1 || policy_number_significant_digits(digits) > 15 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            original,
+            nom::error::ErrorKind::Float,
+        )));
+    }
+
+    if let Ok(f) = digits.parse::<f64>() {
+        if f.is_finite() {
+            Ok((input, Expr::Literal(AstValue::Float(f))))
+        } else {
+            Err(nom::Err::Error(nom::error::Error::new(
+                original,
+                nom::error::ErrorKind::Float,
+            )))
+        }
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            original,
+            nom::error::ErrorKind::Float,
+        )))
+    }
+}
+
+fn policy_number_significant_digits(value: &str) -> usize {
+    let mut count = 0;
+    let mut seen_non_zero = false;
+
+    for byte in value.bytes() {
+        if !byte.is_ascii_digit() {
+            continue;
+        }
+        if byte != b'0' {
+            seen_non_zero = true;
+        }
+        if seen_non_zero {
+            count += 1;
+        }
+    }
+
+    count
 }
 
 /// Parse function call or identifier, with optional ::cast
 fn parse_policy_func_or_ident(input: &str) -> IResult<&str, Expr> {
+    let original = input;
     let (input, name) = identifier(input)?;
+    if name
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit())
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            original,
+            nom::error::ErrorKind::Alpha,
+        )));
+    }
 
     // Check for function call: name(
     let mut expr = if let Ok((rest, _)) = char::<_, nom::error::Error<&str>>('(').parse(input) {
@@ -1520,6 +1579,48 @@ mod tests {
             "Expected Binary OR, got {:?}",
             policy.using
         );
+    }
+
+    #[test]
+    fn test_parse_policy_rejects_invalid_numeric_literals() {
+        let huge = "999999999999999999999999999999999999999999999999999999999999999999";
+        let input = format!(
+            r#"
+            table orders (
+                id uuid primary_key,
+                amount numeric
+            )
+
+            policy amount_guard on orders
+                for select
+                using (amount = {huge})
+        "#
+        );
+        assert!(Schema::parse(&input).is_err());
+
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                amount numeric
+            )
+
+            policy amount_guard on orders
+                for select
+                using (amount = 1.2.3)
+        "#;
+        assert!(Schema::parse(input).is_err());
+
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                amount numeric
+            )
+
+            policy amount_guard on orders
+                for select
+                using (amount = 9007199254740993.25)
+        "#;
+        assert!(Schema::parse(input).is_err());
     }
 
     #[test]
