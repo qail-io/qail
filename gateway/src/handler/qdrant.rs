@@ -1013,34 +1013,56 @@ fn payload_value_from_json_str(json: &str) -> Result<qail_qdrant::PayloadValue, 
             format!("Qdrant JSON payload value is invalid: {err}"),
         )
     })?;
-    Ok(payload_value_from_json(value))
+    payload_value_from_json(value)
 }
 
-fn payload_value_from_json(value: serde_json::Value) -> qail_qdrant::PayloadValue {
+fn payload_value_from_json(
+    value: serde_json::Value,
+) -> Result<qail_qdrant::PayloadValue, ApiError> {
     match value {
-        serde_json::Value::Null => qail_qdrant::PayloadValue::Null,
-        serde_json::Value::Bool(value) => qail_qdrant::PayloadValue::Bool(value),
+        serde_json::Value::Null => Ok(qail_qdrant::PayloadValue::Null),
+        serde_json::Value::Bool(value) => Ok(qail_qdrant::PayloadValue::Bool(value)),
         serde_json::Value::Number(value) => {
             if let Some(value) = value.as_i64() {
-                qail_qdrant::PayloadValue::Integer(value)
-            } else if let Some(value) = value.as_u64().and_then(|value| i64::try_from(value).ok()) {
-                qail_qdrant::PayloadValue::Integer(value)
+                Ok(qail_qdrant::PayloadValue::Integer(value))
+            } else if let Some(value) = value.as_u64() {
+                let value = i64::try_from(value).map_err(|_| {
+                    ApiError::bad_request(
+                        "INVALID_QDRANT_PAYLOAD",
+                        "Qdrant JSON integer payload values must fit in signed 64-bit range",
+                    )
+                })?;
+                Ok(qail_qdrant::PayloadValue::Integer(value))
             } else if let Some(value) = value.as_f64() {
-                qail_qdrant::PayloadValue::Float(value)
+                if !value.is_finite() {
+                    return Err(ApiError::bad_request(
+                        "INVALID_QDRANT_PAYLOAD",
+                        "Qdrant JSON float payload values must be finite numbers",
+                    ));
+                }
+                Ok(qail_qdrant::PayloadValue::Float(value))
             } else {
-                qail_qdrant::PayloadValue::String(value.to_string())
+                Err(ApiError::bad_request(
+                    "INVALID_QDRANT_PAYLOAD",
+                    "Qdrant JSON number payload value is not representable",
+                ))
             }
         }
-        serde_json::Value::String(value) => qail_qdrant::PayloadValue::String(value),
-        serde_json::Value::Array(values) => qail_qdrant::PayloadValue::List(
-            values.into_iter().map(payload_value_from_json).collect(),
-        ),
-        serde_json::Value::Object(values) => qail_qdrant::PayloadValue::Object(
-            values
+        serde_json::Value::String(value) => Ok(qail_qdrant::PayloadValue::String(value)),
+        serde_json::Value::Array(values) => {
+            let values = values
                 .into_iter()
-                .map(|(key, value)| (key, payload_value_from_json(value)))
-                .collect::<HashMap<_, _>>(),
-        ),
+                .map(payload_value_from_json)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(qail_qdrant::PayloadValue::List(values))
+        }
+        serde_json::Value::Object(values) => {
+            let values = values
+                .into_iter()
+                .map(|(key, value)| Ok((key, payload_value_from_json(value)?)))
+                .collect::<Result<HashMap<_, _>, ApiError>>()?;
+            Ok(qail_qdrant::PayloadValue::Object(values))
+        }
     }
 }
 
@@ -2087,6 +2109,23 @@ mod tests {
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_json_integer_precision_drift() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value(
+                "metadata",
+                Value::Json(r#"{"too_big":18446744073709551615}"#.to_string()),
+            );
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
+        assert!(err.message.contains("signed 64-bit"));
     }
 
     #[test]
