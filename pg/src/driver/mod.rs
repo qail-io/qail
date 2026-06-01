@@ -13,6 +13,7 @@
 //! - `pool` — Connection pool (PgPool, PoolConfig, PooledConnection)
 
 // ── Internal submodules ─────────────────────────────────────────────
+mod access;
 mod auth_types;
 mod auto_mode;
 pub mod branch_sql;
