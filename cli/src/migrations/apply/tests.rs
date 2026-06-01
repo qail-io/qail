@@ -297,6 +297,59 @@ table orgs {
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_supports_composite_foreign_keys() {
+        let input = r#"
+table schedules {
+    route_id text not_null
+    schedule_id text not_null
+}
+
+unique index idx_schedules_route_schedule on schedules (route_id, schedule_id)
+
+table trips {
+    route_id text not_null
+    schedule_id text not_null
+    foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id) constraint fk_trips_schedule on_delete cascade on_update restrict initially_deferred
+}
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("composite foreign keys should compile in strict mode");
+        let add_fk = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, qail_core::ast::Action::Alter) && cmd.table == "trips")
+            .expect("expected deferred composite FK command");
+
+        assert!(
+            add_fk.table_constraints.iter().any(|constraint| matches!(
+                constraint,
+                qail_core::ast::TableConstraint::ForeignKey {
+                    name,
+                    columns,
+                    ref_table,
+                    ref_columns,
+                    on_delete,
+                    on_update,
+                    deferrable,
+                } if name.as_deref() == Some("fk_trips_schedule")
+                    && columns == &["route_id", "schedule_id"]
+                    && ref_table == "schedules"
+                    && ref_columns == &["route_id", "schedule_id"]
+                    && on_delete.as_deref() == Some("CASCADE")
+                    && on_update.as_deref() == Some("RESTRICT")
+                    && deferrable.as_deref() == Some("DEFERRABLE INITIALLY DEFERRED")
+            )),
+            "composite FK options should survive strict CLI compilation"
+        );
+
+        let sql = commands_to_sql(&cmds);
+        assert!(
+            sql.contains("ALTER TABLE trips ADD CONSTRAINT fk_trips_schedule FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"),
+            "composite FK SQL should preserve options, got: {sql}"
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_policies() {
         let input = r#"
 table users (

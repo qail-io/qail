@@ -124,13 +124,6 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
 
     let mut unsupported = Vec::new();
     unsupported.extend(hint_unsupported);
-    if schema
-        .tables
-        .values()
-        .any(|t| !t.multi_column_fks.is_empty())
-    {
-        unsupported.push("multi-column foreign keys");
-    }
     if !unsupported.is_empty() {
         bail!(
             "Strict AST migration compiler does not support: {}",

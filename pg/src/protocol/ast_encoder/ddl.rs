@@ -589,7 +589,44 @@ fn references_target_to_sql(target: &str) -> String {
     )
 }
 
-fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
+fn fk_action_option_to_sql(action: &str) -> Option<&'static str> {
+    match action
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', " ")
+        .as_str()
+    {
+        "cascade" => Some("CASCADE"),
+        "restrict" => Some("RESTRICT"),
+        "no action" => Some("NO ACTION"),
+        "set null" => Some("SET NULL"),
+        "set default" => Some("SET DEFAULT"),
+        _ => None,
+    }
+}
+
+fn fk_deferrable_option_to_sql(deferrable: &str) -> Option<&'static str> {
+    match deferrable
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', " ")
+        .as_str()
+    {
+        "deferrable" => Some("DEFERRABLE"),
+        "deferrable initially deferred" | "initially deferred" => {
+            Some("DEFERRABLE INITIALLY DEFERRED")
+        }
+        "deferrable initially immediate" | "initially immediate" => {
+            Some("DEFERRABLE INITIALLY IMMEDIATE")
+        }
+        _ => None,
+    }
+}
+
+fn encode_table_constraint(
+    constraint: &TableConstraint,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
     match constraint {
         TableConstraint::Unique(cols) => {
             buf.extend_from_slice(b"UNIQUE (");
@@ -606,6 +643,9 @@ fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
             columns,
             ref_table,
             ref_columns,
+            on_delete,
+            on_update,
+            deferrable,
         } => {
             if let Some(name) = name {
                 buf.extend_from_slice(b"CONSTRAINT ");
@@ -619,8 +659,36 @@ fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
             buf.extend_from_slice(b"(");
             push_joined_ident_list(buf, ref_columns);
             buf.extend_from_slice(b")");
+            if let Some(action) = on_delete {
+                let Some(action) = fk_action_option_to_sql(action) else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "invalid foreign key ON DELETE action".to_string(),
+                    ));
+                };
+                buf.extend_from_slice(b" ON DELETE ");
+                buf.extend_from_slice(action.as_bytes());
+            }
+            if let Some(action) = on_update {
+                let Some(action) = fk_action_option_to_sql(action) else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "invalid foreign key ON UPDATE action".to_string(),
+                    ));
+                };
+                buf.extend_from_slice(b" ON UPDATE ");
+                buf.extend_from_slice(action.as_bytes());
+            }
+            if let Some(deferrable) = deferrable {
+                let Some(deferrable) = fk_deferrable_option_to_sql(deferrable) else {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "invalid foreign key DEFERRABLE clause".to_string(),
+                    ));
+                };
+                buf.extend_from_slice(b" ");
+                buf.extend_from_slice(deferrable.as_bytes());
+            }
         }
     }
+    Ok(())
 }
 
 fn encode_column_check_constraint(
@@ -809,7 +877,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol
             buf.extend_from_slice(b", ");
         }
         first = false;
-        encode_table_constraint(tc, buf);
+        encode_table_constraint(tc, buf)?;
     }
 
     buf.extend_from_slice(b")");
@@ -988,7 +1056,7 @@ pub fn encode_alter_add_column(
         }
         first = false;
         buf.extend_from_slice(b"ADD ");
-        encode_table_constraint(constraint, buf);
+        encode_table_constraint(constraint, buf)?;
     }
 
     Ok(())
@@ -2005,6 +2073,33 @@ mod tests {
         assert!(
             sql.contains("UNIQUE"),
             "add-column SQL should preserve UNIQUE constraint, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn encode_alter_add_column_renders_composite_fk_options() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "trips".to_string(),
+            table_constraints: vec![TableConstraint::ForeignKey {
+                name: Some("fk_trips_schedule".to_string()),
+                columns: vec!["route_id".to_string(), "schedule_id".to_string()],
+                ref_table: "schedules".to_string(),
+                ref_columns: vec!["route_id".to_string(), "schedule_id".to_string()],
+                on_delete: Some("CASCADE".to_string()),
+                on_update: Some("RESTRICT".to_string()),
+                deferrable: Some("DEFERRABLE INITIALLY DEFERRED".to_string()),
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        encode_alter_add_column(&cmd, &mut buf).unwrap();
+
+        let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
+        assert!(
+            sql.contains("ADD CONSTRAINT fk_trips_schedule FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"),
+            "composite FK SQL should preserve options, got: {sql}"
         );
     }
 
