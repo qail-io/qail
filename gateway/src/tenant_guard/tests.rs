@@ -76,6 +76,7 @@ total integer
     GatewayState {
         pool,
         policy_engine: PolicyEngine::new(),
+        access_policy: None,
         event_engine: EventTriggerEngine::new(),
         schema,
         cache: QueryCache::new(config.cache_config()),

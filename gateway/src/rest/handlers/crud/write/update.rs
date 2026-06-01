@@ -137,7 +137,7 @@ pub(crate) async fn update_handler(
     // Always fetch the changed row internally. Without RETURNING, the current
     // mutation fetch path cannot distinguish a successful path update from a
     // zero-row match, and event triggers need the post-update row.
-    cmd = cmd.returning_all();
+    cmd = super::apply_table_returning(cmd, table);
 
     let mut old_cmd = if has_update_triggers {
         let mut old_cmd = qail_core::ast::Qail::get(&table_name)
@@ -166,8 +166,10 @@ pub(crate) async fn update_handler(
             .apply_policies(&auth, old_cmd)
             .map_err(|e| ApiError::forbidden(e.to_string()))?;
         state.optimize_qail_for_execution(old_cmd);
+        crate::access::check_access_policy(state.as_ref(), &auth, old_cmd)?;
     }
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers)?;
@@ -217,6 +219,12 @@ pub(crate) async fn update_handler(
                     return Err(ApiError::forbidden(e.to_string()));
                 }
                 state.optimize_qail_for_execution(&mut exists_cmd);
+                if let Err(e) =
+                    crate::access::check_access_policy(state.as_ref(), &auth, &exists_cmd)
+                {
+                    let _ = conn.rollback_and_release().await;
+                    return Err(e);
+                }
                 let rows = match conn.fetch_all_uncached(&exists_cmd).await {
                     Ok(rows) => rows,
                     Err(e) => {

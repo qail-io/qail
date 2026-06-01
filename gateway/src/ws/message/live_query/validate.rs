@@ -124,6 +124,14 @@ pub(super) async fn prepare_live_query(
 
     crate::handler::clamp_query_limit(&mut cmd, state.config.max_result_rows);
     state.optimize_qail_for_execution(&mut cmd);
+    if let Err(e) = crate::access::check_access_policy(state.as_ref(), auth, &cmd) {
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: e.message.clone(),
+            })
+            .await;
+        return None;
+    }
 
     let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);
     if let Err(_api_err) = state.complexity_guard.check(depth, filters, joins) {

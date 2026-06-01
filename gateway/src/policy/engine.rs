@@ -1,8 +1,8 @@
-use std::fs;
+use std::{collections::BTreeSet, fs};
 
 use qail_core::ast::{
-    Action, Cage, CageKind, Condition, ConflictAction, Expr, Join, JoinKind, LogicalOp,
-    MergeAction, MergeSource, Operator, Qail, Value,
+    Action, Cage, CageKind, Condition, ConflictAction, Expr, GroupByMode, Join, JoinKind,
+    LogicalOp, MergeAction, MergeSource, Operator, Qail, Value,
 };
 
 use crate::auth::AuthContext;
@@ -88,7 +88,10 @@ impl PolicyEngine {
     }
 
     fn projection_restricted_action(action: Action) -> bool {
-        matches!(action, Action::Get | Action::Export | Action::With)
+        matches!(
+            action,
+            Action::Get | Action::Export | Action::With | Action::Search | Action::Scroll
+        )
     }
 
     fn applicable_policies<'a>(
@@ -268,6 +271,71 @@ impl PolicyEngine {
             .unwrap_or(name)
             .trim_matches('"')
             .to_ascii_lowercase()
+    }
+
+    fn normalized_policy_ref_part(name: &str) -> String {
+        name.trim().trim_matches('"').to_ascii_lowercase()
+    }
+
+    fn target_column_refs(base_table: &str, base_qualifier: &str) -> BTreeSet<String> {
+        let mut refs = BTreeSet::new();
+        for value in [base_table, base_qualifier] {
+            let normalized = Self::normalized_policy_ref_part(value);
+            if !normalized.is_empty() {
+                if let Some(short_name) = normalized.rsplit('.').next()
+                    && short_name != normalized
+                {
+                    refs.insert(short_name.to_string());
+                }
+                refs.insert(normalized);
+            }
+        }
+        refs
+    }
+
+    fn target_column_refs_for_cmd(
+        cmd: &Qail,
+        base_table: &str,
+        base_qualifier: &str,
+    ) -> BTreeSet<String> {
+        let mut refs = Self::target_column_refs(base_table, base_qualifier);
+        if let Some(target_alias) = cmd
+            .merge
+            .as_ref()
+            .and_then(|merge| merge.target_alias.as_deref())
+        {
+            let normalized = Self::normalized_policy_ref_part(target_alias);
+            if !normalized.is_empty() {
+                refs.insert(normalized);
+            }
+        }
+        refs
+    }
+
+    fn parse_column_ref(name: &str) -> Option<(Option<String>, String)> {
+        let trimmed = name.trim();
+        if trimmed.is_empty()
+            || trimmed == "*"
+            || trimmed.ends_with(".*")
+            || trimmed.contains('(')
+            || trimmed.contains(')')
+            || trimmed.split_whitespace().count() != 1
+        {
+            return None;
+        }
+
+        let parts: Vec<String> = trimmed
+            .split('.')
+            .map(Self::normalized_policy_ref_part)
+            .filter(|part| !part.is_empty())
+            .collect();
+        let column = parts.last()?.clone();
+        let qualifier = (parts.len() > 1).then(|| parts[..parts.len() - 1].join("."));
+        Some((qualifier, column))
+    }
+
+    fn column_ref_matches_target(qualifier: Option<&str>, target_refs: &BTreeSet<String>) -> bool {
+        qualifier.is_none_or(|qualifier| target_refs.contains(qualifier))
     }
 
     fn projects_all_columns(expr: &Expr) -> bool {
@@ -656,6 +724,516 @@ impl PolicyEngine {
 
         let columns = Self::conflict_update_columns(cmd)?;
         Self::enforce_write_columns_for_policies(policies, &columns, OperationType::Update)
+    }
+
+    fn enforce_named_write_expr_ref_for_policies(
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+        name: &str,
+        operation: OperationType,
+        context: &'static str,
+    ) -> Result<(), GatewayError> {
+        let Some((qualifier, column)) = Self::parse_column_ref(name) else {
+            return Err(GatewayError::AccessDenied(format!(
+                "Policy column restrictions cannot inspect {} reference '{}'",
+                context, name
+            )));
+        };
+        if !Self::column_ref_matches_target(qualifier.as_deref(), target_refs) {
+            return Ok(());
+        }
+        Self::enforce_write_columns_for_policies(policies, &[column], operation)
+    }
+
+    fn enforce_condition_write_expr_refs_for_policies(
+        condition: &Condition,
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+        operation: OperationType,
+        context: &'static str,
+    ) -> Result<(), GatewayError> {
+        Self::enforce_expr_write_refs_for_policies(
+            &condition.left,
+            policies,
+            target_refs,
+            operation,
+            context,
+        )?;
+        Self::enforce_value_write_refs_for_policies(
+            &condition.value,
+            policies,
+            target_refs,
+            operation,
+            context,
+        )
+    }
+
+    fn enforce_expr_write_refs_for_policies(
+        expr: &Expr,
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+        operation: OperationType,
+        context: &'static str,
+    ) -> Result<(), GatewayError> {
+        match expr {
+            Expr::Named(name)
+            | Expr::Aliased { name, .. }
+            | Expr::JsonAccess { column: name, .. } => {
+                Self::enforce_named_write_expr_ref_for_policies(
+                    policies,
+                    target_refs,
+                    name,
+                    operation,
+                    context,
+                )
+            }
+            Expr::Aggregate { col, filter, .. } => {
+                if col != "*" {
+                    Self::enforce_named_write_expr_ref_for_policies(
+                        policies,
+                        target_refs,
+                        col,
+                        operation,
+                        context,
+                    )?;
+                }
+                if let Some(conditions) = filter {
+                    for condition in conditions {
+                        Self::enforce_condition_write_expr_refs_for_policies(
+                            condition,
+                            policies,
+                            target_refs,
+                            operation,
+                            context,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Cast { expr, .. }
+            | Expr::Mod { col: expr, .. }
+            | Expr::FieldAccess { expr, .. }
+            | Expr::Collate { expr, .. } => Self::enforce_expr_write_refs_for_policies(
+                expr,
+                policies,
+                target_refs,
+                operation,
+                context,
+            ),
+            Expr::Subscript { expr, index, .. } => {
+                Self::enforce_expr_write_refs_for_policies(
+                    expr,
+                    policies,
+                    target_refs,
+                    operation,
+                    context,
+                )?;
+                Self::enforce_expr_write_refs_for_policies(
+                    index,
+                    policies,
+                    target_refs,
+                    operation,
+                    context,
+                )
+            }
+            Expr::FunctionCall { args, .. } => {
+                for arg in args {
+                    Self::enforce_expr_write_refs_for_policies(
+                        arg,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                Ok(())
+            }
+            Expr::SpecialFunction { args, .. } => {
+                for (_, arg) in args {
+                    Self::enforce_expr_write_refs_for_policies(
+                        arg,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                Ok(())
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::enforce_expr_write_refs_for_policies(
+                    left,
+                    policies,
+                    target_refs,
+                    operation,
+                    context,
+                )?;
+                Self::enforce_expr_write_refs_for_policies(
+                    right,
+                    policies,
+                    target_refs,
+                    operation,
+                    context,
+                )
+            }
+            Expr::Literal(value) => Self::enforce_value_write_refs_for_policies(
+                value,
+                policies,
+                target_refs,
+                operation,
+                context,
+            ),
+            Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+                for element in elements {
+                    Self::enforce_expr_write_refs_for_policies(
+                        element,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                Ok(())
+            }
+            Expr::Case {
+                when_clauses,
+                else_value,
+                ..
+            } => {
+                for (condition, value) in when_clauses {
+                    Self::enforce_condition_write_expr_refs_for_policies(
+                        condition,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                    Self::enforce_expr_write_refs_for_policies(
+                        value,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                if let Some(value) = else_value {
+                    Self::enforce_expr_write_refs_for_policies(
+                        value,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                Ok(())
+            }
+            Expr::Window {
+                params,
+                partition,
+                order,
+                ..
+            } => {
+                for param in params {
+                    Self::enforce_expr_write_refs_for_policies(
+                        param,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                for column in partition {
+                    Self::enforce_named_write_expr_ref_for_policies(
+                        policies,
+                        target_refs,
+                        column,
+                        operation,
+                        context,
+                    )?;
+                }
+                for cage in order {
+                    for condition in &cage.conditions {
+                        Self::enforce_condition_write_expr_refs_for_policies(
+                            condition,
+                            policies,
+                            target_refs,
+                            operation,
+                            context,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Subquery { .. } | Expr::Exists { .. } | Expr::Star | Expr::Def { .. } => Ok(()),
+        }
+    }
+
+    fn enforce_value_write_refs_for_policies(
+        value: &Value,
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+        operation: OperationType,
+        context: &'static str,
+    ) -> Result<(), GatewayError> {
+        match value {
+            Value::Column(name) => Self::enforce_named_write_expr_ref_for_policies(
+                policies,
+                target_refs,
+                name,
+                operation,
+                context,
+            ),
+            Value::Expr(expr) => Self::enforce_expr_write_refs_for_policies(
+                expr,
+                policies,
+                target_refs,
+                operation,
+                context,
+            ),
+            Value::Array(values) => {
+                for value in values {
+                    Self::enforce_value_write_refs_for_policies(
+                        value,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                Ok(())
+            }
+            Value::Function(_) => Err(GatewayError::AccessDenied(format!(
+                "Policy column restrictions cannot inspect {} raw function value",
+                context
+            ))),
+            Value::Subquery(_) => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn enforce_payload_value_write_expr_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+        operation: OperationType,
+    ) -> Result<(), GatewayError> {
+        for cage in &cmd.cages {
+            if !matches!(cage.kind, CageKind::Payload) {
+                continue;
+            }
+            for condition in &cage.conditions {
+                Self::enforce_value_write_refs_for_policies(
+                    &condition.value,
+                    policies,
+                    target_refs,
+                    operation,
+                    "write payload value",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn enforce_conflict_update_expr_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+    ) -> Result<(), GatewayError> {
+        let Some(on_conflict) = cmd.on_conflict.as_ref() else {
+            return Ok(());
+        };
+        let ConflictAction::DoUpdate { assignments } = &on_conflict.action else {
+            return Ok(());
+        };
+        for (_, expr) in assignments {
+            Self::enforce_expr_write_refs_for_policies(
+                expr,
+                policies,
+                target_refs,
+                OperationType::Update,
+                "conflict update expression",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn enforce_merge_expr_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        target_refs: &BTreeSet<String>,
+        operation: OperationType,
+    ) -> Result<(), GatewayError> {
+        let Some(merge) = cmd.merge.as_ref() else {
+            return Ok(());
+        };
+        for clause in &merge.clauses {
+            match (&clause.action, operation) {
+                (MergeAction::Update { assignments }, OperationType::Update) => {
+                    for (_, expr) in assignments {
+                        Self::enforce_expr_write_refs_for_policies(
+                            expr,
+                            policies,
+                            target_refs,
+                            operation,
+                            "merge update expression",
+                        )?;
+                    }
+                }
+                (MergeAction::Insert { values, .. }, OperationType::Create) => {
+                    for expr in values {
+                        Self::enforce_expr_write_refs_for_policies(
+                            expr,
+                            policies,
+                            target_refs,
+                            operation,
+                            "merge insert expression",
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn enforce_write_expression_column_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        operation: OperationType,
+        base_table: &str,
+        base_qualifier: &str,
+    ) -> Result<(), GatewayError> {
+        if !policies
+            .iter()
+            .any(|policy| Self::policy_restricts_columns(policy))
+        {
+            return Ok(());
+        }
+
+        let target_refs = Self::target_column_refs_for_cmd(cmd, base_table, base_qualifier);
+        match cmd.action {
+            Action::Add if operation == OperationType::Create && cmd.source_query.is_none() => {
+                Self::enforce_payload_value_write_expr_policies(
+                    cmd,
+                    policies,
+                    &target_refs,
+                    operation,
+                )
+            }
+            Action::Add if operation == OperationType::Update => {
+                Self::enforce_conflict_update_expr_policies(cmd, policies, &target_refs)
+            }
+            Action::Upsert
+                if matches!(operation, OperationType::Create | OperationType::Update) =>
+            {
+                Self::enforce_payload_value_write_expr_policies(
+                    cmd,
+                    policies,
+                    &target_refs,
+                    operation,
+                )
+            }
+            Action::Set | Action::Put | Action::Over if operation == OperationType::Update => {
+                Self::enforce_payload_value_write_expr_policies(
+                    cmd,
+                    policies,
+                    &target_refs,
+                    operation,
+                )
+            }
+            Action::Merge => {
+                Self::enforce_merge_expr_policies(cmd, policies, &target_refs, operation)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn enforce_read_expression_column_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        base_table: &str,
+        base_qualifier: &str,
+    ) -> Result<(), GatewayError> {
+        if !policies
+            .iter()
+            .any(|policy| Self::policy_restricts_columns(policy))
+        {
+            return Ok(());
+        }
+
+        let target_refs = Self::target_column_refs_for_cmd(cmd, base_table, base_qualifier);
+        for expr in &cmd.distinct_on {
+            if Self::projects_all_columns(expr) {
+                return Err(GatewayError::AccessDenied(
+                    "Policy column restrictions cannot inspect DISTINCT ON wildcard".to_string(),
+                ));
+            }
+            Self::enforce_expr_write_refs_for_policies(
+                expr,
+                policies,
+                &target_refs,
+                OperationType::Read,
+                "read distinct expression",
+            )?;
+        }
+
+        if let GroupByMode::GroupingSets(sets) = &cmd.group_by_mode {
+            for group in sets {
+                for column in group {
+                    Self::enforce_named_write_expr_ref_for_policies(
+                        policies,
+                        &target_refs,
+                        column,
+                        OperationType::Read,
+                        "read grouping set",
+                    )?;
+                }
+            }
+        }
+
+        for cage in &cmd.cages {
+            if matches!(
+                cage.kind,
+                CageKind::Payload | CageKind::Limit(_) | CageKind::Offset(_) | CageKind::Sample(_)
+            ) {
+                continue;
+            }
+            for condition in &cage.conditions {
+                Self::enforce_condition_write_expr_refs_for_policies(
+                    condition,
+                    policies,
+                    &target_refs,
+                    OperationType::Read,
+                    "read condition",
+                )?;
+            }
+        }
+
+        for condition in &cmd.having {
+            Self::enforce_condition_write_expr_refs_for_policies(
+                condition,
+                policies,
+                &target_refs,
+                OperationType::Read,
+                "read having condition",
+            )?;
+        }
+
+        for join in &cmd.joins {
+            if let Some(conditions) = &join.on {
+                for condition in conditions {
+                    Self::enforce_condition_write_expr_refs_for_policies(
+                        condition,
+                        policies,
+                        &target_refs,
+                        OperationType::Read,
+                        "read join condition",
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn create_policy_column(condition: &Condition) -> Result<String, GatewayError> {
@@ -1164,24 +1742,65 @@ impl PolicyEngine {
             !cmd.joins.is_empty(),
         )?;
 
+        if required_ops.contains(&OperationType::Read) {
+            Self::enforce_read_expression_column_policies(
+                cmd,
+                &applicable_policies,
+                &base_table,
+                &base_qualifier,
+            )?;
+        }
+
         if cmd.action == Action::Merge {
             self.enforce_merge_policy_filters(auth, &base_table, &required_ops)?;
             for required_op in &required_ops {
                 let policies = self.applicable_policies(auth, &base_table, *required_op)?;
                 Self::enforce_merge_column_policies(cmd, &policies, *required_op)?;
+                Self::enforce_write_expression_column_policies(
+                    cmd,
+                    &policies,
+                    *required_op,
+                    &base_table,
+                    &base_qualifier,
+                )?;
+                Self::enforce_returning_column_policies(cmd, &policies)?;
             }
         } else if cmd.action == Action::Upsert {
             let create_policies =
                 self.applicable_policies(auth, &base_table, OperationType::Create)?;
             Self::enforce_write_column_policies(cmd, &create_policies, OperationType::Create)?;
+            Self::enforce_write_expression_column_policies(
+                cmd,
+                &create_policies,
+                OperationType::Create,
+                &base_table,
+                &base_qualifier,
+            )?;
+            Self::enforce_returning_column_policies(cmd, &create_policies)?;
             let update_policies =
                 self.applicable_policies(auth, &base_table, OperationType::Update)?;
             Self::enforce_write_column_policies(cmd, &update_policies, OperationType::Update)?;
+            Self::enforce_write_expression_column_policies(
+                cmd,
+                &update_policies,
+                OperationType::Update,
+                &base_table,
+                &base_qualifier,
+            )?;
+            Self::enforce_returning_column_policies(cmd, &update_policies)?;
         } else if matches!(
             cmd.action,
             Action::Add | Action::Set | Action::Put | Action::Over
         ) {
             Self::enforce_write_column_policies(cmd, &applicable_policies, op)?;
+            Self::enforce_write_expression_column_policies(
+                cmd,
+                &applicable_policies,
+                op,
+                &base_table,
+                &base_qualifier,
+            )?;
+            Self::enforce_returning_column_policies(cmd, &applicable_policies)?;
         }
 
         if cmd.action == Action::Add && !has_unrestricted_policy {
@@ -1213,6 +1832,14 @@ impl PolicyEngine {
             let update_policies =
                 self.applicable_policies(auth, &base_table, OperationType::Update)?;
             Self::enforce_conflict_update_column_policies(cmd, &update_policies)?;
+            Self::enforce_write_expression_column_policies(
+                cmd,
+                &update_policies,
+                OperationType::Update,
+                &base_table,
+                &base_qualifier,
+            )?;
+            Self::enforce_returning_column_policies(cmd, &update_policies)?;
             let (update_filters, update_unrestricted) = self.policy_filters_for(
                 auth,
                 &update_policies,
@@ -1477,16 +2104,13 @@ impl PolicyEngine {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
     }
 
-    /// Apply column whitelist: replace SELECT columns with only the allowed set.
-    /// Fails closed when projection expressions prevent deterministic enforcement.
-    fn apply_column_whitelist(
-        &self,
-        cmd: &mut Qail,
+    fn apply_column_whitelist_to_projection(
+        columns: &mut Vec<Expr>,
         allowed: &[String],
+        context: &'static str,
     ) -> Result<(), GatewayError> {
-        if Self::is_star_projection(&cmd.columns) {
-            // SELECT * → restrict to allowed columns
-            cmd.columns = allowed.iter().map(|c| Expr::Named(c.clone())).collect();
+        if Self::is_star_projection(columns) {
+            *columns = allowed.iter().map(|c| Expr::Named(c.clone())).collect();
             return Ok(());
         }
 
@@ -1494,18 +2118,18 @@ impl PolicyEngine {
             .iter()
             .map(|column| Self::normalized_policy_column(column))
             .collect();
-        let mut filtered = Vec::with_capacity(cmd.columns.len());
-        for expr in &cmd.columns {
+        let mut filtered = Vec::with_capacity(columns.len());
+        for expr in columns.iter() {
             let name = Self::projection_column_name(expr).ok_or_else(|| {
-                GatewayError::AccessDenied(
-                    "Policy column whitelist cannot be enforced on expression projections"
-                        .to_string(),
-                )
+                GatewayError::AccessDenied(format!(
+                    "Policy column whitelist cannot be enforced on {} expression projections",
+                    context
+                ))
             })?;
             if !Self::is_safe_policy_column_name(name) {
                 return Err(GatewayError::AccessDenied(format!(
-                    "Policy column whitelist rejected unsupported projection '{}'",
-                    name
+                    "Policy column whitelist rejected unsupported {} projection '{}'",
+                    context, name
                 )));
             }
             let normalized_name = Self::normalized_policy_column(name);
@@ -1515,45 +2139,44 @@ impl PolicyEngine {
         }
 
         if filtered.is_empty() {
-            return Err(GatewayError::AccessDenied(
-                "No selected columns are allowed by policy".to_string(),
-            ));
+            return Err(GatewayError::AccessDenied(format!(
+                "No {} columns are allowed by policy",
+                context
+            )));
         }
 
-        cmd.columns = filtered;
+        *columns = filtered;
         Ok(())
     }
 
-    /// Apply column blacklist: remove denied columns from SELECT.
-    /// Fails closed for wildcard/expression projections.
-    fn apply_column_blacklist(
-        &self,
-        cmd: &mut Qail,
+    fn apply_column_blacklist_to_projection(
+        columns: &mut Vec<Expr>,
         denied: &[String],
+        context: &'static str,
     ) -> Result<(), GatewayError> {
-        if Self::is_star_projection(&cmd.columns) {
-            return Err(GatewayError::AccessDenied(
-                "Policy denied_columns cannot be enforced on wildcard projection; select explicit columns"
-                    .to_string(),
-            ));
+        if Self::is_star_projection(columns) {
+            return Err(GatewayError::AccessDenied(format!(
+                "Policy denied_columns cannot be enforced on wildcard projection in {} columns; select explicit columns",
+                context
+            )));
         }
 
         let denied: std::collections::HashSet<String> = denied
             .iter()
             .map(|column| Self::normalized_policy_column(column))
             .collect();
-        let mut filtered = Vec::with_capacity(cmd.columns.len());
-        for expr in &cmd.columns {
+        let mut filtered = Vec::with_capacity(columns.len());
+        for expr in columns.iter() {
             let name = Self::projection_column_name(expr).ok_or_else(|| {
-                GatewayError::AccessDenied(
-                    "Policy denied_columns cannot be enforced on expression projections"
-                        .to_string(),
-                )
+                GatewayError::AccessDenied(format!(
+                    "Policy denied_columns cannot be enforced on {} expression projections",
+                    context
+                ))
             })?;
             if !Self::is_safe_policy_column_name(name) {
                 return Err(GatewayError::AccessDenied(format!(
-                    "Policy denied_columns rejected unsupported projection '{}'",
-                    name
+                    "Policy denied_columns rejected unsupported {} projection '{}'",
+                    context, name
                 )));
             }
             let normalized_name = Self::normalized_policy_column(name);
@@ -1563,13 +2186,64 @@ impl PolicyEngine {
         }
 
         if filtered.is_empty() {
-            return Err(GatewayError::AccessDenied(
-                "All selected columns are denied by policy".to_string(),
-            ));
+            return Err(GatewayError::AccessDenied(format!(
+                "All {} columns are denied by policy",
+                context
+            )));
         }
 
-        cmd.columns = filtered;
+        *columns = filtered;
         Ok(())
+    }
+
+    fn enforce_returning_column_policies(
+        cmd: &mut Qail,
+        policies: &[&PolicyDef],
+    ) -> Result<(), GatewayError> {
+        let Some(returning) = &mut cmd.returning else {
+            return Ok(());
+        };
+
+        for policy in policies {
+            if !Self::policy_restricts_columns(policy) {
+                continue;
+            }
+            if !policy.allowed_columns.is_empty() {
+                Self::apply_column_whitelist_to_projection(
+                    returning,
+                    &policy.allowed_columns,
+                    "returning",
+                )?;
+            }
+            if !policy.denied_columns.is_empty() {
+                Self::apply_column_blacklist_to_projection(
+                    returning,
+                    &policy.denied_columns,
+                    "returning",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply column whitelist: replace SELECT columns with only the allowed set.
+    /// Fails closed when projection expressions prevent deterministic enforcement.
+    fn apply_column_whitelist(
+        &self,
+        cmd: &mut Qail,
+        allowed: &[String],
+    ) -> Result<(), GatewayError> {
+        Self::apply_column_whitelist_to_projection(&mut cmd.columns, allowed, "selected")
+    }
+
+    /// Apply column blacklist: remove denied columns from SELECT.
+    /// Fails closed for wildcard/expression projections.
+    fn apply_column_blacklist(
+        &self,
+        cmd: &mut Qail,
+        denied: &[String],
+    ) -> Result<(), GatewayError> {
+        Self::apply_column_blacklist_to_projection(&mut cmd.columns, denied, "selected")
     }
 
     /// Check if any policy denies access (before filter injection).

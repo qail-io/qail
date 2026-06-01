@@ -313,6 +313,7 @@ impl ApiError {
             | "INVALID_SCORE_THRESHOLD"
             | "INVALID_QDRANT_FILTER"
             | "INVALID_QDRANT_PAYLOAD"
+            | "INVALID_QDRANT_PROJECTION"
             | "EXPORT_ONLY"
             | "AST_VALIDATION_FAILED" => StatusCode::BAD_REQUEST,
             "PAYLOAD_TOO_LARGE" | "BATCH_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,

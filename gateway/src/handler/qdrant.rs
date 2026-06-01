@@ -5,7 +5,7 @@
 
 use axum::response::Json;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{QueryResponse, ResponseMetadata};
@@ -54,6 +54,11 @@ pub(super) async fn execute_qdrant_cmd(
 
     // Extract limit from CageKind::Limit if present
     let limit_val = qdrant_limit_from_cmd(&cmd, state.config.max_result_rows)?;
+    let response_projection = if matches!(cmd.action, Action::Search | Action::Scroll) {
+        qdrant_response_projection_from_cmd(&cmd)?
+    } else {
+        None
+    };
 
     match cmd.action {
         Action::Search => {
@@ -69,7 +74,7 @@ pub(super) async fn execute_qdrant_cmd(
                 limit: limit_val,
                 score_threshold: cmd.score_threshold,
                 vector_name: cmd.vector_name.as_deref(),
-                with_vectors: cmd.with_vector,
+                with_vectors: qdrant_should_request_vectors(&cmd, response_projection.as_ref()),
             };
             let results = if must_conditions.is_empty() && should_groups.is_empty() {
                 conn.search_with_request(search_request)
@@ -81,16 +86,16 @@ pub(super) async fn execute_qdrant_cmd(
                     .map_err(|e| qdrant_err(e, "search"))?
             };
 
-            let rows: Vec<serde_json::Value> = results.iter().map(scored_point_to_json).collect();
             if let Some(tenant_id) = auth.tenant_id.as_deref() {
-                verify_qdrant_tenant_boundary(
-                    &rows,
+                verify_qdrant_points_tenant_boundary(
+                    &results,
                     tenant_id,
                     &tenant_col,
                     collection,
                     "qdrant_search",
                 )?;
             }
+            let rows = qdrant_points_to_json(&results, response_projection.as_ref());
             let count = rows.len();
 
             Ok(Json(QueryResponse {
@@ -108,7 +113,7 @@ pub(super) async fn execute_qdrant_cmd(
                     collection,
                     scroll_limit,
                     scroll_offset.as_ref(),
-                    cmd.with_vector,
+                    qdrant_should_request_vectors(&cmd, response_projection.as_ref()),
                 )
                 .await
                 .map_err(|e| qdrant_err(e, "scroll"))?
@@ -117,7 +122,7 @@ pub(super) async fn execute_qdrant_cmd(
                     collection,
                     scroll_limit,
                     scroll_offset.as_ref(),
-                    cmd.with_vector,
+                    qdrant_should_request_vectors(&cmd, response_projection.as_ref()),
                     &must_conditions,
                     &should_groups,
                 )
@@ -125,17 +130,16 @@ pub(super) async fn execute_qdrant_cmd(
                 .map_err(|e| qdrant_err(e, "scroll"))?
             };
 
-            let rows: Vec<serde_json::Value> =
-                result.points.iter().map(scored_point_to_json).collect();
             if let Some(tenant_id) = auth.tenant_id.as_deref() {
-                verify_qdrant_tenant_boundary(
-                    &rows,
+                verify_qdrant_points_tenant_boundary(
+                    &result.points,
                     tenant_id,
                     &tenant_col,
                     collection,
                     "qdrant_scroll",
                 )?;
             }
+            let rows = qdrant_points_to_json(&result.points, response_projection.as_ref());
             let count = rows.len();
 
             Ok(Json(QueryResponse {
@@ -343,19 +347,93 @@ fn inject_qdrant_tenant_scope(cmd: &mut qail_core::ast::Qail, tenant_col: &str, 
     }
 }
 
-fn verify_qdrant_tenant_boundary(
-    rows: &[serde_json::Value],
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QdrantResponseProjection {
+    fields: HashSet<String>,
+}
+
+impl QdrantResponseProjection {
+    fn contains(&self, field: &str) -> bool {
+        self.fields
+            .contains(&normalize_qdrant_projection_name(field))
+    }
+}
+
+fn normalize_qdrant_projection_name(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .rsplit('.')
+        .next()
+        .unwrap_or(raw)
+        .trim_matches('"')
+        .to_ascii_lowercase()
+}
+
+fn qdrant_response_projection_from_cmd(
+    cmd: &qail_core::ast::Qail,
+) -> Result<Option<QdrantResponseProjection>, ApiError> {
+    use qail_core::ast::Expr;
+
+    if cmd.columns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut fields = HashSet::new();
+    let mut has_wildcard = false;
+    for expr in &cmd.columns {
+        let name = match expr {
+            Expr::Named(name) | Expr::Aliased { name, .. } => name,
+            other => {
+                return Err(ApiError::bad_request(
+                    "INVALID_QDRANT_PROJECTION",
+                    format!("Qdrant projections require named payload fields, got {other:?}"),
+                ));
+            }
+        };
+        let trimmed = name.trim().trim_matches('"');
+        if trimmed == "*" || trimmed.ends_with(".*") {
+            has_wildcard = true;
+            continue;
+        }
+        let normalized = normalize_qdrant_projection_name(name);
+        if normalized.is_empty() {
+            return Err(ApiError::bad_request(
+                "INVALID_QDRANT_PROJECTION",
+                "Qdrant projection field cannot be empty",
+            ));
+        }
+        fields.insert(normalized);
+    }
+
+    if has_wildcard && !fields.is_empty() {
+        return Err(ApiError::bad_request(
+            "INVALID_QDRANT_PROJECTION",
+            "Qdrant wildcard projection cannot be mixed with named payload fields",
+        ));
+    }
+    if has_wildcard {
+        return Ok(None);
+    }
+
+    Ok(Some(QdrantResponseProjection { fields }))
+}
+
+fn qdrant_should_request_vectors(
+    cmd: &qail_core::ast::Qail,
+    projection: Option<&QdrantResponseProjection>,
+) -> bool {
+    cmd.with_vector && projection.is_none_or(|projection| projection.contains("vector"))
+}
+
+fn verify_qdrant_points_tenant_boundary(
+    points: &[qail_qdrant::ScoredPoint],
     expected_tenant_id: &str,
     tenant_col: &str,
     collection: &str,
     endpoint: &str,
 ) -> Result<(), ApiError> {
-    for (idx, row) in rows.iter().enumerate() {
-        let value = row
-            .get("payload")
-            .and_then(|payload| payload.get(tenant_col))
-            .or_else(|| row.get(tenant_col));
-        let Some(value) = value else {
+    for (idx, point) in points.iter().enumerate() {
+        let Some(value) = point.payload.get(tenant_col) else {
             tracing::error!(
                 collection = %collection,
                 endpoint = %endpoint,
@@ -368,14 +446,15 @@ fn verify_qdrant_tenant_boundary(
                 "Data integrity error",
             ));
         };
-        if value.as_str() != Some(expected_tenant_id) {
+        if !matches!(value, qail_qdrant::PayloadValue::String(actual) if actual == expected_tenant_id)
+        {
             tracing::error!(
                 collection = %collection,
                 endpoint = %endpoint,
                 row = idx,
                 tenant_col = %tenant_col,
                 expected = %expected_tenant_id,
-                actual = %value,
+                actual = ?value,
                 "TENANT_BOUNDARY_VIOLATION - Qdrant tenant payload mismatch"
             );
             return Err(ApiError::with_code(
@@ -1397,13 +1476,35 @@ fn qdrant_err(e: qail_qdrant::QdrantError, op: &str) -> ApiError {
 
 /// Convert a `ScoredPoint` to a JSON value for the response.
 fn scored_point_to_json(pt: &qail_qdrant::ScoredPoint) -> serde_json::Value {
+    scored_point_to_json_projected(pt, None)
+}
+
+fn qdrant_points_to_json(
+    points: &[qail_qdrant::ScoredPoint],
+    projection: Option<&QdrantResponseProjection>,
+) -> Vec<serde_json::Value> {
+    points
+        .iter()
+        .map(|point| match projection {
+            Some(projection) => scored_point_to_json_projected(point, Some(projection)),
+            None => scored_point_to_json(point),
+        })
+        .collect()
+}
+
+fn scored_point_to_json_projected(
+    pt: &qail_qdrant::ScoredPoint,
+    projection: Option<&QdrantResponseProjection>,
+) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     let response_id = pt
         .payload
         .get(ORIGINAL_POINT_ID_PAYLOAD_KEY)
         .map(payload_value_to_json)
-        .unwrap_or_else(|| serde_json::json!(pt.id));
-    obj.insert("id".to_string(), response_id);
+        .unwrap_or_else(|| qdrant_point_id_to_json(&pt.id));
+    if projection.is_none_or(|projection| projection.contains("id")) {
+        obj.insert("id".to_string(), response_id);
+    }
     obj.insert("score".to_string(), serde_json::json!(pt.score));
 
     if !pt.payload.is_empty() {
@@ -1411,6 +1512,7 @@ fn scored_point_to_json(pt: &qail_qdrant::ScoredPoint) -> serde_json::Value {
             .payload
             .iter()
             .filter(|(k, _)| k.as_str() != ORIGINAL_POINT_ID_PAYLOAD_KEY)
+            .filter(|(k, _)| projection.is_none_or(|projection| projection.contains(k)))
             .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
             .collect();
         if !payload.is_empty() {
@@ -1418,7 +1520,9 @@ fn scored_point_to_json(pt: &qail_qdrant::ScoredPoint) -> serde_json::Value {
         }
     }
 
-    if let Some(vector) = &pt.vector {
+    if let Some(vector) = &pt.vector
+        && projection.is_none_or(|projection| projection.contains("vector"))
+    {
         obj.insert("vector".to_string(), serde_json::json!(vector));
     }
 
@@ -1456,8 +1560,9 @@ mod tests {
         extract_upsert_point_with_filter_fallback, inject_qdrant_tenant_scope,
         prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
         qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
-        qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd,
-        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
+        qdrant_response_projection_from_cmd, qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata,
+        qdrant_scroll_offset_from_cmd, qdrant_should_request_vectors, qdrant_upsert_filter_cages,
+        scored_point_to_json, scored_point_to_json_projected, split_filter_conditions,
         tenant_scoped_qdrant_point_id, validate_qdrant_read_filters,
         verify_existing_qdrant_points_tenant_boundary,
     };
@@ -1529,6 +1634,82 @@ mod tests {
             let actual = actual.as_f64().expect("numeric vector component");
             assert!((actual - expected).abs() < 0.000_001);
         }
+    }
+
+    #[test]
+    fn scored_point_projection_hides_unselected_payload_and_vector() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "title".to_string(),
+            qail_qdrant::PayloadValue::String("Visible".to_string()),
+        );
+        payload.insert(
+            "secret".to_string(),
+            qail_qdrant::PayloadValue::String("hidden".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: Some(vec![0.1, 0.2, 0.3]),
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .with_vectors()
+            .columns(["id", "title"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("projection should parse")
+            .expect("projection should be explicit");
+
+        assert!(!qdrant_should_request_vectors(&cmd, Some(&projection)));
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        assert_eq!(json.get("id"), Some(&serde_json::json!(7)));
+        assert!(json.get("vector").is_none());
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(payload.get("title"), Some(&serde_json::json!("Visible")));
+        assert!(!payload.contains_key("secret"));
+    }
+
+    #[test]
+    fn scored_point_projection_allows_requested_vector() {
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload: qail_qdrant::Payload::new(),
+            vector: Some(vec![0.1, 0.2, 0.3]),
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .with_vectors()
+            .columns(["id", "vector"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("projection should parse")
+            .expect("projection should be explicit");
+
+        assert!(qdrant_should_request_vectors(&cmd, Some(&projection)));
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+        assert!(json.get("vector").is_some());
+    }
+
+    #[test]
+    fn qdrant_projection_rejects_expression_columns() {
+        let mut cmd = Qail::search("embeddings").vector(vec![0.1, 0.2]);
+        cmd.columns = vec![Expr::FunctionCall {
+            name: "lower".to_string(),
+            args: vec![Expr::Named("title".to_string())],
+            alias: Some("title".to_string()),
+        }];
+
+        let err = qdrant_response_projection_from_cmd(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PROJECTION");
     }
 
     #[test]

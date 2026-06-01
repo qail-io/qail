@@ -64,6 +64,8 @@ pub struct GatewayState {
     pub pool: PgPool,
     /// Row-level security policy engine.
     pub policy_engine: PolicyEngine,
+    /// Native vertical access policy.
+    pub access_policy: Option<Arc<qail_core::access::AccessPolicy>>,
     /// Webhook event trigger engine.
     pub event_engine: EventTriggerEngine,
     /// Loaded table schema registry.

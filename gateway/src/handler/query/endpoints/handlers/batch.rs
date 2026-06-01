@@ -195,6 +195,20 @@ pub async fn execute_batch(
         }
 
         state.optimize_qail_for_execution(&mut cmd);
+        if let Err(e) = crate::access::check_access_policy(state.as_ref(), &auth, &cmd) {
+            results.push(BatchQueryResult {
+                index,
+                success: false,
+                rows: None,
+                count: None,
+                error: Some(e.message.clone()),
+            });
+            if request.transaction {
+                had_error = true;
+                break;
+            }
+            continue;
+        }
 
         let (depth, filters, joins) = query_complexity(&cmd);
         if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {

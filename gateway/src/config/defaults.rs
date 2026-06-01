@@ -139,6 +139,7 @@ impl Default for GatewayConfig {
             database_url: "postgres://localhost/qail".to_string(),
             schema_path: None,
             policy_path: None,
+            access_policy_path: None,
             bind_address: "0.0.0.0:8080".to_string(),
             cors_enabled: true,
             cors_allowed_origins: Vec::new(),

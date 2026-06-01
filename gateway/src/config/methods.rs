@@ -134,6 +134,11 @@ impl GatewayConfig {
             database_url: qail.postgres.url.clone(),
             schema_path: qail.project.schema.clone(),
             policy_path,
+            access_policy_path: qail
+                .access
+                .as_ref()
+                .filter(|access| access.enabled)
+                .and_then(|access| access.path.clone()),
             bind_address,
             cors_enabled,
             cors_allowed_origins: qail
@@ -259,5 +264,38 @@ rpc_allowlist_path = "rpc.allow"
 
         assert!(cfg.rpc_require_schema_qualified);
         assert!(cfg.rpc_signature_check);
+    }
+
+    #[test]
+    fn from_qail_config_maps_enabled_access_policy_path() {
+        let qail = qail_core::config::QailConfig {
+            access: Some(qail_core::config::AccessPolicyConfig {
+                enabled: true,
+                path: Some("access-policy.toml".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let cfg = GatewayConfig::from_qail_config(&qail);
+
+        assert_eq!(
+            cfg.access_policy_path.as_deref(),
+            Some("access-policy.toml")
+        );
+    }
+
+    #[test]
+    fn from_qail_config_ignores_disabled_access_policy_path() {
+        let qail = qail_core::config::QailConfig {
+            access: Some(qail_core::config::AccessPolicyConfig {
+                enabled: false,
+                path: Some("access-policy.toml".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let cfg = GatewayConfig::from_qail_config(&qail);
+
+        assert!(cfg.access_policy_path.is_none());
     }
 }

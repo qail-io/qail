@@ -96,6 +96,10 @@ pub async fn expand_nested(
             conn.release().await;
             return Err(ApiError::forbidden(e.to_string()));
         }
+        if let Err(e) = crate::access::check_access_policy(state.as_ref(), auth, &cmd) {
+            conn.release().await;
+            return Err(e);
+        }
 
         let rows = match conn.fetch_all_uncached(&cmd).await {
             Ok(r) => r,

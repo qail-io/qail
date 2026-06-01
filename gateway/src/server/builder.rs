@@ -39,6 +39,12 @@ impl GatewayBuilder {
         self
     }
 
+    /// Set the native access policy path
+    pub fn access_policy(mut self, path: impl Into<String>) -> Self {
+        self.config.access_policy_path = Some(path.into());
+        self
+    }
+
     /// Set the bind address
     pub fn bind(mut self, addr: impl Into<String>) -> Self {
         self.config.bind_address = addr.into();

@@ -635,6 +635,7 @@ pub(crate) async fn list_handler(
     }
 
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     // Build cache key from full URI + user identity
     let is_streaming = params.stream.unwrap_or(false);

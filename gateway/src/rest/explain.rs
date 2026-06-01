@@ -196,6 +196,7 @@ pub(crate) async fn explain_handler(
     if has_joins {
         crate::rest::filters::qualify_base_filter_columns_for_join(&mut cmd, &table_name);
     }
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     // ── Query Complexity Guard ───────────────────────────────────────
     let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);

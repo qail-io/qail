@@ -550,11 +550,11 @@ pub(crate) async fn create_handler(
             mutation_params.returning.as_deref(),
             has_create_triggers || classify_upsert_event,
         ) {
-            cmd = apply_returning(cmd, Some("*")).map_err(ApiError::parse_error)?;
+            cmd = super::apply_table_returning(cmd, table);
         } else if mutation_params.returning.is_none() {
             cmd = apply_create_probe_returning(cmd, table);
         } else {
-            cmd = apply_returning(cmd, mutation_params.returning.as_deref())
+            cmd = super::apply_mutation_returning(cmd, table, mutation_params.returning.as_deref())
                 .map_err(ApiError::parse_error)?;
         }
 
@@ -588,8 +588,16 @@ pub(crate) async fn create_handler(
                 return Err(ApiError::forbidden(e.to_string()));
             }
             state.optimize_qail_for_execution(old_cmd);
+            if let Err(e) = crate::access::check_access_policy(state.as_ref(), &auth, old_cmd) {
+                let _ = conn.rollback_and_release().await;
+                return Err(e);
+            }
         }
         state.optimize_qail_for_execution(&mut cmd);
+        if let Err(e) = crate::access::check_access_policy(state.as_ref(), &auth, &cmd) {
+            let _ = conn.rollback_and_release().await;
+            return Err(e);
+        }
         let zero_row_disposition = zero_row_conflict_disposition(&cmd);
 
         let old_data = if let Some(ref old_cmd) = old_cmd {

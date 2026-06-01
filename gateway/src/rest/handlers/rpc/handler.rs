@@ -162,6 +162,7 @@ pub(crate) async fn rpc_handler(
         .policy_engine
         .apply_policies(&auth, &mut policy_probe)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    crate::access::check_access_policy(state.as_ref(), &auth, &policy_probe)?;
 
     let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
         .await

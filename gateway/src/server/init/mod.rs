@@ -18,6 +18,7 @@ mod helpers;
 
 pub(crate) struct StartupState {
     policy_engine: PolicyEngine,
+    access_policy: Option<Arc<qail_core::access::AccessPolicy>>,
     event_engine: EventTriggerEngine,
     schema: SchemaRegistry,
     cache: QueryCache,
@@ -47,6 +48,7 @@ impl StartupState {
         GatewayState {
             pool: self.pool,
             policy_engine: self.policy_engine,
+            access_policy: self.access_policy,
             event_engine: self.event_engine,
             schema: self.schema,
             cache: self.cache,

@@ -16,6 +16,41 @@ fn mutation_needs_full_returning(
     needs_event_row || (response_requested_returning && requested_returning.is_none())
 }
 
+fn apply_table_returning(
+    cmd: qail_core::ast::Qail,
+    table: &crate::schema::GatewayTable,
+) -> qail_core::ast::Qail {
+    let columns: Vec<&str> = table
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .filter(|column| crate::rest::filters::is_safe_identifier(column))
+        .collect();
+    if columns.is_empty() {
+        cmd.returning_all()
+    } else {
+        cmd.returning(columns)
+    }
+}
+
+fn apply_mutation_returning(
+    cmd: qail_core::ast::Qail,
+    table: &crate::schema::GatewayTable,
+    returning: Option<&str>,
+) -> Result<qail_core::ast::Qail, String> {
+    let Some(returning) = returning else {
+        return Ok(cmd);
+    };
+
+    let cols = parse_select_columns(returning)
+        .map_err(|msg| format!("Invalid returning parameter: {}", msg))?;
+    if cols.len() == 1 && cols[0] == "*" {
+        Ok(apply_table_returning(cmd, table))
+    } else {
+        apply_returning(cmd, Some(returning))
+    }
+}
+
 fn project_mutation_returning_rows(
     mut rows: Vec<Value>,
     returning: Option<&str>,
@@ -62,11 +97,34 @@ fn identifier_matches_column(identifier: &str, column: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_overlay_write_needs_base_lookup, ensure_path_mutation_affected,
-        identifier_matches_column, mutation_needs_full_returning, project_mutation_returning_rows,
+        apply_mutation_returning, apply_table_returning, branch_overlay_write_needs_base_lookup,
+        ensure_path_mutation_affected, identifier_matches_column, mutation_needs_full_returning,
+        project_mutation_returning_rows,
     };
     use crate::rest::branch::BranchOverlayRowState;
+    use crate::schema::{GatewayColumn, GatewayTable};
+    use qail_core::ast::{Expr, Qail};
     use serde_json::json;
+
+    fn test_table(columns: &[&str]) -> GatewayTable {
+        GatewayTable {
+            name: "users".to_string(),
+            columns: columns
+                .iter()
+                .map(|name| GatewayColumn {
+                    name: (*name).to_string(),
+                    col_type: "string".to_string(),
+                    pg_type: "text".to_string(),
+                    nullable: true,
+                    primary_key: *name == "id",
+                    unique: false,
+                    has_default: false,
+                    foreign_key: None,
+                })
+                .collect(),
+            primary_key: Some("id".to_string()),
+        }
+    }
 
     #[test]
     fn mutation_needs_full_returning_when_event_payload_needs_full_row() {
@@ -74,6 +132,37 @@ mod tests {
         assert!(mutation_needs_full_returning(true, None, false));
         assert!(!mutation_needs_full_returning(true, Some("id"), false));
         assert!(!mutation_needs_full_returning(false, None, false));
+    }
+
+    #[test]
+    fn apply_table_returning_uses_explicit_schema_columns() {
+        let table = test_table(&["id", "email", "password_hash"]);
+
+        let cmd = apply_table_returning(Qail::set("users"), &table);
+
+        assert_eq!(
+            cmd.returning,
+            Some(vec![
+                Expr::Named("id".to_string()),
+                Expr::Named("email".to_string()),
+                Expr::Named("password_hash".to_string())
+            ])
+        );
+    }
+
+    #[test]
+    fn apply_mutation_returning_expands_wildcard_to_schema_columns() {
+        let table = test_table(&["id", "email"]);
+
+        let cmd = apply_mutation_returning(Qail::add("users"), &table, Some(" * ")).unwrap();
+
+        assert_eq!(
+            cmd.returning,
+            Some(vec![
+                Expr::Named("id".to_string()),
+                Expr::Named("email".to_string())
+            ])
+        );
     }
 
     #[test]

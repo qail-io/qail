@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::super::database_url::load_rpc_allow_list;
 use super::helpers::{
-    build_pool, load_event_engine, load_policy_engine, load_schema_registry, load_user_tenant_map,
-    verify_schema_drift,
+    build_pool, load_access_policy, load_event_engine, load_policy_engine, load_schema_registry,
+    load_user_tenant_map, verify_schema_drift,
 };
 use super::{Gateway, StartupState};
 use crate::error::GatewayError;
@@ -12,6 +12,7 @@ use crate::middleware::RateLimiter;
 impl Gateway {
     pub(crate) async fn build_startup_state(&self) -> Result<StartupState, GatewayError> {
         let policy_engine = load_policy_engine(&self.config)?;
+        let access_policy = load_access_policy(&self.config)?;
         let schema = load_schema_registry(&self.config)?;
 
         let cache_config = self.config.cache_config();
@@ -211,6 +212,7 @@ impl Gateway {
 
         Ok(StartupState {
             policy_engine,
+            access_policy,
             event_engine,
             schema,
             cache,

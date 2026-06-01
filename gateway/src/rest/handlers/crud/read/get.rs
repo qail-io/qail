@@ -98,6 +98,7 @@ pub(crate) async fn get_by_id_handler(
     }
 
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     // Execute
     let mut conn = state
