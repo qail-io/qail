@@ -28,6 +28,19 @@ fn encoded_sql_str(sql_buf: &[u8]) -> PgResult<&str> {
         .map_err(|e| PgError::Encode(format!("encoded SQL is not UTF-8: {}", e)))
 }
 
+async fn reprepare_prepared_ast_query(
+    conn: &mut super::PgConnection,
+    prepared: &PreparedAstQuery,
+) -> PgResult<()> {
+    conn.clear_prepared_statement_state();
+    let stmt = conn.prepare(&prepared.sql).await?;
+    conn.stmt_cache
+        .put(prepared.sql_hash, stmt.name().to_string());
+    conn.prepared_statements
+        .insert(stmt.name().to_string(), prepared.sql.clone());
+    Ok(())
+}
+
 impl PgDriver {
     /// Execute a QAIL command and fetch all rows (CACHED + ZERO-ALLOC).
     /// **Default method** - uses prepared statement caching for best performance.
@@ -121,13 +134,7 @@ impl PgDriver {
             if let Err(err) = self.connection.flush_write_buf().await {
                 if !retried && err.is_prepared_statement_retryable() {
                     retried = true;
-                    let stmt = self.connection.prepare(&prepared.sql).await?;
-                    self.connection
-                        .stmt_cache
-                        .put(prepared.sql_hash, stmt.name().to_string());
-                    self.connection
-                        .prepared_statements
-                        .insert(stmt.name().to_string(), prepared.sql.clone());
+                    reprepare_prepared_ast_query(&mut self.connection, prepared).await?;
                     continue;
                 }
                 return Err(err);
@@ -165,13 +172,8 @@ impl PgDriver {
                         if let Some(err) = error {
                             if !retried && err.is_prepared_statement_retryable() {
                                 retried = true;
-                                let stmt = self.connection.prepare(&prepared.sql).await?;
-                                self.connection
-                                    .stmt_cache
-                                    .put(prepared.sql_hash, stmt.name().to_string());
-                                self.connection
-                                    .prepared_statements
-                                    .insert(stmt.name().to_string(), prepared.sql.clone());
+                                reprepare_prepared_ast_query(&mut self.connection, prepared)
+                                    .await?;
                                 break;
                             }
                             return Err(err);
@@ -845,11 +847,42 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn error_response_payload(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(b'S');
+        payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'C');
+        payload.extend_from_slice(code.as_bytes());
+        payload.push(0);
+        payload.push(b'M');
+        payload.extend_from_slice(message.as_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload
+    }
+
+    #[cfg(unix)]
     fn push_command_complete(driver: &mut PgDriver, tag: &str) {
         let mut payload = Vec::with_capacity(tag.len() + 1);
         payload.extend_from_slice(tag.as_bytes());
         payload.push(0);
         push_backend_frame(driver, b'C', &payload);
+    }
+
+    #[cfg(unix)]
+    fn prepared_ast_for_sql(sql: &str) -> PreparedAstQuery {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        sql.hash(&mut hasher);
+
+        PreparedAstQuery {
+            stmt: crate::driver::PreparedStatement::from_sql(sql),
+            params: Vec::new(),
+            sql: sql.to_string(),
+            sql_hash: hasher.finish(),
+        }
     }
 
     #[cfg(unix)]
@@ -887,5 +920,53 @@ mod tests {
                 || err.to_string().contains("invalid affected row count")
         );
         assert!(driver.connection.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_ast_retry_reparses_after_missing_server_statement() {
+        let (mut driver, _peer) = test_driver_with_peer();
+        let prepared = prepared_ast_for_sql("SELECT 1");
+        let stmt_name = prepared.stmt.name().to_string();
+
+        driver
+            .connection
+            .stmt_cache
+            .put(prepared.sql_hash, stmt_name.clone());
+        driver
+            .connection
+            .prepared_statements
+            .insert(stmt_name.clone(), prepared.sql.clone());
+
+        let missing_payload = error_response_payload(
+            "26000",
+            &format!("prepared statement \"{}\" does not exist", stmt_name),
+        );
+
+        // First execution: backend says local prepared state is stale.
+        push_backend_frame(&mut driver, b'E', &missing_payload);
+        push_backend_frame(&mut driver, b'Z', b"I");
+        // Re-prepare: this must consume ParseComplete + ReadyForQuery.
+        push_backend_frame(&mut driver, b'1', &[]);
+        push_backend_frame(&mut driver, b'Z', b"I");
+        // Retried execution succeeds.
+        push_backend_frame(&mut driver, b'2', &[]);
+        push_command_complete(&mut driver, "SELECT 0");
+        push_backend_frame(&mut driver, b'Z', b"I");
+
+        let rows = driver
+            .fetch_all_prepared_ast(&prepared)
+            .await
+            .expect("stale prepared AST handle should reparse and retry once");
+
+        assert!(rows.is_empty());
+        assert!(
+            driver
+                .connection
+                .prepared_statements
+                .contains_key(&stmt_name)
+        );
+        assert!(driver.connection.stmt_cache.contains(&prepared.sql_hash));
+        assert!(!driver.connection.is_io_desynced());
     }
 }
