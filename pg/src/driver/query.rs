@@ -1155,9 +1155,7 @@ impl PgConnection {
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    if error.is_none() {
-                        error = Some(PgError::QueryServer(err.into()));
-                    }
+                    capture_query_server_error(self, &mut error, PgError::QueryServer(err.into()));
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
@@ -1220,9 +1218,7 @@ impl PgConnection {
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    if error.is_none() {
-                        error = Some(PgError::QueryServer(err.into()));
-                    }
+                    capture_query_server_error(self, &mut error, PgError::QueryServer(err.into()));
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
@@ -2022,6 +2018,58 @@ mod tests {
 
         assert!(matches!(err, PgError::QueryServer(_)));
         assert!(!conn.prepared_statements.contains_key(&stmt_name));
+        assert!(!conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn query_prepared_single_clears_state_on_missing_statement() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        let stmt = super::super::PreparedStatement::from_sql("SELECT 1");
+        let stmt_name = stmt.name().to_string();
+        conn.prepared_statements
+            .insert(stmt_name.clone(), "SELECT 1".to_string());
+        let err_payload = error_response_payload(
+            "26000",
+            &format!("prepared statement \"{}\" does not exist", stmt_name),
+        );
+
+        push_backend_frame(&mut conn, b'E', &err_payload);
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let err = conn
+            .query_prepared_single(&stmt, &[])
+            .await
+            .expect_err("missing server statement should be returned");
+
+        assert!(matches!(err, PgError::QueryServer(_)));
+        assert!(conn.prepared_statements.is_empty());
+        assert!(!conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn query_prepared_single_reuse_clears_state_on_missing_statement() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        let stmt = super::super::PreparedStatement::from_sql("SELECT 1");
+        let stmt_name = stmt.name().to_string();
+        conn.prepared_statements
+            .insert(stmt_name.clone(), "SELECT 1".to_string());
+        let err_payload = error_response_payload(
+            "26000",
+            &format!("prepared statement \"{}\" does not exist", stmt_name),
+        );
+
+        push_backend_frame(&mut conn, b'E', &err_payload);
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let err = conn
+            .query_prepared_single_reuse_with_result_format(&stmt, &[], PgEncoder::FORMAT_TEXT)
+            .await
+            .expect_err("missing server statement should be returned");
+
+        assert!(matches!(err, PgError::QueryServer(_)));
+        assert!(conn.prepared_statements.is_empty());
         assert!(!conn.is_io_desynced());
     }
 }
