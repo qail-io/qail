@@ -873,12 +873,7 @@ impl PgConnection {
     /// Generate a statement name from SQL hash.
     /// Uses a simple hash to create a unique name like "stmt_12345abc".
     pub(crate) fn sql_to_stmt_name(sql: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        sql.hash(&mut hasher);
-        format!("s{:016x}", hasher.finish())
+        super::prepared::sql_bytes_to_stmt_name(sql.as_bytes())
     }
 
     /// Execute a simple SQL statement (no parameters).
@@ -1930,6 +1925,13 @@ mod tests {
             .expect_err("parameter overflow must be rejected");
 
         assert!(matches!(err, PgError::Encode(msg) if msg.contains("Too many parameters")));
+    }
+
+    #[test]
+    fn sql_to_stmt_name_matches_prepared_statement_identity() {
+        let sql = "SELECT id, name FROM users WHERE id = $1";
+        let stmt = super::super::PreparedStatement::from_sql(sql);
+        assert_eq!(PgConnection::sql_to_stmt_name(sql), stmt.name());
     }
 
     #[cfg(unix)]
