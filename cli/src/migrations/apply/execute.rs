@@ -16,7 +16,8 @@ use crate::migrations::{
 use crate::shadow::has_verified_shadow_receipt_with_driver;
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
-use qail_core::ast::{Action, Constraint, Expr, JoinKind};
+use qail_core::ast::Value;
+use qail_core::ast::{Action, Condition, Constraint, Expr, JoinKind, Operator, TableConstraint};
 use qail_core::prelude::Qail;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -843,6 +844,7 @@ async fn verify_applied_commands_effects(
                     continue;
                 }
                 verify_created_table_shape(pg, cmd, &mut failures).await?;
+                verify_table_constraints(pg, cmd, &mut failures).await?;
             }
             Action::Alter => {
                 for column in extract_column_names(&cmd.columns) {
@@ -853,6 +855,7 @@ async fn verify_applied_commands_effects(
                         ));
                     }
                 }
+                verify_table_constraints(pg, cmd, &mut failures).await?;
             }
             Action::Drop if table_exists(pg, &cmd.table).await? => {
                 failures.push(format!("expected table '{}' to be dropped", cmd.table));
@@ -1173,6 +1176,65 @@ async fn verify_created_table_shape(
     Ok(())
 }
 
+async fn verify_table_constraints(
+    pg: &mut qail_pg::PgDriver,
+    cmd: &Qail,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    for constraint in &cmd.table_constraints {
+        match constraint {
+            TableConstraint::PrimaryKey(columns) => {
+                if !table_has_key_constraint(pg, &cmd.table, "PRIMARY KEY", columns).await? {
+                    failures.push(format!(
+                        "expected table '{}' to have PRIMARY KEY ({})",
+                        cmd.table,
+                        columns.join(", ")
+                    ));
+                }
+            }
+            TableConstraint::Unique(columns) => {
+                if !table_has_key_constraint(pg, &cmd.table, "UNIQUE", columns).await? {
+                    failures.push(format!(
+                        "expected table '{}' to have UNIQUE ({})",
+                        cmd.table,
+                        columns.join(", ")
+                    ));
+                }
+            }
+            TableConstraint::ForeignKey {
+                name,
+                columns,
+                ref_table,
+                ref_columns,
+                on_delete,
+                on_update,
+                deferrable,
+            } => {
+                let expected = ExpectedForeignKeyConstraint {
+                    name: name.as_deref(),
+                    columns,
+                    ref_table,
+                    ref_columns,
+                    on_delete: on_delete.as_deref(),
+                    on_update: on_update.as_deref(),
+                    deferrable: deferrable.as_deref(),
+                };
+                if !table_has_foreign_key_constraint(pg, &cmd.table, &expected).await? {
+                    failures.push(format!(
+                        "expected table '{}' to have FOREIGN KEY ({}) REFERENCES {}({})",
+                        cmd.table,
+                        columns.join(", "),
+                        ref_table,
+                        ref_columns.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
     let live_type = if live.data_type.eq_ignore_ascii_case("USER-DEFINED") {
         live.udt_name.as_deref().unwrap_or(live.data_type.as_str())
@@ -1180,6 +1242,30 @@ fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
         live.data_type.as_str()
     };
     normalize_column_type(expected) == normalize_column_type(live_type)
+}
+
+fn normalize_constraint_part(value: &str) -> String {
+    value.trim().trim_matches('"').to_ascii_lowercase()
+}
+
+fn normalized_constraint_columns(columns: &[String]) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| normalize_constraint_part(column))
+        .collect()
+}
+
+fn constraint_columns_match(live: &[String], expected: &[String]) -> bool {
+    normalized_constraint_columns(live) == normalized_constraint_columns(expected)
+}
+
+fn join_column_eq(left: &str, right: &str) -> Condition {
+    Condition {
+        left: Expr::Named(left.to_string()),
+        op: Operator::Eq,
+        value: Value::Column(right.to_string()),
+        is_array_unnest: false,
+    }
 }
 
 fn normalize_column_type(raw: &str) -> String {
@@ -1237,6 +1323,250 @@ async fn column_has_constraint_type(
         )
     })?;
     Ok(!rows.is_empty())
+}
+
+async fn table_has_key_constraint(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    constraint_type: &str,
+    expected_columns: &[String],
+) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.table_constraints tc")
+        .columns([
+            "tc.constraint_name",
+            "kcu.column_name",
+            "kcu.ordinal_position",
+        ])
+        .join_conds(
+            JoinKind::Inner,
+            "information_schema.key_column_usage kcu",
+            vec![
+                join_column_eq("kcu.constraint_schema", "tc.constraint_schema"),
+                join_column_eq("kcu.constraint_name", "tc.constraint_name"),
+            ],
+        )
+        .where_eq("tc.table_schema", schema)
+        .where_eq("tc.table_name", table_name)
+        .where_eq("tc.constraint_type", constraint_type)
+        .where_eq("kcu.table_schema", schema)
+        .where_eq("kcu.table_name", table_name);
+
+    let rows = pg.fetch_all(&cmd).await.with_context(|| {
+        format!(
+            "Failed {} table constraint check for '{}'",
+            constraint_type, table
+        )
+    })?;
+
+    let mut by_constraint = HashMap::<String, Vec<(i32, String)>>::new();
+    for row in rows {
+        let Some(name) = row.get_string(0) else {
+            continue;
+        };
+        let Some(column) = row.get_string(1) else {
+            continue;
+        };
+        let ordinal = row
+            .get_string(2)
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or_default();
+        by_constraint
+            .entry(name)
+            .or_default()
+            .push((ordinal, column));
+    }
+
+    Ok(by_constraint.into_values().any(|mut columns| {
+        columns.sort_by_key(|(ordinal, _)| *ordinal);
+        let live_columns = columns.into_iter().map(|(_, col)| col).collect::<Vec<_>>();
+        constraint_columns_match(&live_columns, expected_columns)
+    }))
+}
+
+#[derive(Debug)]
+struct ExpectedForeignKeyConstraint<'a> {
+    name: Option<&'a str>,
+    columns: &'a [String],
+    ref_table: &'a str,
+    ref_columns: &'a [String],
+    on_delete: Option<&'a str>,
+    on_update: Option<&'a str>,
+    deferrable: Option<&'a str>,
+}
+
+#[derive(Debug, Default)]
+struct LiveForeignKeyConstraint {
+    columns: Vec<(i32, String, String)>,
+    ref_schema: String,
+    ref_table: String,
+    delete_rule: String,
+    update_rule: String,
+    is_deferrable: bool,
+    initially_deferred: bool,
+}
+
+async fn table_has_foreign_key_constraint(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    expected: &ExpectedForeignKeyConstraint<'_>,
+) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.table_constraints tc")
+        .columns([
+            "tc.constraint_name",
+            "kcu.column_name",
+            "kcu.ordinal_position",
+            "rkcu.table_schema",
+            "rkcu.table_name",
+            "rkcu.column_name",
+            "rc.delete_rule",
+            "rc.update_rule",
+            "tc.is_deferrable",
+            "tc.initially_deferred",
+        ])
+        .join_conds(
+            JoinKind::Inner,
+            "information_schema.key_column_usage kcu",
+            vec![
+                join_column_eq("kcu.constraint_schema", "tc.constraint_schema"),
+                join_column_eq("kcu.constraint_name", "tc.constraint_name"),
+            ],
+        )
+        .join_conds(
+            JoinKind::Inner,
+            "information_schema.referential_constraints rc",
+            vec![
+                join_column_eq("rc.constraint_schema", "tc.constraint_schema"),
+                join_column_eq("rc.constraint_name", "tc.constraint_name"),
+            ],
+        )
+        .join_conds(
+            JoinKind::Inner,
+            "information_schema.key_column_usage rkcu",
+            vec![
+                join_column_eq("rkcu.constraint_schema", "rc.unique_constraint_schema"),
+                join_column_eq("rkcu.constraint_name", "rc.unique_constraint_name"),
+                join_column_eq("rkcu.ordinal_position", "kcu.position_in_unique_constraint"),
+            ],
+        )
+        .where_eq("tc.table_schema", schema)
+        .where_eq("tc.table_name", table_name)
+        .where_eq("tc.constraint_type", "FOREIGN KEY")
+        .where_eq("kcu.table_schema", schema)
+        .where_eq("kcu.table_name", table_name);
+    let cmd = if let Some(name) = expected.name {
+        cmd.where_eq("tc.constraint_name", name)
+    } else {
+        cmd
+    };
+
+    let rows = pg
+        .fetch_all(&cmd)
+        .await
+        .with_context(|| format!("Failed foreign key table constraint check for '{}'", table))?;
+
+    let mut by_constraint = HashMap::<String, LiveForeignKeyConstraint>::new();
+    for row in rows {
+        let Some(name) = row.get_string(0) else {
+            continue;
+        };
+        let Some(column) = row.get_string(1) else {
+            continue;
+        };
+        let ordinal = row
+            .get_string(2)
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or_default();
+        let ref_schema = row.get_string(3).unwrap_or_default();
+        let ref_table = row.get_string(4).unwrap_or_default();
+        let ref_column = row.get_string(5).unwrap_or_default();
+        let delete_rule = row.get_string(6).unwrap_or_default();
+        let update_rule = row.get_string(7).unwrap_or_default();
+        let is_deferrable = row
+            .get_string(8)
+            .is_some_and(|v| v.eq_ignore_ascii_case("YES"));
+        let initially_deferred = row
+            .get_string(9)
+            .is_some_and(|v| v.eq_ignore_ascii_case("YES"));
+
+        let live = by_constraint.entry(name).or_default();
+        live.columns.push((ordinal, column, ref_column));
+        live.ref_schema = ref_schema;
+        live.ref_table = ref_table;
+        live.delete_rule = delete_rule;
+        live.update_rule = update_rule;
+        live.is_deferrable = is_deferrable;
+        live.initially_deferred = initially_deferred;
+    }
+
+    Ok(by_constraint
+        .into_values()
+        .any(|live| foreign_key_constraint_matches(live, expected)))
+}
+
+fn foreign_key_constraint_matches(
+    mut live: LiveForeignKeyConstraint,
+    expected: &ExpectedForeignKeyConstraint<'_>,
+) -> bool {
+    live.columns.sort_by_key(|(ordinal, _, _)| *ordinal);
+    let live_columns = live
+        .columns
+        .iter()
+        .map(|(_, column, _)| column.clone())
+        .collect::<Vec<_>>();
+    let live_ref_columns = live
+        .columns
+        .iter()
+        .map(|(_, _, column)| column.clone())
+        .collect::<Vec<_>>();
+    let (expected_ref_schema, expected_ref_table) = split_schema_ident(expected.ref_table);
+
+    constraint_columns_match(&live_columns, expected.columns)
+        && normalize_constraint_part(&live.ref_schema)
+            == normalize_constraint_part(expected_ref_schema)
+        && normalize_constraint_part(&live.ref_table)
+            == normalize_constraint_part(expected_ref_table)
+        && constraint_columns_match(&live_ref_columns, expected.ref_columns)
+        && fk_rule_matches(&live.delete_rule, expected.on_delete)
+        && fk_rule_matches(&live.update_rule, expected.on_update)
+        && deferrable_matches(
+            live.is_deferrable,
+            live.initially_deferred,
+            expected.deferrable,
+        )
+}
+
+fn fk_rule_matches(live_rule: &str, expected_rule: Option<&str>) -> bool {
+    normalize_fk_rule(live_rule) == normalize_fk_rule(expected_rule.unwrap_or("NO ACTION"))
+}
+
+fn normalize_fk_rule(rule: &str) -> String {
+    rule.trim()
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase()
+}
+
+fn deferrable_matches(
+    live_is_deferrable: bool,
+    live_initially_deferred: bool,
+    expected_deferrable: Option<&str>,
+) -> bool {
+    let Some(expected) = expected_deferrable else {
+        return !live_is_deferrable && !live_initially_deferred;
+    };
+    let normalized = normalize_fk_rule(expected);
+    match normalized.as_str() {
+        "NOT DEFERRABLE" => !live_is_deferrable && !live_initially_deferred,
+        "DEFERRABLE" | "DEFERRABLE INITIALLY IMMEDIATE" => {
+            live_is_deferrable && !live_initially_deferred
+        }
+        "DEFERRABLE INITIALLY DEFERRED" => live_is_deferrable && live_initially_deferred,
+        _ => false,
+    }
 }
 
 async fn index_exists(pg: &mut qail_pg::PgDriver, index_name: &str) -> Result<bool> {
@@ -1742,16 +2072,19 @@ mod tests {
     use super::{
         ApplyDownContext, ApplyReceiptContext, apply_commands_and_record_receipt_atomic,
         apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
-        enforce_apply_destructive_policy, enforce_apply_down_destructive_policy,
-        ensure_applied_checksum_matches, ensure_up_down_pairing, normalize_column_type,
-        parse_qail_to_commands_strict, parse_rename_expr, should_adopt_existing_error,
-        should_run_apply_lock_risk_preflight, split_schema_ident, strip_optional_if_exists_prefix,
-        validate_receipts_against_local,
+        constraint_columns_match, deferrable_matches, enforce_apply_destructive_policy,
+        enforce_apply_down_destructive_policy, ensure_applied_checksum_matches,
+        ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches,
+        normalize_column_type, parse_qail_to_commands_strict, parse_rename_expr,
+        should_adopt_existing_error, should_run_apply_lock_risk_preflight, split_schema_ident,
+        strip_optional_if_exists_prefix, validate_receipts_against_local,
+        verify_applied_commands_effects,
     };
+    use super::{ExpectedForeignKeyConstraint, LiveForeignKeyConstraint};
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::{MigrateDirection, MigrationPhase};
     use crate::migrations::{EnforcementMode, ReceiptValidationMode};
-    use qail_core::ast::{Action, Constraint, Expr};
+    use qail_core::ast::{Action, Constraint, Expr, TableConstraint};
     use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
@@ -1851,6 +2184,63 @@ mod tests {
             normalize_column_type("timestamptz"),
             "timestamp with time zone"
         );
+    }
+
+    #[test]
+    fn table_constraint_column_matching_is_ordered_and_normalized() {
+        assert!(constraint_columns_match(
+            &["\"Tenant_ID\"".to_string(), "Order_ID".to_string()],
+            &["tenant_id".to_string(), "order_id".to_string()]
+        ));
+        assert!(!constraint_columns_match(
+            &["order_id".to_string(), "tenant_id".to_string()],
+            &["tenant_id".to_string(), "order_id".to_string()]
+        ));
+    }
+
+    #[test]
+    fn foreign_key_rule_and_deferrable_matching_normalize_pg_variants() {
+        assert!(fk_rule_matches("SET NULL", Some("set_null")));
+        assert!(fk_rule_matches("NO ACTION", None));
+        assert!(deferrable_matches(
+            true,
+            true,
+            Some("DEFERRABLE INITIALLY DEFERRED")
+        ));
+        assert!(deferrable_matches(
+            true,
+            false,
+            Some("DEFERRABLE INITIALLY IMMEDIATE")
+        ));
+        assert!(deferrable_matches(false, false, None));
+        assert!(!deferrable_matches(false, false, Some("DEFERRABLE")));
+    }
+
+    #[test]
+    fn foreign_key_constraint_matching_checks_columns_reference_and_options() {
+        let live = LiveForeignKeyConstraint {
+            columns: vec![
+                (2, "schedule_id".to_string(), "schedule_id".to_string()),
+                (1, "route_id".to_string(), "route_id".to_string()),
+            ],
+            ref_schema: "public".to_string(),
+            ref_table: "schedules".to_string(),
+            delete_rule: "CASCADE".to_string(),
+            update_rule: "RESTRICT".to_string(),
+            is_deferrable: true,
+            initially_deferred: true,
+        };
+        let expected = ExpectedForeignKeyConstraint {
+            name: Some("fk_trips_schedule"),
+            columns: &["route_id".to_string(), "schedule_id".to_string()],
+            ref_table: "schedules",
+            ref_columns: &["route_id".to_string(), "schedule_id".to_string()],
+            on_delete: Some("cascade"),
+            on_update: Some("restrict"),
+            deferrable: Some("deferrable initially deferred"),
+        };
+
+        assert!(foreign_key_constraint_matches(live, &expected));
     }
 
     #[test]
@@ -2302,6 +2692,119 @@ mod tests {
             .execute(&Qail {
                 action: Action::Drop,
                 table,
+                ..Default::default()
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_applied_effects_detects_missing_composite_fk_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping composite FK verification DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let parent = format!("verify_fk_parent_{}", suffix);
+        let child = format!("verify_fk_child_{}", suffix);
+
+        let create_parent = Qail {
+            action: Action::Make,
+            table: parent.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "route_id".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "schedule_id".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            table_constraints: vec![TableConstraint::Unique(vec![
+                "route_id".to_string(),
+                "schedule_id".to_string(),
+            ])],
+            ..Default::default()
+        };
+        let create_child = Qail {
+            action: Action::Make,
+            table: child.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "route_id".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "schedule_id".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        pg.execute(&create_parent)
+            .await
+            .expect("create parent table");
+        pg.execute(&create_child).await.expect("create child table");
+
+        let add_fk = Qail {
+            action: Action::Alter,
+            table: child.clone(),
+            table_constraints: vec![TableConstraint::ForeignKey {
+                name: Some(format!("fk_{}_schedule", child)),
+                columns: vec!["route_id".to_string(), "schedule_id".to_string()],
+                ref_table: parent.clone(),
+                ref_columns: vec!["route_id".to_string(), "schedule_id".to_string()],
+                on_delete: Some("CASCADE".to_string()),
+                on_update: Some("RESTRICT".to_string()),
+                deferrable: Some("DEFERRABLE INITIALLY DEFERRED".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let err = verify_applied_commands_effects(
+            &mut pg,
+            "missing_composite_fk.up.qail",
+            &[add_fk.clone()],
+        )
+        .await
+        .expect_err("missing composite FK must fail verification before receipt write");
+        assert!(
+            err.to_string().contains("FOREIGN KEY")
+                && err.to_string().contains(&child)
+                && err.to_string().contains(&parent),
+            "unexpected verification error: {err}"
+        );
+
+        pg.execute(&add_fk)
+            .await
+            .expect("add composite foreign key");
+        verify_applied_commands_effects(&mut pg, "existing_composite_fk.up.qail", &[add_fk])
+            .await
+            .expect("existing composite FK should verify");
+
+        let _ = pg
+            .execute(&Qail {
+                action: Action::Drop,
+                table: child,
+                ..Default::default()
+            })
+            .await;
+        let _ = pg
+            .execute(&Qail {
+                action: Action::Drop,
+                table: parent,
                 ..Default::default()
             })
             .await;
