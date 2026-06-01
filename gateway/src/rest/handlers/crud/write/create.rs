@@ -279,10 +279,9 @@ pub(crate) async fn create_handler(
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let tenant_scope_column =
-        crate::rest::tenant_scope_column_for_table(state.as_ref(), &table_name);
     let tenant_scope =
         crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
+    let tenant_scope_column = tenant_scope.as_ref().map(|(column, _)| column.clone());
     let prefer = parse_prefer_header(&headers);
 
     // Validate required columns upfront (skip for upserts — conflict rows may exist)
@@ -368,9 +367,9 @@ pub(crate) async fn create_handler(
 
     let normalized_objects: Vec<serde_json::Map<String, Value>> = objects
         .iter()
-        .map(|obj| match tenant_scope_column.as_deref() {
-            Some(scope_column) => {
-                normalize_create_object_for_tenant(obj, scope_column, auth.tenant_id.as_deref())
+        .map(|obj| match tenant_scope.as_ref() {
+            Some((scope_column, tenant_id)) => {
+                normalize_create_object_for_tenant(obj, scope_column, Some(tenant_id))
             }
             None => Ok((*obj).clone()),
         })
@@ -459,7 +458,7 @@ pub(crate) async fn create_handler(
     )?;
 
     let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
-    let enforce_tenant_column = auth.tenant_id.is_some() && tenant_scope_column.is_some();
+    let enforce_tenant_column = tenant_scope.is_some();
     let tenant_column = tenant_scope_column.as_deref().unwrap_or("");
     let has_create_triggers = !state
         .event_engine
@@ -806,6 +805,18 @@ mod tests {
     }
 
     #[test]
+    fn normalize_create_object_preserves_tenant_column_without_scope() {
+        let mut obj = Map::new();
+        obj.insert("tenant_id".to_string(), json!("tenant_b"));
+        obj.insert("name".to_string(), json!("shared-row"));
+
+        let normalized = normalize_create_object_for_tenant(&obj, "tenant_id", None).unwrap();
+
+        assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_b")));
+        assert_eq!(normalized.get("name"), Some(&json!("shared-row")));
+    }
+
+    #[test]
     fn normalize_create_object_rejects_case_variant_tenant_column() {
         let mut obj = Map::new();
         obj.insert("Tenant_ID".to_string(), json!("tenant_b"));
@@ -962,6 +973,19 @@ mod tests {
 
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].0, "status");
+    }
+
+    #[test]
+    fn upsert_update_assignments_allow_tenant_column_without_scope_enforcement() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("tenant_id".to_string(), json!("tenant-b"));
+        let conflict_cols = vec!["id"];
+
+        let updates = upsert_update_assignments(&obj, &conflict_cols, false, "tenant_id");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "tenant_id");
     }
 
     #[test]

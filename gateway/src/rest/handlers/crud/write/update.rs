@@ -75,10 +75,9 @@ pub(crate) async fn update_handler(
         .clone();
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let tenant_scope_column =
-        crate::rest::tenant_scope_column_for_table(state.as_ref(), &table_name);
     let tenant_scope =
         crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
+    let tenant_scope_column = tenant_scope.as_ref().map(|(column, _)| column.clone());
 
     // Parse JSON body
     let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
@@ -253,7 +252,9 @@ pub(crate) async fn update_handler(
             tenant_scope_column
                 .as_deref()
                 .unwrap_or(&state.config.tenant_column),
-            auth.tenant_id.as_deref(),
+            tenant_scope
+                .as_ref()
+                .map(|(_, tenant_id)| tenant_id.as_str()),
         ) {
             Ok(row_data) => row_data,
             Err(e) => {
@@ -439,6 +440,26 @@ mod tests {
 
         assert_eq!(row.get("id"), Some(&json!("path-id")));
         assert_eq!(row.get("tenant_id"), Some(&json!("auth-tenant")));
+    }
+
+    #[test]
+    fn build_branch_update_overlay_row_preserves_payload_tenant_without_scope() {
+        let mut obj = Map::new();
+        obj.insert("tenant_id".to_string(), json!("payload-tenant"));
+        obj.insert("status".to_string(), json!("paid"));
+
+        let row = build_branch_update_overlay_row(
+            Some(json!({"id": "base-id", "tenant_id": "base-tenant"})),
+            &obj,
+            "id",
+            "path-id",
+            "tenant_id",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(row.get("id"), Some(&json!("path-id")));
+        assert_eq!(row.get("tenant_id"), Some(&json!("payload-tenant")));
     }
 
     #[test]
