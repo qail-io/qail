@@ -1376,6 +1376,72 @@ fn test_qdrant_upsert_update_column_blacklist_rejects_payload_column() {
 }
 
 #[test]
+fn test_qdrant_search_column_whitelist_restricts_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "embeddings_read".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["id".into(), "title".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::search("embeddings")
+        .vector(vec![0.1, 0.2])
+        .with_vectors();
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.columns,
+        vec![
+            Expr::Named("id".to_string()),
+            Expr::Named("title".to_string())
+        ]
+    );
+}
+
+#[test]
+fn test_qdrant_scroll_column_blacklist_filters_explicit_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "embeddings_read".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["secret".into(), "vector".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::scroll("embeddings").columns(["id", "title", "secret", "vector"]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.columns,
+        vec![
+            Expr::Named("id".to_string()),
+            Expr::Named("title".to_string())
+        ]
+    );
+}
+
+#[test]
 fn test_insert_select_column_blacklist_requires_safe_target_columns() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {

@@ -88,7 +88,10 @@ impl PolicyEngine {
     }
 
     fn projection_restricted_action(action: Action) -> bool {
-        matches!(action, Action::Get | Action::Export | Action::With)
+        matches!(
+            action,
+            Action::Get | Action::Export | Action::With | Action::Search | Action::Scroll
+        )
     }
 
     fn applicable_policies<'a>(
