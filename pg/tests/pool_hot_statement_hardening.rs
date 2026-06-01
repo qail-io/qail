@@ -87,6 +87,14 @@ fn command_complete(tag: &str) -> Vec<u8> {
     backend_frame(b'C', &payload)
 }
 
+fn parse_complete() -> Vec<u8> {
+    backend_frame(b'1', &[])
+}
+
+fn bind_complete() -> Vec<u8> {
+    backend_frame(b'2', &[])
+}
+
 fn error_response(code: &str, message: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(b'S');
@@ -103,9 +111,13 @@ fn error_response(code: &str, message: &str) -> Vec<u8> {
 }
 
 fn pool_config(port: u16) -> PoolConfig {
+    pool_config_with_max(port, 1)
+}
+
+fn pool_config_with_max(port: u16, max_connections: usize) -> PoolConfig {
     PoolConfig::new_dev("127.0.0.1", port, "test_user", "test_db")
         .min_connections(0)
-        .max_connections(1)
+        .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(2))
         .connect_timeout(Duration::from_secs(2))
 }
@@ -177,6 +189,134 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
     checked_rx.await.unwrap();
     second_conn.release().await;
 
+    pool.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
+    let (listener, port) = mock_listener().await;
+    let (checked_tx, checked_rx) = oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        // First connection: successfully cache and promote a hot statement.
+        let (mut first_sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut first_sock).await;
+        first_sock.write_all(&auth_ok()).await.unwrap();
+        first_sock.write_all(&ready_idle()).await.unwrap();
+        first_sock.flush().await.unwrap();
+
+        let first_query = read_frontend_msg_types_until_sync(&mut first_sock).await;
+        assert_eq!(first_query.first().copied(), Some(b'P'));
+        first_sock.write_all(&parse_complete()).await.unwrap();
+        first_sock.write_all(&bind_complete()).await.unwrap();
+        first_sock
+            .write_all(&command_complete("SELECT 0"))
+            .await
+            .unwrap();
+        first_sock.write_all(&ready_idle()).await.unwrap();
+        first_sock.flush().await.unwrap();
+
+        // Second connection: new checkout tries to pre-prepare the hot statement,
+        // but the server now rejects it as stale after schema drift.
+        let (mut stale_sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut stale_sock).await;
+        stale_sock.write_all(&auth_ok()).await.unwrap();
+        stale_sock.write_all(&ready_idle()).await.unwrap();
+        stale_sock.flush().await.unwrap();
+
+        let stale_preprepare = read_frontend_msg_types_until_sync(&mut stale_sock).await;
+        assert_eq!(
+            stale_preprepare.first().copied(),
+            Some(b'P'),
+            "second connection should attempt hot pre-prepare before the stale error"
+        );
+        stale_sock
+            .write_all(&error_response(
+                "42P01",
+                "relation does not exist after schema drift",
+            ))
+            .await
+            .unwrap();
+        stale_sock.write_all(&ready_idle()).await.unwrap();
+        stale_sock.flush().await.unwrap();
+
+        // The pool replaces the failed pre-prepare connection.
+        let (mut replacement_sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut replacement_sock).await;
+        replacement_sock.write_all(&auth_ok()).await.unwrap();
+        replacement_sock.write_all(&ready_idle()).await.unwrap();
+        replacement_sock.flush().await.unwrap();
+
+        let (msg_type, payload) = read_frontend_frame(&mut replacement_sock).await;
+        assert_eq!(msg_type, b'Q');
+        assert_eq!(payload_cstr(&payload), "COMMIT");
+        replacement_sock
+            .write_all(&command_complete("COMMIT"))
+            .await
+            .unwrap();
+        replacement_sock.write_all(&ready_idle()).await.unwrap();
+        replacement_sock.flush().await.unwrap();
+
+        // Third checkout reuses the replacement connection. If the stale hot
+        // statement was not evicted, checkout will send another Parse here.
+        match timeout(
+            Duration::from_millis(200),
+            read_frontend_frame(&mut replacement_sock),
+        )
+        .await
+        {
+            Ok((unexpected, _)) => {
+                panic!(
+                    "pool checkout retried stale hot pre-prepare after a pre-prepare failure; first frame was {}",
+                    unexpected as char
+                );
+            }
+            Err(_) => {
+                checked_tx.send(()).unwrap();
+            }
+        }
+
+        let (msg_type, payload) = read_frontend_frame(&mut replacement_sock).await;
+        assert_eq!(msg_type, b'Q');
+        assert_eq!(payload_cstr(&payload), "COMMIT");
+        replacement_sock
+            .write_all(&command_complete("COMMIT"))
+            .await
+            .unwrap();
+        replacement_sock.write_all(&ready_idle()).await.unwrap();
+        replacement_sock.flush().await.unwrap();
+
+        let (msg_type, payload) = read_frontend_frame(&mut first_sock).await;
+        assert_eq!(msg_type, b'Q');
+        assert_eq!(payload_cstr(&payload), "COMMIT");
+        first_sock
+            .write_all(&command_complete("COMMIT"))
+            .await
+            .unwrap();
+        first_sock.write_all(&ready_idle()).await.unwrap();
+        first_sock.flush().await.unwrap();
+    });
+
+    let pool = PgPool::connect(pool_config_with_max(port, 2))
+        .await
+        .unwrap();
+
+    let mut first_conn = pool.acquire_raw().await.unwrap();
+    let rows = first_conn
+        .fetch_all_cached(&Qail::get("users"))
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+
+    let second_conn = pool.acquire_raw().await.unwrap();
+    second_conn.release().await;
+
+    let third_conn = pool.acquire_raw().await.unwrap();
+    checked_rx.await.unwrap();
+    third_conn.release().await;
+
+    first_conn.release().await;
     pool.close().await;
     server.await.unwrap();
 }

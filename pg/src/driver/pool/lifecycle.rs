@@ -60,6 +60,23 @@ pub(super) fn handle_hot_preprepare_message(
     }
 }
 
+fn evict_failed_hot_preprepare_entries(
+    pool: &PgPoolInner,
+    missing: &[(u64, String, String)],
+) -> usize {
+    let Ok(mut hot) = pool.hot_statements.write() else {
+        return 0;
+    };
+
+    let mut evicted = 0usize;
+    for (hash, _, _) in missing {
+        if hot.remove(hash).is_some() {
+            evicted += 1;
+        }
+    }
+    evicted
+}
+
 impl PgPoolInner {
     pub(super) async fn return_connection(&self, conn: PgConnection, created_at: Instant) {
         decrement_active_count_saturating(&self.active_count);
@@ -342,12 +359,15 @@ impl PgPool {
             };
 
             if let Err(e) = preprepare_result {
+                let evicted_hot_statements =
+                    evict_failed_hot_preprepare_entries(&self.inner, &missing);
                 tracing::warn!(
                     host = %self.inner.config.host,
                     port = self.inner.config.port,
                     user = %self.inner.config.user,
                     db = %self.inner.config.database,
                     timeout_ms = preprepare_timeout.as_millis() as u64,
+                    evicted_hot_statements,
                     error = %e,
                     "pool_hot_prepare_failed: replacing connection to avoid handing out uncertain protocol state"
                 );
