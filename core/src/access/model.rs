@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::ast::Action;
 use crate::rls::SuperAdminToken;
 
-use super::normalize_column_name;
+use super::ident::normalize_column_name;
 
 /// High-level data operation governed by access policy.
 #[derive(
