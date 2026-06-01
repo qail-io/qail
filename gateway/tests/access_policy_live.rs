@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use qail_core::ast::{Operator, Qail, Value as QailValue};
+use qail_core::ast::{Expr, Operator, Qail, SortOrder, Value as QailValue};
 use qail_gateway::{GatewayConfig, GatewayState, create_router};
 use qail_pg::{PgDriver, PgPool, PoolConfig};
 use serde_json::Value;
@@ -147,6 +147,20 @@ async fn private_note(driver: &mut PgDriver, table: &str) -> String {
         .expect("private_note row")
 }
 
+async fn visible_name(driver: &mut PgDriver, table: &str) -> String {
+    let rows = driver
+        .fetch_all_uncached(&Qail::get(table).columns(["name"]).filter(
+            "id",
+            Operator::Eq,
+            QailValue::Int(1),
+        ))
+        .await
+        .expect("read name");
+    rows.first()
+        .and_then(|row| row.try_get_by_name::<String>("name").ok())
+        .expect("name row")
+}
+
 async fn response_json(response: axum::response::Response) -> Value {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -243,6 +257,35 @@ async fn gateway_native_access_policy_enforces_live_queries() {
     )
     .await;
     assert_eq!(denied_filter.status(), StatusCode::FORBIDDEN);
+
+    let denied_payload_rhs = post_binary(
+        app.clone(),
+        &Qail::set(&table)
+            .set_value("name", QailValue::Column("private_note".to_string()))
+            .filter("id", Operator::Eq, QailValue::Int(1)),
+        false,
+    )
+    .await;
+    assert_eq!(denied_payload_rhs.status(), StatusCode::FORBIDDEN);
+    assert_eq!(visible_name(&mut driver, &table).await, "visible");
+
+    let denied_window_partition = post_binary(
+        app.clone(),
+        &Qail::get(&table).columns(["id"]).order_by_expr(
+            Expr::Window {
+                name: "ranked_rows".to_string(),
+                func: "row_number".to_string(),
+                params: vec![],
+                partition: vec!["private_note".to_string()],
+                order: vec![],
+                frame: None,
+            },
+            SortOrder::Asc,
+        ),
+        false,
+    )
+    .await;
+    assert_eq!(denied_window_partition.status(), StatusCode::FORBIDDEN);
 
     let denied_write = post_binary(
         app.clone(),
