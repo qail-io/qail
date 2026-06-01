@@ -134,11 +134,16 @@ impl PgConnection {
                             channel,
                             payload,
                         } => {
-                            return Ok(Notification {
+                            let notification = Notification {
                                 process_id,
                                 channel,
                                 payload,
-                            });
+                            };
+                            if got_ready {
+                                return Ok(notification);
+                            }
+                            self.notifications.push_back(notification);
+                            continue;
                         }
                         BackendMessage::EmptyQueryResponse => continue,
                         BackendMessage::NoticeResponse(_) => continue,
@@ -208,7 +213,7 @@ mod tests {
     use crate::driver::{PgConnection, PgError};
 
     #[cfg(unix)]
-    fn test_conn() -> PgConnection {
+    fn test_conn_with_peer() -> (PgConnection, tokio::net::UnixStream) {
         use crate::driver::connection::StatementCache;
         use crate::driver::stream::PgStream;
         use bytes::BytesMut;
@@ -216,28 +221,55 @@ mod tests {
         use std::num::NonZeroUsize;
         use tokio::net::UnixStream;
 
-        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
-        PgConnection {
-            stream: PgStream::Unix(unix_stream),
-            buffer: BytesMut::with_capacity(1024),
-            write_buf: BytesMut::with_capacity(1024),
-            sql_buf: BytesMut::with_capacity(256),
-            params_buf: Vec::new(),
-            prepared_statements: HashMap::new(),
-            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
-            column_info_cache: HashMap::new(),
-            process_id: 0,
-            cancel_key_bytes: Vec::new(),
-            requested_protocol_minor: PgConnection::default_protocol_minor(),
-            negotiated_protocol_minor: PgConnection::default_protocol_minor(),
-            notifications: VecDeque::new(),
-            replication_stream_active: false,
-            replication_mode_enabled: false,
-            last_replication_wal_end: None,
-            io_desynced: false,
-            pending_statement_closes: Vec::new(),
-            draining_statement_closes: false,
-        }
+        let (unix_stream, peer) = UnixStream::pair().expect("unix stream pair");
+        (
+            PgConnection {
+                stream: PgStream::Unix(unix_stream),
+                buffer: BytesMut::with_capacity(1024),
+                write_buf: BytesMut::with_capacity(1024),
+                sql_buf: BytesMut::with_capacity(256),
+                params_buf: Vec::new(),
+                prepared_statements: HashMap::new(),
+                stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+                column_info_cache: HashMap::new(),
+                process_id: 0,
+                cancel_key_bytes: Vec::new(),
+                requested_protocol_minor: PgConnection::default_protocol_minor(),
+                negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+                notifications: VecDeque::new(),
+                replication_stream_active: false,
+                replication_mode_enabled: false,
+                last_replication_wal_end: None,
+                io_desynced: false,
+                pending_statement_closes: Vec::new(),
+                draining_statement_closes: false,
+            },
+            peer,
+        )
+    }
+
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        test_conn_with_peer().0
+    }
+
+    #[cfg(unix)]
+    fn push_backend_frame(conn: &mut PgConnection, msg_type: u8, payload: &[u8]) {
+        conn.buffer.extend_from_slice(&[msg_type]);
+        conn.buffer
+            .extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        conn.buffer.extend_from_slice(payload);
+    }
+
+    #[cfg(unix)]
+    fn notification_payload(process_id: i32, channel: &str, payload: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&process_id.to_be_bytes());
+        bytes.extend_from_slice(channel.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(payload.as_bytes());
+        bytes.push(0);
+        bytes
     }
 
     #[cfg(unix)]
@@ -251,5 +283,30 @@ mod tests {
 
         assert!(err.to_string().contains("bad notify frame"));
         assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_notification_drains_empty_query_before_returning_pre_ready_notify() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        let payload = notification_payload(42, "jobs", "ready");
+
+        push_backend_frame(&mut conn, b'A', &payload);
+        push_backend_frame(&mut conn, b'I', &[]);
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let notification = conn
+            .recv_notification()
+            .await
+            .expect("pre-ready notification should be returned after flush drain");
+
+        assert_eq!(notification.process_id, 42);
+        assert_eq!(notification.channel, "jobs");
+        assert_eq!(notification.payload, "ready");
+        assert!(
+            conn.buffer.is_empty(),
+            "empty-query flush frames must not remain buffered"
+        );
+        assert!(!conn.is_io_desynced());
     }
 }
