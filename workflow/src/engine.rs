@@ -577,6 +577,41 @@ fn selected_branch_steps<'a>(
     }
 }
 
+fn validate_branch_resume_selection(
+    branches: &[(String, Vec<WorkflowStep>)],
+    selection: &WorkflowBranchCursorSelection,
+    condition_key: &str,
+    condition_value: &str,
+) -> Result<(), WorkflowError> {
+    match selection {
+        WorkflowBranchCursorSelection::Branch(idx) => {
+            let Some((branch_value, _)) = branches.get(*idx) else {
+                return Err(invalid_cursor(format!(
+                    "branch index {idx} no longer exists"
+                )));
+            };
+            if branch_value != condition_value {
+                return Err(invalid_cursor(format!(
+                    "branch cursor selected index {idx} for value '{branch_value}', \
+                     but current condition '{condition_key}' is '{condition_value}'"
+                )));
+            }
+        }
+        WorkflowBranchCursorSelection::Default => {
+            if branches
+                .iter()
+                .any(|(branch_value, _)| branch_value == condition_value)
+            {
+                return Err(invalid_cursor(format!(
+                    "default branch cursor no longer matches condition '{condition_key}' \
+                     value '{condition_value}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Execute a single workflow step.
 fn execute_step<'a, E: WorkflowExecutor>(
     executor: &'a E,
@@ -651,12 +686,24 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 let (selection, selected_steps, start_index, nested_cursor) = match cursor_frames
                     .first()
                 {
-                    Some(WorkflowCursorFrame::Branch { selection, index }) => (
-                        selection.clone(),
-                        selected_branch_steps(branches, default, selection)?,
-                        *index,
-                        &cursor_frames[1..],
-                    ),
+                    Some(WorkflowCursorFrame::Branch { selection, index }) => {
+                        let condition_value = ctx
+                            .get_str(condition_key)
+                            .ok_or_else(|| WorkflowError::MissingContextKey(condition_key.clone()))?
+                            .to_string();
+                        validate_branch_resume_selection(
+                            branches,
+                            selection,
+                            condition_key,
+                            &condition_value,
+                        )?;
+                        (
+                            selection.clone(),
+                            selected_branch_steps(branches, default, selection)?,
+                            *index,
+                            &cursor_frames[1..],
+                        )
+                    }
                     Some(_) => {
                         return Err(invalid_cursor(
                             "expected Branch frame for nested branch resume",
@@ -1584,6 +1631,216 @@ mod tests {
             notifs.is_empty(),
             "steps after a nested branch Wait must not execute"
         );
+    }
+
+    #[tokio::test]
+    async fn branch_resume_rejects_reordered_branch_definition() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("branch_reorder_source")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::branch(
+                    "customer.tier",
+                    vec![
+                        (
+                            "vip",
+                            vec![
+                                WorkflowStep::wait(
+                                    "approved",
+                                    std::time::Duration::from_secs(3600),
+                                ),
+                                WorkflowStep::notify(
+                                    ChannelKind::Email,
+                                    "vip_approved",
+                                    "customer.email",
+                                ),
+                            ],
+                        ),
+                        (
+                            "standard",
+                            vec![
+                                WorkflowStep::wait(
+                                    "approved",
+                                    std::time::Duration::from_secs(3600),
+                                ),
+                                WorkflowStep::notify(
+                                    ChannelKind::Email,
+                                    "standard_approved",
+                                    "customer.email",
+                                ),
+                            ],
+                        ),
+                    ],
+                    vec![],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-branch-reorder", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({
+                "tier": "vip",
+                "email": "guest@example.com"
+            }),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        let drifted_wf = WorkflowDefinition::new("branch_reorder_drifted")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::branch(
+                    "customer.tier",
+                    vec![
+                        (
+                            "standard",
+                            vec![
+                                WorkflowStep::wait(
+                                    "approved",
+                                    std::time::Duration::from_secs(3600),
+                                ),
+                                WorkflowStep::notify(
+                                    ChannelKind::Email,
+                                    "standard_approved",
+                                    "customer.email",
+                                ),
+                            ],
+                        ),
+                        (
+                            "vip",
+                            vec![
+                                WorkflowStep::wait(
+                                    "approved",
+                                    std::time::Duration::from_secs(3600),
+                                ),
+                                WorkflowStep::notify(
+                                    ChannelKind::Email,
+                                    "vip_approved",
+                                    "customer.email",
+                                ),
+                            ],
+                        ),
+                    ],
+                    vec![],
+                )],
+            );
+
+        let err = resume_workflow(
+            &executor,
+            &drifted_wf,
+            "wf-branch-reorder",
+            serde_json::json!({"event": "approved"}),
+        )
+        .await
+        .expect_err("branch definition reorder must not silently resume wrong arm");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"));
+                assert!(msg.contains("standard"));
+                assert!(msg.contains("vip"));
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "drifted resume must fail before sending the wrong branch notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_resume_rejects_default_branch_drift() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("branch_default_source")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::branch(
+                    "customer.tier",
+                    vec![(
+                        "vip",
+                        vec![WorkflowStep::notify(
+                            ChannelKind::Email,
+                            "vip",
+                            "customer.email",
+                        )],
+                    )],
+                    vec![
+                        WorkflowStep::wait("approved", std::time::Duration::from_secs(3600)),
+                        WorkflowStep::notify(ChannelKind::Email, "default", "customer.email"),
+                    ],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-branch-default-drift", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({
+                "tier": "gold",
+                "email": "guest@example.com"
+            }),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        let drifted_wf = WorkflowDefinition::new("branch_default_drifted")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::branch(
+                    "customer.tier",
+                    vec![
+                        (
+                            "vip",
+                            vec![WorkflowStep::notify(
+                                ChannelKind::Email,
+                                "vip",
+                                "customer.email",
+                            )],
+                        ),
+                        (
+                            "gold",
+                            vec![WorkflowStep::notify(
+                                ChannelKind::Email,
+                                "gold",
+                                "customer.email",
+                            )],
+                        ),
+                    ],
+                    vec![
+                        WorkflowStep::wait("approved", std::time::Duration::from_secs(3600)),
+                        WorkflowStep::notify(ChannelKind::Email, "default", "customer.email"),
+                    ],
+                )],
+            );
+
+        let err = resume_workflow(
+            &executor,
+            &drifted_wf,
+            "wf-branch-default-drift",
+            serde_json::json!({"event": "approved"}),
+        )
+        .await
+        .expect_err("default branch cursor must reject new matching branch arms");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("default branch cursor"));
+                assert!(msg.contains("gold"));
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
