@@ -104,6 +104,29 @@ fn existing_column_foreign_key_diffs(old: &Schema, new: &Schema) -> Vec<String> 
     changes
 }
 
+fn removed_or_changed_multi_column_foreign_keys(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, old_table) in &old.tables {
+        let Some(new_table) = new.tables.get(table_name) else {
+            continue;
+        };
+
+        for old_fk in &old_table.multi_column_fks {
+            if !new_table.multi_column_fks.contains(old_fk) {
+                changes.push(format!(
+                    "{}.{}",
+                    table_name,
+                    multi_column_fk_signature(old_fk)
+                ));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn existing_column_unique_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -241,6 +264,13 @@ fn foreign_key_signature(fk: &Option<super::schema::ForeignKey>) -> Option<Strin
     fk.as_ref().map(|fk| format!("{:?}", fk))
 }
 
+fn multi_column_fk_signature(fk: &super::schema::MultiColumnForeignKey) -> String {
+    match &fk.name {
+        Some(name) => format!("constraint:{name}"),
+        None => format!("{:?}->{:?}.{:?}", fk.columns, fk.ref_table, fk.ref_columns),
+    }
+}
+
 fn generated_signature(generated: &Option<Generated>) -> Option<String> {
     match generated {
         Some(Generated::AlwaysStored(expr)) => Some(format!("stored:{expr}")),
@@ -357,6 +387,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely alter single-column foreign keys on existing columns: {}. \
              Use an explicit migration for ADD/DROP/replace FOREIGN KEY constraints.",
             fk_diffs.join(", ")
+        ));
+    }
+
+    let multi_fk_diffs = removed_or_changed_multi_column_foreign_keys(old, new);
+    if !multi_fk_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely drop or replace multi-column foreign keys on existing tables: {}. \
+             Use an explicit migration for DROP CONSTRAINT/ADD CONSTRAINT replacement.",
+            multi_fk_diffs.join(", ")
         ));
     }
 
@@ -1900,5 +1939,76 @@ mod tests {
             ),
             "generated SQL should add composite foreign key, got: {sql}"
         );
+    }
+
+    #[test]
+    fn state_diff_support_rejects_removed_multi_column_foreign_key() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        old.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("trips")
+            .expect("trips table should exist")
+            .multi_column_fks
+            .clear();
+
+        let err =
+            diff_schemas_checked(&old, &new).expect_err("removed composite FK should fail closed");
+        assert!(err.contains("multi-column foreign keys"));
+        assert!(err.contains("trips."));
+    }
+
+    #[test]
+    fn state_diff_support_rejects_changed_multi_column_foreign_key() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        old.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("trips")
+            .expect("trips table should exist")
+            .multi_column_fks[0] = MultiColumnForeignKey::new(
+            vec!["route_id".to_string(), "schedule_id".to_string()],
+            "schedules",
+            vec!["schedule_id".to_string(), "route_id".to_string()],
+        );
+
+        let err =
+            diff_schemas_checked(&old, &new).expect_err("changed composite FK should fail closed");
+        assert!(err.contains("multi-column foreign keys"));
+        assert!(err.contains("trips."));
     }
 }
