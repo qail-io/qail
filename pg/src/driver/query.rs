@@ -842,8 +842,15 @@ impl PgConnection {
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
                         let query_err = PgError::QueryServer(err.into());
-                        if !query_err.is_prepared_statement_already_exists() {
-                            // Invalidate cache to prevent stale local mapping after parse failure.
+                        if query_err.is_prepared_statement_retryable()
+                            || (is_new
+                                && !flow.saw_parse_complete()
+                                && !query_err.is_prepared_statement_already_exists())
+                        {
+                            // Invalidate cache only when the server-side prepared
+                            // statement is known absent or the Parse step failed.
+                            // Execution-stage errors after ParseComplete leave the
+                            // statement usable on the backend.
                             self.prepared_statements.remove(&stmt_name);
                         }
                         error = Some(query_err);
@@ -1906,6 +1913,20 @@ mod tests {
         conn.buffer.extend_from_slice(payload);
     }
 
+    fn error_response_payload(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(b'S');
+        payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'C');
+        payload.extend_from_slice(code.as_bytes());
+        payload.push(0);
+        payload.push(b'M');
+        payload.extend_from_slice(message.as_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload
+    }
+
     #[test]
     fn prepared_buffer_sizing_rejects_too_many_params_before_allocation() {
         let params = vec![None; i16::MAX as usize + 1];
@@ -1959,5 +1980,48 @@ mod tests {
 
         assert!(err.to_string().contains("ReadyForQuery before completion"));
         assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn query_cached_keeps_statement_after_post_parse_error() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        let sql = "SELECT $1";
+        let stmt_name = PgConnection::sql_to_stmt_name(sql);
+        let err_payload = error_response_payload("23514", "check constraint violation");
+
+        push_backend_frame(&mut conn, b'1', &[]);
+        push_backend_frame(&mut conn, b'E', &err_payload);
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let err = conn
+            .query_cached(sql, &[Some(b"bad".to_vec())])
+            .await
+            .expect_err("execution-stage error should be returned");
+
+        assert!(matches!(err, PgError::QueryServer(_)));
+        assert!(conn.prepared_statements.contains_key(&stmt_name));
+        assert!(!conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn query_cached_removes_new_statement_when_parse_fails() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        let sql = "SELECT broken";
+        let stmt_name = PgConnection::sql_to_stmt_name(sql);
+        let err_payload = error_response_payload("42601", "syntax error");
+
+        push_backend_frame(&mut conn, b'E', &err_payload);
+        push_backend_frame(&mut conn, b'Z', b"I");
+
+        let err = conn
+            .query_cached(sql, &[])
+            .await
+            .expect_err("parse-stage error should be returned");
+
+        assert!(matches!(err, PgError::QueryServer(_)));
+        assert!(!conn.prepared_statements.contains_key(&stmt_name));
+        assert!(!conn.is_io_desynced());
     }
 }
