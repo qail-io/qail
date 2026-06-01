@@ -1175,7 +1175,7 @@ fn qail_value_matches_json(value: &QailValue, json: &Value) -> bool {
     match value {
         QailValue::Null | QailValue::NullUuid => json.is_null(),
         QailValue::Bool(expected) => json.as_bool() == Some(*expected),
-        QailValue::Int(expected) => json.as_i64() == Some(*expected),
+        QailValue::Int(expected) => json_number_equals_i64(json, *expected),
         QailValue::Float(expected) => json
             .as_f64()
             .is_some_and(|actual| (actual - expected).abs() < f64::EPSILON),
@@ -1198,12 +1198,89 @@ fn json_as_f64(value: &Value) -> Option<f64> {
 
 fn compare_json_to_qail(value: &Value, expected: &QailValue) -> Option<std::cmp::Ordering> {
     match expected {
-        QailValue::Int(n) => json_as_f64(value)?.partial_cmp(&(*n as f64)),
+        QailValue::Int(n) => compare_json_to_i64(value, *n),
         QailValue::Float(n) => json_as_f64(value)?.partial_cmp(n),
         QailValue::String(s) | QailValue::Json(s) | QailValue::Timestamp(s) => {
             value.as_str()?.partial_cmp(s.as_str())
         }
         QailValue::Uuid(u) => value.as_str()?.partial_cmp(u.to_string().as_str()),
+        _ => None,
+    }
+}
+
+enum JsonInteger {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+fn json_integer(number: &serde_json::Number) -> Option<JsonInteger> {
+    if let Some(value) = number.as_i64() {
+        Some(JsonInteger::Signed(value))
+    } else {
+        number.as_u64().map(JsonInteger::Unsigned)
+    }
+}
+
+fn compare_json_integers(left: JsonInteger, right: JsonInteger) -> std::cmp::Ordering {
+    match (left, right) {
+        (JsonInteger::Signed(left), JsonInteger::Signed(right)) => left.cmp(&right),
+        (JsonInteger::Unsigned(left), JsonInteger::Unsigned(right)) => left.cmp(&right),
+        (JsonInteger::Signed(left), JsonInteger::Unsigned(right)) => {
+            if left < 0 {
+                std::cmp::Ordering::Less
+            } else {
+                (left as u64).cmp(&right)
+            }
+        }
+        (JsonInteger::Unsigned(left), JsonInteger::Signed(right)) => {
+            if right < 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                left.cmp(&(right as u64))
+            }
+        }
+    }
+}
+
+fn compare_json_numbers(
+    left: &serde_json::Number,
+    right: &serde_json::Number,
+) -> Option<std::cmp::Ordering> {
+    match (json_integer(left), json_integer(right)) {
+        (Some(left), Some(right)) => Some(compare_json_integers(left, right)),
+        _ => left
+            .as_f64()
+            .and_then(|left| right.as_f64().and_then(|right| left.partial_cmp(&right))),
+    }
+}
+
+fn compare_json_number_to_i64(
+    number: &serde_json::Number,
+    expected: i64,
+) -> Option<std::cmp::Ordering> {
+    if let Some(actual) = json_integer(number) {
+        return Some(compare_json_integers(actual, JsonInteger::Signed(expected)));
+    }
+    number.as_f64()?.partial_cmp(&(expected as f64))
+}
+
+fn json_number_equals_i64(value: &Value, expected: i64) -> bool {
+    match value {
+        Value::Number(number) => {
+            compare_json_number_to_i64(number, expected) == Some(std::cmp::Ordering::Equal)
+        }
+        _ => false,
+    }
+}
+
+fn compare_json_to_i64(value: &Value, expected: i64) -> Option<std::cmp::Ordering> {
+    match value {
+        Value::Number(number) => compare_json_number_to_i64(number, expected),
+        Value::String(value) => value
+            .parse::<i64>()
+            .ok()
+            .map(|actual| actual.cmp(&expected))
+            .or_else(|| value.parse::<f64>().ok()?.partial_cmp(&(expected as f64))),
         _ => None,
     }
 }
@@ -1422,10 +1499,9 @@ fn compare_json_field(left: &Value, right: &Value, column: &str, desc: bool) -> 
         (None, None) => std::cmp::Ordering::Equal,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (Some(_), None) => std::cmp::Ordering::Less,
-        (Some(Value::Number(left)), Some(Value::Number(right))) => left
-            .as_f64()
-            .and_then(|left| right.as_f64().and_then(|right| left.partial_cmp(&right)))
-            .unwrap_or(std::cmp::Ordering::Equal),
+        (Some(Value::Number(left)), Some(Value::Number(right))) => {
+            compare_json_numbers(left, right).unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Some(Value::String(left)), Some(Value::String(right))) => left.cmp(right),
         (Some(Value::Bool(left)), Some(Value::Bool(right))) => left.cmp(right),
         _ => std::cmp::Ordering::Equal,
@@ -1858,6 +1934,42 @@ mod tests {
                 json!({"id": 2, "status": "open"})
             ]
         );
+    }
+
+    #[test]
+    fn branch_read_constraints_compare_large_integer_filters_exactly() {
+        let pivot = 9_007_199_254_740_992_i64;
+        let filters = vec![("id".to_string(), Operator::Gt, QailValue::Int(pivot))];
+        let mut rows = vec![json!({"id": pivot as u64}), json!({"id": pivot as u64 + 1})];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![json!({"id": pivot as u64 + 1})]);
+    }
+
+    #[test]
+    fn branch_read_constraints_sort_large_integer_json_exactly() {
+        let low = 9_007_199_254_740_992_u64;
+        let high = low + 1;
+        let mut rows = vec![json!({"id": high}), json!({"id": low})];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                sort: Some("id:asc"),
+                ..branch_constraint_input()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![json!({"id": low}), json!({"id": high})]);
     }
 
     #[test]
