@@ -443,6 +443,7 @@ impl AccessPolicy {
             .map(|cte| normalize_table_ref(&cte.name))
             .collect();
         self.check_join_read_access(ctx, cmd, &cte_names)?;
+        self.check_auxiliary_read_access(ctx, cmd, &cte_names)?;
 
         let required_ops = required_operations_for_command(cmd).ok_or_else(|| {
             AccessError::new(
@@ -451,6 +452,16 @@ impl AccessPolicy {
                 AccessErrorKind::UnsupportedAction(cmd.action),
             )
         })?;
+        if cte_names.contains(&table) {
+            if required_ops.iter().all(|op| *op == AccessOperation::Read) {
+                return Ok(());
+            }
+            return Err(AccessError::new(
+                table,
+                None,
+                AccessErrorKind::CteMutationUnsupported,
+            ));
+        }
 
         for operation in &required_ops {
             self.check_table_operation(ctx, &table, *operation)?;
@@ -580,6 +591,32 @@ impl AccessPolicy {
         Ok(())
     }
 
+    fn check_auxiliary_read_access(
+        &self,
+        ctx: &AccessContext,
+        cmd: &Qail,
+        cte_names: &BTreeSet<String>,
+    ) -> Result<(), AccessError> {
+        for table_ref in cmd.from_tables.iter().chain(&cmd.using_tables) {
+            let table = normalize_table_ref(table_ref);
+            if table.is_empty() || cte_names.contains(&table) {
+                continue;
+            }
+            self.check_table_operation(ctx, &table, AccessOperation::Read)?;
+            if self
+                .table_policy(&table)
+                .is_some_and(|policy| policy.read_columns.is_restrictive())
+            {
+                return Err(AccessError::new(
+                    table,
+                    Some(AccessOperation::Read),
+                    AccessErrorKind::AuxiliaryTableColumnPolicyUnsupported,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn check_condition_read_columns(&self, table: &str, cmd: &Qail) -> Result<(), AccessError> {
         let rule = self
             .table_policy(table)
@@ -590,6 +627,8 @@ impl AccessPolicy {
         }
 
         let target_refs = target_refs_for_command(cmd, table);
+        self.check_distinct_on_columns(table, rule, &target_refs, cmd)?;
+        self.check_grouping_set_columns(table, rule, &target_refs, cmd)?;
         for cage in &cmd.cages {
             if matches!(cage.kind, CageKind::Payload) {
                 continue;
@@ -645,6 +684,43 @@ impl AccessPolicy {
                         condition,
                         "merge condition",
                     )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_distinct_on_columns(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        cmd: &Qail,
+    ) -> Result<(), AccessError> {
+        for expr in &cmd.distinct_on {
+            if expr_projects_all_columns(expr) {
+                return Err(AccessError::new(
+                    table.to_string(),
+                    Some(AccessOperation::Read),
+                    AccessErrorKind::WildcardProjectionDenied,
+                ));
+            }
+            self.check_expr_column_refs(table, rule, target_refs, expr, "distinct on")?;
+        }
+        Ok(())
+    }
+
+    fn check_grouping_set_columns(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        cmd: &Qail,
+    ) -> Result<(), AccessError> {
+        if let crate::ast::GroupByMode::GroupingSets(sets) = &cmd.group_by_mode {
+            for group in sets {
+                for column in group {
+                    check_named_read_column(table, rule, target_refs, column, "grouping sets")?;
                 }
             }
         }
@@ -1147,6 +1223,14 @@ impl std::fmt::Display for AccessError {
                 "source table '{}' has column policy that cannot be enforced without an explicit source query",
                 self.table
             ),
+            AccessErrorKind::AuxiliaryTableColumnPolicyUnsupported => write!(
+                f,
+                "auxiliary table '{}' has column policy that cannot be enforced in UPDATE FROM or DELETE USING",
+                self.table
+            ),
+            AccessErrorKind::CteMutationUnsupported => {
+                write!(f, "CTE relation '{}' cannot be mutated", self.table)
+            }
             AccessErrorKind::EmptyTable => write!(f, "command has no target table"),
         }
     }
@@ -1191,6 +1275,10 @@ pub enum AccessErrorKind {
     JoinedTableColumnPolicyUnsupported,
     /// Source table column policies cannot be enforced without an explicit source projection.
     SourceTableColumnPolicyUnsupported,
+    /// UPDATE FROM / DELETE USING table column policies cannot be enforced by this checker.
+    AuxiliaryTableColumnPolicyUnsupported,
+    /// CTE aliases are read-only derived relations.
+    CteMutationUnsupported,
     /// Command did not carry a target table.
     EmptyTable,
 }
@@ -1788,6 +1876,108 @@ mod tests {
     }
 
     #[test]
+    fn update_from_and_delete_using_require_read_access_on_auxiliary_tables() {
+        let policy = AccessPolicy::new().with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Update, AccessOperation::Delete]),
+        );
+
+        let update = Qail::set("orders")
+            .set_value("status", "paid")
+            .update_from(["accounts"])
+            .filter(
+                "orders.account_id",
+                Operator::Eq,
+                Value::Column("accounts.id".into()),
+            );
+        let err = policy
+            .check_command(&AccessContext::anonymous(), &update)
+            .expect_err("UPDATE FROM source table should require read policy");
+        assert_eq!(err.table, "accounts");
+        assert_eq!(err.operation, Some(AccessOperation::Read));
+
+        let delete = Qail::del("orders").delete_using(["accounts"]).filter(
+            "orders.account_id",
+            Operator::Eq,
+            Value::Column("accounts.id".into()),
+        );
+        let err = policy
+            .check_command(&AccessContext::anonymous(), &delete)
+            .expect_err("DELETE USING source table should require read policy");
+        assert_eq!(err.table, "accounts");
+        assert_eq!(err.operation, Some(AccessOperation::Read));
+    }
+
+    #[test]
+    fn auxiliary_tables_with_restrictive_read_columns_fail_closed() {
+        let policy = AccessPolicy::new()
+            .with_table(
+                "orders",
+                TableAccessPolicy::new().allow_operations([AccessOperation::Update]),
+            )
+            .with_table(
+                "accounts",
+                TableAccessPolicy::new()
+                    .allow_operations([AccessOperation::Read])
+                    .read_columns(ColumnRule::only(["id"])),
+            );
+
+        let cmd = Qail::set("orders")
+            .set_value("status", "paid")
+            .update_from(["accounts"])
+            .filter(
+                "orders.account_id",
+                Operator::Eq,
+                Value::Column("accounts.id".into()),
+            );
+
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &cmd)
+                .expect_err("restrictive auxiliary source columns cannot be enforced precisely")
+                .kind,
+            AccessErrorKind::AuxiliaryTableColumnPolicyUnsupported
+        );
+    }
+
+    #[test]
+    fn read_column_policy_checks_distinct_on_and_grouping_sets() {
+        let policy = AccessPolicy::new().with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id", "status"])),
+        );
+
+        let distinct = Qail::get("orders")
+            .columns(["id"])
+            .distinct_on(["private_note"]);
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &distinct)
+                .expect_err("DISTINCT ON denied column should fail")
+                .kind,
+            AccessErrorKind::ColumnDenied {
+                column: "private_note".to_string()
+            }
+        );
+
+        let mut grouping = Qail::get("orders").columns(["id"]);
+        grouping.group_by_mode =
+            crate::ast::GroupByMode::GroupingSets(vec![vec!["private_note".to_string()]]);
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &grouping)
+                .expect_err("GROUPING SETS denied column should fail")
+                .kind,
+            AccessErrorKind::ColumnDenied {
+                column: "private_note".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn returning_uses_read_column_policy_even_on_writes() {
         let policy = AccessPolicy::new().with_table(
             "users",
@@ -1828,6 +2018,52 @@ mod tests {
         policy
             .check_command(&AccessContext::anonymous(), &cmd)
             .expect("outer and subquery table policies should pass");
+    }
+
+    #[test]
+    fn cte_alias_reads_do_not_require_separate_table_policy() {
+        let policy = AccessPolicy::new().with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id", "status"])),
+        );
+        let cmd = Qail::get("recent_orders")
+            .with(
+                "recent_orders",
+                Qail::get("orders").columns(["id", "status"]),
+            )
+            .columns(["id"]);
+
+        policy
+            .check_command(&AccessContext::anonymous(), &cmd)
+            .expect("CTE alias should be treated as a checked derived relation");
+    }
+
+    #[test]
+    fn cte_body_still_enforces_base_table_policy() {
+        let policy = AccessPolicy::new().with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id"])),
+        );
+        let cmd = Qail::get("recent_orders")
+            .with(
+                "recent_orders",
+                Qail::get("orders").columns(["id", "private_note"]),
+            )
+            .columns(["id"]);
+
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &cmd)
+                .expect_err("CTE body denied columns must still fail")
+                .kind,
+            AccessErrorKind::ColumnDenied {
+                column: "private_note".to_string()
+            }
+        );
     }
 
     #[test]
