@@ -137,7 +137,7 @@ pub(crate) async fn update_handler(
     // Always fetch the changed row internally. Without RETURNING, the current
     // mutation fetch path cannot distinguish a successful path update from a
     // zero-row match, and event triggers need the post-update row.
-    cmd = cmd.returning_all();
+    cmd = super::apply_table_returning(cmd, table);
 
     let mut old_cmd = if has_update_triggers {
         let mut old_cmd = qail_core::ast::Qail::get(&table_name)

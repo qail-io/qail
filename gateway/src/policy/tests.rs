@@ -1,6 +1,8 @@
 use super::*;
 use crate::auth::AuthContext;
-use qail_core::ast::{Action, CageKind, Expr, LogicalOp, MergeAction, Operator, Qail, Value};
+use qail_core::ast::{
+    Action, CageKind, Expr, GroupByMode, LogicalOp, MergeAction, Operator, Qail, SortOrder, Value,
+};
 
 #[test]
 fn test_policy_expands_user_id() {
@@ -843,6 +845,63 @@ fn test_merge_enforces_column_policies_for_actions() {
 }
 
 #[test]
+fn test_merge_update_column_blacklist_rejects_target_rhs() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+    add_unrestricted_merge_source_read_policy(&mut engine);
+
+    let mut cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("status", Expr::Named("users.password_hash".to_string()))]);
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'password_hash'")
+    );
+}
+
+#[test]
+fn test_merge_update_column_blacklist_rejects_target_alias_rhs() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+    add_unrestricted_merge_source_read_policy(&mut engine);
+
+    let mut cmd = Qail::merge_into("users")
+        .target_alias("u")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("u.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("status", Expr::Named("u.password_hash".to_string()))]);
+    let err = engine
+        .apply_policies(&merge_policy_auth(), &mut cmd)
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'password_hash'")
+    );
+}
+
+#[test]
 fn test_merge_delete_requires_delete_policy() {
     let mut engine = PolicyEngine::new();
     for operation in [OperationType::Create, OperationType::Update] {
@@ -1171,6 +1230,165 @@ fn test_column_blacklist_rejects_wildcard_projection() {
 }
 
 #[test]
+fn test_read_column_blacklist_rejects_filter_on_denied_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "hide_password".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd =
+        Qail::get("users")
+            .columns(["id"])
+            .filter("password_hash", Operator::Eq, "secret");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Read on column 'password_hash'")
+    );
+}
+
+#[test]
+fn test_read_column_blacklist_matches_schema_qualified_short_table_ref() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "hide_password".to_string(),
+        table: "public.users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("public.users").columns(["id"]).filter(
+        "users.password_hash",
+        Operator::Eq,
+        "secret",
+    );
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Read on column 'password_hash'")
+    );
+}
+
+#[test]
+fn test_read_column_whitelist_rejects_sort_on_unlisted_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_read".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["id".into(), "email".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users")
+        .columns(["id"])
+        .order_by("password_hash", SortOrder::Asc);
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("does not allow Read on column 'password_hash'")
+    );
+}
+
+#[test]
+fn test_read_column_whitelist_rejects_grouping_set_on_unlisted_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_read".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["id".into(), "email".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users").columns(["id"]);
+    cmd.group_by_mode = GroupByMode::GroupingSets(vec![vec!["password_hash".into()]]);
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("does not allow Read on column 'password_hash'")
+    );
+}
+
+#[test]
+fn test_count_column_blacklist_rejects_filter_on_denied_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "hide_password".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd =
+        Qail::get("users")
+            .columns(["id"])
+            .filter("password_hash", Operator::Eq, "secret");
+    cmd.action = Action::Cnt;
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Read on column 'password_hash'")
+    );
+}
+
+#[test]
 fn test_column_whitelist_rejects_expression_projection() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {
@@ -1263,6 +1481,65 @@ fn test_update_column_blacklist_rejects_payload_column() {
 }
 
 #[test]
+fn test_update_column_blacklist_rejects_payload_rhs_column_ref() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd =
+        Qail::set("users").set_value("display_status", Value::Column("password_hash".to_string()));
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'password_hash'")
+    );
+}
+
+#[test]
+fn test_update_column_blacklist_rejects_raw_payload_rhs_function() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("users").set_value(
+        "display_status",
+        Value::Function("coalesce(password_hash, '')".to_string()),
+    );
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(err.to_string().contains("raw function value"));
+}
+
+#[test]
 fn test_create_column_whitelist_rejects_unlisted_payload_column() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {
@@ -1290,6 +1567,126 @@ fn test_create_column_whitelist_rejects_unlisted_payload_column() {
     assert!(
         err.to_string()
             .contains("does not allow Create on column 'is_admin'")
+    );
+}
+
+#[test]
+fn test_create_column_whitelist_rewrites_returning_wildcard() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec!["id".into(), "email".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("users")
+        .set_value("email", "a@example.test")
+        .returning_all();
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.returning,
+        Some(vec![
+            Expr::Named("id".to_string()),
+            Expr::Named("email".to_string())
+        ])
+    );
+}
+
+#[test]
+fn test_update_column_blacklist_filters_returning_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("users")
+        .set_value("email", "a@example.test")
+        .returning(["id", "password_hash"]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(cmd.returning, Some(vec![Expr::Named("id".to_string())]));
+}
+
+#[test]
+fn test_update_column_blacklist_rejects_all_denied_returning_columns() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("users")
+        .set_value("email", "a@example.test")
+        .returning(["password_hash"]);
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(err.to_string().contains("All returning columns are denied"));
+}
+
+#[test]
+fn test_update_column_blacklist_rejects_returning_wildcard() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("users")
+        .set_value("email", "a@example.test")
+        .returning_all();
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string().contains("wildcard projection") && err.to_string().contains("returning")
     );
 }
 
@@ -1523,6 +1920,50 @@ fn test_on_conflict_update_column_blacklist_rejects_assignment() {
     assert!(
         err.to_string()
             .contains("denies Update on column 'is_admin'")
+    );
+}
+
+#[test]
+fn test_on_conflict_update_column_blacklist_rejects_assignment_rhs() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("users")
+        .set_value("id", "user-1")
+        .set_value("status", "active")
+        .on_conflict_update(
+            &["id"],
+            &[("status", Expr::Named("users.password_hash".into()))],
+        );
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'password_hash'")
     );
 }
 

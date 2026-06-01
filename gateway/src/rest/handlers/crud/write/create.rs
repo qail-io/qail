@@ -550,11 +550,11 @@ pub(crate) async fn create_handler(
             mutation_params.returning.as_deref(),
             has_create_triggers || classify_upsert_event,
         ) {
-            cmd = apply_returning(cmd, Some("*")).map_err(ApiError::parse_error)?;
+            cmd = super::apply_table_returning(cmd, table);
         } else if mutation_params.returning.is_none() {
             cmd = apply_create_probe_returning(cmd, table);
         } else {
-            cmd = apply_returning(cmd, mutation_params.returning.as_deref())
+            cmd = super::apply_mutation_returning(cmd, table, mutation_params.returning.as_deref())
                 .map_err(ApiError::parse_error)?;
         }
 

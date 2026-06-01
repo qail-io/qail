@@ -45,7 +45,7 @@ pub(crate) async fn delete_handler(
             QailValue::String(tenant_id.clone()),
         );
     }
-    cmd = cmd.returning_all();
+    cmd = super::apply_table_returning(cmd, table);
 
     let has_delete_triggers = !state
         .event_engine
