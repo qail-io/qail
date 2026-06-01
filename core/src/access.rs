@@ -273,6 +273,15 @@ impl AccessPolicy {
         self.check_grouping_set_columns(table, rule, &target_refs, cmd)?;
         for cage in &cmd.cages {
             if matches!(cage.kind, CageKind::Payload) {
+                for condition in &cage.conditions {
+                    self.check_value_column_refs(
+                        table,
+                        rule,
+                        &target_refs,
+                        &condition.value,
+                        "write payload value",
+                    )?;
+                }
                 continue;
             }
             for condition in &cage.conditions {
@@ -461,9 +470,17 @@ impl AccessPolicy {
                 }
                 Ok(())
             }
-            Expr::Window { params, order, .. } => {
+            Expr::Window {
+                params,
+                partition,
+                order,
+                ..
+            } => {
                 for param in params {
                     self.check_expr_column_refs(table, rule, target_refs, param, context)?;
+                }
+                for column in partition {
+                    check_named_read_column(table, rule, target_refs, column, context)?;
                 }
                 for cage in order {
                     for condition in &cage.conditions {
@@ -501,6 +518,11 @@ impl AccessPolicy {
                 }
                 Ok(())
             }
+            Value::Function(_) => Err(AccessError::new(
+                table.to_string(),
+                Some(AccessOperation::Read),
+                AccessErrorKind::UnsupportedColumnExpression { context },
+            )),
             Value::Subquery(_) => Ok(()),
             _ => Ok(()),
         }

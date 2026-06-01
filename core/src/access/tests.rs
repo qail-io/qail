@@ -211,6 +211,43 @@ fn read_column_policy_does_not_block_write_only_payloads() {
 }
 
 #[test]
+fn write_payload_values_require_read_access_for_column_refs() {
+    let policy = AccessPolicy::new().with_table(
+        "orders",
+        TableAccessPolicy::new()
+            .allow_operations([AccessOperation::Update])
+            .read_columns(ColumnRule::only(["id"]))
+            .write_columns(ColumnRule::only(["status"])),
+    );
+
+    let copy_denied_column = Qail::set("orders")
+        .set_value("status", Value::Column("private_note".to_string()))
+        .filter("id", Operator::Eq, 1);
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &copy_denied_column)
+            .expect_err("payload RHS column refs should require read access")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "private_note".to_string()
+        }
+    );
+
+    let raw_expr = Qail::set("orders")
+        .set_value("status", Value::Function("private_note".to_string()))
+        .filter("id", Operator::Eq, 1);
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &raw_expr)
+            .expect_err("raw payload RHS SQL cannot be inspected under read column policy")
+            .kind,
+        AccessErrorKind::UnsupportedColumnExpression {
+            context: "write payload value"
+        }
+    );
+}
+
+#[test]
 fn update_from_and_delete_using_require_read_access_on_auxiliary_tables() {
     let policy = AccessPolicy::new().with_table(
         "orders",
@@ -305,6 +342,38 @@ fn read_column_policy_checks_distinct_on_and_grouping_sets() {
         policy
             .check_command(&AccessContext::anonymous(), &grouping)
             .expect_err("GROUPING SETS denied column should fail")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "private_note".to_string()
+        }
+    );
+}
+
+#[test]
+fn read_column_policy_checks_window_partition_columns() {
+    let policy = AccessPolicy::new().with_table(
+        "orders",
+        TableAccessPolicy::new()
+            .allow_operations([AccessOperation::Read])
+            .read_columns(ColumnRule::only(["id", "status"])),
+    );
+
+    let window_sort = Expr::Window {
+        name: "ranked_orders".to_string(),
+        func: "row_number".to_string(),
+        params: vec![],
+        partition: vec!["private_note".to_string()],
+        order: vec![],
+        frame: None,
+    };
+    let cmd = Qail::get("orders")
+        .columns(["id"])
+        .order_by_expr(window_sort, crate::ast::SortOrder::Asc);
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &cmd)
+            .expect_err("window PARTITION BY denied column should fail")
             .kind,
         AccessErrorKind::ColumnDenied {
             column: "private_note".to_string()
