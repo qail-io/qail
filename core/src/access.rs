@@ -5,16 +5,17 @@
 //! driver sends the AST to a backend.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use crate::ast::{
-    Action, CageKind, Condition, ConflictAction, Expr, MergeAction, MergeSource, Qail, Value,
+    CageKind, Condition, ConflictAction, Expr, MergeAction, MergeSource, Qail, Value,
 };
 
 mod columns;
+mod config;
 mod error;
 mod ident;
 mod model;
+mod operations;
 
 use columns::{
     check_named_read_column, check_projection_rule, create_columns, expr_projects_all_columns,
@@ -24,6 +25,7 @@ use ident::{normalize_column_name, normalize_table_ref, target_refs_for_command}
 
 pub use error::{AccessError, AccessErrorKind, AccessPolicyLoadError};
 pub use model::{AccessContext, AccessDecision, AccessOperation, ColumnRule, TableAccessPolicy};
+pub use operations::required_operations_for_command;
 
 /// Complete access policy set.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -36,74 +38,6 @@ pub struct AccessPolicy {
 }
 
 impl AccessPolicy {
-    /// Deny-by-default policy set.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Allow-by-default policy set for trusted/internal use.
-    pub fn allow_by_default() -> Self {
-        Self {
-            default_decision: AccessDecision::Allow,
-            tables: BTreeMap::new(),
-        }
-    }
-
-    /// Add or replace a table policy.
-    pub fn with_table(mut self, table: impl Into<String>, policy: TableAccessPolicy) -> Self {
-        self.tables
-            .insert(normalize_table_ref(&table.into()), policy);
-        self
-    }
-
-    /// Parse an access policy from TOML.
-    pub fn from_toml_str(input: &str) -> Result<Self, AccessPolicyLoadError> {
-        toml::from_str::<Self>(input)
-            .map(Self::normalize_table_keys)
-            .map_err(AccessPolicyLoadError::Toml)
-    }
-
-    /// Parse an access policy from JSON.
-    pub fn from_json_str(input: &str) -> Result<Self, AccessPolicyLoadError> {
-        serde_json::from_str::<Self>(input)
-            .map(Self::normalize_table_keys)
-            .map_err(AccessPolicyLoadError::Json)
-    }
-
-    /// Load an access policy from a `.toml` or `.json` file.
-    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, AccessPolicyLoadError> {
-        let path = path.as_ref();
-        let raw = std::fs::read_to_string(path).map_err(AccessPolicyLoadError::Read)?;
-        match path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("toml") => Self::from_toml_str(&raw),
-            Some("json") => Self::from_json_str(&raw),
-            other => Err(AccessPolicyLoadError::UnsupportedExtension(
-                other.unwrap_or_default().to_string(),
-            )),
-        }
-    }
-
-    /// Mutably access a table policy, creating an empty policy if needed.
-    pub fn table_mut(&mut self, table: impl Into<String>) -> &mut TableAccessPolicy {
-        self.tables
-            .entry(normalize_table_ref(&table.into()))
-            .or_default()
-    }
-
-    fn normalize_table_keys(mut self) -> Self {
-        self.tables = self
-            .tables
-            .into_iter()
-            .map(|(table, policy)| (normalize_table_ref(&table), policy))
-            .collect();
-        self
-    }
-
     /// Check whether a command is allowed for the supplied context.
     pub fn check_command(&self, ctx: &AccessContext, cmd: &Qail) -> Result<(), AccessError> {
         self.check_command_inner(ctx, cmd)
@@ -804,66 +738,6 @@ impl AccessPolicy {
             _ => Ok(()),
         }
     }
-}
-
-impl Default for AccessPolicy {
-    fn default() -> Self {
-        Self {
-            default_decision: AccessDecision::Deny,
-            tables: BTreeMap::new(),
-        }
-    }
-}
-
-/// Required operations for a full command.
-pub fn required_operations_for_command(cmd: &Qail) -> Option<BTreeSet<AccessOperation>> {
-    let mut operations = BTreeSet::new();
-    match cmd.action {
-        Action::Add => {
-            operations.insert(AccessOperation::Create);
-            if matches!(
-                cmd.on_conflict.as_ref().map(|conflict| &conflict.action),
-                Some(ConflictAction::DoUpdate { .. })
-            ) {
-                operations.insert(AccessOperation::Update);
-            }
-        }
-        Action::Merge => {
-            if let Some(merge) = &cmd.merge {
-                for clause in &merge.clauses {
-                    match &clause.action {
-                        MergeAction::Update { .. } => {
-                            operations.insert(AccessOperation::Update);
-                        }
-                        MergeAction::Insert { .. } => {
-                            operations.insert(AccessOperation::Create);
-                        }
-                        MergeAction::Delete => {
-                            operations.insert(AccessOperation::Delete);
-                        }
-                        MergeAction::DoNothing => {}
-                    }
-                }
-                if operations.is_empty() {
-                    operations.extend([
-                        AccessOperation::Create,
-                        AccessOperation::Update,
-                        AccessOperation::Delete,
-                    ]);
-                }
-            } else {
-                operations.extend([
-                    AccessOperation::Create,
-                    AccessOperation::Update,
-                    AccessOperation::Delete,
-                ]);
-            }
-        }
-        action => {
-            operations.extend(AccessOperation::required_for_action(action)?);
-        }
-    }
-    Some(operations)
 }
 
 #[cfg(test)]
