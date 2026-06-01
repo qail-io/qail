@@ -19,9 +19,10 @@
 
 use super::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use super::schema::{
-    CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Generated, Grant,
-    Index, IndexMethod, MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind,
-    Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewDef,
+    CheckConstraint, CheckExpr, Column, Comment, Deferrable, EnumType, Extension, FkAction,
+    Generated, Grant, Index, IndexMethod, MigrationHint, MultiColumnForeignKey, Privilege,
+    ResourceDef, ResourceKind, Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table,
+    ViewDef,
 };
 use super::types::ColumnType;
 use crate::ast::Expr;
@@ -1278,9 +1279,6 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
         .map(|s| s.trim().to_string())
         .collect();
     let trailing = ref_part[ref_paren_end + 1..].trim();
-    if !trailing.is_empty() {
-        return Err("trailing content after foreign_key definition".to_string());
-    }
     if ref_cols.is_empty() || ref_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key referenced columns are required".to_string());
     }
@@ -1297,7 +1295,95 @@ fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
         return Err("foreign_key local/ref column counts must match".to_string());
     }
 
-    Ok(MultiColumnForeignKey::new(local_cols, ref_table, ref_cols))
+    let mut fk = MultiColumnForeignKey::new(local_cols, ref_table, ref_cols);
+    if !trailing.is_empty() {
+        apply_multi_column_fk_options(&mut fk, trailing)?;
+    }
+
+    Ok(fk)
+}
+
+fn apply_multi_column_fk_options(
+    fk: &mut MultiColumnForeignKey,
+    trailing: &str,
+) -> Result<(), String> {
+    let parts: Vec<&str> = trailing.split_whitespace().collect();
+    let mut i = 0;
+    let mut seen_name = false;
+    let mut seen_on_delete = false;
+    let mut seen_on_update = false;
+    let mut seen_deferrable = false;
+
+    while i < parts.len() {
+        match parts[i] {
+            "constraint" | "name" if i + 1 < parts.len() => {
+                if seen_name {
+                    return Err("duplicate foreign_key constraint name".to_string());
+                }
+                let name = parts[i + 1];
+                if !is_native_identifier(name) {
+                    return Err(format!("invalid foreign_key constraint name '{}'", name));
+                }
+                seen_name = true;
+                fk.name = Some(name.to_string());
+                i += 2;
+            }
+            "constraint" | "name" => {
+                return Err(format!("{} requires a constraint name", parts[i]));
+            }
+            "on_delete" if i + 1 < parts.len() => {
+                if seen_on_delete {
+                    return Err("duplicate on_delete action".to_string());
+                }
+                seen_on_delete = true;
+                fk.on_delete = parse_fk_action_str(parts[i + 1])?;
+                i += 2;
+            }
+            "on_update" if i + 1 < parts.len() => {
+                if seen_on_update {
+                    return Err("duplicate on_update action".to_string());
+                }
+                seen_on_update = true;
+                fk.on_update = parse_fk_action_str(parts[i + 1])?;
+                i += 2;
+            }
+            "on_delete" | "on_update" => {
+                return Err(format!("{} requires a foreign key action", parts[i]));
+            }
+            "deferrable" => {
+                if seen_deferrable {
+                    return Err("duplicate foreign_key deferrable option".to_string());
+                }
+                seen_deferrable = true;
+                fk.deferrable = Deferrable::Deferrable;
+                i += 1;
+            }
+            "initially_deferred" => {
+                if seen_deferrable {
+                    return Err("duplicate foreign_key deferrable option".to_string());
+                }
+                seen_deferrable = true;
+                fk.deferrable = Deferrable::InitiallyDeferred;
+                i += 1;
+            }
+            "initially_immediate" => {
+                if seen_deferrable {
+                    return Err("duplicate foreign_key deferrable option".to_string());
+                }
+                seen_deferrable = true;
+                fk.deferrable = Deferrable::InitiallyImmediate;
+                i += 1;
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown foreign_key option '{}' after references",
+                    unknown
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse a view definition.
@@ -1985,6 +2071,7 @@ fn apply_fk_action_options(
 ) -> Result<Column, String> {
     let mut seen_on_delete = false;
     let mut seen_on_update = false;
+    let mut seen_deferrable = false;
     while *i + 1 < parts.len() {
         match parts[*i + 1] {
             "on_delete" if *i + 2 < parts.len() => {
@@ -2007,6 +2094,30 @@ fn apply_fk_action_options(
             }
             "on_delete" | "on_update" => {
                 return Err(format!("{} requires a foreign key action", parts[*i + 1]));
+            }
+            "deferrable" => {
+                if seen_deferrable {
+                    return Err("duplicate foreign key deferrable option".to_string());
+                }
+                seen_deferrable = true;
+                col = col.deferrable();
+                *i += 1;
+            }
+            "initially_deferred" => {
+                if seen_deferrable {
+                    return Err("duplicate foreign key deferrable option".to_string());
+                }
+                seen_deferrable = true;
+                col = col.initially_deferred();
+                *i += 1;
+            }
+            "initially_immediate" => {
+                if seen_deferrable {
+                    return Err("duplicate foreign key deferrable option".to_string());
+                }
+                seen_deferrable = true;
+                col = col.initially_immediate();
+                *i += 1;
             }
             _ => break,
         }
@@ -2086,6 +2197,9 @@ fn is_column_constraint_keyword(token: &str) -> bool {
             | "references"
             | "on_delete"
             | "on_update"
+            | "deferrable"
+            | "initially_deferred"
+            | "initially_immediate"
             | "check_name"
     ) || token.starts_with("check(")
         || token.starts_with("generated_stored(")
@@ -3295,6 +3409,67 @@ table bookings {
     }
 
     #[test]
+    fn test_parse_multi_column_fk_options_roundtrip() {
+        let input = r#"
+table bookings {
+  id serial primary_key
+  route_id integer not_null
+  schedule_id integer not_null
+  foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id) constraint fk_bookings_schedule on_delete cascade on_update restrict initially_deferred
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let table = &schema.tables["bookings"];
+        assert_eq!(table.multi_column_fks.len(), 1);
+        let fk = &table.multi_column_fks[0];
+        assert_eq!(fk.name.as_deref(), Some("fk_bookings_schedule"));
+        assert!(matches!(fk.on_delete, FkAction::Cascade));
+        assert!(matches!(fk.on_update, FkAction::Restrict));
+        assert!(matches!(fk.deferrable, Deferrable::InitiallyDeferred));
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        assert!(rendered.contains("constraint fk_bookings_schedule"));
+        assert!(rendered.contains("on_delete cascade"));
+        assert!(rendered.contains("on_update restrict"));
+        assert!(rendered.contains("initially_deferred"));
+
+        let reparsed = parse_qail(&rendered).unwrap();
+        let reparsed_fk = &reparsed.tables["bookings"].multi_column_fks[0];
+        assert_eq!(reparsed_fk.name, fk.name);
+        assert_eq!(reparsed_fk.on_delete, fk.on_delete);
+        assert_eq!(reparsed_fk.on_update, fk.on_update);
+        assert_eq!(reparsed_fk.deferrable, fk.deferrable);
+    }
+
+    #[test]
+    fn test_parse_single_column_fk_deferrable_roundtrip() {
+        let input = r#"
+table bookings {
+  id serial primary_key
+  user_id uuid references users(id) on_delete cascade initially_immediate
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let fk = schema.tables["bookings"].columns[1]
+            .foreign_key
+            .as_ref()
+            .expect("foreign key should parse");
+        assert!(matches!(fk.on_delete, FkAction::Cascade));
+        assert!(matches!(fk.deferrable, Deferrable::InitiallyImmediate));
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        assert!(rendered.contains("on_delete cascade initially_immediate"));
+
+        let reparsed = parse_qail(&rendered).unwrap();
+        let reparsed_fk = reparsed.tables["bookings"].columns[1]
+            .foreign_key
+            .as_ref()
+            .expect("foreign key should reparse");
+        assert_eq!(reparsed_fk.on_delete, fk.on_delete);
+        assert_eq!(reparsed_fk.deferrable, fk.deferrable);
+    }
+
+    #[test]
     fn test_parse_column_name_starting_with_foreign_key() {
         let input = r#"
 table audits {
@@ -3348,8 +3523,8 @@ table audits {
                 "foreign_key local/ref column counts must match",
             ),
             (
-                "table bookings {\n  foreign_key (route_id) references schedules(id) on_delete cascade\n}",
-                "trailing content after foreign_key definition",
+                "table bookings {\n  foreign_key (route_id) references schedules(id) bananas cascade\n}",
+                "unknown foreign_key option 'bananas' after references",
             ),
         ] {
             let err = parse_qail(input).expect_err("invalid multi-column fk should fail");

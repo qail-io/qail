@@ -641,6 +641,24 @@ impl MultiColumnForeignKey {
         self.name = Some(name.into());
         self
     }
+
+    /// Make the foreign key DEFERRABLE.
+    pub fn deferrable(mut self) -> Self {
+        self.deferrable = Deferrable::Deferrable;
+        self
+    }
+
+    /// Make the foreign key DEFERRABLE INITIALLY DEFERRED.
+    pub fn initially_deferred(mut self) -> Self {
+        self.deferrable = Deferrable::InitiallyDeferred;
+        self
+    }
+
+    /// Make the foreign key DEFERRABLE INITIALLY IMMEDIATE.
+    pub fn initially_immediate(mut self) -> Self {
+        self.deferrable = Deferrable::InitiallyImmediate;
+        self
+    }
 }
 
 // ============================================================================
@@ -1506,12 +1524,36 @@ pub fn to_qail_string(schema: &Schema) -> String {
         }
         // Multi-column foreign keys
         for fk in &table.multi_column_fks {
-            output.push_str(&format!(
+            let mut fk_line = format!(
                 "  foreign_key ({}) references {}({})\n",
                 fk.columns.join(", "),
                 fk.ref_table,
                 fk.ref_columns.join(", ")
-            ));
+            );
+            if fk.name.is_some()
+                || fk.on_delete != FkAction::NoAction
+                || fk.on_update != FkAction::NoAction
+                || fk.deferrable != Deferrable::NotDeferrable
+            {
+                fk_line.pop();
+                if let Some(name) = &fk.name {
+                    fk_line.push_str(&format!(" constraint {}", name));
+                }
+                if fk.on_delete != FkAction::NoAction {
+                    fk_line.push_str(&format!(" on_delete {}", fk_action_str(&fk.on_delete)));
+                }
+                if fk.on_update != FkAction::NoAction {
+                    fk_line.push_str(&format!(" on_update {}", fk_action_str(&fk.on_update)));
+                }
+                match &fk.deferrable {
+                    Deferrable::Deferrable => fk_line.push_str(" deferrable"),
+                    Deferrable::InitiallyDeferred => fk_line.push_str(" initially_deferred"),
+                    Deferrable::InitiallyImmediate => fk_line.push_str(" initially_immediate"),
+                    Deferrable::NotDeferrable => {}
+                }
+                fk_line.push('\n');
+            }
+            output.push_str(&fk_line);
         }
         // RLS directives
         if table.enable_rls {
@@ -1882,6 +1924,11 @@ pub(super) fn multi_column_fk_to_table_constraint(
         columns: fk.columns.clone(),
         ref_table: fk.ref_table.clone(),
         ref_columns: fk.ref_columns.clone(),
+        on_delete: (fk.on_delete != FkAction::NoAction)
+            .then(|| fk_action_to_sql(&fk.on_delete).to_string()),
+        on_update: (fk.on_update != FkAction::NoAction)
+            .then(|| fk_action_to_sql(&fk.on_update).to_string()),
+        deferrable: deferrable_to_sql(&fk.deferrable).map(str::to_string),
     }
 }
 
@@ -2241,11 +2288,17 @@ mod tests {
             Table::new("trips")
                 .column(Column::new("route_id", ColumnType::Text))
                 .column(Column::new("schedule_id", ColumnType::Text))
-                .foreign_key(MultiColumnForeignKey::new(
-                    vec!["route_id".to_string(), "schedule_id".to_string()],
-                    "schedules",
-                    vec!["route_id".to_string(), "schedule_id".to_string()],
-                )),
+                .foreign_key(
+                    MultiColumnForeignKey::new(
+                        vec!["route_id".to_string(), "schedule_id".to_string()],
+                        "schedules",
+                        vec!["route_id".to_string(), "schedule_id".to_string()],
+                    )
+                    .named("fk_trips_schedule")
+                    .on_delete(FkAction::Cascade)
+                    .on_update(FkAction::Restrict)
+                    .initially_deferred(),
+                ),
         );
 
         let cmds = schema_to_commands(&schema);
@@ -2292,13 +2345,20 @@ mod tests {
                 .any(|constraint| matches!(
                         constraint,
                         crate::ast::TableConstraint::ForeignKey {
+                            name,
                             columns,
                             ref_table,
                             ref_columns,
-                            ..
+                            on_delete,
+                            on_update,
+                            deferrable,
                         } if columns == &["route_id", "schedule_id"]
+                            && name.as_deref() == Some("fk_trips_schedule")
                             && ref_table == "schedules"
                             && ref_columns == &["route_id", "schedule_id"]
+                            && on_delete.as_deref() == Some("CASCADE")
+                            && on_update.as_deref() == Some("RESTRICT")
+                            && deferrable.as_deref() == Some("DEFERRABLE INITIALLY DEFERRED")
                 )),
             "multi-column foreign key should be represented in generated commands"
         );
@@ -2306,7 +2366,7 @@ mod tests {
         let sql = add_fk_cmd.to_sql();
         assert!(
             sql.contains(
-                "ALTER TABLE trips ADD FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id)"
+                "ALTER TABLE trips ADD CONSTRAINT fk_trips_schedule FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             ),
             "generated SQL should include composite foreign key, got: {sql}"
         );

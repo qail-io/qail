@@ -272,6 +272,9 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                 columns,
                 ref_table,
                 ref_columns,
+                on_delete,
+                on_update,
+                deferrable,
             } => {
                 if let Some(name) = name {
                     ensure_str("qail.table_constraint.name", name)?;
@@ -292,6 +295,15 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                 )?;
                 for col in ref_columns {
                     ensure_str("qail.table_constraint.ref_column", col)?;
+                }
+                if let Some(action) = on_delete {
+                    ensure_str("qail.table_constraint.on_delete", action)?;
+                }
+                if let Some(action) = on_update {
+                    ensure_str("qail.table_constraint.on_update", action)?;
+                }
+                if let Some(clause) = deferrable {
+                    ensure_str("qail.table_constraint.deferrable", clause)?;
                 }
             }
         }

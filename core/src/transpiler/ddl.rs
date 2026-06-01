@@ -337,19 +337,60 @@ fn quoted_column_list(cols: &[String], generator: &dyn SqlGenerator) -> String {
         .join(", ")
 }
 
-fn table_constraint_to_sql(constraint: &TableConstraint, generator: &dyn SqlGenerator) -> String {
+fn fk_action_option_to_sql(action: &str) -> Option<&'static str> {
+    match action
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', " ")
+        .as_str()
+    {
+        "cascade" => Some("CASCADE"),
+        "restrict" => Some("RESTRICT"),
+        "no action" => Some("NO ACTION"),
+        "set null" => Some("SET NULL"),
+        "set default" => Some("SET DEFAULT"),
+        _ => None,
+    }
+}
+
+fn fk_deferrable_option_to_sql(deferrable: &str) -> Option<&'static str> {
+    match deferrable
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', " ")
+        .as_str()
+    {
+        "deferrable" => Some("DEFERRABLE"),
+        "deferrable initially deferred" | "initially deferred" => {
+            Some("DEFERRABLE INITIALLY DEFERRED")
+        }
+        "deferrable initially immediate" | "initially immediate" => {
+            Some("DEFERRABLE INITIALLY IMMEDIATE")
+        }
+        _ => None,
+    }
+}
+
+fn table_constraint_to_sql(
+    constraint: &TableConstraint,
+    generator: &dyn SqlGenerator,
+) -> Result<String, String> {
     match constraint {
         TableConstraint::Unique(cols) => {
-            format!("UNIQUE ({})", quoted_column_list(cols, generator))
+            Ok(format!("UNIQUE ({})", quoted_column_list(cols, generator)))
         }
-        TableConstraint::PrimaryKey(cols) => {
-            format!("PRIMARY KEY ({})", quoted_column_list(cols, generator))
-        }
+        TableConstraint::PrimaryKey(cols) => Ok(format!(
+            "PRIMARY KEY ({})",
+            quoted_column_list(cols, generator)
+        )),
         TableConstraint::ForeignKey {
             name,
             columns,
             ref_table,
             ref_columns,
+            on_delete,
+            on_update,
+            deferrable,
         } => {
             let mut sql = String::new();
             if let Some(name) = name {
@@ -364,7 +405,28 @@ fn table_constraint_to_sql(constraint: &TableConstraint, generator: &dyn SqlGene
             sql.push('(');
             sql.push_str(&quoted_column_list(ref_columns, generator));
             sql.push(')');
-            sql
+            if let Some(action) = on_delete {
+                let Some(action) = fk_action_option_to_sql(action) else {
+                    return Err("/* ERROR: Invalid foreign key ON DELETE action */".to_string());
+                };
+                sql.push_str(" ON DELETE ");
+                sql.push_str(action);
+            }
+            if let Some(action) = on_update {
+                let Some(action) = fk_action_option_to_sql(action) else {
+                    return Err("/* ERROR: Invalid foreign key ON UPDATE action */".to_string());
+                };
+                sql.push_str(" ON UPDATE ");
+                sql.push_str(action);
+            }
+            if let Some(deferrable) = deferrable {
+                let Some(deferrable) = fk_deferrable_option_to_sql(deferrable) else {
+                    return Err("/* ERROR: Invalid foreign key DEFERRABLE clause */".to_string());
+                };
+                sql.push(' ');
+                sql.push_str(deferrable);
+            }
+            Ok(sql)
         }
     }
 }
@@ -533,10 +595,11 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     for tc in &cmd.table_constraints {
-        defs.push(format!(
-            "    {}",
-            table_constraint_to_sql(tc, generator.as_ref())
-        ));
+        let constraint_sql = match table_constraint_to_sql(tc, generator.as_ref()) {
+            Ok(sql) => sql,
+            Err(err) => return err,
+        };
+        defs.push(format!("    {}", constraint_sql));
     }
 
     sql.push_str(&defs.join(",\n"));
@@ -884,11 +947,11 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
         parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
     }
     for constraint in &cmd.table_constraints {
-        parts.push(format!(
-            "ALTER TABLE {} ADD {}",
-            table,
-            table_constraint_to_sql(constraint, generator.as_ref())
-        ));
+        let constraint_sql = match table_constraint_to_sql(constraint, generator.as_ref()) {
+            Ok(sql) => sql,
+            Err(err) => return err,
+        };
+        parts.push(format!("ALTER TABLE {} ADD {}", table, constraint_sql));
     }
 
     if parts.is_empty() {

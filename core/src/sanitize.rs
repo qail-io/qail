@@ -58,6 +58,44 @@ fn check_ident(field: &str, value: &str) -> Result<(), SanitizeError> {
     }
 }
 
+fn check_fk_action(field: &str, value: &str) -> Result<(), SanitizeError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', " ");
+    if matches!(
+        normalized.as_str(),
+        "cascade" | "restrict" | "no action" | "set null" | "set default"
+    ) {
+        Ok(())
+    } else {
+        Err(SanitizeError {
+            field: field.to_string(),
+            value: value.chars().take(40).collect(),
+            reason:
+                "foreign key action must be cascade, restrict, no_action, set_null, or set_default"
+                    .to_string(),
+        })
+    }
+}
+
+fn check_fk_deferrable(field: &str, value: &str) -> Result<(), SanitizeError> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', " ");
+    if matches!(
+        normalized.as_str(),
+        "deferrable"
+            | "initially deferred"
+            | "initially immediate"
+            | "deferrable initially deferred"
+            | "deferrable initially immediate"
+    ) {
+        Ok(())
+    } else {
+        Err(SanitizeError {
+            field: field.to_string(),
+            value: value.chars().take(40).collect(),
+            reason: "foreign key deferrable clause must be deferrable, initially_deferred, or initially_immediate".to_string(),
+        })
+    }
+}
+
 /// Validate an `Expr` node for unsafe patterns.
 ///
 /// - `Expr::Named` must be a safe identifier.
@@ -316,6 +354,9 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                 columns,
                 ref_table,
                 ref_columns,
+                on_delete,
+                on_update,
+                deferrable,
             } => {
                 if let Some(name) = name {
                     check_ident(&format!("table_constraints[{i}].name"), name)?;
@@ -326,6 +367,15 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                 check_ident(&format!("table_constraints[{i}].ref_table"), ref_table)?;
                 for col in ref_columns {
                     check_ident(&format!("table_constraints[{i}].ref_column"), col)?;
+                }
+                if let Some(action) = on_delete {
+                    check_fk_action(&format!("table_constraints[{i}].on_delete"), action)?;
+                }
+                if let Some(action) = on_update {
+                    check_fk_action(&format!("table_constraints[{i}].on_update"), action)?;
+                }
+                if let Some(clause) = deferrable {
+                    check_fk_deferrable(&format!("table_constraints[{i}].deferrable"), clause)?;
                 }
             }
         }

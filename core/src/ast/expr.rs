@@ -616,6 +616,15 @@ pub enum TableConstraint {
         ref_table: String,
         /// Referenced columns.
         ref_columns: Vec<String>,
+        /// Optional ON DELETE action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_delete: Option<String>,
+        /// Optional ON UPDATE action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_update: Option<String>,
+        /// Optional DEFERRABLE clause.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferrable: Option<String>,
     },
 }
 
