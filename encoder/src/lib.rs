@@ -87,7 +87,7 @@ fn checked_bind_execute_pair_len(statement_len: usize, param_len: usize) -> Resu
 
 fn checked_bind_execute_batch_capacity(
     statement_len: usize,
-    param_strs: &[&str],
+    param_strs: &[Option<&str>],
     count: usize,
 ) -> Result<usize, String> {
     let cycle_count = param_strs.len().max(1);
@@ -97,8 +97,9 @@ fn checked_bind_execute_batch_capacity(
         cycle_len = checked_bind_execute_pair_len(statement_len, 0)?;
     } else {
         for param in param_strs {
+            let param_len = param.map_or(0, str::len);
             cycle_len = cycle_len
-                .checked_add(checked_bind_execute_pair_len(statement_len, param.len())?)
+                .checked_add(checked_bind_execute_pair_len(statement_len, param_len)?)
                 .ok_or_else(|| "Bind/Execute cycle size overflow".to_string())?;
         }
     }
@@ -120,8 +121,9 @@ fn checked_bind_execute_batch_capacity(
         }
     } else {
         for param in param_strs.iter().take(remainder) {
+            let param_len = param.map_or(0, str::len);
             total = total
-                .checked_add(checked_bind_execute_pair_len(statement_len, param.len())?)
+                .checked_add(checked_bind_execute_pair_len(statement_len, param_len)?)
                 .ok_or_else(|| "Bind/Execute batch size overflow".to_string())?;
         }
     }
@@ -614,7 +616,8 @@ pub unsafe extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut u
 /// The caller **MUST** ensure that `params` points to a valid array of at least
 /// `params_count` elements. Providing a smaller array is **undefined behavior**
 /// (the function iterates `0..params_count` via `params.add(i)`).
-/// Individual null elements within the array are safely skipped via `filter_map`.
+/// Individual null elements within the array are encoded as SQL NULL
+/// parameters and preserve their position in the batch cycle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qail_encode_bind_execute_batch(
     statement: *const c_char,
@@ -643,7 +646,7 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
         };
 
         // Collect params
-        let param_strs: Vec<&str> = if params.is_null() || params_count == 0 {
+        let param_strs: Vec<Option<&str>> = if params.is_null() || params_count == 0 {
             vec![]
         } else {
             let mut out = Vec::new();
@@ -652,12 +655,13 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
                 // to an array containing at least `params_count` entries.
                 let p = unsafe { *params.add(i) };
                 if p.is_null() {
+                    out.push(None);
                     continue;
                 }
                 // SAFETY: Non-null parameter entries are expected to
                 // point to valid NUL-terminated C strings.
                 match unsafe { CStr::from_ptr(p) }.to_str() {
-                    Ok(s) => out.push(s),
+                    Ok(s) => out.push(Some(s)),
                     Err(e) => {
                         set_error(format!("Invalid UTF-8 in param {i}: {e}"));
                         return -3;
@@ -682,7 +686,7 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
             let param = if param_strs.is_empty() {
                 None
             } else {
-                Some(param_strs[i % param_strs.len()])
+                param_strs[i % param_strs.len()]
             };
 
             // Encode Bind
@@ -1164,6 +1168,60 @@ mod tests {
             .into_owned()
     }
 
+    fn bind_param_values(bytes: &[u8]) -> Vec<Option<Vec<u8>>> {
+        let mut values = Vec::new();
+        let mut offset = 0usize;
+
+        while offset < bytes.len() {
+            match bytes[offset] {
+                b'B' => {
+                    let msg_len = i32::from_be_bytes(
+                        bytes[offset + 1..offset + 5]
+                            .try_into()
+                            .expect("bind message length"),
+                    ) as usize;
+                    let end = offset + 1 + msg_len;
+                    let mut pos = offset + 5;
+
+                    while bytes[pos] != 0 {
+                        pos += 1;
+                    }
+                    pos += 1;
+
+                    while bytes[pos] != 0 {
+                        pos += 1;
+                    }
+                    pos += 1;
+
+                    let format_count =
+                        i16::from_be_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize;
+                    pos += 2 + (format_count * 2);
+
+                    let param_count =
+                        i16::from_be_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize;
+                    pos += 2;
+                    assert_eq!(param_count, 1);
+
+                    let param_len = i32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    if param_len == -1 {
+                        values.push(None);
+                    } else {
+                        let param_len = param_len as usize;
+                        values.push(Some(bytes[pos..pos + param_len].to_vec()));
+                    }
+
+                    offset = end;
+                }
+                b'E' => offset += 10,
+                b'S' => break,
+                other => panic!("unexpected message byte {other} at offset {offset}"),
+            }
+        }
+
+        values
+    }
+
     #[test]
     fn test_uniform_batch_rejects_size_overflow_without_allocation() {
         let table = CString::new("users").unwrap();
@@ -1280,6 +1338,41 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Invalid UTF-8 in param 0"));
+    }
+
+    #[test]
+    fn test_bind_execute_batch_preserves_null_param_slots() {
+        let statement = CString::new("stmt").unwrap();
+        let param = CString::new("alice").unwrap();
+        let params = [std::ptr::null(), param.as_ptr()];
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_bind_execute_batch(
+                statement.as_ptr(),
+                params.as_ptr(),
+                params.len(),
+                4,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, 0);
+        assert!(!out_ptr.is_null());
+        assert!(out_len > 0);
+
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+        let values = bind_param_values(bytes);
+        assert_eq!(
+            values,
+            vec![None, Some(b"alice".to_vec()), None, Some(b"alice".to_vec())]
+        );
+
+        unsafe {
+            qail_free_bytes(out_ptr, out_len);
+        }
     }
 
     #[test]
