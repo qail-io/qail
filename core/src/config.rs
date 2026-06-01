@@ -90,6 +90,9 @@ pub struct QailConfig {
     /// `[gateway]` section (optional).
     pub gateway: Option<GatewayConfig>,
 
+    /// `[access]` section (optional native vertical access policy).
+    pub access: Option<AccessPolicyConfig>,
+
     /// `[[sync]]` rules.
     pub sync: Vec<SyncRule>,
 }
@@ -305,6 +308,25 @@ impl Default for GatewayConfig {
     }
 }
 
+/// `[access]` — native vertical access policy settings.
+#[derive(Debug, Clone)]
+pub struct AccessPolicyConfig {
+    /// Enable loading and enforcing the native access policy.
+    pub enabled: bool,
+
+    /// Path to a TOML or JSON access policy file.
+    pub path: Option<String>,
+}
+
+impl Default for AccessPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+        }
+    }
+}
+
 fn default_bind() -> String {
     "0.0.0.0:8080".to_string()
 }
@@ -429,6 +451,7 @@ impl QailConfig {
             postgres: parse_postgres(root)?,
             qdrant: parse_qdrant(root)?,
             gateway: parse_gateway(root)?,
+            access: parse_access(root)?,
             sync: parse_sync(root)?,
         })
     }
@@ -549,6 +572,26 @@ fn parse_gateway(root: &toml::Table) -> ConfigResult<Option<GatewayConfig>> {
     } else {
         None
     };
+
+    Ok(Some(cfg))
+}
+
+fn parse_access(root: &toml::Table) -> ConfigResult<Option<AccessPolicyConfig>> {
+    let Some(tbl) = subtable(root, "access")? else {
+        return Ok(None);
+    };
+
+    let mut cfg = AccessPolicyConfig::default();
+    if let Some(v) = opt_bool(tbl, "access", "enabled")? {
+        cfg.enabled = v;
+    }
+    cfg.path = opt_string(tbl, "access", "path")?;
+
+    if cfg.enabled && cfg.path.is_none() {
+        return Err(ConfigError::Invalid(
+            "access.path is required when access.enabled is true".to_string(),
+        ));
+    }
 
     Ok(Some(cfg))
 }
@@ -882,6 +925,9 @@ bind = "0.0.0.0:9090"
 cors = false
 policy = "policies.yaml"
 
+[access]
+path = "access-policy.toml"
+
 [gateway.cache]
 enabled = true
 max_entries = 5000
@@ -908,6 +954,13 @@ embedding_model = "candle:bert-base"
         let gw = config.gateway.unwrap();
         assert_eq!(gw.bind, "0.0.0.0:9090");
         assert!(!gw.cors);
+        assert_eq!(
+            config
+                .access
+                .as_ref()
+                .and_then(|access| access.path.as_deref()),
+            Some("access-policy.toml")
+        );
 
         let cache = gw.cache.unwrap();
         assert_eq!(cache.max_entries, 5000);
@@ -935,5 +988,28 @@ url = "postgres://localhost/legacy"
         assert!(config.postgres.rls.is_none());
         assert!(config.qdrant.is_none());
         assert!(config.gateway.is_none());
+        assert!(config.access.is_none());
+    }
+
+    #[test]
+    fn test_parse_disabled_access_policy_without_path() {
+        let toml_str = r#"
+[access]
+enabled = false
+"#;
+        let config = QailConfig::from_toml_str(toml_str).unwrap();
+        let access = config.access.unwrap();
+        assert!(!access.enabled);
+        assert!(access.path.is_none());
+    }
+
+    #[test]
+    fn test_parse_enabled_access_policy_requires_path() {
+        let toml_str = r#"
+[access]
+enabled = true
+"#;
+        let result = QailConfig::from_toml_str(toml_str);
+        assert!(matches!(result, Err(ConfigError::Invalid(_))));
     }
 }

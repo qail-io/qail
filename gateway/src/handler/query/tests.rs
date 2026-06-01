@@ -61,6 +61,7 @@ async fn build_test_state(config: GatewayConfig, allow_list: QueryAllowList) -> 
     Arc::new(GatewayState {
         pool,
         policy_engine: PolicyEngine::new(),
+        access_policy: None,
         event_engine: EventTriggerEngine::new(),
         schema: SchemaRegistry::new(),
         cache: QueryCache::new(config.cache_config()),

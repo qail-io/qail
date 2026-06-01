@@ -57,6 +57,10 @@ enabled = true
 max_entries = 1000
 ttl_secs = 60
 
+[access]
+enabled = true
+path = "access-policy.toml"
+
 [[sync]]
 source_table = "products"
 trigger_column = "description"
@@ -144,7 +148,34 @@ let gw = GatewayConfig::from_qail_config(&qail);
 | `[postgres.rls]` | No | RLS role names |
 | `[qdrant]` | No | Qdrant REST + gRPC endpoints |
 | `[gateway]` | No | HTTP server bind, CORS, cache |
+| `[access]` | No | Native vertical access policy file |
 | `[[sync]]` | No | Vector sync rules (hybrid mode) |
+
+## Native Access Policy
+
+RLS handles row ownership; `[access]` handles operation and column access before
+the gateway sends a QAIL AST to Postgres. It is opt-in:
+
+```toml
+[access]
+enabled = true
+path = "access-policy.toml"
+```
+
+Example `access-policy.toml`:
+
+```toml
+default_decision = "deny"
+
+[tables.orders]
+operations = ["read", "update"]
+read_columns = { only = ["id", "status", "total"] }
+write_columns = { only = ["status"] }
+require_any_role = ["operator", "administrator"]
+require_scopes = ["orders:read"]
+```
+
+Policy files may be TOML or JSON. When `enabled = true`, `path` is required.
 
 ## Generated Files
 

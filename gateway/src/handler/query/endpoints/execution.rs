@@ -11,6 +11,7 @@ pub(super) async fn execute_qail_cmd_fast(
 ) -> Result<Json<FastQueryResponse>, ApiError> {
     let mut cmd = cmd.clone();
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), auth, &cmd)?;
     let is_read_only = command_is_read_only_for_release(&cmd);
 
     let (depth, filters, joins) = query_complexity(&cmd);
@@ -139,6 +140,7 @@ pub(super) async fn execute_qail_cmd(
 ) -> Result<Json<QueryResponse>, ApiError> {
     let mut cmd = cmd.clone();
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), auth, &cmd)?;
 
     let (depth, filters, joins) = query_complexity(&cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {

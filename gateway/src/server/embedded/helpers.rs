@@ -13,6 +13,26 @@ use crate::policy::PolicyEngine;
 use crate::schema::SchemaRegistry;
 use qail_pg::PgPool;
 
+pub(super) fn load_access_policy(
+    config: &GatewayConfig,
+) -> Result<Option<Arc<qail_core::access::AccessPolicy>>, GatewayError> {
+    let Some(policy_path) = config.access_policy_path.as_ref() else {
+        return Ok(None);
+    };
+
+    let canonical = crate::config::validate_config_path(policy_path, config.config_root.as_deref())
+        .map_err(GatewayError::Config)?;
+    tracing::info!("Loading native access policy from: {}", canonical.display());
+    let policy = qail_core::access::AccessPolicy::load_from_path(&canonical).map_err(|e| {
+        GatewayError::Config(format!(
+            "Failed to load native access policy from '{}': {}",
+            canonical.display(),
+            e
+        ))
+    })?;
+    Ok(Some(Arc::new(policy)))
+}
+
 pub(super) fn load_policy_engine(config: &GatewayConfig) -> Result<PolicyEngine, GatewayError> {
     let mut policy_engine = PolicyEngine::new();
     if let Some(ref policy_path) = config.policy_path {

@@ -56,6 +56,10 @@ pub struct GatewayConfig {
     /// Path to policies file (optional)
     pub policy_path: Option<String>,
 
+    /// Path to native vertical access policy file (optional).
+    #[serde(default)]
+    pub access_policy_path: Option<String>,
+
     /// Server bind address
     pub bind_address: String,
 

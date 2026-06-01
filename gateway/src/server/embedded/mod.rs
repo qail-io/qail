@@ -31,6 +31,7 @@ impl GatewayState {
         safety_gateway.check_production_strict()?;
 
         let policy_engine = helpers::load_policy_engine(&config)?;
+        let access_policy = helpers::load_access_policy(&config)?;
         let schema = helpers::load_schema_registry(&config)?;
         helpers::verify_schema_drift(
             &pool,
@@ -130,6 +131,7 @@ impl GatewayState {
         let state = GatewayState {
             pool,
             policy_engine,
+            access_policy,
             event_engine,
             schema,
             cache,

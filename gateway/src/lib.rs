@@ -31,6 +31,7 @@
 #![deny(unused_imports)]
 #![deny(dead_code)]
 
+pub(crate) mod access;
 pub mod auth;
 pub mod cache;
 pub mod concurrency;

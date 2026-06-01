@@ -152,6 +152,7 @@ pub async fn execute_query_export(
     }
 
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     let (depth, filters, joins) = query_complexity(&cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {

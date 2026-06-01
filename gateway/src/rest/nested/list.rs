@@ -187,6 +187,8 @@ pub(crate) async fn nested_list_handler(
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
     state.optimize_qail_for_execution(&mut parent_cmd);
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), &auth, &parent_cmd)?;
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     // Execute — parent proof first, then the child query.
     let mut conn = state

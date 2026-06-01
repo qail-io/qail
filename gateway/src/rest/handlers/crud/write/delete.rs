@@ -58,6 +58,7 @@ pub(crate) async fn delete_handler(
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
     state.optimize_qail_for_execution(&mut cmd);
+    crate::access::check_access_policy(state.as_ref(), &auth, &cmd)?;
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers)?;
@@ -106,6 +107,12 @@ pub(crate) async fn delete_handler(
                     return Err(ApiError::forbidden(e.to_string()));
                 }
                 state.optimize_qail_for_execution(&mut exists_cmd);
+                if let Err(e) =
+                    crate::access::check_access_policy(state.as_ref(), &auth, &exists_cmd)
+                {
+                    let _ = conn.rollback_and_release().await;
+                    return Err(e);
+                }
                 let rows = match conn.fetch_all_uncached(&exists_cmd).await {
                     Ok(rows) => rows,
                     Err(e) => {

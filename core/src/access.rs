@@ -5,6 +5,7 @@
 //! driver sends the AST to a backend.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use crate::ast::{
     Action, CageKind, Condition, ConflictAction, Expr, MergeAction, MergeSource, Qail, Value,
@@ -347,11 +348,52 @@ impl AccessPolicy {
         self
     }
 
+    /// Parse an access policy from TOML.
+    pub fn from_toml_str(input: &str) -> Result<Self, AccessPolicyLoadError> {
+        toml::from_str::<Self>(input)
+            .map(Self::normalize_table_keys)
+            .map_err(AccessPolicyLoadError::Toml)
+    }
+
+    /// Parse an access policy from JSON.
+    pub fn from_json_str(input: &str) -> Result<Self, AccessPolicyLoadError> {
+        serde_json::from_str::<Self>(input)
+            .map(Self::normalize_table_keys)
+            .map_err(AccessPolicyLoadError::Json)
+    }
+
+    /// Load an access policy from a `.toml` or `.json` file.
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, AccessPolicyLoadError> {
+        let path = path.as_ref();
+        let raw = std::fs::read_to_string(path).map_err(AccessPolicyLoadError::Read)?;
+        match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("toml") => Self::from_toml_str(&raw),
+            Some("json") => Self::from_json_str(&raw),
+            other => Err(AccessPolicyLoadError::UnsupportedExtension(
+                other.unwrap_or_default().to_string(),
+            )),
+        }
+    }
+
     /// Mutably access a table policy, creating an empty policy if needed.
     pub fn table_mut(&mut self, table: impl Into<String>) -> &mut TableAccessPolicy {
         self.tables
             .entry(normalize_table_ref(&table.into()))
             .or_default()
+    }
+
+    fn normalize_table_keys(mut self) -> Self {
+        self.tables = self
+            .tables
+            .into_iter()
+            .map(|(table, policy)| (normalize_table_ref(&table), policy))
+            .collect();
+        self
     }
 
     /// Check whether a command is allowed for the supplied context.
@@ -376,13 +418,12 @@ impl AccessPolicy {
         if let Some(source_query) = &cmd.source_query {
             self.check_command_inner(ctx, source_query)?;
         }
-        if let Some(merge) = &cmd.merge
-            && let MergeSource::Query { query, .. } = &merge.source
-        {
-            self.check_command_inner(ctx, query)?;
+        if let Some(merge) = &cmd.merge {
+            match &merge.source {
+                MergeSource::Query { query, .. } => self.check_command_inner(ctx, query)?,
+                MergeSource::Table { name, .. } => self.check_merge_table_source(ctx, name)?,
+            }
         }
-
-        self.check_embedded_queries(ctx, cmd)?;
 
         let table = normalize_table_ref(&cmd.table);
         if table.is_empty() {
@@ -392,6 +433,9 @@ impl AccessPolicy {
                 AccessErrorKind::EmptyTable,
             ));
         }
+
+        self.check_embedded_queries(ctx, cmd)?;
+        self.check_condition_read_columns(&table, cmd)?;
 
         let cte_names: BTreeSet<String> = cmd
             .ctes
@@ -431,6 +475,34 @@ impl AccessPolicy {
             self.check_returning_columns(&table, returning)?;
         }
 
+        Ok(())
+    }
+
+    fn check_merge_table_source(
+        &self,
+        ctx: &AccessContext,
+        source_table: &str,
+    ) -> Result<(), AccessError> {
+        let table = normalize_table_ref(source_table);
+        if table.is_empty() {
+            return Err(AccessError::new(
+                String::new(),
+                Some(AccessOperation::Read),
+                AccessErrorKind::EmptyTable,
+            ));
+        }
+
+        self.check_table_operation(ctx, &table, AccessOperation::Read)?;
+        if self
+            .table_policy(&table)
+            .is_some_and(|policy| policy.read_columns.is_restrictive())
+        {
+            return Err(AccessError::new(
+                table,
+                Some(AccessOperation::Read),
+                AccessErrorKind::SourceTableColumnPolicyUnsupported,
+            ));
+        }
         Ok(())
     }
 
@@ -506,6 +578,214 @@ impl AccessPolicy {
             }
         }
         Ok(())
+    }
+
+    fn check_condition_read_columns(&self, table: &str, cmd: &Qail) -> Result<(), AccessError> {
+        let rule = self
+            .table_policy(table)
+            .map(|policy| &policy.read_columns)
+            .unwrap_or(&ColumnRule::Any);
+        if !rule.is_restrictive() {
+            return Ok(());
+        }
+
+        let target_refs = target_refs_for_command(cmd, table);
+        for cage in &cmd.cages {
+            if matches!(cage.kind, CageKind::Payload) {
+                continue;
+            }
+            for condition in &cage.conditions {
+                self.check_condition_column_refs(
+                    table,
+                    rule,
+                    &target_refs,
+                    condition,
+                    "condition",
+                )?;
+            }
+        }
+        for condition in &cmd.having {
+            self.check_condition_column_refs(
+                table,
+                rule,
+                &target_refs,
+                condition,
+                "having condition",
+            )?;
+        }
+        for join in &cmd.joins {
+            if let Some(conditions) = &join.on {
+                for condition in conditions {
+                    self.check_condition_column_refs(
+                        table,
+                        rule,
+                        &target_refs,
+                        condition,
+                        "join condition",
+                    )?;
+                }
+            }
+        }
+        if let Some(merge) = &cmd.merge {
+            for condition in &merge.on {
+                self.check_condition_column_refs(
+                    table,
+                    rule,
+                    &target_refs,
+                    condition,
+                    "merge condition",
+                )?;
+            }
+            for clause in &merge.clauses {
+                for condition in &clause.condition {
+                    self.check_condition_column_refs(
+                        table,
+                        rule,
+                        &target_refs,
+                        condition,
+                        "merge condition",
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_condition_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        condition: &Condition,
+        context: &'static str,
+    ) -> Result<(), AccessError> {
+        self.check_expr_column_refs(table, rule, target_refs, &condition.left, context)?;
+        self.check_value_column_refs(table, rule, target_refs, &condition.value, context)
+    }
+
+    fn check_expr_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        expr: &Expr,
+        context: &'static str,
+    ) -> Result<(), AccessError> {
+        match expr {
+            Expr::Named(name)
+            | Expr::Aliased { name, .. }
+            | Expr::JsonAccess { column: name, .. } => {
+                check_named_read_column(table, rule, target_refs, name, context)
+            }
+            Expr::Aggregate { col, filter, .. } => {
+                if col != "*" {
+                    check_named_read_column(table, rule, target_refs, col, context)?;
+                }
+                if let Some(conditions) = filter {
+                    for condition in conditions {
+                        self.check_condition_column_refs(
+                            table,
+                            rule,
+                            target_refs,
+                            condition,
+                            context,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Cast { expr, .. }
+            | Expr::Mod { col: expr, .. }
+            | Expr::FieldAccess { expr, .. }
+            | Expr::Collate { expr, .. } => {
+                self.check_expr_column_refs(table, rule, target_refs, expr, context)
+            }
+            Expr::Subscript { expr, index, .. } => {
+                self.check_expr_column_refs(table, rule, target_refs, expr, context)?;
+                self.check_expr_column_refs(table, rule, target_refs, index, context)
+            }
+            Expr::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.check_expr_column_refs(table, rule, target_refs, arg, context)?;
+                }
+                Ok(())
+            }
+            Expr::SpecialFunction { args, .. } => {
+                for (_, arg) in args {
+                    self.check_expr_column_refs(table, rule, target_refs, arg, context)?;
+                }
+                Ok(())
+            }
+            Expr::Binary { left, right, .. } => {
+                self.check_expr_column_refs(table, rule, target_refs, left, context)?;
+                self.check_expr_column_refs(table, rule, target_refs, right, context)
+            }
+            Expr::Literal(value) => {
+                self.check_value_column_refs(table, rule, target_refs, value, context)
+            }
+            Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+                for element in elements {
+                    self.check_expr_column_refs(table, rule, target_refs, element, context)?;
+                }
+                Ok(())
+            }
+            Expr::Case {
+                when_clauses,
+                else_value,
+                ..
+            } => {
+                for (condition, value) in when_clauses {
+                    self.check_condition_column_refs(table, rule, target_refs, condition, context)?;
+                    self.check_expr_column_refs(table, rule, target_refs, value, context)?;
+                }
+                if let Some(value) = else_value {
+                    self.check_expr_column_refs(table, rule, target_refs, value, context)?;
+                }
+                Ok(())
+            }
+            Expr::Window { params, order, .. } => {
+                for param in params {
+                    self.check_expr_column_refs(table, rule, target_refs, param, context)?;
+                }
+                for cage in order {
+                    for condition in &cage.conditions {
+                        self.check_condition_column_refs(
+                            table,
+                            rule,
+                            target_refs,
+                            condition,
+                            context,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Subquery { .. } | Expr::Exists { .. } | Expr::Star | Expr::Def { .. } => Ok(()),
+        }
+    }
+
+    fn check_value_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        value: &Value,
+        context: &'static str,
+    ) -> Result<(), AccessError> {
+        match value {
+            Value::Column(name) => check_named_read_column(table, rule, target_refs, name, context),
+            Value::Expr(expr) => {
+                self.check_expr_column_refs(table, rule, target_refs, expr, context)
+            }
+            Value::Array(values) => {
+                for value in values {
+                    self.check_value_column_refs(table, rule, target_refs, value, context)?;
+                }
+                Ok(())
+            }
+            Value::Subquery(_) => Ok(()),
+            _ => Ok(()),
+        }
     }
 
     fn check_read_columns(
@@ -751,6 +1031,49 @@ impl Default for AccessPolicy {
     }
 }
 
+/// Access policy file loading failure.
+#[derive(Debug)]
+pub enum AccessPolicyLoadError {
+    /// Filesystem read failure.
+    Read(std::io::Error),
+    /// TOML parse failure.
+    Toml(toml::de::Error),
+    /// JSON parse failure.
+    Json(serde_json::Error),
+    /// File extension is not supported.
+    UnsupportedExtension(String),
+}
+
+impl std::fmt::Display for AccessPolicyLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(err) => write!(f, "failed to read access policy: {err}"),
+            Self::Toml(err) => write!(f, "failed to parse TOML access policy: {err}"),
+            Self::Json(err) => write!(f, "failed to parse JSON access policy: {err}"),
+            Self::UnsupportedExtension(extension) if extension.is_empty() => {
+                write!(f, "access policy file must use .toml or .json extension")
+            }
+            Self::UnsupportedExtension(extension) => {
+                write!(
+                    f,
+                    "unsupported access policy extension '.{extension}' (expected .toml or .json)"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AccessPolicyLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(err) => Some(err),
+            Self::Toml(err) => Some(err),
+            Self::Json(err) => Some(err),
+            Self::UnsupportedExtension(_) => None,
+        }
+    }
+}
+
 /// Access check failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessError {
@@ -819,6 +1142,11 @@ impl std::fmt::Display for AccessError {
                 "joined table '{}' has column policy that cannot be enforced in a flat join",
                 self.table
             ),
+            AccessErrorKind::SourceTableColumnPolicyUnsupported => write!(
+                f,
+                "source table '{}' has column policy that cannot be enforced without an explicit source query",
+                self.table
+            ),
             AccessErrorKind::EmptyTable => write!(f, "command has no target table"),
         }
     }
@@ -861,6 +1189,8 @@ pub enum AccessErrorKind {
     ExplicitWriteColumnsRequired,
     /// Joined table column policies cannot be enforced by this checker.
     JoinedTableColumnPolicyUnsupported,
+    /// Source table column policies cannot be enforced without an explicit source projection.
+    SourceTableColumnPolicyUnsupported,
     /// Command did not carry a target table.
     EmptyTable,
 }
@@ -1125,6 +1455,70 @@ fn simple_column_name(name: &str) -> Option<String> {
     Some(normalize_column_name(trimmed))
 }
 
+fn check_named_read_column(
+    table: &str,
+    rule: &ColumnRule,
+    target_refs: &BTreeSet<String>,
+    name: &str,
+    context: &'static str,
+) -> Result<(), AccessError> {
+    let Some(column_ref) = parse_column_ref(name) else {
+        return Err(AccessError::new(
+            table.to_string(),
+            Some(AccessOperation::Read),
+            AccessErrorKind::UnsupportedColumnExpression { context },
+        ));
+    };
+    if !column_ref_matches_target(&column_ref, target_refs) {
+        return Ok(());
+    }
+    if !rule.allows(&column_ref.column) {
+        return Err(AccessError::new(
+            table.to_string(),
+            Some(AccessOperation::Read),
+            AccessErrorKind::ColumnDenied {
+                column: column_ref.column,
+            },
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ColumnRef {
+    qualifier: Option<String>,
+    column: String,
+}
+
+fn parse_column_ref(name: &str) -> Option<ColumnRef> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed == "*"
+        || trimmed.ends_with(".*")
+        || trimmed.contains('(')
+        || trimmed.contains(')')
+        || trimmed.split_whitespace().count() != 1
+    {
+        return None;
+    }
+
+    let parts: Vec<String> = trimmed
+        .split('.')
+        .map(normalize_identifier_part)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let column = parts.last()?.clone();
+    let qualifier = (parts.len() > 1).then(|| parts[..parts.len() - 1].join("."));
+    Some(ColumnRef { qualifier, column })
+}
+
+fn column_ref_matches_target(column_ref: &ColumnRef, target_refs: &BTreeSet<String>) -> bool {
+    let Some(qualifier) = &column_ref.qualifier else {
+        return true;
+    };
+    target_refs.contains(qualifier)
+}
+
 fn normalize_column_name(name: impl Into<String>) -> String {
     let name = name.into();
     name.rsplit('.')
@@ -1134,6 +1528,10 @@ fn normalize_column_name(name: impl Into<String>) -> String {
         .to_ascii_lowercase()
 }
 
+fn normalize_identifier_part(part: &str) -> String {
+    part.trim().trim_matches('"').to_ascii_lowercase()
+}
+
 fn normalize_table_ref(table_ref: &str) -> String {
     table_ref
         .split_whitespace()
@@ -1141,6 +1539,39 @@ fn normalize_table_ref(table_ref: &str) -> String {
         .unwrap_or_default()
         .trim_matches('"')
         .to_ascii_lowercase()
+}
+
+fn target_refs_for_command(cmd: &Qail, table: &str) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    refs.insert(table.to_string());
+    if let Some(short_name) = table.rsplit('.').next()
+        && short_name != table
+    {
+        refs.insert(short_name.to_string());
+    }
+    if let Some(alias) = table_alias(&cmd.table) {
+        refs.insert(alias);
+    }
+    if let Some(target_alias) = cmd
+        .merge
+        .as_ref()
+        .and_then(|merge| merge.target_alias.as_deref())
+    {
+        refs.insert(normalize_identifier_part(target_alias));
+    }
+    refs
+}
+
+fn table_alias(table_ref: &str) -> Option<String> {
+    let mut tokens = table_ref.split_whitespace();
+    tokens.next()?;
+    let token = tokens.next()?;
+    let alias = if token.eq_ignore_ascii_case("as") {
+        tokens.next()?
+    } else {
+        token
+    };
+    Some(normalize_identifier_part(alias)).filter(|alias| !alias.is_empty())
 }
 
 #[cfg(test)]
@@ -1222,6 +1653,20 @@ mod tests {
             }
         );
 
+        let denied_filter =
+            Qail::get("users")
+                .columns(["id"])
+                .filter("password_hash", Operator::Eq, "secret");
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &denied_filter)
+                .expect_err("filtering by a denied column should fail")
+                .kind,
+            AccessErrorKind::ColumnDenied {
+                column: "password_hash".to_string()
+            }
+        );
+
         policy
             .check_command(
                 &AccessContext::anonymous(),
@@ -1232,16 +1677,21 @@ mod tests {
 
     #[test]
     fn write_column_allowlist_checks_update_insert_upsert_and_merge() {
-        let policy = AccessPolicy::new().with_table(
-            "orders",
-            TableAccessPolicy::new()
-                .allow_operations([
-                    AccessOperation::Create,
-                    AccessOperation::Update,
-                    AccessOperation::Delete,
-                ])
-                .write_columns(ColumnRule::only(["status", "total"])),
-        );
+        let policy = AccessPolicy::new()
+            .with_table(
+                "orders",
+                TableAccessPolicy::new()
+                    .allow_operations([
+                        AccessOperation::Create,
+                        AccessOperation::Update,
+                        AccessOperation::Delete,
+                    ])
+                    .write_columns(ColumnRule::only(["status", "total"])),
+            )
+            .with_table(
+                "incoming_orders",
+                TableAccessPolicy::new().allow_operations([AccessOperation::Read]),
+            );
 
         let update = Qail::set("orders").set_value("admin_note", "nope");
         assert_eq!(
@@ -1301,6 +1751,38 @@ mod tests {
                 .kind,
             AccessErrorKind::ColumnDenied {
                 column: "private_note".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn read_column_policy_does_not_block_write_only_payloads() {
+        let policy = AccessPolicy::new().with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Update])
+                .read_columns(ColumnRule::only(["id"]))
+                .write_columns(ColumnRule::only(["status"])),
+        );
+
+        let allowed = Qail::set("orders")
+            .set_value("status", "paid")
+            .filter("id", Operator::Eq, 1);
+        policy
+            .check_command(&AccessContext::anonymous(), &allowed)
+            .expect("write-only payload column should not require read access");
+
+        let denied_filter =
+            Qail::set("orders")
+                .set_value("status", "paid")
+                .filter("status", Operator::Eq, "draft");
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &denied_filter)
+                .expect_err("filter column should still require read access")
+                .kind,
+            AccessErrorKind::ColumnDenied {
+                column: "status".to_string()
             }
         );
     }
@@ -1379,5 +1861,122 @@ mod tests {
             .expect_err("merge source query table should require read policy");
         assert_eq!(err.table, "source_orders");
         assert_eq!(err.operation, Some(AccessOperation::Read));
+    }
+
+    #[test]
+    fn merge_table_source_is_checked_as_read() {
+        let policy = AccessPolicy::new().with_table(
+            "orders",
+            TableAccessPolicy::new().allow_operations([AccessOperation::Update]),
+        );
+
+        let cmd = Qail::merge_into("orders")
+            .using_table_as("source_orders", "src")
+            .merge_on_condition(Condition {
+                left: Expr::Named("orders.id".to_string()),
+                op: Operator::Eq,
+                value: Value::Column("src.id".to_string()),
+                is_array_unnest: false,
+            })
+            .when_matched_update(&[("status", Expr::Named("src.status".to_string()))]);
+
+        let err = policy
+            .check_command(&AccessContext::anonymous(), &cmd)
+            .expect_err("merge source table should require read policy");
+        assert_eq!(err.table, "source_orders");
+        assert_eq!(err.operation, Some(AccessOperation::Read));
+    }
+
+    #[test]
+    fn merge_table_source_with_restrictive_columns_requires_query_source() {
+        let policy = AccessPolicy::new()
+            .with_table(
+                "orders",
+                TableAccessPolicy::new().allow_operations([AccessOperation::Update]),
+            )
+            .with_table(
+                "source_orders",
+                TableAccessPolicy::new()
+                    .allow_operations([AccessOperation::Read])
+                    .read_columns(ColumnRule::only(["id"])),
+            );
+
+        let cmd = Qail::merge_into("orders")
+            .using_table_as("source_orders", "src")
+            .merge_on_condition(Condition {
+                left: Expr::Named("orders.id".to_string()),
+                op: Operator::Eq,
+                value: Value::Column("src.id".to_string()),
+                is_array_unnest: false,
+            })
+            .when_matched_update(&[("status", Expr::Named("src.status".to_string()))]);
+
+        assert_eq!(
+            policy
+                .check_command(&AccessContext::anonymous(), &cmd)
+                .expect_err("restrictive source table columns need an explicit query source")
+                .kind,
+            AccessErrorKind::SourceTableColumnPolicyUnsupported
+        );
+    }
+
+    #[test]
+    fn access_policy_loads_from_toml_and_json() {
+        let toml_policy = r#"
+default_decision = "deny"
+
+[tables.Orders]
+operations = ["read"]
+read_columns = { only = ["id", "status"] }
+require_any_role = ["operator"]
+require_scopes = ["orders:read"]
+"#;
+        let policy = AccessPolicy::from_toml_str(toml_policy).unwrap();
+        policy
+            .check_command(
+                &AccessContext::subject("user-1")
+                    .with_role("operator")
+                    .with_scope("orders:read"),
+                &Qail::get("orders").columns(["id", "status"]),
+            )
+            .expect("TOML policy should allow declared columns");
+        assert!(policy.tables.contains_key("orders"));
+
+        let json_policy = r#"{
+            "default_decision": "deny",
+            "tables": {
+                "orders": {
+                    "operations": ["read"],
+                    "read_columns": {"only": ["id"]}
+                }
+            }
+        }"#;
+        let policy = AccessPolicy::from_json_str(json_policy).unwrap();
+        policy
+            .check_command(
+                &AccessContext::anonymous(),
+                &Qail::get("orders").columns(["id"]),
+            )
+            .expect("JSON policy should allow declared column");
+    }
+
+    #[test]
+    fn access_policy_rejects_unsupported_file_extensions() {
+        let path = std::env::temp_dir().join(format!(
+            "qail-access-policy-{}-{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "default_decision: deny").unwrap();
+        let err = AccessPolicy::load_from_path(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(
+            err,
+            AccessPolicyLoadError::UnsupportedExtension(extension) if extension == "yaml"
+        ));
     }
 }
