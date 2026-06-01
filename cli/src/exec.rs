@@ -74,16 +74,12 @@ impl SshTunnel {
 
         // Find available local port
         let local_port = Self::find_available_port()?;
+        let args = build_ssh_tunnel_args(local_port, remote_host, remote_port, ssh_host)?;
 
         // Construct SSH tunnel command
         // ssh -N -L local_port:remote_host:remote_port ssh_host
         let child = Command::new("ssh")
-            .args([
-                "-N", // No remote command
-                "-L",
-                &format!("{}:{}:{}", local_port, remote_host, remote_port),
-                ssh_host,
-            ])
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -113,6 +109,53 @@ impl Drop for SshTunnel {
         // Kill the SSH tunnel process
         let _ = self.child.kill();
     }
+}
+
+fn validate_ssh_arg(label: &str, value: &str, allow_at: bool) -> Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{label} cannot be empty");
+    }
+    if value.trim() != value {
+        anyhow::bail!("{label} cannot contain leading or trailing whitespace");
+    }
+    if value.starts_with('-') {
+        anyhow::bail!("{label} cannot start with '-'");
+    }
+    if value
+        .chars()
+        .any(|c| c.is_ascii_control() || c.is_whitespace())
+    {
+        anyhow::bail!("{label} cannot contain whitespace or control characters");
+    }
+    if !allow_at && value.contains('@') {
+        anyhow::bail!("{label} cannot contain userinfo");
+    }
+    Ok(())
+}
+
+fn tunnel_remote_host(remote_host: &str) -> Result<String> {
+    validate_ssh_arg("SSH tunnel remote host", remote_host, false)?;
+    if remote_host.contains(':') && !remote_host.starts_with('[') {
+        Ok(format!("[{}]", remote_host))
+    } else {
+        Ok(remote_host.to_string())
+    }
+}
+
+fn build_ssh_tunnel_args(
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+    ssh_host: &str,
+) -> Result<Vec<String>> {
+    validate_ssh_arg("SSH destination", ssh_host, true)?;
+    let remote_host = tunnel_remote_host(remote_host)?;
+    Ok(vec![
+        "-N".to_string(),
+        "-L".to_string(),
+        format!("{}:{}:{}", local_port, remote_host, remote_port),
+        ssh_host.to_string(),
+    ])
 }
 
 fn split_qail_statements(content: &str) -> Vec<String> {
@@ -449,4 +492,62 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_tunnel_args_reject_option_like_destination() {
+        let err = build_ssh_tunnel_args(
+            15432,
+            "db.example.com",
+            5432,
+            "-oProxyCommand=touch /tmp/pwn",
+        )
+        .expect_err("ssh option injection must be rejected");
+
+        assert!(err.to_string().contains("cannot start with '-'"));
+    }
+
+    #[test]
+    fn ssh_tunnel_args_reject_whitespace_destination() {
+        let err = build_ssh_tunnel_args(15432, "db.example.com", 5432, "bastion -v")
+            .expect_err("destination must be one ssh argv item");
+
+        assert!(err.to_string().contains("whitespace"));
+    }
+
+    #[test]
+    fn ssh_tunnel_args_accept_common_destination_forms() {
+        let args = build_ssh_tunnel_args(15432, "db.example.com", 5432, "deploy@bastion-prod_1")
+            .expect("common ssh destination should be accepted");
+
+        assert_eq!(
+            args,
+            vec![
+                "-N".to_string(),
+                "-L".to_string(),
+                "15432:db.example.com:5432".to_string(),
+                "deploy@bastion-prod_1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ssh_tunnel_args_bracket_ipv6_remote_host() {
+        let args = build_ssh_tunnel_args(15432, "2001:db8::10", 5432, "bastion")
+            .expect("IPv6 remote host should be representable in -L");
+
+        assert_eq!(args[2], "15432:[2001:db8::10]:5432");
+    }
+
+    #[test]
+    fn ssh_tunnel_args_reject_remote_host_userinfo() {
+        let err = build_ssh_tunnel_args(15432, "alice@db.example.com", 5432, "bastion")
+            .expect_err("database URL host must not carry userinfo into -L");
+
+        assert!(err.to_string().contains("userinfo"));
+    }
 }

@@ -34,10 +34,11 @@ pub(super) fn load_access_policy(
 pub(super) fn load_policy_engine(config: &GatewayConfig) -> Result<PolicyEngine, GatewayError> {
     let mut policy_engine = PolicyEngine::new();
     if let Some(ref policy_path) = config.policy_path {
-        crate::config::validate_config_path(policy_path, config.config_root.as_deref())
-            .map_err(GatewayError::Config)?;
-        tracing::info!("Loading policies from: {}", policy_path);
-        policy_engine.load_from_file(policy_path)?;
+        let canonical =
+            crate::config::validate_config_path(policy_path, config.config_root.as_deref())
+                .map_err(GatewayError::Config)?;
+        tracing::info!("Loading policies from: {}", canonical.display());
+        policy_engine.load_from_file(canonical.to_str().unwrap_or(policy_path))?;
     }
     Ok(policy_engine)
 }
@@ -45,10 +46,11 @@ pub(super) fn load_policy_engine(config: &GatewayConfig) -> Result<PolicyEngine,
 pub(super) fn load_schema_registry(config: &GatewayConfig) -> Result<SchemaRegistry, GatewayError> {
     let mut schema = SchemaRegistry::new();
     if let Some(ref schema_path) = config.schema_path {
-        crate::config::validate_config_path(schema_path, config.config_root.as_deref())
-            .map_err(GatewayError::Config)?;
-        tracing::info!("Loading schema from: {}", schema_path);
-        schema.load_from_file(schema_path)?;
+        let canonical =
+            crate::config::validate_config_path(schema_path, config.config_root.as_deref())
+                .map_err(GatewayError::Config)?;
+        tracing::info!("Loading schema from: {}", canonical.display());
+        schema.load_from_file(canonical.to_str().unwrap_or(schema_path))?;
     }
     Ok(schema)
 }
@@ -185,11 +187,12 @@ pub(super) fn load_event_engine(
 ) -> Result<EventTriggerEngine, GatewayError> {
     let mut event_engine = EventTriggerEngine::new();
     if let Some(ref events_path) = config.events_path {
-        crate::config::validate_config_path(events_path, config.config_root.as_deref())
-            .map_err(GatewayError::Config)?;
-        tracing::info!("Loading event triggers from: {}", events_path);
+        let canonical =
+            crate::config::validate_config_path(events_path, config.config_root.as_deref())
+                .map_err(GatewayError::Config)?;
+        tracing::info!("Loading event triggers from: {}", canonical.display());
         event_engine
-            .load_from_file(events_path)
+            .load_from_file(canonical.to_str().unwrap_or(events_path))
             .map_err(GatewayError::Config)?;
     }
     Ok(event_engine)
