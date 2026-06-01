@@ -58,7 +58,7 @@ fn test_reject_ddl_blocks_ddl() {
 
 #[test]
 fn test_reject_ddl_blocks_nested_unsupported_actions() {
-    use qail_core::ast::{Qail, SetOp};
+    use qail_core::ast::{Expr, MergeSource, Qail, SetOp};
 
     let cmd = Qail::get("safe").with("safe", Qail::export("orders"));
     assert!(reject_ddl_in_transaction(&cmd).is_err());
@@ -70,6 +70,25 @@ fn test_reject_ddl_blocks_nested_unsupported_actions() {
     let mut cmd = Qail::get("orders");
     cmd.set_ops
         .push((SetOp::UnionAll, Box::new(Qail::export("archived_orders"))));
+    assert!(reject_ddl_in_transaction(&cmd).is_err());
+
+    let mut cmd = Qail::get("orders");
+    cmd.columns.push(Expr::Subquery {
+        query: Box::new(Qail::export("orders")),
+        alias: Some("exported".to_string()),
+    });
+    assert!(reject_ddl_in_transaction(&cmd).is_err());
+
+    let mut cmd = Qail::merge_into("users")
+        .using_query_as(Qail::get("staging_users"), "s")
+        .merge_on_column("users.id", qail_core::ast::Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".into()))]);
+    if let Some(merge) = &mut cmd.merge {
+        merge.source = MergeSource::Query {
+            query: Box::new(Qail::export("staging_users")),
+            alias: Some("s".to_string()),
+        };
+    }
     assert!(reject_ddl_in_transaction(&cmd).is_err());
 }
 
