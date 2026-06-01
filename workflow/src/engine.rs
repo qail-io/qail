@@ -895,6 +895,7 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
     ctx: &mut WorkflowContext,
     mode: RunMode<'a>,
 ) -> Result<String, WorkflowError> {
+    let run_start_transition_count = ctx.transition_count();
     let mut pending_cursor_frames = match ctx.cursor.clone() {
         Some(cursor) if cursor.state == ctx.current_state => {
             if timeout_fallback_from_context(ctx)?.is_some() {
@@ -994,8 +995,12 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
         // Persist after each state change
         executor.save_state(ctx).await?;
 
-        // Safety: prevent infinite loops (max 50 transitions per run)
-        if ctx.transition_count() > 50 {
+        // Safety: prevent infinite loops (max 50 transitions per run).
+        if ctx
+            .transition_count()
+            .saturating_sub(run_start_transition_count)
+            > 50
+        {
             return Err(WorkflowError::Other(
                 "Maximum transition count exceeded (50)".into(),
             ));
@@ -1177,6 +1182,7 @@ fn steps_contain_wait(steps: &[WorkflowStep]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::StateChange;
     use crate::payment::{ChargeResponse, ChargeStatus, PaymentKind};
 
     struct MockExecutor {
@@ -1274,6 +1280,32 @@ mod tests {
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "done");
         assert_eq!(ctx.transition_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn transition_limit_counts_only_current_run() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("aged_workflow")
+            .initial_state("active")
+            .transition("active", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-aged-history", "active");
+        for idx in 0..51 {
+            ctx.history.push(StateChange {
+                from: format!("past_{idx}"),
+                to: format!("past_{}", idx + 1),
+                at: Utc::now(),
+                reason: None,
+            });
+        }
+
+        let result = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect("old workflow history must not trip per-run loop guard");
+
+        assert_eq!(result, "done");
+        assert_eq!(ctx.transition_count(), 52);
     }
 
     #[tokio::test]
