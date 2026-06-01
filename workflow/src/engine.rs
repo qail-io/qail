@@ -791,16 +791,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 store_as,
             } => {
                 ensure_no_child_cursor("Charge", cursor_frames)?;
-                // Resolve amount from context (supports i64 or f64)
-                let amount = ctx
-                    .get(amount_key)
-                    .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
-                    .ok_or_else(|| {
-                        WorkflowError::MissingContextKey(format!(
-                            "{} (expected numeric amount)",
-                            amount_key
-                        ))
-                    })?;
+                let amount = resolve_charge_amount(ctx, amount_key)?;
 
                 let reference_id = ctx
                     .get_str(reference_key)
@@ -839,6 +830,83 @@ fn execute_step<'a, E: WorkflowExecutor>(
 
         Ok(StepOutcome::Continue)
     })
+}
+
+fn resolve_charge_amount(ctx: &WorkflowContext, amount_key: &str) -> Result<i64, WorkflowError> {
+    let value = ctx.get(amount_key).ok_or_else(|| {
+        WorkflowError::MissingContextKey(format!("{amount_key} (expected numeric amount)"))
+    })?;
+
+    let amount = match value {
+        Value::Number(number) => charge_amount_from_number(number, amount_key)?,
+        _ => {
+            return Err(WorkflowError::MissingContextKey(format!(
+                "{amount_key} (expected numeric amount)"
+            )));
+        }
+    };
+
+    if amount <= 0 {
+        return Err(invalid_charge_amount(
+            amount_key,
+            "amount must be greater than zero",
+        ));
+    }
+
+    Ok(amount)
+}
+
+fn charge_amount_from_number(
+    number: &serde_json::Number,
+    amount_key: &str,
+) -> Result<i64, WorkflowError> {
+    if let Some(value) = number.as_i64() {
+        return Ok(value);
+    }
+
+    if let Some(value) = number.as_u64() {
+        return i64::try_from(value).map_err(|_| {
+            invalid_charge_amount(amount_key, "integer amount must fit in signed 64-bit range")
+        });
+    }
+
+    if let Some(value) = number.as_f64() {
+        const MAX_SAFE_JSON_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+        if !value.is_finite() {
+            return Err(invalid_charge_amount(
+                amount_key,
+                "float amount must be finite",
+            ));
+        }
+
+        if value.fract() != 0.0 {
+            return Err(invalid_charge_amount(
+                amount_key,
+                "float amount must be an integer in the smallest currency unit",
+            ));
+        }
+
+        if !(-MAX_SAFE_JSON_INTEGER..=MAX_SAFE_JSON_INTEGER).contains(&value) {
+            return Err(invalid_charge_amount(
+                amount_key,
+                "float amount exceeds JSON safe integer range",
+            ));
+        }
+
+        return Ok(value as i64);
+    }
+
+    Err(invalid_charge_amount(
+        amount_key,
+        "amount number is not representable",
+    ))
+}
+
+fn invalid_charge_amount(amount_key: &str, message: &str) -> WorkflowError {
+    WorkflowError::Other(format!(
+        "Invalid charge amount at '{amount_key}': {message}"
+    ))
 }
 
 fn normalize_query_wire_for_execution(cmd_json: &str) -> Result<String, WorkflowError> {
@@ -1188,6 +1256,7 @@ mod tests {
     struct MockExecutor {
         queries: std::sync::Mutex<Vec<String>>,
         notifications: std::sync::Mutex<Vec<(String, String)>>,
+        charges: std::sync::Mutex<Vec<ChargeRequest>>,
         saved_state: std::sync::Mutex<Option<WorkflowContext>>,
     }
 
@@ -1196,9 +1265,25 @@ mod tests {
             Self {
                 queries: std::sync::Mutex::new(Vec::new()),
                 notifications: std::sync::Mutex::new(Vec::new()),
+                charges: std::sync::Mutex::new(Vec::new()),
                 saved_state: std::sync::Mutex::new(None),
             }
         }
+    }
+
+    fn charge_only_workflow(name: &str) -> WorkflowDefinition {
+        WorkflowDefinition::new(name)
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge(
+                    PaymentKind::Xendit,
+                    "order.total",
+                    "order.id",
+                    Some("charge"),
+                )],
+            )
     }
 
     #[async_trait]
@@ -1249,6 +1334,7 @@ mod tests {
             _provider: &PaymentKind,
             request: ChargeRequest,
         ) -> Result<ChargeResponse, WorkflowError> {
+            self.charges.lock().unwrap().push(request.clone());
             Ok(ChargeResponse {
                 charge_id: format!("mock-charge-{}", request.reference_id),
                 status: ChargeStatus::Pending,
@@ -2195,6 +2281,116 @@ mod tests {
             Some("Pending")
         );
         assert!(charge.get("qr_code").is_some());
+
+        let charges = executor.charges.lock().unwrap();
+        assert_eq!(charges.len(), 1);
+        assert_eq!(charges[0].amount, 150000);
+    }
+
+    #[tokio::test]
+    async fn charge_accepts_safe_integer_float_amount() {
+        let executor = MockExecutor::new();
+        let wf = charge_only_workflow("booking_payment_float");
+
+        let mut ctx = WorkflowContext::new("wf-payment-float", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-float",
+                "total": 150000.0
+            }),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+
+        assert_eq!(result, "awaiting_payment");
+        let charges = executor.charges.lock().unwrap();
+        assert_eq!(charges.len(), 1);
+        assert_eq!(charges[0].amount, 150000);
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_fractional_amount_before_provider_call() {
+        let executor = MockExecutor::new();
+        let wf = charge_only_workflow("booking_payment_fractional");
+
+        let mut ctx = WorkflowContext::new("wf-payment-fractional", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-fractional",
+                "total": 150000.75
+            }),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("fractional charge amount must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid charge amount"));
+                assert!(msg.contains("smallest currency unit"));
+            }
+            other => panic!("expected invalid amount error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_non_positive_amount_before_provider_call() {
+        let executor = MockExecutor::new();
+        let wf = charge_only_workflow("booking_payment_negative");
+
+        let mut ctx = WorkflowContext::new("wf-payment-negative", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-negative",
+                "total": -1
+            }),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("non-positive charge amount must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid charge amount"));
+                assert!(msg.contains("greater than zero"));
+            }
+            other => panic!("expected invalid amount error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_oversized_unsigned_amount_before_provider_call() {
+        let executor = MockExecutor::new();
+        let wf = charge_only_workflow("booking_payment_oversized");
+
+        let mut ctx = WorkflowContext::new("wf-payment-oversized", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-oversized",
+                "total": u64::MAX
+            }),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("oversized charge amount must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid charge amount"));
+                assert!(msg.contains("signed 64-bit"));
+            }
+            other => panic!("expected invalid amount error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
