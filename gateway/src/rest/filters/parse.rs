@@ -293,6 +293,9 @@ pub(crate) fn parse_scalar_value(s: &str) -> QailValue {
     if let Ok(n) = s.parse::<i64>() {
         return QailValue::Int(n);
     }
+    if is_integer_literal(s) {
+        return QailValue::String(s.to_string());
+    }
     if let Ok(f) = s.parse::<f64>() {
         return QailValue::Float(f);
     }
@@ -300,6 +303,14 @@ pub(crate) fn parse_scalar_value(s: &str) -> QailValue {
         return QailValue::Uuid(uuid);
     }
     QailValue::String(s.to_string())
+}
+
+fn is_integer_literal(s: &str) -> bool {
+    let digits = s
+        .strip_prefix('+')
+        .or_else(|| s.strip_prefix('-'))
+        .unwrap_or(s);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Parse a cursor value and reject non-finite numeric sentinels such as NaN/inf.

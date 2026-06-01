@@ -203,6 +203,39 @@ fn test_parse_scalar_value() {
 }
 
 #[test]
+fn parse_scalar_value_preserves_oversized_integer_literals() {
+    assert_eq!(
+        parse_scalar_value("9223372036854775808"),
+        QailValue::String("9223372036854775808".to_string())
+    );
+    assert_eq!(
+        parse_scalar_value("-9223372036854775809"),
+        QailValue::String("-9223372036854775809".to_string())
+    );
+}
+
+#[test]
+fn json_to_qail_value_preserves_oversized_unsigned_integer() {
+    let max_i64_as_u64 = serde_json::json!(i64::MAX as u64);
+    assert_eq!(
+        json_to_qail_value(&max_i64_as_u64),
+        QailValue::Int(i64::MAX)
+    );
+
+    let oversized = serde_json::json!(u64::MAX);
+    assert_eq!(
+        json_to_qail_value(&oversized),
+        QailValue::String(u64::MAX.to_string())
+    );
+
+    let nested = serde_json::json!([u64::MAX]);
+    assert_eq!(
+        json_to_qail_value(&nested),
+        QailValue::Array(vec![QailValue::String(u64::MAX.to_string())])
+    );
+}
+
+#[test]
 fn test_sql_injection_in_filter_value() {
     let payloads = vec![
         "'; DROP TABLE users; --",
