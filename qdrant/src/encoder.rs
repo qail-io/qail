@@ -137,6 +137,24 @@ pub fn encode_varint_u64(buf: &mut BytesMut, mut value: u64) {
     }
 }
 
+#[inline]
+fn extend_f32_le_slice(buf: &mut BytesMut, values: &[f32]) {
+    #[cfg(target_endian = "little")]
+    {
+        // Protobuf fixed32 values are little-endian. On little-endian targets,
+        // f32 memory layout already matches the wire format.
+        let float_bytes: &[u8] = bytemuck::cast_slice(values);
+        buf.extend_from_slice(float_bytes);
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    {
+        for value in values {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
 // ============================================================================
 // SearchPoints Encoder
 // ============================================================================
@@ -186,9 +204,7 @@ pub fn encode_search_proto(
     let vector_bytes_len = vector.len() * 4; // f32 = 4 bytes
     encode_varint(buf, vector_bytes_len);
 
-    // ZERO-COPY: Write floats directly as bytes via bytemuck (safe, zero-cost)
-    let float_bytes: &[u8] = bytemuck::cast_slice(vector);
-    buf.extend_from_slice(float_bytes);
+    extend_f32_le_slice(buf, vector);
 
     // Field 4: limit (varint)
     buf.put_u8(SEARCH_LIMIT);
@@ -258,8 +274,7 @@ pub fn encode_search_with_filter_groups_proto(
     buf.put_u8(SEARCH_VECTOR);
     let vector_bytes_len = request.vector.len() * 4;
     encode_varint(buf, vector_bytes_len);
-    let float_bytes: &[u8] = bytemuck::cast_slice(request.vector);
-    buf.extend_from_slice(float_bytes);
+    extend_f32_le_slice(buf, request.vector);
 
     // Field 3: filter (Filter message)
     if !must_conditions.is_empty() || !should_conditions.is_empty() {
@@ -319,8 +334,7 @@ pub fn encode_search_with_filter_grouped_cages_proto(
     buf.put_u8(SEARCH_VECTOR);
     let vector_bytes_len = request.vector.len() * 4;
     encode_varint(buf, vector_bytes_len);
-    let float_bytes: &[u8] = bytemuck::cast_slice(request.vector);
-    buf.extend_from_slice(float_bytes);
+    extend_f32_le_slice(buf, request.vector);
 
     // Field 3: filter (Filter message)
     if !must_conditions.is_empty() || !should_groups.is_empty() {
@@ -818,8 +832,7 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
     encode_varint(&mut point_buf, vector_inner_len);
     point_buf.put_u8(0x0A); // Vector.data (field 1, packed floats)
     encode_varint(&mut point_buf, vector_bytes_len);
-    let float_bytes: &[u8] = bytemuck::cast_slice(&point.vector);
-    point_buf.extend_from_slice(float_bytes);
+    extend_f32_le_slice(&mut point_buf, &point.vector);
 
     // Write to main buffer with length prefix
     buf.put_u8(UPSERT_POINTS);
