@@ -122,18 +122,7 @@ fn bytes_to_json_typed(bytes: &[u8], oid: u32, format: i16) -> serde_json::Value
             Err(_) => serde_json::Value::Null,
         },
         pg_oid::NUMERIC => match Numeric::from_pg(bytes, oid, format) {
-            Ok(n) => {
-                if let Ok(i) = n.to_i64_exact() {
-                    serde_json::Value::Number(i.into())
-                } else if let Ok(f) = n.to_f64() {
-                    match serde_json::Number::from_f64(f) {
-                        Some(num) => serde_json::Value::Number(num),
-                        None => serde_json::Value::String(n.0),
-                    }
-                } else {
-                    serde_json::Value::String(n.0)
-                }
-            }
+            Ok(n) => numeric_to_json(n.as_str()),
             Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
         },
         pg_oid::JSON | pg_oid::JSONB => match Json::from_pg(bytes, oid, format) {
@@ -223,18 +212,7 @@ pub(crate) fn text_to_json_typed(s: &str, oid: u32) -> serde_json::Value {
         },
 
         // ── Numeric/Decimal (OID 1700) — preserve precision as string or number ──
-        1700 => {
-            if let Ok(n) = s.parse::<i64>() {
-                serde_json::Value::Number(n.into())
-            } else if let Ok(f) = s.parse::<f64>() {
-                match serde_json::Number::from_f64(f) {
-                    Some(num) => serde_json::Value::Number(num),
-                    None => serde_json::Value::String(s.to_string()),
-                }
-            } else {
-                serde_json::Value::String(s.to_string())
-            }
-        }
+        1700 => numeric_to_json(s),
 
         // ── JSON/JSONB (OID 114, 3802) — parse directly ──────────
         114 | 3802 => match serde_json::from_str(s) {
@@ -277,6 +255,69 @@ fn text_to_json_guess(s: &str) -> serde_json::Value {
     } else {
         serde_json::Value::String(s.to_string())
     }
+}
+
+fn numeric_to_json(s: &str) -> serde_json::Value {
+    const MAX_SAFE_JSON_FLOAT_INTEGER: f64 = 9_007_199_254_740_991.0;
+    const MAX_JSON_NUMERIC_SIGNIFICANT_DIGITS: usize = 15;
+
+    let trimmed = s.trim();
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+
+    if let Some(integer_part) = integral_decimal_integer_part(trimmed)
+        && let Ok(n) = integer_part.parse::<i64>()
+    {
+        return serde_json::Value::Number(n.into());
+    }
+
+    if decimal_significant_digits(trimmed) > MAX_JSON_NUMERIC_SIGNIFICANT_DIGITS {
+        return serde_json::Value::String(s.to_string());
+    }
+
+    match trimmed.parse::<f64>() {
+        Ok(f) if f.is_finite() && f.abs() <= MAX_SAFE_JSON_FLOAT_INTEGER => {
+            serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(s.to_string()))
+        }
+        _ => serde_json::Value::String(s.to_string()),
+    }
+}
+
+fn integral_decimal_integer_part(s: &str) -> Option<&str> {
+    if s.contains('e') || s.contains('E') {
+        return None;
+    }
+    let (integer, fractional) = s.split_once('.')?;
+    if fractional.bytes().all(|b| b == b'0') {
+        Some(integer)
+    } else {
+        None
+    }
+}
+
+fn decimal_significant_digits(s: &str) -> usize {
+    let mut count = 0;
+    let mut seen_non_zero = false;
+
+    for byte in s.bytes() {
+        if byte == b'e' || byte == b'E' {
+            break;
+        }
+        if !byte.is_ascii_digit() {
+            continue;
+        }
+        if byte != b'0' {
+            seen_non_zero = true;
+        }
+        if seen_non_zero {
+            count += 1;
+        }
+    }
+
+    count
 }
 
 /// Convert PostgreSQL text-format array (e.g., `{1,2,3}` or `{{1,2},{3,4}}`) to JSON array.

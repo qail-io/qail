@@ -51,7 +51,16 @@ fn typed_float_oid_701() {
 #[test]
 fn typed_numeric_oid_1700() {
     assert_eq!(text_to_json_typed("100", 1700), serde_json::json!(100));
+    assert_eq!(text_to_json_typed("100.00", 1700), serde_json::json!(100));
     assert_eq!(text_to_json_typed("99.95", 1700), serde_json::json!(99.95));
+    assert_eq!(
+        text_to_json_typed("9007199254740993.25", 1700),
+        serde_json::json!("9007199254740993.25")
+    );
+    assert_eq!(
+        text_to_json_typed("9223372036854775808", 1700),
+        serde_json::json!("9223372036854775808")
+    );
     assert_eq!(
         text_to_json_typed("1e999", 1700),
         serde_json::json!("1e999")
