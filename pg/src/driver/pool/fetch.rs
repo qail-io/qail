@@ -24,6 +24,20 @@ fn rollback_cache_miss_statement_registration(
 }
 
 #[inline]
+fn register_hot_statement_after_parse_success(
+    pool: &super::lifecycle::PgPoolInner,
+    sql_hash: u64,
+    stmt_name: &str,
+    sql: &str,
+) {
+    if let Ok(mut hot) = pool.hot_statements.write()
+        && (hot.contains_key(&sql_hash) || hot.len() < MAX_HOT_STATEMENTS)
+    {
+        hot.insert(sql_hash, (stmt_name.to_string(), sql.to_string()));
+    }
+}
+
+#[inline]
 fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
     if matches!(
         err,
@@ -453,6 +467,7 @@ impl PooledConnection {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        let pool = std::sync::Arc::clone(&self.pool);
         let conn = self.conn.as_mut().ok_or_else(|| {
             PgError::Connection("Connection already released back to pool".into())
         })?;
@@ -524,13 +539,6 @@ impl PooledConnection {
             conn.stmt_cache.put(sql_hash, name.clone());
             conn.prepared_statements
                 .insert(name.clone(), sql_str.to_string());
-
-            // Register in global hot-statement registry for cross-connection sharing
-            if let Ok(mut hot) = self.pool.hot_statements.write()
-                && hot.len() < MAX_HOT_STATEMENTS
-            {
-                hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
-            }
 
             name
         };
@@ -635,6 +643,11 @@ impl PooledConnection {
                             ),
                         );
                     }
+                    if is_cache_miss && let Some(sql) = conn.prepared_statements.get(&stmt_name) {
+                        register_hot_statement_after_parse_success(
+                            &pool, sql_hash, &stmt_name, sql,
+                        );
+                    }
                     return Ok(rows);
                 }
                 crate::protocol::BackendMessage::ErrorResponse(err) => {
@@ -730,6 +743,7 @@ impl PooledConnection {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        let pool = std::sync::Arc::clone(&self.pool);
         let conn = self.conn.as_mut().ok_or_else(|| {
             PgError::Connection("Connection already released back to pool".into())
         })?;
@@ -781,12 +795,6 @@ impl PooledConnection {
             conn.stmt_cache.put(sql_hash, name.clone());
             conn.prepared_statements
                 .insert(name.clone(), sql_str.to_string());
-
-            if let Ok(mut hot) = self.pool.hot_statements.write()
-                && hot.len() < MAX_HOT_STATEMENTS
-            {
-                hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
-            }
 
             name
         };
@@ -966,6 +974,11 @@ impl PooledConnection {
                                 "Cache miss query reached ReadyForQuery without ParseComplete"
                                     .to_string(),
                             ),
+                        );
+                    }
+                    if is_cache_miss && let Some(sql) = conn.prepared_statements.get(&stmt_name) {
+                        register_hot_statement_after_parse_success(
+                            &pool, sql_hash, &stmt_name, sql,
                         );
                     }
                     return Ok(rows);
