@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_simple_tenant_check() {
-        let expr = parse_policy_expr("id = current_setting('app.current_operator_id', true)::uuid")
+        let expr = parse_policy_expr("id = current_setting('app.current_tenant_id', true)::uuid")
             .expect("expected tenant check parse");
         match &expr {
             Expr::Binary {

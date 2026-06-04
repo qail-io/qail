@@ -331,33 +331,40 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
 
         let started_ms = now_epoch_ms();
         let mut chunked_backfill_spec = None;
-        let (cmds, executed_sql_for_receipt, checksum_input) =
+        let (cmds, executed_sql_for_receipt, receipt_checksum, legacy_receipt_checksum) =
             if matches!(direction, MigrateDirection::Up) && mig.phase == MigrationPhase::Backfill {
                 if let Some(spec) = parse_backfill_spec(&content, backfill_chunk_size)? {
                     chunked_backfill_spec = Some(spec);
-                    (Vec::new(), content.clone(), content.clone())
+                    (
+                        Vec::new(),
+                        content.clone(),
+                        crate::time::md5_hex(&content),
+                        None,
+                    )
                 } else {
                     let cmds = parse_qail_to_commands_strict(&content)
                         .context("Failed to compile backfill migration to AST commands")?;
                     let sql = commands_to_sql(&cmds);
+                    let checksums = expected_checksums_for_commands(&cmds, &sql);
                     risk_summary.push_str(";chunked_backfill=false");
-                    (cmds, sql.clone(), sql)
+                    (cmds, sql, checksums.current, checksums.legacy)
                 }
             } else {
                 let cmds = parse_qail_to_commands_strict(&content)
                     .context("Failed to compile migration to AST commands")?;
                 let sql = commands_to_sql(&cmds);
-                (cmds, sql.clone(), sql)
+                let checksums = expected_checksums_for_commands(&cmds, &sql);
+                (cmds, sql, checksums.current, checksums.legacy)
             };
 
-        let expected_checksum = crate::time::md5_hex(&checksum_input);
         if matches!(direction, MigrateDirection::Up)
             && let Some(stored_checksum) = applied_migrations.get(&mig.display_name)
         {
             ensure_applied_checksum_matches(
                 &mig.display_name,
                 stored_checksum,
-                &expected_checksum,
+                &receipt_checksum,
+                legacy_receipt_checksum.as_deref(),
             )?;
             println!(
                 "  {} {} {}",
@@ -472,7 +479,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
                     migration_name: &mig.display_name,
                     started_ms,
                     executed_sql_for_receipt,
-                    checksum_input,
+                    checksum: receipt_checksum,
                     risk_summary,
                     versions_to_delete: versions_to_delete.as_slice(),
                     failpoint_override: None,
@@ -497,7 +504,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
                     migration_name: &mig.display_name,
                     started_ms,
                     executed_sql_for_receipt,
-                    checksum_input,
+                    checksum: receipt_checksum.clone(),
                     risk_summary,
                     affected_rows_est,
                     failpoint_override: None,
@@ -506,7 +513,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
             .await
             .context(format!("Failed to apply migration {}", mig.display_name))?;
 
-            applied_migrations.insert(mig.display_name.clone(), expected_checksum);
+            applied_migrations.insert(mig.display_name.clone(), receipt_checksum);
         }
 
         println!("{}", "✓".green());
@@ -1072,6 +1079,10 @@ async fn column_exists(pg: &mut qail_pg::PgDriver, table: &str, column: &str) ->
 struct LiveColumnDefinition {
     data_type: String,
     udt_name: Option<String>,
+    character_maximum_length: Option<i32>,
+    numeric_precision: Option<i32>,
+    numeric_scale: Option<i32>,
+    datetime_precision: Option<i32>,
     nullable: bool,
 }
 
@@ -1082,7 +1093,15 @@ async fn live_column_definition(
 ) -> Result<Option<LiveColumnDefinition>> {
     let (schema, table_name) = split_schema_ident(table);
     let cmd = Qail::get("information_schema.columns")
-        .columns(["data_type", "udt_name", "is_nullable"])
+        .columns([
+            "data_type",
+            "udt_name",
+            "is_nullable",
+            "character_maximum_length",
+            "numeric_precision",
+            "numeric_scale",
+            "datetime_precision",
+        ])
         .where_eq("table_schema", schema)
         .where_eq("table_name", table_name)
         .where_eq("column_name", column)
@@ -1105,6 +1124,10 @@ async fn live_column_definition(
     Ok(Some(LiveColumnDefinition {
         data_type,
         udt_name: row.get_string(1),
+        character_maximum_length: row.get_i32(3),
+        numeric_precision: row.get_i32(4),
+        numeric_scale: row.get_i32(5),
+        datetime_precision: row.get_i32(6),
         nullable: is_nullable.eq_ignore_ascii_case("YES"),
     }))
 }
@@ -1241,7 +1264,55 @@ fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
     } else {
         live.data_type.as_str()
     };
-    normalize_column_type(expected) == normalize_column_type(live_type)
+    let expected_type = normalize_column_type(expected);
+    if expected_type != normalize_column_type(live_type) {
+        return false;
+    }
+
+    type_modifiers_match(&expected_type, expected, live)
+}
+
+fn type_modifiers_match(
+    normalized_expected_type: &str,
+    expected: &str,
+    live: &LiveColumnDefinition,
+) -> bool {
+    let modifiers = parse_type_modifiers(expected);
+    if modifiers.is_empty() {
+        return true;
+    }
+
+    match normalized_expected_type {
+        "character varying" | "character" => modifiers
+            .first()
+            .is_none_or(|expected_len| live.character_maximum_length == Some(*expected_len)),
+        "numeric" => {
+            let expected_precision = modifiers[0];
+            let expected_scale = modifiers.get(1).copied().unwrap_or(0);
+            live.numeric_precision == Some(expected_precision)
+                && live.numeric_scale == Some(expected_scale)
+        }
+        "timestamp without time zone"
+        | "timestamp with time zone"
+        | "time without time zone"
+        | "time with time zone" => modifiers
+            .first()
+            .is_none_or(|expected_precision| live.datetime_precision == Some(*expected_precision)),
+        _ => true,
+    }
+}
+
+fn parse_type_modifiers(raw: &str) -> Vec<i32> {
+    let Some(start) = raw.find('(') else {
+        return Vec::new();
+    };
+    let Some(end) = raw[start + 1..].find(')') else {
+        return Vec::new();
+    };
+    raw[start + 1..start + 1 + end]
+        .split(',')
+        .filter_map(|part| part.trim().parse::<i32>().ok())
+        .collect()
 }
 
 fn normalize_constraint_part(value: &str) -> String {
@@ -1284,11 +1355,14 @@ fn normalize_column_type(raw: &str) -> String {
         "int2" => "smallint",
         "bool" => "boolean",
         "varchar" => "character varying",
+        "char" | "bpchar" => "character",
         "decimal" => "numeric",
         "float8" => "double precision",
         "float4" => "real",
         "timestamptz" => "timestamp with time zone",
         "timestamp" => "timestamp without time zone",
+        "timetz" => "time with time zone",
+        "time" => "time without time zone",
         other => other,
     }
     .to_string()
@@ -1626,7 +1700,7 @@ struct ApplyReceiptContext<'a> {
     migration_name: &'a str,
     started_ms: i64,
     executed_sql_for_receipt: String,
-    checksum_input: String,
+    checksum: String,
     risk_summary: String,
     affected_rows_est: Option<i64>,
     failpoint_override: Option<&'a str>,
@@ -1642,7 +1716,7 @@ async fn apply_commands_and_record_receipt_atomic(
         migration_name,
         started_ms,
         executed_sql_for_receipt,
-        checksum_input,
+        checksum,
         risk_summary,
         affected_rows_est,
         failpoint_override,
@@ -1663,7 +1737,6 @@ async fn apply_commands_and_record_receipt_atomic(
     }
 
     let finished_ms = now_epoch_ms();
-    let checksum = crate::time::md5_hex(&checksum_input);
     let receipt = MigrationReceipt {
         version: migration_name.to_string(),
         name: migration_name.to_string(),
@@ -1710,7 +1783,7 @@ struct ApplyDownContext<'a> {
     migration_name: &'a str,
     started_ms: i64,
     executed_sql_for_receipt: String,
-    checksum_input: String,
+    checksum: String,
     risk_summary: String,
     versions_to_delete: &'a [String],
     failpoint_override: Option<&'a str>,
@@ -1725,7 +1798,7 @@ async fn apply_down_commands_and_reconcile_history_atomic(
         migration_name,
         started_ms,
         executed_sql_for_receipt,
-        checksum_input,
+        checksum,
         risk_summary,
         versions_to_delete,
         failpoint_override,
@@ -1763,7 +1836,6 @@ async fn apply_down_commands_and_reconcile_history_atomic(
     }
 
     let finished_ms = now_epoch_ms();
-    let checksum = crate::time::md5_hex(&checksum_input);
     let deleted = if versions_to_delete.is_empty() {
         String::from("none")
     } else {
@@ -1838,8 +1910,9 @@ fn ensure_applied_checksum_matches(
     version: &str,
     stored_checksum: &str,
     expected_checksum: &str,
+    legacy_expected_checksum: Option<&str>,
 ) -> Result<()> {
-    if stored_checksum == expected_checksum {
+    if stored_checksum == expected_checksum || legacy_expected_checksum == Some(stored_checksum) {
         return Ok(());
     }
     bail!(
@@ -1851,21 +1924,39 @@ fn ensure_applied_checksum_matches(
     );
 }
 
-pub(crate) fn compute_expected_migration_checksum(
+#[derive(Debug, Clone)]
+pub(crate) struct ExpectedMigrationChecksums {
+    pub current: String,
+    pub legacy: Option<String>,
+}
+
+fn expected_checksums_for_commands(cmds: &[Qail], sql: &str) -> ExpectedMigrationChecksums {
+    let current = stable_cmds_checksum(cmds);
+    let legacy = crate::time::md5_hex(sql);
+    ExpectedMigrationChecksums {
+        current: current.clone(),
+        legacy: (legacy != current).then_some(legacy),
+    }
+}
+
+pub(crate) fn compute_expected_migration_checksums(
     content: &str,
     phase: MigrationPhase,
     backfill_chunk_size: usize,
-) -> Result<String> {
+) -> Result<ExpectedMigrationChecksums> {
     if phase == MigrationPhase::Backfill
         && parse_backfill_spec(content, backfill_chunk_size)?.is_some()
     {
-        return Ok(crate::time::md5_hex(content));
+        return Ok(ExpectedMigrationChecksums {
+            current: crate::time::md5_hex(content),
+            legacy: None,
+        });
     }
 
     let cmds = parse_qail_to_commands_strict(content)
         .context("Failed to compile migration to AST commands for checksum")?;
     let sql = commands_to_sql(&cmds);
-    Ok(crate::time::md5_hex(&sql))
+    Ok(expected_checksums_for_commands(&cmds, &sql))
 }
 
 fn validate_receipts_against_local(
@@ -1922,13 +2013,15 @@ fn validate_receipts_against_local(
         let content = std::fs::read_to_string(&mig.path)
             .with_context(|| format!("Failed to read {}", mig.path.display()))?;
         let expected_checksum =
-            compute_expected_migration_checksum(&content, mig.phase, backfill_chunk_size)?;
-        if stored_checksum == &expected_checksum {
+            compute_expected_migration_checksums(&content, mig.phase, backfill_chunk_size)?;
+        if stored_checksum == &expected_checksum.current
+            || expected_checksum.legacy.as_ref() == Some(stored_checksum)
+        {
             continue;
         }
         let msg = format!(
             "Migration checksum drift detected for '{}': stored={}, local={}",
-            mig.display_name, stored_checksum, expected_checksum
+            mig.display_name, stored_checksum, expected_checksum.current
         );
         match mode {
             ReceiptValidationMode::Warn => {
@@ -2070,9 +2163,10 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyDownContext, ApplyReceiptContext, apply_commands_and_record_receipt_atomic,
-        apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
-        constraint_columns_match, deferrable_matches, enforce_apply_destructive_policy,
+        ApplyDownContext, ApplyReceiptContext, LiveColumnDefinition,
+        apply_commands_and_record_receipt_atomic, apply_down_commands_and_reconcile_history_atomic,
+        collect_policy_final_expectations, column_type_matches, constraint_columns_match,
+        deferrable_matches, enforce_apply_destructive_policy,
         enforce_apply_down_destructive_policy, ensure_applied_checksum_matches,
         ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches,
         normalize_column_type, parse_qail_to_commands_strict, parse_rename_expr,
@@ -2102,12 +2196,25 @@ mod tests {
 
     #[test]
     fn applied_checksum_match_passes() {
-        assert!(ensure_applied_checksum_matches("001_init.up.qail", "abc", "abc").is_ok());
+        assert!(ensure_applied_checksum_matches("001_init.up.qail", "abc", "abc", None).is_ok());
+    }
+
+    #[test]
+    fn applied_checksum_accepts_legacy_sql_checksum() {
+        assert!(
+            ensure_applied_checksum_matches(
+                "001_init.up.qail",
+                "legacy",
+                "current",
+                Some("legacy"),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn applied_checksum_mismatch_fails() {
-        let err = ensure_applied_checksum_matches("001_init.up.qail", "abc", "def")
+        let err = ensure_applied_checksum_matches("001_init.up.qail", "abc", "def", None)
             .expect_err("mismatch must fail");
         assert!(
             err.to_string().contains("checksum drift"),
@@ -2180,10 +2287,45 @@ mod tests {
         assert_eq!(normalize_column_type("serial"), "integer");
         assert_eq!(normalize_column_type("int4"), "integer");
         assert_eq!(normalize_column_type("varchar(255)"), "character varying");
+        assert_eq!(normalize_column_type("char(2)"), "character");
         assert_eq!(
             normalize_column_type("timestamptz"),
             "timestamp with time zone"
         );
+    }
+
+    fn live_column(
+        data_type: &str,
+        character_maximum_length: Option<i32>,
+        numeric_precision: Option<i32>,
+        numeric_scale: Option<i32>,
+        datetime_precision: Option<i32>,
+    ) -> LiveColumnDefinition {
+        LiveColumnDefinition {
+            data_type: data_type.to_string(),
+            udt_name: None,
+            character_maximum_length,
+            numeric_precision,
+            numeric_scale,
+            datetime_precision,
+            nullable: false,
+        }
+    }
+
+    #[test]
+    fn column_type_matching_checks_type_modifiers() {
+        let varchar_32 = live_column("character varying", Some(32), None, None, None);
+        assert!(column_type_matches("varchar(32)", &varchar_32));
+        assert!(!column_type_matches("varchar(255)", &varchar_32));
+
+        let numeric_10_2 = live_column("numeric", None, Some(10), Some(2), None);
+        assert!(column_type_matches("numeric(10,2)", &numeric_10_2));
+        assert!(!column_type_matches("numeric(12,2)", &numeric_10_2));
+        assert!(!column_type_matches("numeric(10,4)", &numeric_10_2));
+
+        let timestamp_3 = live_column("timestamp without time zone", None, None, None, Some(3));
+        assert!(column_type_matches("timestamp(3)", &timestamp_3));
+        assert!(!column_type_matches("timestamp(6)", &timestamp_3));
     }
 
     #[test]
@@ -2582,7 +2724,7 @@ mod tests {
                 migration_name: &migration_name,
                 started_ms: crate::migrations::now_epoch_ms(),
                 executed_sql_for_receipt: "-- fp marker".to_string(),
-                checksum_input: "-- fp marker".to_string(),
+                checksum: crate::time::md5_hex("-- fp marker"),
                 risk_summary: "source=apply.failpoint.test".to_string(),
                 affected_rows_est: None,
                 failpoint_override: Some("apply.before_receipt"),
@@ -2668,7 +2810,7 @@ mod tests {
                 migration_name: &migration_name,
                 started_ms: crate::migrations::now_epoch_ms(),
                 executed_sql_for_receipt: "-- adopt existing shape".to_string(),
-                checksum_input: "-- adopt existing shape".to_string(),
+                checksum: crate::time::md5_hex("-- adopt existing shape"),
                 risk_summary: "source=apply.adopt_existing.shape.test".to_string(),
                 affected_rows_est: None,
                 failpoint_override: None,
@@ -2686,6 +2828,105 @@ mod tests {
         assert!(
             !version_exists(&mut pg, migration_name.as_str()).await,
             "failed adoption must not write a migration receipt"
+        );
+
+        let _ = pg
+            .execute(&Qail {
+                action: Action::Drop,
+                table,
+                ..Default::default()
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn adopt_existing_rejects_column_type_modifier_drift_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping adopt-existing type modifier DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let table = format!("adopt_existing_type_{}", suffix);
+        let migration_name = format!("adopt_existing_type_{}.up.qail", suffix);
+
+        let existing_cmd = Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "email".to_string(),
+                    data_type: "varchar(32)".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        pg.execute(&existing_cmd)
+            .await
+            .expect("create type-drift existing table");
+
+        let planned_cmd = Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "email".to_string(),
+                    data_type: "varchar(255)".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let err = apply_commands_and_record_receipt_atomic(
+            &mut pg,
+            &[planned_cmd],
+            true,
+            ApplyReceiptContext {
+                migration_name: &migration_name,
+                started_ms: crate::migrations::now_epoch_ms(),
+                executed_sql_for_receipt: "-- adopt existing type modifier".to_string(),
+                checksum: crate::time::md5_hex("-- adopt existing type modifier"),
+                risk_summary: "source=apply.adopt_existing.type_modifier.test".to_string(),
+                affected_rows_est: None,
+                failpoint_override: None,
+            },
+        )
+        .await
+        .expect_err("narrower existing column type modifier must not be adopted");
+
+        assert!(
+            err.to_string().contains("expected column")
+                && err.to_string().contains("email")
+                && err.to_string().contains("varchar(255)")
+                && err.to_string().contains("character varying"),
+            "unexpected adopt-existing type modifier error: {err}"
+        );
+        assert!(
+            !version_exists(&mut pg, migration_name.as_str()).await,
+            "failed type-modifier adoption must not write a migration receipt"
         );
 
         let _ = pg
@@ -2776,7 +3017,7 @@ mod tests {
         let err = verify_applied_commands_effects(
             &mut pg,
             "missing_composite_fk.up.qail",
-            &[add_fk.clone()],
+            std::slice::from_ref(&add_fk),
         )
         .await
         .expect_err("missing composite FK must fail verification before receipt write");
@@ -2870,7 +3111,7 @@ mod tests {
                 migration_name: &down_name,
                 started_ms: crate::migrations::now_epoch_ms(),
                 executed_sql_for_receipt: format!("drop {};", table),
-                checksum_input: format!("drop {};", table),
+                checksum: crate::time::md5_hex(&format!("drop {};", table)),
                 risk_summary: "source=apply.down.reconcile.test".to_string(),
                 versions_to_delete: &[up_v1.clone(), up_v2.clone()],
                 failpoint_override: None,

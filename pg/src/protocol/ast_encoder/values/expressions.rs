@@ -787,6 +787,16 @@ pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) -> Result<(), crate::protoco
     Ok(())
 }
 
+/// Encode an expression while sharing the caller's parameter buffer.
+pub fn encode_expr_with_params(
+    expr: &Expr,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    super::super::dml::validate_expr_ref("expression", expr)?;
+    encode_column_expr_inner(expr, buf, Some(params))
+}
+
 /// Encode JOIN ON value - AST-native, no allocations for column references.
 pub fn encode_join_value(
     value: &Value,

@@ -7,7 +7,7 @@
 --   • Database: qail_test
 --   • Roles:    qail (password), qail_user (superuser), qail_app (restricted)
 --   • Tables:   operators, users, vessels, orders, agents, destinations, odysseys
---   • RLS:      Multi-tenant filtering on operator_id
+--   • RLS:      Multi-tenant filtering on operator_id via app.current_tenant_id
 --   • Seed:     2 operators with distinct data counts
 -- ============================================================
 
@@ -168,7 +168,7 @@ CREATE POLICY vessels_operator_isolation ON vessels
   FOR ALL
   USING (
     current_setting('app.is_super_admin', true) = 'true'
-    OR operator_id::text = current_setting('app.current_operator_id', true)
+    OR operator_id::text = current_setting('app.current_tenant_id', true)
   );
 
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
@@ -178,7 +178,7 @@ CREATE POLICY orders_operator_isolation ON orders
   FOR ALL
   USING (
     current_setting('app.is_super_admin', true) = 'true'
-    OR operator_id::text = current_setting('app.current_operator_id', true)
+    OR operator_id::text = current_setting('app.current_tenant_id', true)
   );
 
 ALTER TABLE odysseys ENABLE ROW LEVEL SECURITY;
@@ -188,7 +188,7 @@ CREATE POLICY odysseys_operator_isolation ON odysseys
   FOR ALL
   USING (
     current_setting('app.is_super_admin', true) = 'true'
-    OR operator_id::text = current_setting('app.current_operator_id', true)
+    OR operator_id::text = current_setting('app.current_tenant_id', true)
   );
 
 -- Phase 6: Grants

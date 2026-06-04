@@ -12,6 +12,10 @@ internal fun encodeQueryComponent(value: String): String =
     URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
 
 @PublishedApi
+internal fun encodePathSegment(value: Any): String =
+    encodeQueryComponent(value.toString())
+
+@PublishedApi
 internal fun buildEncodedQuery(params: List<Pair<String, String>>): String {
     if (params.isEmpty()) return ""
     val qs = params.joinToString("&") { (key, value) ->
@@ -100,7 +104,7 @@ class SelectBuilder<T>(
 
     /** Execute and return the full paginated response. */
     suspend inline fun <reified R : T> exec(): ListResponse<R> {
-        val path = "/api/$table${buildQueryString()}"
+        val path = "/api/${encodePathSegment(table)}${buildQueryString()}"
         return client.request(HttpMethod.Get, path)
     }
 
@@ -112,7 +116,10 @@ class SelectBuilder<T>(
 
     /** Get a single row by primary key. */
     suspend inline fun <reified R : T> get(id: Any): R {
-        val res: SingleResponse<R> = client.request(HttpMethod.Get, "/api/$table/$id")
+        val res: SingleResponse<R> = client.request(
+            HttpMethod.Get,
+            "/api/${encodePathSegment(table)}/${encodePathSegment(id)}",
+        )
         return res.data
     }
 
@@ -132,7 +139,10 @@ class SelectBuilder<T>(
             params += "${filter.column}.${filter.op.value}" to filter.value
         }
 
-        return client.request(HttpMethod.Get, "/api/$table/aggregate${buildEncodedQuery(params)}")
+        return client.request(
+            HttpMethod.Get,
+            "/api/${encodePathSegment(table)}/aggregate${buildEncodedQuery(params)}",
+        )
     }
 
     // Internal
@@ -203,7 +213,7 @@ class InsertBuilder<T>(
         _onConflictAction?.let { params += "on_conflict_action" to it }
         val qs = buildEncodedQuery(params)
 
-        return client.request(HttpMethod.Post, "/api/$table$qs") {
+        return client.request(HttpMethod.Post, "/api/${encodePathSegment(table)}$qs") {
             setBody(data)
             contentType(ContentType.Application.Json)
         }
@@ -242,7 +252,10 @@ class UpdateBuilder<T>(
         _returning?.let { params += "returning" to it }
         val qs = buildEncodedQuery(params)
 
-        return client.request(HttpMethod.Patch, "/api/$table/$id$qs") {
+        return client.request(
+            HttpMethod.Patch,
+            "/api/${encodePathSegment(table)}/${encodePathSegment(id)}$qs",
+        ) {
             setBody(data)
             contentType(ContentType.Application.Json)
         }
@@ -264,5 +277,5 @@ class DeleteBuilder(
 ) {
     /** Delete a row by primary key. */
     suspend fun exec(id: Any): DeleteResponse =
-        client.request(HttpMethod.Delete, "/api/$table/$id")
+        client.request(HttpMethod.Delete, "/api/${encodePathSegment(table)}/${encodePathSegment(id)}")
 }

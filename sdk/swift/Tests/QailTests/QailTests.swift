@@ -193,6 +193,19 @@ final class QailTests: XCTestCase {
         XCTAssertEqual(user.name, "Bob")
     }
 
+    func testGetByIdEncodesPathSeparators() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+                "/api/users/tenant%2Fa%3Fb%23c"
+            )
+            return jsonResponse(["data": ["id": 42, "name": "Bob"]])
+        }
+
+        let client = createClient()
+        let _: User = try await client.from("users").get(id: "tenant/a?b#c")
+    }
+
     func testExpand() async throws {
         MockURLProtocol.handler = { request in
             let url = request.url!.absoluteString
@@ -250,6 +263,22 @@ final class QailTests: XCTestCase {
         XCTAssertEqual(res.data.name, "Updated")
     }
 
+    func testUpdateEncodesPathSeparators() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+                "/api/users/tenant%2Fa%3Fb%23c"
+            )
+            XCTAssertEqual(request.httpMethod, "PATCH")
+            return jsonResponse(["data": ["id": 1, "name": "Updated"], "count": 1])
+        }
+
+        let client = createClient()
+        let _: MutationResponse<User> = try await client.update("users")
+            .set(["name": "Updated"])
+            .exec(id: "tenant/a?b#c")
+    }
+
     // MARK: Delete Builder
 
     func testDelete() async throws {
@@ -261,6 +290,21 @@ final class QailTests: XCTestCase {
 
         let client = createClient()
         let res = try await client.delete("users").exec(id: 42)
+        XCTAssertTrue(res.deleted)
+    }
+
+    func testDeleteEncodesPathSeparators() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+                "/api/users/tenant%2Fa%3Fb%23c"
+            )
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            return jsonResponse(["deleted": true])
+        }
+
+        let client = createClient()
+        let res = try await client.delete("users").exec(id: "tenant/a?b#c")
         XCTAssertTrue(res.deleted)
     }
 
@@ -314,6 +358,48 @@ final class QailTests: XCTestCase {
         }
     }
 
+    func testCompactErrorParsingAndLocalizedDescription() async throws {
+        MockURLProtocol.handler = { _ in
+            return jsonResponse([
+                "error": "ORDER_NOT_FOUND",
+                "message": "Order not found.",
+            ], status: 404)
+        }
+
+        let client = createClient()
+        do {
+            let _: HealthResponse = try await client.health()
+            XCTFail("Should have thrown")
+        } catch let error as QailError {
+            XCTAssertEqual(error.status, 404)
+            XCTAssertEqual(error.code, "ORDER_NOT_FOUND")
+            XCTAssertEqual(error.message, "Order not found.")
+            XCTAssertEqual(error.localizedDescription, "[ORDER_NOT_FOUND] Order not found.")
+        }
+    }
+
+    func testEmptyErrorBodyUsesStatusText() async throws {
+        MockURLProtocol.handler = { _ in
+            let response = HTTPURLResponse(
+                url: URL(string: "http://test")!,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (Data(), response)
+        }
+
+        let client = createClient()
+        do {
+            let _: HealthResponse = try await client.health()
+            XCTFail("Should have thrown")
+        } catch let error as QailError {
+            XCTAssertEqual(error.status, 404)
+            XCTAssertEqual(error.code, "HTTP_404")
+            XCTAssertEqual(error.message, "not found")
+        }
+    }
+
     func testSelectBuilderEncodesFilterValueSafely() async throws {
         MockURLProtocol.handler = { request in
             let url = request.url!.absoluteString
@@ -358,14 +444,13 @@ final class QailTests: XCTestCase {
         XCTAssert(url.hasPrefix("wss://localhost:8443/ws?"))
         XCTAssert(url.contains("access_token=ws-token"))
     }
-}
 
     // MARK: Batch & Fast
 
     func testBatchResponse() async throws {
         MockURLProtocol.handler = { _ in
             return jsonResponse([
-                "results": [["index": 0, "success": true, "rows": [["id": 1]], "count": 1]],
+                "results": [["index": 0, "success": true, "rows": [["id": 1, "name": "Alice"]], "count": 1]],
                 "total": 1,
                 "success": 1
             ])

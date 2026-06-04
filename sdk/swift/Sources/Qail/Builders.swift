@@ -1,5 +1,16 @@
 import Foundation
 
+private let qailPathSegmentAllowed: CharacterSet = {
+    var allowed = CharacterSet.urlPathAllowed
+    allowed.remove(charactersIn: "/?#%")
+    return allowed
+}()
+
+internal func qailEncodePathSegment(_ value: CustomStringConvertible) -> String {
+    let raw = String(describing: value)
+    return raw.addingPercentEncoding(withAllowedCharacters: qailPathSegmentAllowed) ?? raw
+}
+
 // MARK: - Select Builder
 
 /// Fluent builder for `GET /api/{table}` queries.
@@ -115,7 +126,7 @@ public final class SelectBuilder<T: Decodable> {
 
     /// Execute and return the full paginated response.
     public func exec() async throws -> ListResponse<T> {
-        let path = "/api/\(table)\(buildQueryString())"
+        let path = "/api/\(qailEncodePathSegment(table))\(buildQueryString())"
         return try await client.request(method: "GET", path: path)
     }
 
@@ -152,7 +163,7 @@ public final class SelectBuilder<T: Decodable> {
     public func get(id: CustomStringConvertible) async throws -> T {
         let res: SingleResponse<T> = try await client.request(
             method: "GET",
-            path: "/api/\(table)/\(id)"
+            path: "/api/\(qailEncodePathSegment(table))/\(qailEncodePathSegment(id))"
         )
         return res.data
     }
@@ -187,7 +198,7 @@ public final class SelectBuilder<T: Decodable> {
 
         return try await client.request(
             method: "GET",
-            path: "/api/\(table)/aggregate" + (components.percentEncodedQuery.map { "?\($0)" } ?? "")
+            path: "/api/\(qailEncodePathSegment(table))/aggregate" + (components.percentEncodedQuery.map { "?\($0)" } ?? "")
         )
     }
 
@@ -278,7 +289,7 @@ public final class InsertBuilder<T: Decodable> {
         let qs = components.query.map { "?\($0)" } ?? ""
 
         let body = try JSONSerialization.data(withJSONObject: data)
-        return try await client.request(method: "POST", path: "/api/\(table)\(qs)", body: body)
+        return try await client.request(method: "POST", path: "/api/\(qailEncodePathSegment(table))\(qs)", body: body)
     }
 }
 
@@ -326,7 +337,7 @@ public final class UpdateBuilder<T: Decodable> {
         let qs = components.query.map { "?\($0)" } ?? ""
 
         let body = try JSONSerialization.data(withJSONObject: data)
-        return try await client.request(method: "PATCH", path: "/api/\(table)/\(id)\(qs)", body: body)
+        return try await client.request(method: "PATCH", path: "/api/\(qailEncodePathSegment(table))/\(qailEncodePathSegment(id))\(qs)", body: body)
     }
 }
 
@@ -348,6 +359,6 @@ public final class DeleteBuilder {
 
     /// Delete a row by primary key.
     public func exec(id: CustomStringConvertible) async throws -> DeleteResponse {
-        try await client.request(method: "DELETE", path: "/api/\(table)/\(id)")
+        try await client.request(method: "DELETE", path: "/api/\(qailEncodePathSegment(table))/\(qailEncodePathSegment(id))")
     }
 }

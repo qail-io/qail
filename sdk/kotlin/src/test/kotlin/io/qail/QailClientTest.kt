@@ -143,6 +143,15 @@ class QailClientTest {
     }
 
     @Test
+    fun testGetByIdEncodesPathSeparators() = runTest {
+        val qail = mockClient { request ->
+            assertEquals("/api/users/tenant%2Fa%3Fb%23c", request.url.encodedPath)
+            jsonResponse("""{"data":{"id":42,"name":"Bob"}}""")
+        }
+        qail.from<User>("users").get<User>("tenant/a?b#c")
+    }
+
+    @Test
     fun testExpand() = runTest {
         val qail = mockClient { request ->
             val url = request.url.toString()
@@ -219,6 +228,18 @@ class QailClientTest {
         assertEquals("Updated", res.data.name)
     }
 
+    @Test
+    fun testUpdateEncodesPathSeparators() = runTest {
+        val qail = mockClient { request ->
+            assertEquals("/api/users/tenant%2Fa%3Fb%23c", request.url.encodedPath)
+            assertEquals(HttpMethod.Patch, request.method)
+            jsonResponse("""{"data":{"id":1,"name":"Updated"},"count":1}""")
+        }
+        qail.update<User>("users")
+            .set(mapOf("name" to "Updated"))
+            .exec<User>(id = "tenant/a?b#c")
+    }
+
     // MARK: Delete Builder
 
     @Test
@@ -230,6 +251,16 @@ class QailClientTest {
         }
         val res = qail.delete("users").exec(id = 42)
         assertTrue(res.deleted)
+    }
+
+    @Test
+    fun testDeleteEncodesPathSeparators() = runTest {
+        val qail = mockClient { request ->
+            assertEquals("/api/users/tenant%2Fa%3Fb%23c", request.url.encodedPath)
+            assertEquals(HttpMethod.Delete, request.method)
+            jsonResponse("""{"deleted":true}""")
+        }
+        qail.delete("users").exec(id = "tenant/a?b#c")
     }
 
     // MARK: Error Handling
@@ -305,7 +336,7 @@ class QailClientTest {
     fun testBatchResponse() = runTest {
         val qail = mockClient { _ ->
             jsonResponse("""{
-                "results": [{"index":0,"success":true,"rows":[{"id":1}],"count":1}],
+                "results": [{"index":0,"success":true,"rows":[{"id":1,"name":"Alice"}],"count":1}],
                 "total": 1,
                 "success": 1,
                 "metadata": {"request_id": "batch-1"}

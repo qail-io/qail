@@ -10,6 +10,7 @@ mod expressions;
 pub use expressions::encode_column_expr;
 pub use expressions::encode_conditions;
 pub use expressions::encode_expr;
+pub use expressions::encode_expr_with_params;
 pub use expressions::encode_join_value;
 pub use expressions::encode_operator;
 pub use expressions::encode_value;

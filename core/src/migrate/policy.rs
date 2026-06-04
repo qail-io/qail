@@ -8,14 +8,14 @@
 //! use qail_core::migrate::policy::{RlsPolicy, PolicyTarget};
 //! use qail_core::ast::{Expr, BinaryOp, Value};
 //!
-//! // operator_id = current_setting('app.current_operator_id')::uuid
+//! // tenant_id = current_setting('app.current_tenant_id')::uuid
 //! let tenant_check = Expr::Binary {
-//!     left: Box::new(Expr::Named("operator_id".into())),
+//!     left: Box::new(Expr::Named("tenant_id".into())),
 //!     op: BinaryOp::Eq,
 //!     right: Box::new(Expr::Cast {
 //!         expr: Box::new(Expr::FunctionCall {
 //!             name: "current_setting".into(),
-//!             args: vec![Expr::Literal(Value::String("app.current_operator_id".into()))],
+//!             args: vec![Expr::Literal(Value::String("app.current_tenant_id".into()))],
 //!             alias: None,
 //!         }),
 //!         target_type: "uuid".into(),
@@ -187,8 +187,8 @@ impl RlsPolicy {
 /// ```
 /// use qail_core::migrate::policy::tenant_check;
 ///
-/// let expr = tenant_check("operator_id", "app.current_operator_id", "uuid");
-/// // Equivalent to: operator_id = current_setting('app.current_operator_id')::uuid
+/// let expr = tenant_check("tenant_id", "app.current_tenant_id", "uuid");
+/// // Equivalent to: tenant_id = current_setting('app.current_tenant_id')::uuid
 /// ```
 pub fn tenant_check(
     column: impl Into<String>,
@@ -280,16 +280,8 @@ mod tests {
     fn test_policy_builder() {
         let policy = RlsPolicy::create("orders_isolation", "orders")
             .for_all()
-            .using(tenant_check(
-                "operator_id",
-                "app.current_operator_id",
-                "uuid",
-            ))
-            .with_check(tenant_check(
-                "operator_id",
-                "app.current_operator_id",
-                "uuid",
-            ));
+            .using(tenant_check("tenant_id", "app.current_tenant_id", "uuid"))
+            .with_check(tenant_check("tenant_id", "app.current_tenant_id", "uuid"));
 
         assert_eq!(policy.name, "orders_isolation");
         assert_eq!(policy.table, "orders");
@@ -312,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_tenant_check_helper() {
-        let expr = tenant_check("operator_id", "app.current_operator_id", "uuid");
+        let expr = tenant_check("tenant_id", "app.current_tenant_id", "uuid");
 
         let Expr::Binary {
             left, op, right, ..
@@ -325,7 +317,7 @@ mod tests {
         let Expr::Named(n) = left.as_ref() else {
             panic!("Expected Named, got {left:?}");
         };
-        assert_eq!(n, "operator_id");
+        assert_eq!(n, "tenant_id");
 
         let Expr::Cast {
             expr: cast_expr,
@@ -347,7 +339,7 @@ mod tests {
     #[test]
     fn test_super_admin_bypass() {
         let expr = or(
-            tenant_check("operator_id", "app.current_operator_id", "uuid"),
+            tenant_check("tenant_id", "app.current_tenant_id", "uuid"),
             session_bool_check("app.is_super_admin"),
         );
 
@@ -366,7 +358,7 @@ mod tests {
     #[test]
     fn test_and_combinator() {
         let expr = and(
-            tenant_check("operator_id", "app.current_operator_id", "uuid"),
+            tenant_check("tenant_id", "app.current_tenant_id", "uuid"),
             tenant_check("agent_id", "app.current_agent_id", "uuid"),
         );
 

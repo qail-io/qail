@@ -248,6 +248,94 @@ fn write_payload_values_require_read_access_for_column_refs() {
 }
 
 #[test]
+fn conflict_update_values_require_read_access_for_target_column_refs() {
+    let policy = AccessPolicy::new().with_table(
+        "orders",
+        TableAccessPolicy::new()
+            .allow_operations([AccessOperation::Create, AccessOperation::Update])
+            .read_columns(ColumnRule::only(["id", "status"]))
+            .write_columns(ColumnRule::only(["status"])),
+    );
+
+    let copy_denied_column = Qail::add("orders")
+        .columns(["status"])
+        .values(["paid"])
+        .on_conflict_update(
+            &["id"],
+            &[("status", Expr::Named("private_note".to_string()))],
+        );
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &copy_denied_column)
+            .expect_err("conflict update RHS target refs should require read access")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "private_note".to_string()
+        }
+    );
+}
+
+#[test]
+fn merge_action_values_require_read_access_for_target_column_refs() {
+    let policy = AccessPolicy::new()
+        .with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Create, AccessOperation::Update])
+                .read_columns(ColumnRule::only(["id", "status"]))
+                .write_columns(ColumnRule::only(["status"])),
+        )
+        .with_table(
+            "incoming_orders",
+            TableAccessPolicy::new().allow_operations([AccessOperation::Read]),
+        );
+
+    let update_denied_column = Qail::merge_into("orders")
+        .using_table_as("incoming_orders", "src")
+        .merge_on_condition(Condition {
+            left: Expr::Named("orders.id".to_string()),
+            op: Operator::Eq,
+            value: Value::Column("src.id".to_string()),
+            is_array_unnest: false,
+        })
+        .when_matched_update(&[("status", Expr::Named("orders.private_note".to_string()))]);
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &update_denied_column)
+            .expect_err("merge update RHS target refs should require read access")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "private_note".to_string()
+        }
+    );
+
+    let insert_denied_column = Qail::merge_into("orders")
+        .using_table_as("incoming_orders", "src")
+        .merge_on_condition(Condition {
+            left: Expr::Named("orders.id".to_string()),
+            op: Operator::Eq,
+            value: Value::Column("src.id".to_string()),
+            is_array_unnest: false,
+        })
+        .when_not_matched_insert(
+            &["status"],
+            &[Expr::Named("orders.private_note".to_string())],
+        );
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &insert_denied_column)
+            .expect_err("merge insert RHS target refs should require read access")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "private_note".to_string()
+        }
+    );
+}
+
+#[test]
 fn update_from_and_delete_using_require_read_access_on_auxiliary_tables() {
     let policy = AccessPolicy::new().with_table(
         "orders",

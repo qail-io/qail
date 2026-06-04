@@ -11,7 +11,7 @@
 //!
 //! policy users_isolation on users
 //!     for all
-//!     using (operator_id = current_setting('app.operator_id')::uuid)
+//!     using (tenant_id = current_setting('app.tenant_id')::uuid)
 //! ```
 
 use nom::{
@@ -1448,7 +1448,7 @@ mod tests {
         let input = r#"
             table orders (
                 id uuid primary_key,
-                operator_id uuid not null
+                tenant_id uuid not null
             ) enable_rls
         "#;
 
@@ -1462,12 +1462,12 @@ mod tests {
         let input = r#"
             table orders (
                 id uuid primary_key,
-                operator_id uuid not null
+                tenant_id uuid not null
             ) enable_rls
 
             policy orders_isolation on orders
                 for all
-                using (operator_id = current_setting('app.current_operator_id')::uuid)
+                using (tenant_id = current_setting('app.current_tenant_id')::uuid)
         "#;
 
         let schema = Schema::parse(input).expect("parse failed");
@@ -1493,7 +1493,7 @@ mod tests {
         let Expr::Named(n) = left.as_ref() else {
             panic!("Expected Named, got {left:?}");
         };
-        assert_eq!(n, "operator_id");
+        assert_eq!(n, "tenant_id");
 
         let Expr::Cast {
             target_type,
@@ -1521,7 +1521,7 @@ mod tests {
 
             policy orders_write on orders
                 for insert
-                with check (operator_id = current_setting('app.current_operator_id')::uuid)
+                with check (tenant_id = current_setting('app.current_tenant_id')::uuid)
         "#;
 
         let schema = Schema::parse(input).expect("parse failed");
@@ -1562,7 +1562,7 @@ mod tests {
 
             policy tenant_or_admin on orders
                 for all
-                using (operator_id = current_setting('app.current_operator_id')::uuid or current_setting('app.is_super_admin')::boolean = true)
+                using (tenant_id = current_setting('app.current_tenant_id')::uuid or current_setting('app.is_super_admin')::boolean = true)
         "#;
 
         let schema = Schema::parse(input).expect("parse failed");
@@ -1628,12 +1628,12 @@ mod tests {
         let input = r#"
             table orders (
                 id uuid primary_key,
-                operator_id uuid not null
+                tenant_id uuid not null
             ) enable_rls
 
             policy orders_isolation on orders
                 for all
-                using (operator_id = current_setting('app.current_operator_id')::uuid)
+                using (tenant_id = current_setting('app.current_tenant_id')::uuid)
         "#;
 
         let schema = Schema::parse(input).expect("parse failed");
@@ -1651,16 +1651,16 @@ mod tests {
         let input = r#"
             table orders (
                 id uuid primary_key,
-                operator_id uuid not null
+                tenant_id uuid not null
             ) enable_rls
 
             policy orders_read on orders
                 for select
-                using (operator_id = current_setting('app.current_operator_id')::uuid)
+                using (tenant_id = current_setting('app.current_tenant_id')::uuid)
 
             policy orders_write on orders
                 for insert
-                with check (operator_id = current_setting('app.current_operator_id')::uuid)
+                with check (tenant_id = current_setting('app.current_tenant_id')::uuid)
         "#;
 
         let schema = Schema::parse(input).expect("parse failed");

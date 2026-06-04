@@ -12,8 +12,8 @@ use qail_core::transpiler::escape_identifier;
 
 use super::helpers::write_usize;
 use super::values::{
-    encode_columns, encode_columns_with_params, encode_conditions, encode_expr, encode_join_value,
-    encode_operator, encode_value,
+    encode_columns, encode_columns_with_params, encode_conditions, encode_expr,
+    encode_expr_with_params, encode_join_value, encode_operator, encode_value,
 };
 
 const MAX_IDENT_LEN: usize = 63;
@@ -1445,7 +1445,7 @@ pub fn encode_merge(
             encode_conditions(&clause.condition, buf, params)?;
         }
         buf.extend_from_slice(b" THEN ");
-        encode_merge_action(&clause.action, buf)?;
+        encode_merge_action(&clause.action, buf, params)?;
     }
 
     if let Some(ref ret_cols) = cmd.returning
@@ -1559,6 +1559,7 @@ fn encode_merge_source(
 fn encode_merge_action(
     action: &MergeAction,
     buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     match action {
         MergeAction::Update { assignments } => {
@@ -1569,7 +1570,7 @@ fn encode_merge_action(
                 }
                 push_identifier_ref(buf, col, false);
                 buf.extend_from_slice(b" = ");
-                encode_expr(expr, buf)?;
+                encode_expr_with_params(expr, buf, params)?;
             }
         }
         MergeAction::Insert { columns, values } => {
@@ -1589,7 +1590,7 @@ fn encode_merge_action(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_expr(value, buf)?;
+                encode_expr_with_params(value, buf, params)?;
             }
             buf.extend_from_slice(b")");
         }

@@ -2439,6 +2439,54 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_merge_action_subqueries_share_outer_params() {
+        use qail_core::ast::{Expr, Operator};
+
+        let matched_lookup =
+            Qail::get("profiles")
+                .columns(["display_name"])
+                .filter("tier", Operator::Eq, "gold");
+        let insert_lookup =
+            Qail::get("profiles")
+                .columns(["display_name"])
+                .filter("tier", Operator::Eq, "new");
+
+        let cmd = Qail::merge_into("users")
+            .target_alias("u")
+            .using_table_as("staging_users", "s")
+            .merge_on_column("u.id", Operator::Eq, "s.id")
+            .when_matched_update(&[(
+                "name",
+                Expr::Subquery {
+                    query: Box::new(matched_lookup),
+                    alias: None,
+                },
+            )])
+            .when_not_matched_insert(
+                &["id", "name"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Subquery {
+                        query: Box::new(insert_lookup),
+                        alias: None,
+                    },
+                ],
+            );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("name = (SELECT display_name FROM profiles WHERE tier = $1)"),
+            "MERGE update subquery must share the outer parameter context: {sql}"
+        );
+        assert!(
+            sql.contains("VALUES (s.id, (SELECT display_name FROM profiles WHERE tier = $2))"),
+            "MERGE insert subquery must keep parameter numbering continuous: {sql}"
+        );
+        assert_eq!(params, vec![Some(b"gold".to_vec()), Some(b"new".to_vec())]);
+    }
+
+    #[test]
     fn test_encode_merge_sql_json_condition_is_boolean_predicate() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 

@@ -43,8 +43,8 @@ public struct ResponseMetadata: Decodable, Sendable {
     public let durationMs: Double?
 
     enum CodingKeys: String, CodingKey {
-        case requestId = "request_id"
-        case durationMs = "duration_ms"
+        case requestId
+        case durationMs
     }
 }
 
@@ -78,8 +78,8 @@ public struct HealthResponse: Decodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case status, version
-        case poolActive = "pool_active"
-        case poolIdle = "pool_idle"
+        case poolActive
+        case poolIdle
     }
 }
 
@@ -243,7 +243,7 @@ public final class WebSocketSubscription: QailSubscription, @unchecked Sendable 
 ///
 /// Matches the gateway `ApiError` JSON shape including enriched
 /// `hint`, `table`, and `column` fields for developer-friendly diagnostics.
-public struct QailError: Error, Decodable, Sendable, CustomStringConvertible {
+public struct QailError: Error, Decodable, Sendable, CustomStringConvertible, LocalizedError {
     public let code: String
     public let message: String
     public let details: String?
@@ -269,6 +269,10 @@ public struct QailError: Error, Decodable, Sendable, CustomStringConvertible {
         if let details { parts.append("Details: \(details)") }
         return parts.joined(separator: " | ")
     }
+
+    public var errorDescription: String? {
+        description
+    }
 }
 
 /// Internal wrapper to decode error responses from the gateway.
@@ -280,8 +284,36 @@ extension QailError {
             err.status = status
             return err
         }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let code = (json["code"] as? String)
+                ?? (json["error"] as? String)
+                ?? "HTTP_\(status)"
+            let message = (json["message"] as? String)
+                ?? (json["error_description"] as? String)
+                ?? (json["error"] as? String)
+                ?? HTTPURLResponse.localizedString(forStatusCode: status)
+            let details = (json["details"] as? String)
+                ?? (json["detail"] as? String)
+            let requestId = (json["request_id"] as? String)
+                ?? (json["requestId"] as? String)
+            var err = QailError(
+                code: code,
+                message: message,
+                details: details,
+                requestId: requestId,
+                hint: json["hint"] as? String,
+                table: json["table"] as? String,
+                column: json["column"] as? String
+            )
+            err.status = status
+            return err
+        }
         // Fallback: raw text
-        let text = String(data: data, encoding: .utf8) ?? "Unknown error"
+        let rawText = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = rawText?.isEmpty == false
+            ? rawText!
+            : HTTPURLResponse.localizedString(forStatusCode: status)
         var err = QailError(
             code: "HTTP_\(status)",
             message: text,
@@ -303,7 +335,7 @@ public struct TxnBeginResponse: Decodable, Sendable {
     public let txnId: String
 
     enum CodingKeys: String, CodingKey {
-        case txnId = "txn_id"
+        case txnId
     }
 }
 

@@ -13,7 +13,7 @@ Client Request
 ┌─────────────────────────────────────┐
 │  extract_auth_from_headers()        │
 │  → JwtClaims { sub, role,           │
-│    tenant_id, operator_id, extra }  │
+│    tenant_id, extra }               │
 │  → AuthContext { user_id, role,     │
 │    tenant_id, claims }              │
 └──────────────┬──────────────────────┘
@@ -21,14 +21,14 @@ Client Request
                ▼  (if tenant_id missing)
 ┌─────────────────────────────────────┐
 │  enrich_with_operator_map()         │
-│  user_id → operator_id lookup       │
+│  user_id → tenant_id lookup         │
 │  (cache loaded at startup)          │
 └──────────────┬──────────────────────┘
                │
                ▼
 ┌─────────────────────────────────────┐
 │  to_rls_context()                   │
-│  → RlsContext { operator_id,        │
+│  → RlsContext { tenant_id,          │
 │    agent_id, is_super_admin }       │
 └──────────────┬──────────────────────┘
                │
@@ -67,12 +67,12 @@ JWT_SECRET=your-256-bit-secret
 {
   "user_id": "user-uuid-123",
   "role": "SuperAdmin",
-  "operator_id": "operator-uuid-456",
+  "tenant_id": "tenant-uuid-456",
   "exp": 1739000000
 }
 ```
 
-Both `sub`/`user_id` and `tenant_id`/`operator_id` are accepted via `serde(alias)`.
+Both `sub` and `user_id` are accepted for the authenticated user. Tenant scope must be carried by `tenant_id` or resolved from the startup user→tenant cache; legacy `operator_id` claims are retained in `extra` but are not promoted into tenant scope.
 
 ### Supported Algorithms
 
@@ -117,7 +117,7 @@ The gateway maps `AuthContext` → `RlsContext` for Postgres-native RLS:
 
 | AuthContext field | RLS session variable | PostgreSQL usage |
 |---|---|---|
-| `tenant_id` | `app.current_tenant_id` + `app.current_operator_id` | `current_setting('app.current_operator_id')` |
+| `tenant_id` | `app.current_tenant_id` | `current_setting('app.current_tenant_id')` |
 | `claims["agent_id"]` | `app.current_agent_id` | `current_setting('app.current_agent_id')` |
 | `role == "administrator" \| "Administrator"` | Super admin bypass | Skips RLS entirely |
 
@@ -129,7 +129,6 @@ BEGIN;
 SET LOCAL statement_timeout = 5000;
 SET LOCAL app.is_global = 'false';
 SELECT set_config('app.current_tenant_id', 'op-123', true),
-       set_config('app.current_operator_id', 'op-123', true),
        set_config('app.current_agent_id', '', true),
        set_config('app.is_super_admin', 'false', true);
 
@@ -146,7 +145,7 @@ All `SET LOCAL` variables reset automatically when `COMMIT` runs on connection r
 Some JWTs only contain `user_id` without `tenant_id`. The gateway resolves this at startup:
 
 ```
-Startup: SELECT id, operator_id FROM users → user_operator_map cache
+Startup: SELECT id, tenant_id FROM users → user_tenant_map cache
 Runtime: auth.enrich_with_operator_map(&cache) fills in tenant_id
 ```
 
@@ -165,8 +164,10 @@ Runtime: auth.enrich_with_operator_map(&cache) fills in tenant_id
 CREATE POLICY tenant_isolation ON orders
   FOR ALL
   TO app_user
-  USING (operator_id = current_setting('app.current_operator_id')::uuid);
+  USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 ```
+
+If an existing schema still names its tenant column `operator_id`, compare that column to `app.current_tenant_id`; do not use the removed `app.current_operator_id` session key.
 
 ### Agent-scoped access
 
@@ -175,7 +176,7 @@ CREATE POLICY agent_orders ON orders
   FOR SELECT
   TO app_user
   USING (
-    operator_id = current_setting('app.current_operator_id')::uuid
+    tenant_id = current_setting('app.current_tenant_id')::uuid
     AND (
       current_setting('app.current_agent_id') = ''
       OR agent_id = current_setting('app.current_agent_id')::uuid
@@ -189,7 +190,7 @@ CREATE POLICY agent_orders ON orders
 policy tenant_isolation on orders
   for all
   to app_user
-  using $$ operator_id = current_setting('app.current_operator_id')::uuid $$
+  using $$ tenant_id = current_setting('app.current_tenant_id')::uuid $$
 ```
 
 ---
@@ -214,6 +215,7 @@ policy tenant_isolation on orders
 
 - **No RLS bypass via JWT claims** — `is_super_admin` in JWT extra claims is ignored; only `role == "administrator" | "Administrator"` grants bypass
 - **Integer tenant_id rejected** — `tenant_id: 42` causes full JWT parse failure, not silent coercion
+- **Legacy operator_id not promoted** — `operator_id` remains an extra claim and cannot silently become tenant scope
 - **Empty sub detected** — `sub: ""` correctly fails `is_authenticated()`
 - **FinanceAdmin scoped** — Finance roles do NOT bypass RLS; use database-level policies
 - **Connection safety** — `PooledConnection::Drop` destroys unreleased connections to prevent cross-tenant leaks

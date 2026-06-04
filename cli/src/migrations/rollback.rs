@@ -2,7 +2,7 @@
 
 use crate::colors::*;
 use crate::migrations::apply::{
-    MigrateDirection, MigrationFile, commands_to_sql, compute_expected_migration_checksum,
+    MigrateDirection, MigrationFile, commands_to_sql, compute_expected_migration_checksums,
     discover_migrations, parse_qail_to_commands_strict,
 };
 use crate::migrations::{
@@ -537,14 +537,16 @@ fn validate_rollback_receipts(
         let content = fs::read_to_string(&up_migration.path)
             .with_context(|| format!("Failed to read {}", up_migration.path.display()))?;
         let expected_checksum =
-            compute_expected_migration_checksum(&content, up_migration.phase, 5000)?;
-        if expected_checksum == *stored_checksum {
+            compute_expected_migration_checksums(&content, up_migration.phase, 5000)?;
+        if expected_checksum.current == *stored_checksum
+            || expected_checksum.legacy.as_deref() == Some(stored_checksum)
+        {
             continue;
         }
         let msg = format!(
             "Receipt checksum drift detected for '{}': stored={}, local={}. \
              Refusing rollback until migration history and local files are reconciled.",
-            version, stored_checksum, expected_checksum
+            version, stored_checksum, expected_checksum.current
         );
         match mode {
             ReceiptValidationMode::Warn => {

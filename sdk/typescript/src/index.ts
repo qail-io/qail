@@ -97,6 +97,10 @@ export class QailError extends Error {
     }
 }
 
+function encodePathSegment(value: string | number): string {
+    return encodeURIComponent(String(value));
+}
+
 // ─── Client ─────────────────────────────────────────────────────────
 
 export class QailClient {
@@ -479,7 +483,7 @@ export class SelectBuilder<T = Record<string, unknown>> {
         const qs = params.toString();
         const filterQs = this._filters.join('&');
         const fullQs = [qs, filterQs].filter(Boolean).join('&');
-        const path = `/api/${this.table}${fullQs ? '?' + fullQs : ''}`;
+        const path = `/api/${encodePathSegment(this.table)}${fullQs ? '?' + fullQs : ''}`;
 
         return this.client.request('GET', path);
     }
@@ -493,7 +497,7 @@ export class SelectBuilder<T = Record<string, unknown>> {
     /** Get a single row by primary key */
     async get(id: string | number): Promise<T> {
         const res = await this.client.request<SingleResponse<T>>(
-            'GET', `/api/${this.table}/${id}`,
+            'GET', `/api/${encodePathSegment(this.table)}/${encodePathSegment(id)}`,
         );
         return res.data;
     }
@@ -514,7 +518,7 @@ export class SelectBuilder<T = Record<string, unknown>> {
         const filterQs = this._filters.join('&');
         const fullQs = [qs, filterQs].filter(Boolean).join('&');
 
-        return this.client.request('GET', `/api/${this.table}/aggregate?${fullQs}`);
+        return this.client.request('GET', `/api/${encodePathSegment(this.table)}/aggregate?${fullQs}`);
     }
 }
 
@@ -558,7 +562,7 @@ export class InsertBuilder<T = Record<string, unknown>> {
         if (this._onConflictAction) params.set('on_conflict_action', this._onConflictAction);
 
         const qs = params.toString();
-        const path = `/api/${this.table}${qs ? '?' + qs : ''}`;
+        const path = `/api/${encodePathSegment(this.table)}${qs ? '?' + qs : ''}`;
 
         return this.client.request('POST', path, JSON.stringify(this._data));
     }
@@ -593,7 +597,7 @@ export class UpdateBuilder<T = Record<string, unknown>> {
         if (this._returning) params.set('returning', this._returning);
 
         const qs = params.toString();
-        const path = `/api/${this.table}/${id}${qs ? '?' + qs : ''}`;
+        const path = `/api/${encodePathSegment(this.table)}/${encodePathSegment(id)}${qs ? '?' + qs : ''}`;
 
         return this.client.request('PATCH', path, JSON.stringify(this._data));
     }
@@ -609,6 +613,9 @@ export class DeleteBuilder {
 
     /** Delete a row by primary key */
     async exec(id: string | number): Promise<{ deleted: boolean }> {
-        return this.client.request('DELETE', `/api/${this.table}/${id}`);
+        return this.client.request(
+            'DELETE',
+            `/api/${encodePathSegment(this.table)}/${encodePathSegment(id)}`,
+        );
     }
 }

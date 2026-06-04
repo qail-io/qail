@@ -82,12 +82,12 @@ fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> Result<String, String> {
 ///
 /// let policy = RlsPolicy::create("orders_isolation", "orders")
 ///     .for_all()
-///     .using(tenant_check("operator_id", "app.current_operator_id", "uuid"))
-///     .with_check(tenant_check("operator_id", "app.current_operator_id", "uuid"));
+///     .using(tenant_check("tenant_id", "app.current_tenant_id", "uuid"))
+///     .with_check(tenant_check("tenant_id", "app.current_tenant_id", "uuid"));
 ///
 /// let sql = create_policy_sql(&policy);
 /// assert!(sql.contains("CREATE POLICY"));
-/// assert!(sql.contains("operator_id"));
+/// assert!(sql.contains("tenant_id"));
 /// ```
 pub fn create_policy_sql(policy: &RlsPolicy) -> String {
     let mut sql = format!(
@@ -453,16 +453,8 @@ mod tests {
     fn test_create_policy_basic() {
         let policy = RlsPolicy::create("orders_isolation", "orders")
             .for_all()
-            .using(tenant_check(
-                "operator_id",
-                "app.current_operator_id",
-                "uuid",
-            ))
-            .with_check(tenant_check(
-                "operator_id",
-                "app.current_operator_id",
-                "uuid",
-            ));
+            .using(tenant_check("tenant_id", "app.current_tenant_id", "uuid"))
+            .with_check(tenant_check("tenant_id", "app.current_tenant_id", "uuid"));
 
         let sql = create_policy_sql(&policy);
         assert!(sql.contains("CREATE POLICY"));
@@ -471,7 +463,7 @@ mod tests {
         assert!(sql.contains("FOR ALL"));
         assert!(sql.contains("USING"));
         assert!(sql.contains("WITH CHECK"));
-        assert!(sql.contains("operator_id"));
+        assert!(sql.contains("tenant_id"));
         // Expr::FunctionCall::Display uppercases the function name
         assert!(sql.contains("CURRENT_SETTING"));
     }
@@ -522,7 +514,7 @@ mod tests {
     #[test]
     fn test_create_policy_with_or() {
         let expr = or(
-            tenant_check("operator_id", "app.current_operator_id", "uuid"),
+            tenant_check("tenant_id", "app.current_tenant_id", "uuid"),
             session_bool_check("app.is_super_admin"),
         );
 
@@ -532,7 +524,7 @@ mod tests {
 
         let sql = create_policy_sql(&policy);
         assert!(sql.contains("OR"));
-        assert!(sql.contains("operator_id"));
+        assert!(sql.contains("tenant_id"));
         assert!(sql.contains("is_super_admin"));
     }
 
@@ -682,16 +674,8 @@ mod tests {
     fn test_rls_setup_sql() {
         let policy = RlsPolicy::create("orders_tenant", "orders")
             .for_all()
-            .using(tenant_check(
-                "operator_id",
-                "app.current_operator_id",
-                "uuid",
-            ))
-            .with_check(tenant_check(
-                "operator_id",
-                "app.current_operator_id",
-                "uuid",
-            ));
+            .using(tenant_check("tenant_id", "app.current_tenant_id", "uuid"))
+            .with_check(tenant_check("tenant_id", "app.current_tenant_id", "uuid"));
 
         let stmts = rls_setup_sql("orders", &policy);
         assert_eq!(stmts.len(), 3);

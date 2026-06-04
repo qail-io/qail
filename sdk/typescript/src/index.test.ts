@@ -134,6 +134,17 @@ describe('QailClient', () => {
             expect(fetch.mock.calls[0][0]).toBe('http://localhost:8080/api/users/42');
         });
 
+        it('.get(id) encodes path separators in primary keys', async () => {
+            const fetch = mockFetch({ data: { id: 'tenant/a?b#c', name: 'Bob' } });
+            const client = createClient(fetch);
+
+            await client.from('users').get('tenant/a?b#c');
+
+            expect(fetch.mock.calls[0][0]).toBe(
+                'http://localhost:8080/api/users/tenant%2Fa%3Fb%23c',
+            );
+        });
+
         it('supports expand (FK join)', async () => {
             const fetch = mockFetch({ data: [], count: 0, limit: 50, offset: 0 });
             const client = createClient(fetch);
@@ -220,6 +231,17 @@ describe('QailClient', () => {
             expect(url).toBe('http://localhost:8080/api/users/1?returning=*');
             expect(fetch.mock.calls[0][1].method).toBe('PATCH');
         });
+
+        it('encodes update ids as path segments', async () => {
+            const fetch = mockFetch({ data: { id: 'tenant/a?b#c' }, rows_affected: 1 });
+            const client = createClient(fetch);
+
+            await client.update('users').set({ name: 'Updated' }).exec('tenant/a?b#c');
+
+            expect(fetch.mock.calls[0][0]).toBe(
+                'http://localhost:8080/api/users/tenant%2Fa%3Fb%23c',
+            );
+        });
     });
 
     describe('DeleteBuilder', () => {
@@ -231,6 +253,17 @@ describe('QailClient', () => {
             expect(res.deleted).toBe(true);
             expect(fetch.mock.calls[0][0]).toBe('http://localhost:8080/api/users/42');
             expect(fetch.mock.calls[0][1].method).toBe('DELETE');
+        });
+
+        it('encodes delete ids as path segments', async () => {
+            const fetch = mockFetch({ deleted: true });
+            const client = createClient(fetch);
+
+            await client.delete('users').exec('tenant/a?b#c');
+
+            expect(fetch.mock.calls[0][0]).toBe(
+                'http://localhost:8080/api/users/tenant%2Fa%3Fb%23c',
+            );
         });
     });
 

@@ -303,6 +303,19 @@ impl AccessPolicy {
                 "having condition",
             )?;
         }
+        if let Some(on_conflict) = &cmd.on_conflict
+            && let ConflictAction::DoUpdate { assignments } = &on_conflict.action
+        {
+            for (_, expr) in assignments {
+                self.check_expr_column_refs(
+                    table,
+                    rule,
+                    &target_refs,
+                    expr,
+                    "conflict update value",
+                )?;
+            }
+        }
         for join in &cmd.joins {
             if let Some(conditions) = &join.on {
                 for condition in conditions {
@@ -335,6 +348,31 @@ impl AccessPolicy {
                         condition,
                         "merge condition",
                     )?;
+                }
+                match &clause.action {
+                    MergeAction::Update { assignments } => {
+                        for (_, expr) in assignments {
+                            self.check_expr_column_refs(
+                                table,
+                                rule,
+                                &target_refs,
+                                expr,
+                                "merge update value",
+                            )?;
+                        }
+                    }
+                    MergeAction::Insert { values, .. } => {
+                        for expr in values {
+                            self.check_expr_column_refs(
+                                table,
+                                rule,
+                                &target_refs,
+                                expr,
+                                "merge insert value",
+                            )?;
+                        }
+                    }
+                    MergeAction::Delete | MergeAction::DoNothing => {}
                 }
             }
         }
