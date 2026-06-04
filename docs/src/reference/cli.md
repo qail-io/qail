@@ -1,6 +1,6 @@
 # CLI Commands
 
-The `qail` command-line tool — v1.2.1.
+The `qail` command-line tool — v1.3.0.
 
 ## Installation
 

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-04
+
+Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://dev.qail.io/blog/qail-rs-v1-3-0-deep-audit-hardening)
+
+### Added
+- **Native vertical access policies:** Added `qail_core::access` as a first-class policy layer for operation and column access before an AST reaches PostgreSQL. `AccessPolicy`/`AccessContext` support deny-by-default table policies, role and scope requirements, per-operation allow/deny rules, read/write/returning `ColumnRule`s, wildcard table fallback, super-admin bypass via `SuperAdminToken`, and TOML/JSON policy loading.
+- **Gateway native policy integration:** Added opt-in `[access]` configuration and `GatewayConfig::access_policy_path` support so the gateway can enforce native vertical policy across REST CRUD, nested/expanded reads, RPC probes, QAIL text/binary/batch endpoints, transaction queries, and WebSocket/live-query paths. This complements PostgreSQL RLS: RLS remains the horizontal row boundary, while QAIL native policy handles vertical table/operation/column boundaries.
+
+### Fixed
+- **PostgreSQL prepared statement correctness:** Hot statement promotion now happens only after successful parse, stale hot statements are evicted on preprepare failure, cached statements survive execute errors, stale prepared AST handles are reparsed, stale single-statement state is cleared, prepared statement identity is aligned, and NOTIFY flushes drain before returning.
+- **Migration and schema verification:** Composite foreign-key options are preserved through schema parse/diff/apply paths, strict migrations support composite foreign-key options, state diff rejects composite foreign-key drift, table constraints are verified after apply, and seeded RLS/auth fixtures now match the tenant GUC contract.
+- **Access-policy validation:** MERGE source subqueries and transaction subqueries are fully validated, policy numerics reject invalid values, and `ON CONFLICT`/MERGE value expressions require read access when they depend on existing row data.
+- **Gateway numeric and tenant safety:** Qdrant JSON integer drift is rejected, oversized REST integers and precise numeric responses are preserved, branch replay integers compare exactly, transaction subqueries are guarded, and REST write tenant-guard exemptions are honored only where explicitly allowed.
+- **Workflow runtime safety:** Transition guards are counted per run, charge amounts are validated before execution, and branch resume cursors reject drift instead of resuming against a mismatched workflow path.
+- **Encoder and vector protocol safety:** Null bind batch parameters and zero-parameter binds are preserved, and Qdrant vector floats are encoded little-endian for stable cross-platform binary payloads.
+- **SDK URL safety:** TypeScript, Kotlin, and Swift SDK builders now encode table and ID path segments so `/`, `?`, `#`, and similar characters cannot alter the generated REST route.
+
+### Changed
+- **Release validation:** The 1.3.0 line was verified with the full Rust workspace tests, Clippy, TypeScript/Kotlin/Swift SDK tests, and live PostgreSQL lab coverage for strict migrations, MERGE, access checks, seeded RLS, and gateway native vertical access policy behavior.
+
 ## [1.2.1] - 2026-05-28
 
 ### Fixed

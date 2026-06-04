@@ -4,6 +4,18 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
+## Current Highlights (v1.3.0)
+
+- Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://dev.qail.io/blog/qail-rs-v1-3-0-deep-audit-hardening)
+- **Native vertical access policy**: `qail_core::access` adds deny-by-default table policies, role/scope requirements, operation permissions, and read/write/returning column rules before AST execution.
+- **Gateway policy integration**: `[access]` in `qail.toml` loads TOML/JSON policies so gateway REST, QAIL text/binary/batch, transaction, RPC, nested, expanded, and live-query paths can enforce vertical table and column boundaries alongside PostgreSQL RLS.
+- **PostgreSQL statement cache safety**: hot prepared statements are promoted, evicted, reparsed, and retained only in states that match the real backend statement lifecycle.
+- **Migration verification**: composite foreign-key options now survive parse/diff/apply and strict post-apply checks verify table constraints against the live database.
+- **Gateway hardening**: precise numerics, oversized integers, Qdrant JSON integer drift, transaction subqueries, branch replay, and tenant guard exemptions are handled on explicit fail-closed paths.
+- **Workflow and encoder fixes**: workflow guards, charge amounts, branch cursors, null bind params, zero-parameter binds, and Qdrant vector byte order were tightened.
+- **SDK path safety**: TypeScript, Kotlin, and Swift SDK builders encode table and ID path segments before constructing REST routes.
+- **Real database validation**: PostgreSQL lab coverage passed for strict migrations, MERGE, access-checked execution, seeded RLS, and gateway native access policy behavior.
+
 ## Current Highlights (v1.2.1)
 
 - **Schema parser compatibility**: pulled PostgreSQL schemas now accept table-level `enable_rls` and `force_rls` directives.
