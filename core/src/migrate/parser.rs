@@ -2214,7 +2214,7 @@ fn is_column_constraint_keyword(token: &str) -> bool {
 ///   "col between 0 200"  → Between
 ///   "col >= 0 and col <= 200" → And(GreaterOrEqual, LessOrEqual)
 fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
-    let s = s.trim();
+    let s = strip_wrapping_check_parens(s.trim()).trim();
 
     // Try "col between low high"
     let parts: Vec<&str> = s.split_whitespace().collect();
@@ -2272,7 +2272,12 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     for (op, constructor) in ops {
         if let Some(pos) = s.find(op) {
             let col = s[..pos].trim().to_string();
-            let val = s[pos + op.len()..].trim().parse::<i64>().ok()?;
+            if col.is_empty() {
+                continue;
+            }
+            let Some(val) = parse_check_integer_literal(&s[pos + op.len()..]) else {
+                continue;
+            };
             return Some(constructor(col, val));
         }
     }
@@ -2306,6 +2311,82 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     }
 }
 
+fn strip_wrapping_check_parens(mut s: &str) -> &str {
+    loop {
+        let trimmed = s.trim();
+        if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+            return trimmed;
+        }
+
+        let Some(close) = find_matching_paren(trimmed, 0) else {
+            return trimmed;
+        };
+        if close != trimmed.len() - 1 {
+            return trimmed;
+        }
+        s = &trimmed[1..close];
+    }
+}
+
+fn parse_check_integer_literal(raw: &str) -> Option<i64> {
+    let mut value = raw.trim();
+    if let Some(cast_pos) = find_top_level_type_cast(value) {
+        value = value[..cast_pos].trim();
+    }
+    value = strip_wrapping_check_parens(value).trim();
+    if let Some(cast_pos) = find_top_level_type_cast(value) {
+        value = value[..cast_pos].trim();
+        value = strip_wrapping_check_parens(value).trim();
+    }
+
+    value.parse::<i64>().ok().or_else(|| {
+        let parsed = value.parse::<f64>().ok()?;
+        if parsed.is_finite()
+            && parsed.fract() == 0.0
+            && parsed >= i64::MIN as f64
+            && parsed <= i64::MAX as f64
+        {
+            Some(parsed as i64)
+        } else {
+            None
+        }
+    })
+}
+
+fn find_top_level_type_cast(s: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ':' if paren_depth == 0 && bracket_depth == 0 && s[idx..].starts_with("::") => {
+                return Some(idx);
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn find_top_level_operator(s: &str, operator: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     let mut paren_depth = 0usize;
@@ -2331,7 +2412,11 @@ fn find_top_level_operator(s: &str, operator: &str) -> Option<usize> {
             '[' => bracket_depth += 1,
             ']' => bracket_depth = bracket_depth.saturating_sub(1),
             _ => {
-                if paren_depth == 0 && bracket_depth == 0 && s[idx..].starts_with(operator) {
+                if paren_depth == 0
+                    && bracket_depth == 0
+                    && s.get(idx..idx + operator.len())
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(operator))
+                {
                     return Some(idx);
                 }
             }
@@ -4263,6 +4348,46 @@ table products {
         };
         assert_eq!(column, "score");
         assert_eq!(*value, 0);
+    }
+
+    #[test]
+    fn test_parse_postgres_casted_check_comparison() {
+        let input = r#"
+table partners {
+  id uuid primary_key
+  credit_balance decimal(15,2) not_null default 0 check(credit_balance >= (0)::numeric) check_name chk_credit_balance
+  discount_percent decimal(5,2) not_null default 0 check((discount_percent >= (0)::numeric) AND (discount_percent <= (100)::numeric)) check_name chk_discount_percent
+  client_type varchar(30) not_null default 'hotel'::character varying check((client_type)::text = ANY (ARRAY[('hotel'::character varying)::text, ('travel_agent'::character varying)::text])) check_name chk_client_type
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let credit = &schema.tables["partners"].columns[1];
+        assert!(matches!(
+            credit.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::GreaterOrEqual { column, value })
+                if column == "credit_balance" && *value == 0
+        ));
+
+        let discount = &schema.tables["partners"].columns[2];
+        let CheckExpr::And(left, right) = &discount.check.as_ref().unwrap().expr else {
+            panic!("Expected And, got {:?}", discount.check);
+        };
+        assert!(matches!(
+            left.as_ref(),
+            CheckExpr::GreaterOrEqual { column, value }
+                if column == "discount_percent" && *value == 0
+        ));
+        assert!(matches!(
+            right.as_ref(),
+            CheckExpr::LessOrEqual { column, value }
+                if column == "discount_percent" && *value == 100
+        ));
+
+        let client_type = &schema.tables["partners"].columns[3];
+        assert!(matches!(
+            client_type.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::Sql(sql)) if sql.contains("client_type") && sql.contains("ANY")
+        ));
     }
 
     #[test]

@@ -328,6 +328,7 @@ pub(crate) async fn branch_merge_handler(
     match conn.get_mut() {
         Ok(pg_conn) => match pg_conn.simple_query(&overlay_sql).await {
             Ok(overlay_rows) => {
+                let mut pending_overlay_cmds = Vec::with_capacity(overlay_rows.len());
                 for row in &overlay_rows {
                     let overlay = match branch_overlay_merge_row_from_pg(row) {
                         Ok(overlay) => overlay,
@@ -349,26 +350,33 @@ pub(crate) async fn branch_merge_handler(
                     ) {
                         Ok(mut qail_cmd) => {
                             state.optimize_qail_for_execution(&mut qail_cmd);
-                            match conn.fetch_all_uncached(&qail_cmd).await {
-                                Ok(rows)
-                                    if branch_merge_requires_affected_row(&overlay.operation)
-                                        && rows.is_empty() =>
-                                {
-                                    errors.push(format!(
-                                        "{}.{}: merge {} affected no rows",
-                                        overlay.table, overlay.row_pk, overlay.operation
-                                    ));
-                                }
-                                Ok(_) => {
-                                    applied += 1;
-                                    mutated_tables.insert(overlay.table.clone());
-                                }
-                                Err(e) => errors
-                                    .push(format!("{}.{}: {}", overlay.table, overlay.row_pk, e)),
-                            }
+                            pending_overlay_cmds.push((overlay, qail_cmd));
                         }
                         Err(e) => {
                             errors.push(format!("{}.{}: {}", overlay.table, overlay.row_pk, e));
+                        }
+                    }
+                }
+
+                if errors.is_empty() {
+                    for (overlay, qail_cmd) in pending_overlay_cmds {
+                        match conn.fetch_all_uncached(&qail_cmd).await {
+                            Ok(rows)
+                                if branch_merge_requires_affected_row(&overlay.operation)
+                                    && rows.is_empty() =>
+                            {
+                                errors.push(format!(
+                                    "{}.{}: merge {} affected no rows",
+                                    overlay.table, overlay.row_pk, overlay.operation
+                                ));
+                            }
+                            Ok(_) => {
+                                applied += 1;
+                                mutated_tables.insert(overlay.table.clone());
+                            }
+                            Err(e) => {
+                                errors.push(format!("{}.{}: {}", overlay.table, overlay.row_pk, e))
+                            }
                         }
                     }
                 }

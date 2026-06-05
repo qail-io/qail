@@ -88,6 +88,7 @@ struct LoopFrame {
     exit_depth: i32,
     loop_vars: HashSet<String>,
     query_bindings: HashMap<String, QueryBinding>,
+    batched_plan_bindings: HashSet<String>,
     has_scheduler_pacing: bool,
 }
 
@@ -97,6 +98,7 @@ impl LoopFrame {
             exit_depth,
             loop_vars,
             query_bindings: HashMap::new(),
+            batched_plan_bindings: HashSet::new(),
             has_scheduler_pacing: false,
         }
     }
@@ -334,6 +336,19 @@ fn detect_n_plus_one_in_source_with_index(
 
             if let Some((var_name, binding)) =
                 extract_prebuilt_command_binding(code_line, &loop_vars)
+                && let Some(frame) = loop_stack.last_mut()
+            {
+                frame.query_bindings.insert(var_name, binding);
+            }
+
+            if let Some(plan_name) = extract_nested_batch_plan_binding(code_line)
+                && let Some(frame) = loop_stack.last_mut()
+            {
+                frame.batched_plan_bindings.insert(plan_name);
+            }
+
+            if let Some((var_name, binding)) =
+                extract_batched_plan_command_binding(code_line, &loop_stack)
                 && let Some(frame) = loop_stack.last_mut()
             {
                 frame.query_bindings.insert(var_name, binding);
@@ -1426,6 +1441,53 @@ fn extract_prebuilt_command_binding(
             prebuilt_command: true,
         },
     ))
+}
+
+fn extract_nested_batch_plan_binding(code_line: &str) -> Option<String> {
+    let call_pos = code_line.find("plan_nested_batch_fetch(")?;
+    extract_assignment_ident(code_line, call_pos)
+}
+
+fn extract_batched_plan_command_binding(
+    code_line: &str,
+    loop_stack: &[LoopFrame],
+) -> Option<(String, QueryBinding)> {
+    let to_qail_pos = code_line.find(".to_qail(")?;
+    let receiver = receiver_before_method_call(code_line, to_qail_pos)?;
+    if !loop_stack
+        .iter()
+        .rev()
+        .any(|frame| frame.batched_plan_bindings.contains(receiver))
+    {
+        return None;
+    }
+
+    let var_name = extract_assignment_ident(code_line, to_qail_pos)?;
+    Some((
+        var_name,
+        QueryBinding {
+            uses_loop_var: false,
+            batched: true,
+            shape_fingerprint: None,
+            prebuilt_command: false,
+        },
+    ))
+}
+
+fn receiver_before_method_call(line: &str, dot_idx: usize) -> Option<&str> {
+    let prefix = line.get(..dot_idx)?.trim_end();
+    let end = prefix.len();
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| (!is_ident_char(ch)).then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    let receiver = prefix.get(start..end)?.trim();
+    if is_plain_ident(receiver) {
+        Some(receiver)
+    } else {
+        None
+    }
 }
 
 fn find_qail_parse_call_arg(code_line: &str) -> Option<(usize, String)> {
@@ -2898,6 +2960,46 @@ async fn apply_commands(conn: &Conn, queries: Vec<String>) {
 
         let diags = detect_n_plus_one_in_file("demo.rs", source);
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn ignores_nested_batch_plan_to_qail_loop() {
+        let source = r#"
+async fn expand(conn: &Conn, relations: Vec<&str>, parent_keys: Vec<Value>) {
+    for rel in relations {
+        let plan = match plan_nested_batch_fetch(&registry, "users", rel, parent_keys.clone()) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => continue,
+            Err(_) => continue,
+        };
+        let mut cmd = plan.to_qail();
+        cmd = cmd.filter("tenant_id", Operator::Eq, tenant_id.clone());
+        conn.fetch_all(&cmd).await.unwrap();
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn generic_to_qail_loop_still_reports_without_batch_plan_origin() {
+        let source = r#"
+async fn replay(conn: &Conn, items: Vec<Item>) {
+    for item in items {
+        let plan = build_plan(item);
+        let cmd = plan.to_qail();
+        conn.fetch_all(&cmd).await.unwrap();
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1001),
+            "{diags:?}"
+        );
     }
 
     #[test]
