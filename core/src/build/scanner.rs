@@ -54,7 +54,15 @@ struct LiteralBindingIndex {
 #[derive(Debug, Clone, Default)]
 struct ScopedLiteralBindings {
     start: usize,
+    end: usize,
     bindings: LiteralBindings,
+}
+
+#[derive(Debug, Clone)]
+struct CteAlias {
+    name: String,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,19 +134,35 @@ fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
     }
 }
 
-fn collect_literal_binding_index(content: &str) -> LiteralBindingIndex {
+fn collect_literal_binding_index(
+    content: &str,
+    local_functions: &[LocalFunction],
+) -> LiteralBindingIndex {
     let mut index = LiteralBindingIndex::default();
 
     for stmt in collect_binding_statements(content) {
         match stmt.kind {
             BindingStatementKind::Const => {
-                collect_const_statement_bindings(stmt.text, &mut index.globals);
+                let bindings = collect_const_statement_bindings(stmt.text);
+                if bindings.scalars.is_empty() && bindings.arrays.is_empty() {
+                    continue;
+                }
+                if find_enclosing_local_function(stmt.start, local_functions).is_some() {
+                    index.locals.push(ScopedLiteralBindings {
+                        start: stmt.start,
+                        end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
+                        bindings,
+                    });
+                } else {
+                    merge_literal_bindings(&mut index.globals, &bindings);
+                }
             }
             BindingStatementKind::Let => {
                 let bindings = collect_let_statement_bindings(stmt.text);
                 if !bindings.scalars.is_empty() || !bindings.arrays.is_empty() {
                     index.locals.push(ScopedLiteralBindings {
                         start: stmt.start,
+                        end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
                         bindings,
                     });
                 }
@@ -158,7 +182,7 @@ fn literal_bindings_for_offset(
 ) -> LiteralBindings {
     let mut bindings = index.globals.clone();
     for local in &index.locals {
-        if local.start >= offset {
+        if local.start >= offset || offset >= local.end {
             continue;
         }
         let visible = match enclosing_function {
@@ -322,7 +346,8 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
     bindings
 }
 
-fn collect_const_statement_bindings(stmt: &str, bindings: &mut LiteralBindings) {
+fn collect_const_statement_bindings(stmt: &str) -> LiteralBindings {
+    let mut bindings = LiteralBindings::default();
     if let Some((name, rhs)) = parse_const_binding(stmt) {
         if let Some(value) = extract_string_arg(rhs) {
             bindings
@@ -337,6 +362,9 @@ fn collect_const_statement_bindings(stmt: &str, bindings: &mut LiteralBindings) 
             bindings.arrays.insert(name, values);
         }
     }
+    dedupe_binding_values(&mut bindings.scalars);
+    dedupe_binding_values(&mut bindings.arrays);
+    bindings
 }
 
 fn parse_const_binding(stmt: &str) -> Option<(String, &str)> {
@@ -646,11 +674,10 @@ fn collect_local_functions(source: &str) -> Vec<LocalFunction> {
             i += 2;
             continue;
         };
-        let open_paren = skip_ws(bytes, name_end);
-        if bytes.get(open_paren).copied() != Some(b'(') {
+        let Some(open_paren) = parse_fn_params_open(source, name_end) else {
             i += 2;
             continue;
-        }
+        };
         let Some(close_paren) = find_matching_delim(source, open_paren, b'(', b')') else {
             i += 2;
             continue;
@@ -710,21 +737,31 @@ fn collect_local_function_calls(
                 continue;
             }
 
-            let open_paren = skip_ws(bytes, idx + function.name.len());
-            if bytes.get(open_paren).copied() != Some(b'(') {
+            if idx > 0
+                && matches!(
+                    bytes[idx - 1],
+                    b'.' | b':' | b'!' | b'_' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+                )
+            {
                 idx += function.name.len();
                 continue;
             }
-            let Some((name, name_start)) = bare_call_name_before_open_paren(source, open_paren)
+            if bytes
+                .get(idx + function.name.len())
+                .copied()
+                .is_some_and(is_ident_byte)
+            {
+                idx += function.name.len();
+                continue;
+            }
+
+            let Some(open_paren) =
+                parse_call_open_paren_after_name(source, idx + function.name.len())
             else {
                 idx += function.name.len();
                 continue;
             };
-            if name != function.name {
-                idx += function.name.len();
-                continue;
-            }
-            if previous_identifier_before(source, name_start).as_deref() == Some("fn") {
+            if previous_identifier_before(source, idx).as_deref() == Some("fn") {
                 idx += function.name.len();
                 continue;
             }
@@ -744,10 +781,10 @@ fn collect_local_function_calls(
                 .iter()
                 .map(|(_, start, end)| (*start, *end))
                 .collect::<Vec<_>>();
-            let key = format!("{}@{}@{}", name, open_paren, close_paren);
+            let key = format!("{}@{}@{}", function.name, open_paren, close_paren);
             if seen.insert(key) {
                 out.push(LocalFunctionCall {
-                    name,
+                    name: function.name.clone(),
                     args,
                     arg_spans,
                     open_paren,
@@ -785,6 +822,37 @@ fn find_function_body_open(source: &str, start: usize) -> Option<usize> {
         }
     }
     None
+}
+
+fn skip_optional_generics(source: &str, cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor).copied() != Some(b'<') {
+        return Some(cursor);
+    }
+    let end = find_matching_delim(source, cursor, b'<', b'>')?;
+    Some(skip_ws(bytes, end + 1))
+}
+
+fn parse_fn_params_open(source: &str, name_end: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let cursor = skip_optional_generics(source, name_end)?;
+    (bytes.get(cursor).copied() == Some(b'(')).then_some(cursor)
+}
+
+fn parse_call_open_paren_after_name(source: &str, name_end: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = skip_ws(bytes, name_end);
+
+    if starts_with_bytes(bytes, cursor, b"::") {
+        cursor = skip_ws(bytes, cursor + 2);
+        if bytes.get(cursor).copied() != Some(b'<') {
+            return None;
+        }
+        cursor = skip_optional_generics(source, cursor)?;
+    }
+
+    (bytes.get(cursor).copied() == Some(b'(')).then_some(cursor)
 }
 
 fn parse_param_names(params: &str) -> Vec<String> {
@@ -827,46 +895,6 @@ fn extract_last_ident(text: &str) -> Option<String> {
     }
 }
 
-fn bare_call_name_before_open_paren(
-    source: &str,
-    open_paren_idx: usize,
-) -> Option<(String, usize)> {
-    let bytes = source.as_bytes();
-    if open_paren_idx == 0 || open_paren_idx > bytes.len() {
-        return None;
-    }
-
-    let mut end = open_paren_idx;
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    if end == 0 {
-        return None;
-    }
-
-    let mut start = end;
-    while start > 0 && is_ident_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    if start == end {
-        return None;
-    }
-
-    let prev = source
-        .get(..start)
-        .and_then(|prefix| prefix.as_bytes().last().copied());
-    if matches!(prev, Some(b'.' | b':' | b'!')) {
-        return None;
-    }
-
-    let name = source.get(start..end)?.trim();
-    if name.is_empty() || is_rust_keyword(name) {
-        return None;
-    }
-
-    Some((name.to_string(), start))
-}
-
 fn previous_identifier_before(source: &str, start: usize) -> Option<String> {
     let bytes = source.as_bytes();
     let mut end = start;
@@ -895,35 +923,6 @@ fn previous_identifier_before(source: &str, start: usize) -> Option<String> {
     } else {
         Some(ident.to_string())
     }
-}
-
-fn is_rust_keyword(name: &str) -> bool {
-    matches!(
-        name,
-        "if" | "for"
-            | "while"
-            | "loop"
-            | "match"
-            | "return"
-            | "let"
-            | "fn"
-            | "impl"
-            | "async"
-            | "await"
-            | "move"
-            | "in"
-            | "where"
-            | "else"
-            | "mod"
-            | "struct"
-            | "enum"
-            | "trait"
-            | "use"
-            | "pub"
-            | "super"
-            | "self"
-            | "crate"
-    )
 }
 
 fn compute_line_starts(source: &str) -> Vec<usize> {
@@ -1879,14 +1878,23 @@ fn collect_qail_chains(source: &str) -> Vec<ScannedQailChain> {
     out
 }
 
-fn collect_cte_aliases(chains: &[ScannedQailChain]) -> HashSet<String> {
-    let mut cte_names = HashSet::new();
+fn collect_cte_aliases(
+    chains: &[ScannedQailChain],
+    source: &str,
+    local_functions: &[LocalFunction],
+) -> Vec<CteAlias> {
+    let mut aliases = Vec::new();
+    let qail_bound_vars = chains
+        .iter()
+        .filter_map(|chain| chain.bound_var.as_ref().map(|var| (var.as_str(), chain)))
+        .collect::<Vec<_>>();
+
     for chain in chains {
         for call in scan_chain_method_calls(&chain.full_chain) {
             match call.name {
                 "to_cte" => {
                     if let Some(name) = extract_string_arg(call.args) {
-                        cte_names.insert(name);
+                        push_cte_alias(&mut aliases, source, chain, name);
                     }
                 }
                 "with" => {
@@ -1897,15 +1905,78 @@ fn collect_cte_aliases(chains: &[ScannedQailChain]) -> HashSet<String> {
                     let Some(alias) = extract_string_arg(args[0]) else {
                         continue;
                     };
-                    if args[1].trim_start().starts_with("Qail::") {
-                        cte_names.insert(alias);
+                    if args[1].trim_start().starts_with("Qail::")
+                        || cte_arg_is_visible_bound_qail(
+                            args[1],
+                            chain,
+                            &qail_bound_vars,
+                            source,
+                            local_functions,
+                        )
+                    {
+                        push_cte_alias(&mut aliases, source, chain, alias);
                     }
                 }
                 _ => {}
             }
         }
     }
-    cte_names
+    aliases
+}
+
+fn push_cte_alias(
+    aliases: &mut Vec<CteAlias>,
+    source: &str,
+    chain: &ScannedQailChain,
+    name: String,
+) {
+    let end = find_innermost_block_end(source, chain.start).unwrap_or(source.len());
+    if aliases
+        .iter()
+        .any(|alias| alias.name == name && alias.start == chain.start && alias.end == end)
+    {
+        return;
+    }
+    aliases.push(CteAlias {
+        name,
+        start: chain.start,
+        end,
+    });
+}
+
+fn cte_arg_is_visible_bound_qail(
+    arg: &str,
+    chain: &ScannedQailChain,
+    qail_bound_vars: &[(&str, &ScannedQailChain)],
+    source: &str,
+    local_functions: &[LocalFunction],
+) -> bool {
+    let Some(key) = binding_lookup_key(arg) else {
+        return false;
+    };
+    qail_bound_vars.iter().any(|(var, source_chain)| {
+        *var == key
+            && source_chain.start <= chain.start
+            && chain.start
+                < find_innermost_block_end(source, source_chain.start).unwrap_or(source.len())
+            && same_enclosing_function(source_chain.start, chain.start, local_functions)
+    })
+}
+
+fn same_enclosing_function(a: usize, b: usize, functions: &[LocalFunction]) -> bool {
+    let a_func =
+        find_enclosing_local_function(a, functions).map(|func| (func.body_start, func.body_end));
+    let b_func =
+        find_enclosing_local_function(b, functions).map(|func| (func.body_start, func.body_end));
+    a_func == b_func
+}
+
+fn visible_cte_alias_names(aliases: &[CteAlias], offset: usize) -> HashSet<String> {
+    aliases
+        .iter()
+        .filter(|alias| alias.start <= offset && offset < alias.end)
+        .map(|alias| alias.name.clone())
+        .collect()
 }
 
 fn find_enclosing_local_function(
@@ -1916,6 +1987,44 @@ fn find_enclosing_local_function(
         .iter()
         .filter(|func| offset > func.body_start && offset < func.body_end)
         .min_by_key(|func| func.body_end.saturating_sub(func.body_start))
+}
+
+fn find_innermost_block_end(source: &str, offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut stack = Vec::new();
+    let mut i = 0usize;
+    let limit = offset.min(bytes.len());
+
+    while i < limit {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < limit && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i).min(limit);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next.min(limit);
+            continue;
+        }
+
+        match bytes[i] {
+            b'{' => stack.push(i),
+            b'}' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    stack
+        .last()
+        .and_then(|open| find_matching_delim(source, *open, b'{', b'}'))
 }
 
 fn build_param_substitutions(
@@ -2175,8 +2284,6 @@ pub(crate) fn scan_file_silent(file: &str, content: &str, usages: &mut Vec<QailU
 }
 
 fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_warnings: bool) {
-    let literal_binding_index = collect_literal_binding_index(content);
-
     // ── File-level flags ─────────────────────────────────────────────
     // Detect SuperAdminToken::for_system_process() usage anywhere in file.
     // Files can opt out with `// qail:allow(super_admin)` comment.
@@ -2186,8 +2293,9 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
 
     let chains = collect_qail_chains(content);
     let execution_site_rls = collect_execution_site_rls_offsets(content);
-    let file_cte_names = collect_cte_aliases(&chains);
     let local_functions = collect_local_functions(content);
+    let literal_binding_index = collect_literal_binding_index(content, &local_functions);
+    let cte_aliases = collect_cte_aliases(&chains, content, &local_functions);
     let local_function_calls = collect_local_function_calls(content, &local_functions);
     let helper_rls_params = collect_helper_rls_param_indices(content, &local_functions);
     let mut function_name_counts = HashMap::new();
@@ -2264,6 +2372,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
         };
         let mut pushed = false;
         let mut seen_variants = HashSet::new();
+        let visible_cte_names = visible_cte_alias_names(&cte_aliases, chain.start);
 
         for substitutions in context_iter {
             let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(
@@ -2291,7 +2400,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 &literal_bindings,
             )
             .into_iter()
-            .filter(|table| !file_cte_names.contains(table))
+            .filter(|table| !visible_cte_names.contains(table))
             .collect::<Vec<_>>();
             let related_tables_key = related_tables.join("\x1d");
 
@@ -2300,7 +2409,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 if !seen_variants.insert(variant_key) {
                     continue;
                 }
-                let is_cte_ref = file_cte_names.contains(&table);
+                let is_cte_ref = visible_cte_names.contains(&table);
                 usages.push(QailUsage {
                     file: file.to_string(),
                     line: chain.line,

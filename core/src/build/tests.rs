@@ -958,6 +958,54 @@ fn demo() {
 }
 
 #[test]
+fn test_scan_file_inner_block_literal_binding_does_not_escape_scope() {
+    let content = r#"
+fn demo(table: &str) {
+    {
+        let table = "users";
+        let _users = Qail::get(table).column("email");
+    }
+
+    let _dynamic = Qail::get(table).column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        1,
+        "inner block literal binding must not resolve later dynamic query: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+}
+
+#[test]
+fn test_scan_file_function_local_const_does_not_bleed_between_functions() {
+    let content = r#"
+fn users() {
+    const TABLE: &str = "users";
+    let _cmd = Qail::get(TABLE).column("email");
+}
+
+fn orders() {
+    const TABLE: &str = "orders";
+    let _cmd = Qail::get(TABLE).column("status");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        2,
+        "function-local const table binding must not fan out: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[1].table, "orders");
+}
+
+#[test]
 fn test_scan_file_ignores_helper_calls_in_comments_for_param_substitution() {
     let content = r#"
 async fn fetch_one(table: &str) {
@@ -1000,6 +1048,25 @@ async fn demo(conn: &mut qail_pg::PooledConnection) {
         !usages[0].has_rls,
         "commented cmd.with_rls(...) must not mark helper argument as RLS-scoped"
     );
+}
+
+#[test]
+fn test_scan_file_resolves_generic_helper_function_calls() {
+    let content = r#"
+async fn fetch_one<T>(table: &str, columns: &[&str], id: T) {
+    let _cmd = Qail::get(table).columns(columns).eq("id", id).limit(1);
+}
+
+async fn demo() {
+    fetch_one::<uuid::Uuid>("users", &["id", "email"], uuid::Uuid::nil()).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1, "generic helper should resolve: {usages:?}");
+    assert_eq!(usages[0].table, "users");
+    assert!(usages[0].columns.contains(&"email".to_string()));
 }
 
 #[test]
@@ -1284,6 +1351,86 @@ let read = Qail::get("agg").column("id");
     assert!(
         !usages[1].is_cte_ref,
         "non-Qail .with() rhs should not create a CTE alias"
+    );
+}
+
+#[test]
+fn test_cte_alias_does_not_bleed_across_functions() {
+    let content = r#"
+fn define_cte() {
+    let _cte = Qail::get("orders").columns(["total"]).to_cte("agg");
+}
+
+fn read_real_table() {
+    let _read = Qail::get("agg").column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        !usages[1].is_cte_ref,
+        "CTE aliases from another function must not hide real table validation"
+    );
+}
+
+#[test]
+fn test_bound_cte_source_does_not_cross_nested_duplicate_function_name() {
+    let content = r#"
+fn demo() {
+    let source = Qail::get("orders").columns(["total"]);
+
+    fn demo() {
+        let _main = Qail::get("results").with("agg", source);
+        let _read = Qail::get("agg").column("total");
+    }
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 3);
+    assert!(
+        !usages[2].is_cte_ref,
+        "bound CTE source variables must not cross into a different nested function"
+    );
+}
+
+#[test]
+fn test_cte_alias_does_not_apply_before_definition() {
+    let content = r#"
+fn demo() {
+    let _read = Qail::get("agg").column("id");
+    let _cte = Qail::get("orders").columns(["total"]).to_cte("agg");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        !usages[0].is_cte_ref,
+        "later CTE aliases must not mark earlier table refs as CTE refs"
+    );
+}
+
+#[test]
+fn test_cte_alias_with_bound_qail_source_is_detected() {
+    let content = r#"
+fn demo() {
+    let source = Qail::get("orders").columns(["total"]);
+    let _main = Qail::get("results").with("agg", source);
+    let _read = Qail::get("agg").column("total");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 3);
+    assert!(
+        usages[2].is_cte_ref,
+        "with(alias, bound_qail_source) should mark later alias refs as CTE refs"
     );
 }
 
