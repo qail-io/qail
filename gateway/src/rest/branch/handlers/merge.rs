@@ -328,7 +328,6 @@ pub(crate) async fn branch_merge_handler(
     match conn.get_mut() {
         Ok(pg_conn) => match pg_conn.simple_query(&overlay_sql).await {
             Ok(overlay_rows) => {
-                // qail:allow(nplus1) branch merge replays ordered overlay mutations transactionally
                 for row in &overlay_rows {
                     let overlay = match branch_overlay_merge_row_from_pg(row) {
                         Ok(overlay) => overlay,

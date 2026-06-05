@@ -252,7 +252,6 @@ async fn execute_rollback_plan_atomic(
             plan.groups_to_rollback.len(),
             down_migration.display_name.yellow()
         );
-        // qail:allow(nplus1) rollback must replay compiled migration commands sequentially
         for (step, cmd) in cmds.iter().enumerate() {
             if let Err(err) = driver.execute(cmd).await {
                 let _ = driver.rollback().await;
@@ -275,14 +274,14 @@ async fn execute_rollback_plan_atomic(
         return Err(err);
     }
 
-    // qail:allow(nplus1) rollback history cleanup is bounded by selected migration versions
-    for version in &plan.versions_to_delete {
-        let delete_cmd = Qail::del("_qail_migrations").where_eq("version", version.as_str());
+    if !plan.versions_to_delete.is_empty() {
+        let delete_cmd =
+            Qail::del("_qail_migrations").in_vals("version", plan.versions_to_delete.clone());
         if let Err(err) = driver.execute(&delete_cmd).await {
             let _ = driver.rollback().await;
             return Err(anyhow!(
-                "Failed to update migration history (delete '{}'): {}",
-                version,
+                "Failed to update migration history for rollback target '{}': {}",
+                target_label,
                 err
             ));
         }

@@ -73,7 +73,6 @@ impl PgDriver {
     pub async fn execute_batch(&mut self, cmds: &[Qail]) -> PgResult<Vec<u64>> {
         self.begin().await?;
         let mut results = Vec::with_capacity(cmds.len());
-        // qail:allow(nplus1) batch API intentionally executes caller-supplied commands in order
         for cmd in cmds {
             match self.execute(cmd).await {
                 Ok(n) => results.push(n),

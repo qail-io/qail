@@ -83,7 +83,6 @@ pub async fn execute_batch(
 
     let mut had_error = false;
 
-    // qail:allow(nplus1) batch endpoint intentionally executes caller-supplied queries in order
     for (index, query_text) in request.queries.iter().enumerate() {
         let query_text = query_text.trim();
 
