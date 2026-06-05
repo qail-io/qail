@@ -2234,6 +2234,17 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
         return Some(expr);
     }
 
+    // Try Postgres introspection form:
+    //   (col)::text = ANY (ARRAY[('a'::varchar)::text, ('b'::varchar)::text])
+    if let Some(expr) = parse_postgres_any_array_check_expr(s) {
+        return Some(expr);
+    }
+
+    // Try Postgres regex check form: (col)::text ~ 'pattern'::text
+    if let Some(expr) = parse_postgres_regex_check_expr(s) {
+        return Some(expr);
+    }
+
     // Try "left and right"
     if let Some(and_pos) = find_top_level_operator(s, " and ") {
         let left = parse_check_expr_from_qail(&s[..and_pos])?;
@@ -2385,6 +2396,172 @@ fn find_top_level_type_cast(s: &str) -> Option<usize> {
     }
 
     None
+}
+
+fn parse_postgres_any_array_check_expr(s: &str) -> Option<CheckExpr> {
+    let eq_pos = find_top_level_equality(s)?;
+    let column = parse_postgres_any_check_column(&s[..eq_pos])?;
+    let values = parse_postgres_any_text_array_values(&s[eq_pos + 1..])?;
+    if values.is_empty() {
+        return None;
+    }
+
+    Some(CheckExpr::In { column, values })
+}
+
+fn parse_postgres_regex_check_expr(s: &str) -> Option<CheckExpr> {
+    let regex_pos = find_top_level_regex_operator(s)?;
+    let column = parse_postgres_any_check_column(&s[..regex_pos])?;
+    let pattern = parse_postgres_text_literal(&s[regex_pos + 1..])?;
+    Some(CheckExpr::Regex { column, pattern })
+}
+
+fn find_top_level_equality(s: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '=' if paren_depth == 0 && bracket_depth == 0 => {
+                let before = s[..idx].chars().next_back();
+                let after = s[idx + ch.len_utf8()..].chars().next();
+                if !matches!(before, Some('>' | '<' | '!' | '=')) && !matches!(after, Some('=')) {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn find_top_level_regex_operator(s: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '~' if paren_depth == 0 && bracket_depth == 0 => {
+                let before = s[..idx].chars().next_back();
+                if !matches!(before, Some('!')) {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_postgres_any_check_column(raw: &str) -> Option<String> {
+    let column = strip_postgres_type_casts(raw);
+    if is_native_identifier(column) {
+        Some(column.to_string())
+    } else {
+        None
+    }
+}
+
+fn strip_postgres_type_casts(mut value: &str) -> &str {
+    loop {
+        let trimmed = strip_wrapping_check_parens(value.trim()).trim();
+        let without_cast = find_top_level_type_cast(trimmed)
+            .map(|cast_pos| trimmed[..cast_pos].trim())
+            .unwrap_or(trimmed);
+        let unwrapped = strip_wrapping_check_parens(without_cast).trim();
+        if unwrapped.len() == value.trim().len() {
+            return unwrapped;
+        }
+        value = unwrapped;
+    }
+}
+
+fn parse_postgres_any_text_array_values(raw: &str) -> Option<Vec<String>> {
+    let raw = raw.trim();
+    let any_args = strip_case_insensitive_prefix(raw, "ANY")?.trim_start();
+    let open = any_args.find('(')?;
+    if !any_args[..open].trim().is_empty() {
+        return None;
+    }
+    let close = find_matching_paren(any_args, open)?;
+    if !any_args[close + 1..].trim().is_empty() {
+        return None;
+    }
+
+    let array_expr = strip_postgres_type_casts(&any_args[open + 1..close]);
+    let after_array = strip_case_insensitive_prefix(array_expr, "ARRAY")?.trim_start();
+    if !after_array.starts_with('[') {
+        return None;
+    }
+
+    let body = list_body_before_closing_bracket(&after_array[1..])?;
+    let mut values = Vec::new();
+    for item in split_top_level_csv(body).ok()? {
+        values.push(parse_postgres_text_array_item(&item)?);
+    }
+
+    let mut seen = HashSet::new();
+    if values.iter().any(|value| !seen.insert(value)) {
+        return None;
+    }
+
+    Some(values)
+}
+
+fn parse_postgres_text_array_item(raw: &str) -> Option<String> {
+    parse_postgres_text_literal(raw)
+}
+
+fn parse_postgres_text_literal(raw: &str) -> Option<String> {
+    let value = strip_postgres_type_casts(raw);
+    if !value.starts_with('\'') {
+        return None;
+    }
+    parse_enum_value(value).ok()
+}
+
+fn strip_case_insensitive_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = value.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then_some(&value[prefix.len()..])
 }
 
 fn find_top_level_operator(s: &str, operator: &str) -> Option<usize> {
@@ -4357,7 +4534,10 @@ table partners {
   id uuid primary_key
   credit_balance decimal(15,2) not_null default 0 check(credit_balance >= (0)::numeric) check_name chk_credit_balance
   discount_percent decimal(5,2) not_null default 0 check((discount_percent >= (0)::numeric) AND (discount_percent <= (100)::numeric)) check_name chk_discount_percent
+  sender_type text not_null check(sender_type = ANY (ARRAY['user'::text, 'bot'::text, 'agent'::text])) check_name app_chat_messages_sender_type_check
   client_type varchar(30) not_null default 'hotel'::character varying check((client_type)::text = ANY (ARRAY[('hotel'::character varying)::text, ('travel_agent'::character varying)::text])) check_name chk_client_type
+  duration_hours int not_null check(duration_hours = ANY (ARRAY[8, 10, 12])) check_name duration_hours_check
+  order_prefix text check((order_prefix)::text ~ '^[A-Z][A-Z0-9]{1,11}$'::text) check_name order_prefix_check
 }
 "#;
         let schema = parse_qail(input).unwrap();
@@ -4383,10 +4563,33 @@ table partners {
                 if column == "discount_percent" && *value == 100
         ));
 
-        let client_type = &schema.tables["partners"].columns[3];
+        let sender_type = &schema.tables["partners"].columns[3];
+        assert!(matches!(
+            sender_type.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::In { column, values })
+                if column == "sender_type"
+                    && values == &["user".to_string(), "bot".to_string(), "agent".to_string()]
+        ));
+
+        let client_type = &schema.tables["partners"].columns[4];
         assert!(matches!(
             client_type.check.as_ref().map(|check| &check.expr),
-            Some(CheckExpr::Sql(sql)) if sql.contains("client_type") && sql.contains("ANY")
+            Some(CheckExpr::In { column, values })
+                if column == "client_type"
+                    && values == &["hotel".to_string(), "travel_agent".to_string()]
+        ));
+
+        let duration_hours = &schema.tables["partners"].columns[5];
+        assert!(matches!(
+            duration_hours.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::Sql(sql)) if sql.contains("duration_hours") && sql.contains("ANY")
+        ));
+
+        let order_prefix = &schema.tables["partners"].columns[6];
+        assert!(matches!(
+            order_prefix.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::Regex { column, pattern })
+                if column == "order_prefix" && pattern == "^[A-Z][A-Z0-9]{1,11}$"
         ));
     }
 
@@ -4442,6 +4645,7 @@ table tickets {
 table tickets {
   status text check(status in ["needs and review", ready] and score >= 0)
   title text check(title ~ 'rock and roll')
+  bad_regex text check(bad_regex ~ "not a sql text literal")
 }
 "#;
         let schema = parse_qail(input).unwrap();
@@ -4469,7 +4673,17 @@ table tickets {
             .expr;
         assert!(matches!(
             title_check,
-            CheckExpr::Sql(sql) if sql == "title ~ 'rock and roll'"
+            CheckExpr::Regex { column, pattern } if column == "title" && pattern == "rock and roll"
+        ));
+
+        let bad_regex_check = &schema.tables["tickets"].columns[2]
+            .check
+            .as_ref()
+            .unwrap()
+            .expr;
+        assert!(matches!(
+            bad_regex_check,
+            CheckExpr::Sql(sql) if sql == "bad_regex ~ \"not a sql text literal\""
         ));
     }
 
