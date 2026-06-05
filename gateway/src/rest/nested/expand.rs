@@ -31,6 +31,7 @@ pub async fn expand_nested(
         .acquire_with_auth_rls_guarded(auth, Some(table_name))
         .await?;
 
+    // qail:allow(nplus1) expand fan-out is bounded by requested relationship names, not row count
     for rel in relations {
         // SECURITY: Block nested expansion into inaccessible tables
         let rel_blocked = if !state.allowed_tables.is_empty() {

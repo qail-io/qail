@@ -88,17 +88,25 @@ struct LoopFrame {
     loop_vars: HashSet<String>,
     query_bindings: HashMap<String, QueryBinding>,
     has_scheduler_pacing: bool,
+    allow_nplus1: bool,
 }
 
 impl LoopFrame {
-    fn new(exit_depth: i32, loop_vars: HashSet<String>) -> Self {
+    fn new(exit_depth: i32, loop_vars: HashSet<String>, allow_nplus1: bool) -> Self {
         Self {
             exit_depth,
             loop_vars,
             query_bindings: HashMap::new(),
             has_scheduler_pacing: false,
+            allow_nplus1,
         }
     }
+}
+
+#[derive(Debug)]
+struct PendingLoop {
+    vars: HashSet<String>,
+    allow_nplus1: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +192,8 @@ const ITER_LOOP_PATTERNS: [&str; 4] = [
     ".try_for_each_concurrent(",
 ];
 
+const NPLUS1_ALLOW_MARKER: &str = "qail:allow(nplus1)";
+
 /// Detect semantic N+1 patterns in a single Rust source file.
 #[cfg(any(test, feature = "analyzer"))]
 pub(crate) fn detect_n_plus_one_in_file(file: &str, source: &str) -> Vec<NPlusOneDiagnostic> {
@@ -204,6 +214,7 @@ fn detect_n_plus_one_in_source_with_index(
     let masked_source = mask_non_code(source);
     let lines: Vec<&str> = source.lines().collect();
     let code_lines: Vec<&str> = masked_source.lines().collect();
+    let nplus1_allow_lines = collect_nplus1_allow_lines(source);
     let mut out = Vec::new();
     let mut seen = HashSet::<(usize, usize, NPlusOneCode)>::new();
 
@@ -214,43 +225,59 @@ fn detect_n_plus_one_in_source_with_index(
         .unwrap_or_else(|| vec![None; lines.len()]);
 
     let mut loop_stack: Vec<LoopFrame> = Vec::new();
-    let mut pending_loop_vars: Option<HashSet<String>> = None;
-    let mut pending_iterator_loop = false;
+    let mut pending_loop: Option<PendingLoop> = None;
+    let mut pending_iterator_loop: Option<bool> = None;
     let mut brace_depth: i32 = 0;
 
     for (idx, raw_line) in lines.iter().enumerate() {
         let code_line = code_lines.get(idx).copied().unwrap_or_default();
         let line_no = idx + 1;
         let trimmed = code_line.trim();
+        let line_allows_nplus1 = nplus1_allow_applies_to_line(&nplus1_allow_lines, idx);
 
-        if let Some(vars) = pending_loop_vars.take() {
+        if let Some(pending) = pending_loop.take() {
             if code_line.contains('{') {
                 let has_scheduler_pacing =
                     loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
-                let mut frame = LoopFrame::new(brace_depth, vars);
+                let mut frame = LoopFrame::new(
+                    brace_depth,
+                    pending.vars,
+                    pending.allow_nplus1 || line_allows_nplus1,
+                );
                 frame.has_scheduler_pacing = has_scheduler_pacing;
                 loop_stack.push(frame);
             } else {
-                pending_loop_vars = Some(vars);
+                pending_loop = Some(PendingLoop {
+                    vars: pending.vars,
+                    allow_nplus1: pending.allow_nplus1 || line_allows_nplus1,
+                });
             }
         }
 
-        if pending_iterator_loop {
+        if let Some(pending_allow_nplus1) = pending_iterator_loop.take() {
             if let Some(params) = extract_closure_params(trimmed) {
                 let mut vars = HashSet::new();
                 collect_closure_param_idents(params, &mut vars);
-                pending_iterator_loop = false;
                 if code_line.contains('{') {
                     let has_scheduler_pacing =
                         loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
-                    let mut frame = LoopFrame::new(brace_depth, vars);
+                    let mut frame = LoopFrame::new(
+                        brace_depth,
+                        vars,
+                        pending_allow_nplus1 || line_allows_nplus1,
+                    );
                     frame.has_scheduler_pacing = has_scheduler_pacing;
                     loop_stack.push(frame);
                 } else {
-                    pending_loop_vars = Some(vars);
+                    pending_loop = Some(PendingLoop {
+                        vars,
+                        allow_nplus1: pending_allow_nplus1 || line_allows_nplus1,
+                    });
                 }
             } else if trimmed.contains(';') {
-                pending_iterator_loop = false;
+                pending_iterator_loop = None;
+            } else {
+                pending_iterator_loop = Some(pending_allow_nplus1 || line_allows_nplus1);
             }
         }
 
@@ -258,14 +285,17 @@ fn detect_n_plus_one_in_source_with_index(
             if code_line.contains('{') {
                 let has_scheduler_pacing =
                     loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
-                let mut frame = LoopFrame::new(brace_depth, work_loop_vars);
+                let mut frame = LoopFrame::new(brace_depth, work_loop_vars, line_allows_nplus1);
                 frame.has_scheduler_pacing = has_scheduler_pacing;
                 loop_stack.push(frame);
             } else {
-                pending_loop_vars = Some(work_loop_vars);
+                pending_loop = Some(PendingLoop {
+                    vars: work_loop_vars,
+                    allow_nplus1: line_allows_nplus1,
+                });
             }
         } else if starts_iterator_loop(trimmed) && extract_closure_params(trimmed).is_none() {
-            pending_iterator_loop = true;
+            pending_iterator_loop = Some(line_allows_nplus1);
         }
 
         let work_depth = loop_stack.len();
@@ -281,6 +311,8 @@ fn detect_n_plus_one_in_source_with_index(
                 && loop_stack
                     .last()
                     .is_some_and(|f| f.has_scheduler_pacing && f.loop_vars.is_empty());
+            let allow_nplus1_context =
+                line_allows_nplus1 || loop_stack.iter().any(|frame| frame.allow_nplus1);
 
             if let Some((var_name, qail_start_col, chain)) =
                 extract_query_binding(&lines, &code_lines, idx)
@@ -309,6 +341,7 @@ fn detect_n_plus_one_in_source_with_index(
                 // Inline execute in builder chain inside loop.
                 if let Some(exec) = find_exec_call(&chain)
                     && !batched
+                    && !allow_nplus1_context
                     && (!scheduler_loop_context || uses_loop_var)
                 {
                     emit_query_loop_diag(
@@ -344,7 +377,7 @@ fn detect_n_plus_one_in_source_with_index(
                         .map(|b| b.uses_loop_var)
                         .or_else(|| arg_shape.as_ref().map(|s| s.uses_loop_var))
                         .unwrap_or_else(|| any_loop_var_in_text(&loop_vars, &exec.first_arg));
-                    if !scheduler_loop_context || uses_loop_var {
+                    if !allow_nplus1_context && (!scheduler_loop_context || uses_loop_var) {
                         emit_query_loop_diag(
                             &mut out,
                             &mut seen,
@@ -363,7 +396,8 @@ fn detect_n_plus_one_in_source_with_index(
             {
                 for call in collect_function_calls(code_line) {
                     let resolved = resolve_function_call_targets(caller, &call, index);
-                    if !scheduler_loop_context
+                    if !allow_nplus1_context
+                        && !scheduler_loop_context
                         && resolved
                             .iter()
                             .any(|&target_idx| index.query_executing_functions[target_idx])
@@ -398,6 +432,70 @@ fn binding_matches_arg_shape(binding: &QueryBinding, arg_shape: &QueryShape) -> 
         .shape_fingerprint
         .as_ref()
         .is_none_or(|fp| fp == &arg_shape.fingerprint)
+}
+
+fn collect_nplus1_allow_lines(source: &str) -> HashSet<usize> {
+    let bytes = source.as_bytes();
+    let mut lines = HashSet::new();
+    let mut line_no = 1usize;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            let start_line = line_no;
+            let start = i;
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            if source
+                .get(start..i)
+                .is_some_and(|comment| comment.contains(NPLUS1_ALLOW_MARKER))
+            {
+                lines.insert(start_line);
+            }
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b"/*") {
+            let start_line = line_no;
+            let start = i;
+            i = consume_block_comment(bytes, i);
+            let end_line = start_line + count_newlines(bytes.get(start..i).unwrap_or_default());
+            if source
+                .get(start..i)
+                .is_some_and(|comment| comment.contains(NPLUS1_ALLOW_MARKER))
+            {
+                for line in start_line..=end_line {
+                    lines.insert(line);
+                }
+            }
+            line_no = end_line;
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            line_no += count_newlines(bytes.get(i..next).unwrap_or_default());
+            i = next;
+            continue;
+        }
+
+        if bytes[i] == b'\n' {
+            line_no += 1;
+        }
+        i += 1;
+    }
+
+    lines
+}
+
+fn nplus1_allow_applies_to_line(allow_lines: &HashSet<usize>, idx: usize) -> bool {
+    let line_no = idx + 1;
+    allow_lines.contains(&line_no) || idx > 0 && allow_lines.contains(&idx)
+}
+
+fn count_newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&b| b == b'\n').count()
 }
 
 /// Detect semantic N+1 patterns in all Rust files under a directory.
@@ -2718,6 +2816,56 @@ async fn worker(conn: &Conn, ids: Vec<i64>) {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let cmd = Qail::get("users").eq("id", id);
         let _ = conn.fetch_all(&cmd).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn allow_comment_suppresses_intentional_sequential_executor_loop() {
+        let source = r#"
+async fn apply_commands(conn: &Conn, cmds: &[Qail]) {
+    // qail:allow(nplus1) intentional migration command executor
+    for cmd in cmds {
+        conn.execute(cmd).await.unwrap();
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn allow_comment_suppresses_split_loop_header() {
+        let source = r#"
+async fn apply_commands(conn: &Conn, cmds: &[Qail]) {
+    for cmd
+        // qail:allow(nplus1) intentional generated command executor
+        in cmds
+    {
+        conn.execute(cmd).await.unwrap();
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn allow_marker_inside_string_does_not_suppress_loop_detection() {
+        let source = r#"
+async fn apply_commands(conn: &Conn, cmds: &[Qail]) {
+    let _note = "qail:allow(nplus1)";
+    for cmd in cmds {
+        conn.execute(cmd).await.unwrap();
     }
 }
 "#;
