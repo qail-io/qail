@@ -906,6 +906,103 @@ async fn demo() {
 }
 
 #[test]
+fn test_scan_file_scopes_local_literal_bindings_by_function() {
+    let content = r#"
+fn users() {
+    let table = "users";
+    let columns = ["id", "email"];
+    let _cmd = Qail::get(table).columns(columns);
+}
+
+fn orders() {
+    let table = "orders";
+    let columns = ["id", "status"];
+    let _cmd = Qail::get(table).columns(columns);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        2,
+        "same local binding names in different functions must not fan out: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[0].columns, vec!["id", "email"]);
+    assert_eq!(usages[1].table, "orders");
+    assert_eq!(usages[1].columns, vec!["id", "status"]);
+}
+
+#[test]
+fn test_scan_file_local_literal_shadowing_uses_nearest_binding() {
+    let content = r#"
+fn demo() {
+    let table = "users";
+    let _users = Qail::get(table).column("email");
+
+    let table = "orders";
+    let _orders = Qail::get(table).column("status");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        2,
+        "shadowed local table binding must not fan out: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[1].table, "orders");
+}
+
+#[test]
+fn test_scan_file_ignores_helper_calls_in_comments_for_param_substitution() {
+    let content = r#"
+async fn fetch_one(table: &str) {
+    let _cmd = Qail::get(table).column("id");
+}
+
+async fn demo() {
+    fetch_one("users").await;
+    // fetch_one("ghost").await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        1,
+        "commented helper calls must not create phantom table usages: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+}
+
+#[test]
+fn test_helper_rls_detection_ignores_comments_in_helper_body() {
+    let content = r#"
+async fn exec_without_rls(cmd: Qail, conn: &mut qail_pg::PooledConnection) {
+    // conn.fetch_all_uncached(&cmd.with_rls(ctx)).await;
+    let _ = conn.fetch_all_uncached(&cmd).await;
+}
+
+async fn demo(conn: &mut qail_pg::PooledConnection) {
+    let _ = exec_without_rls(Qail::get("orders").columns(["id"]), conn).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        !usages[0].has_rls,
+        "commented cmd.with_rls(...) must not mark helper argument as RLS-scoped"
+    );
+}
+
+#[test]
 fn test_scan_file_resolves_multiline_helper_calls_like_charters_admin() {
     let content = r#"
 const ALIEUS_COLUMNS: &[&str] = &["id", "name"];
@@ -1164,10 +1261,13 @@ let q = Qail::get("results").with("agg", Qail::get("orders"));
     let mut usages = Vec::new();
     scan_file("test.rs", content, &mut usages);
 
-    // "results" is the main table
-    assert_eq!(usages.len(), 1);
+    // "results" is the main table; the nested CTE source query should also
+    // be represented so its table/columns are schema-validated.
+    assert_eq!(usages.len(), 2);
     // It should NOT be a CTE ref since "results" != "agg"
     assert!(!usages[0].is_cte_ref);
+    assert_eq!(usages[1].table, "orders");
+    assert!(!usages[1].is_cte_ref);
 }
 
 #[test]
@@ -1184,6 +1284,40 @@ let read = Qail::get("agg").column("id");
     assert!(
         !usages[1].is_cte_ref,
         "non-Qail .with() rhs should not create a CTE alias"
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_nested_cte_source_table_typos() {
+    let schema = Schema::parse(
+        r#"
+table results {
+  id UUID
+}
+
+table orders {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("results")
+        .with("agg", Qail::get("ordres").column("id"));
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("Table 'ordres' not found")),
+        "nested Qail CTE source queries should be represented in IR: {:?}",
+        diagnostics
     );
 }
 
@@ -1283,6 +1417,36 @@ fn demo() {
             .message
             .contains("Column 'emial' not found in table 'users'")),
         "qualified column typos should remain visible to schema validation: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_qualified_filter_column_typos() {
+    let schema = Schema::parse(
+        r#"
+table users {
+  id UUID
+  email TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("users").eq("users.emial", "x");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Column 'emial' not found in table 'users'")),
+        "qualified filter column typos should remain visible to schema validation: {:?}",
         diagnostics
     );
 }
@@ -1721,6 +1885,41 @@ fn demo() {
         !diagnostics
             .iter()
             .any(|d| d.message.contains("no explicit tenant scope"))
+    );
+}
+
+#[test]
+fn test_super_admin_audit_accepts_const_tenant_id_eq_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+const TENANT_COL: &str = "tenant_id";
+
+fn demo(tenant_id: uuid::Uuid) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders")
+        .columns(["id"])
+        .eq(TENANT_COL, tenant_id);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", source, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("no explicit tenant scope")),
+        "tenant_id constants should count as explicit tenant scope: {:?}",
+        diagnostics
     );
 }
 

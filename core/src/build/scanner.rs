@@ -45,6 +45,31 @@ struct LiteralBindings {
     arrays: HashMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LiteralBindingIndex {
+    globals: LiteralBindings,
+    locals: Vec<ScopedLiteralBindings>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScopedLiteralBindings {
+    start: usize,
+    bindings: LiteralBindings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingStatementKind {
+    Let,
+    Const,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BindingStatement<'a> {
+    start: usize,
+    text: &'a str,
+    kind: BindingStatementKind,
+}
+
 #[derive(Debug, Clone)]
 struct LocalFunction {
     name: String,
@@ -64,6 +89,7 @@ struct LocalFunctionCall {
 #[derive(Debug, Clone, Default)]
 struct ParamSubstitutions {
     values: HashMap<String, String>,
+    bindings: LiteralBindings,
 }
 
 /// Scan Rust source files for QAIL usage patterns
@@ -100,181 +126,217 @@ fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
     }
 }
 
-/// Phase 1+2: Collect let-bindings that map variable names to string literal(s).
-///
-/// Handles:
-///   `let table = "foo";`                                    → {"table": ["foo"]}
-///   `let (table, col) = ("foo", "bar");`                    → {"table": ["foo"], "col": ["bar"]}
-///   `let (table, col) = if cond { ("a", "x") } else { ("b", "y") };`
-///                                                           → {"table": ["a", "b"], "col": ["x", "y"]}
-///   `let table = if cond { "a" } else { "b" };`             → {"table": ["a", "b"]}
-fn collect_let_bindings(content: &str) -> HashMap<String, Vec<String>> {
-    let mut bindings: HashMap<String, Vec<String>> = HashMap::new();
+fn collect_literal_binding_index(content: &str) -> LiteralBindingIndex {
+    let mut index = LiteralBindingIndex::default();
 
-    // Join all lines for multi-line let analysis
-    let lines: Vec<&str> = content.lines().collect();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-
-        // Look for: let IDENT = "literal"
-        // or:       let (IDENT, IDENT) = ...
-        if let Some(rest) = line.strip_prefix("let ") {
-            let rest = rest.trim();
-
-            // Phase 1: Simple  let table = "literal";
-            if let Some((var, rhs)) = parse_simple_let(rest) {
-                if let Some(lit) = extract_string_arg(rhs.trim()) {
-                    bindings.entry(var).or_default().push(lit);
-                    i += 1;
-                    continue;
-                }
-
-                // Phase 2: let table = if cond { "a" } else { "b" };
-                let rhs = rhs.trim();
-                if rhs.starts_with("if ") {
-                    // Collect the full if/else expression, possibly spanning multiple lines
-                    let mut full_expr = rhs.to_string();
-                    let mut j = i + 1;
-                    // Keep joining lines until we see the closing `;`
-                    while j < lines.len() && !full_expr.contains(';') {
-                        // Preserve line boundaries so `//` comments stay line-scoped.
-                        full_expr.push('\n');
-                        full_expr.push_str(lines[j].trim());
-                        j += 1;
-                    }
-                    let literals = extract_branch_literals(&full_expr);
-                    if !literals.is_empty() {
-                        bindings.entry(var).or_default().extend(literals);
-                    }
-                }
+    for stmt in collect_binding_statements(content) {
+        match stmt.kind {
+            BindingStatementKind::Const => {
+                collect_const_statement_bindings(stmt.text, &mut index.globals);
             }
-
-            // Phase 2: Destructuring  let (table, col) = if cond { ("a", "x") } else { ("b", "y") };
-            //          or             let (table, col) = ("a", "b");
-            if rest.starts_with('(') {
-                // Collect the full line (may span multiple lines)
-                let mut full_line = line.to_string();
-                let mut j = i + 1;
-                while j < lines.len() && !full_line.contains(';') {
-                    // Preserve line boundaries so `//` comments stay line-scoped.
-                    full_line.push('\n');
-                    full_line.push_str(lines[j].trim());
-                    j += 1;
-                }
-
-                if let Some(result) = parse_destructuring_let(&full_line) {
-                    for (name, values) in result {
-                        bindings.entry(name).or_default().extend(values);
-                    }
+            BindingStatementKind::Let => {
+                let bindings = collect_let_statement_bindings(stmt.text);
+                if !bindings.scalars.is_empty() || !bindings.arrays.is_empty() {
+                    index.locals.push(ScopedLiteralBindings {
+                        start: stmt.start,
+                        bindings,
+                    });
                 }
             }
         }
-
-        i += 1;
     }
 
-    bindings
+    dedupe_binding_values(&mut index.globals.scalars);
+    dedupe_binding_values(&mut index.globals.arrays);
+    index
 }
 
-fn collect_literal_bindings(content: &str) -> LiteralBindings {
-    let mut bindings = LiteralBindings {
-        scalars: collect_let_bindings(content),
-        arrays: collect_let_array_bindings(content),
-    };
-    collect_const_literal_bindings(content, &mut bindings);
+fn literal_bindings_for_offset(
+    index: &LiteralBindingIndex,
+    offset: usize,
+    enclosing_function: Option<&LocalFunction>,
+) -> LiteralBindings {
+    let mut bindings = index.globals.clone();
+    for local in &index.locals {
+        if local.start >= offset {
+            continue;
+        }
+        let visible = match enclosing_function {
+            Some(function) => local.start > function.body_start && local.start < function.body_end,
+            None => true,
+        };
+        if visible {
+            merge_shadowing_literal_bindings(&mut bindings, &local.bindings);
+        }
+    }
     dedupe_binding_values(&mut bindings.scalars);
     dedupe_binding_values(&mut bindings.arrays);
     bindings
 }
 
-fn collect_let_array_bindings(content: &str) -> HashMap<String, Vec<String>> {
-    let mut bindings: HashMap<String, Vec<String>> = HashMap::new();
-    let lines: Vec<&str> = content.lines().collect();
+fn merge_shadowing_literal_bindings(target: &mut LiteralBindings, source: &LiteralBindings) {
+    let shadowed_names = source
+        .scalars
+        .keys()
+        .chain(source.arrays.keys())
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    for name in shadowed_names {
+        target.scalars.remove(&name);
+        target.arrays.remove(&name);
+    }
+
+    merge_literal_bindings(target, source);
+}
+
+fn merge_literal_bindings(target: &mut LiteralBindings, source: &LiteralBindings) {
+    for (name, values) in &source.scalars {
+        target
+            .scalars
+            .entry(name.clone())
+            .or_default()
+            .extend(values.iter().cloned());
+    }
+    for (name, values) in &source.arrays {
+        target
+            .arrays
+            .entry(name.clone())
+            .or_default()
+            .extend(values.iter().cloned());
+    }
+}
+
+fn collect_binding_statements(content: &str) -> Vec<BindingStatement<'_>> {
+    let bytes = content.as_bytes();
+    let mut statements = Vec::new();
     let mut i = 0usize;
 
-    while i < lines.len() {
-        let line = lines[i].trim();
-        if let Some(rest) = line.strip_prefix("let ")
-            && let Some((var, rhs)) = parse_simple_let(rest.trim())
-        {
-            let mut full_expr = rhs.trim().to_string();
-            let mut j = i + 1;
-            while j < lines.len() && !full_expr.contains(';') {
-                // Preserve line boundaries so `//` comments stay line-scoped.
-                full_expr.push('\n');
-                full_expr.push_str(lines[j].trim());
-                j += 1;
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
             }
-            let values = extract_array_string_literals_from_expr(&full_expr);
-            if !values.is_empty() {
-                bindings.insert(var, values);
-            }
-            i = j.max(i + 1);
             continue;
         }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        let kind = if starts_with_keyword(content, i, "let")
+            && !matches!(
+                previous_identifier_before(content, i).as_deref(),
+                Some("if" | "while")
+            ) {
+            Some(BindingStatementKind::Let)
+        } else if starts_with_keyword(content, i, "const")
+            || starts_with_keyword(content, i, "static")
+        {
+            Some(BindingStatementKind::Const)
+        } else {
+            None
+        };
+
+        if let Some(kind) = kind {
+            let end = find_statement_end(content, i).unwrap_or_else(|| line_end(content, i));
+            if let Some(text) = content.get(i..end) {
+                statements.push(BindingStatement {
+                    start: i,
+                    text,
+                    kind,
+                });
+            }
+            i = end.max(i + 1);
+            continue;
+        }
+
         i += 1;
     }
 
+    statements
+}
+
+fn starts_with_keyword(source: &str, idx: usize, keyword: &str) -> bool {
+    let bytes = source.as_bytes();
+    let kw = keyword.as_bytes();
+    if !starts_with_bytes(bytes, idx, kw) {
+        return false;
+    }
+    let before_ok = idx == 0 || !is_ident_byte(bytes[idx - 1]);
+    let after = idx + kw.len();
+    let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+    before_ok && after_ok
+}
+
+fn line_end(source: &str, start: usize) -> usize {
+    source
+        .get(start..)
+        .and_then(|tail| tail.find('\n').map(|idx| start + idx))
+        .unwrap_or(source.len())
+}
+
+fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
+    let mut bindings = LiteralBindings::default();
+    let line = stmt.trim();
+
+    if let Some(rest) = line.strip_prefix("let ") {
+        let rest = rest.trim();
+        if let Some((var, rhs)) = parse_simple_let(rest) {
+            let rhs = rhs.trim().trim_end_matches(';').trim();
+            if let Some(lit) = extract_string_arg(rhs) {
+                bindings.scalars.entry(var.clone()).or_default().push(lit);
+            }
+            if rhs.starts_with("if ") {
+                let literals = extract_branch_literals(rhs);
+                if !literals.is_empty() {
+                    bindings
+                        .scalars
+                        .entry(var.clone())
+                        .or_default()
+                        .extend(literals);
+                }
+            }
+            let values = extract_array_string_literals_from_expr(rhs);
+            if !values.is_empty() {
+                bindings.arrays.insert(var, values);
+            }
+        }
+
+        if rest.starts_with('(')
+            && let Some(result) = parse_destructuring_let(line)
+        {
+            for (name, values) in result {
+                bindings.scalars.entry(name).or_default().extend(values);
+            }
+        }
+    }
+
+    dedupe_binding_values(&mut bindings.scalars);
+    dedupe_binding_values(&mut bindings.arrays);
     bindings
 }
 
-fn collect_const_literal_bindings(content: &str, bindings: &mut LiteralBindings) {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut i = 0usize;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-        if !looks_like_const_binding(line) {
-            i += 1;
-            continue;
+fn collect_const_statement_bindings(stmt: &str, bindings: &mut LiteralBindings) {
+    if let Some((name, rhs)) = parse_const_binding(stmt) {
+        if let Some(value) = extract_string_arg(rhs) {
+            bindings
+                .scalars
+                .entry(name.clone())
+                .or_default()
+                .push(value);
         }
 
-        let mut full_stmt = line.to_string();
-        let mut j = i + 1;
-        while j < lines.len() && !full_stmt.contains(';') {
-            // Preserve line boundaries so `//` comments stay line-scoped.
-            full_stmt.push('\n');
-            full_stmt.push_str(lines[j].trim());
-            j += 1;
-        }
-
-        if let Some((name, rhs)) = parse_const_binding(&full_stmt) {
-            if let Some(value) = extract_string_arg(rhs) {
-                bindings
-                    .scalars
-                    .entry(name.clone())
-                    .or_default()
-                    .push(value);
-            }
-
-            let values = extract_array_string_literals_from_expr(rhs);
-            if !values.is_empty() {
-                bindings.arrays.insert(name, values);
-            }
-        }
-
-        i = j.max(i + 1);
-    }
-}
-
-fn looks_like_const_binding(line: &str) -> bool {
-    for prefix in [
-        "const ",
-        "static ",
-        "pub const ",
-        "pub static ",
-        "pub(crate) const ",
-        "pub(crate) static ",
-        "pub(super) const ",
-        "pub(super) static ",
-    ] {
-        if line.starts_with(prefix) {
-            return true;
+        let values = extract_array_string_literals_from_expr(rhs);
+        if !values.is_empty() {
+            bindings.arrays.insert(name, values);
         }
     }
-    false
 }
 
 fn parse_const_binding(stmt: &str) -> Option<(String, &str)> {
@@ -621,22 +683,53 @@ fn collect_local_function_calls(
 ) -> Vec<LocalFunctionCall> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    let bytes = source.as_bytes();
 
     for function in functions {
-        let needle = format!("{}(", function.name);
-        for (idx, _) in source.match_indices(&needle) {
-            let open_paren = idx + function.name.len();
+        let needle = function.name.as_bytes();
+        let mut idx = 0usize;
+        while idx < bytes.len() {
+            if starts_with_bytes(bytes, idx, b"//") {
+                idx += 2;
+                while idx < bytes.len() && bytes[idx] != b'\n' {
+                    idx += 1;
+                }
+                continue;
+            }
+            if starts_with_bytes(bytes, idx, b"/*") {
+                idx = consume_block_comment(bytes, idx);
+                continue;
+            }
+            if let Some(next) = consume_rust_literal(bytes, idx) {
+                idx = next;
+                continue;
+            }
+
+            if !starts_with_bytes(bytes, idx, needle) {
+                idx += 1;
+                continue;
+            }
+
+            let open_paren = skip_ws(bytes, idx + function.name.len());
+            if bytes.get(open_paren).copied() != Some(b'(') {
+                idx += function.name.len();
+                continue;
+            }
             let Some((name, name_start)) = bare_call_name_before_open_paren(source, open_paren)
             else {
+                idx += function.name.len();
                 continue;
             };
             if name != function.name {
+                idx += function.name.len();
                 continue;
             }
             if previous_identifier_before(source, name_start).as_deref() == Some("fn") {
+                idx += function.name.len();
                 continue;
             }
             let Some(close_paren) = find_matching_delim(source, open_paren, b'(', b')') else {
+                idx = open_paren + 1;
                 continue;
             };
             let parsed_args = source
@@ -660,6 +753,7 @@ fn collect_local_function_calls(
                     open_paren,
                 });
             }
+            idx = close_paren + 1;
         }
     }
 
@@ -1756,7 +1850,12 @@ fn collect_qail_chains(source: &str) -> Vec<ScannedQailChain> {
         let full_chain = source.get(hit.start..hit.statement_end).unwrap_or_default();
         let bound_var = source
             .get(statement_start..hit.start)
-            .and_then(extract_bound_var_from_prefix);
+            .and_then(extract_bound_var_from_prefix)
+            .filter(|_| {
+                source
+                    .get(statement_start..hit.start)
+                    .is_some_and(|prefix| !prefix.contains("Qail::"))
+            });
         let (line, column0) = offset_to_line_col(&line_starts, hit.start);
         out.push(ScannedQailChain {
             start: hit.start,
@@ -1769,11 +1868,7 @@ fn collect_qail_chains(source: &str) -> Vec<ScannedQailChain> {
             bound_var,
         });
 
-        let next = if hit.statement_end > hit.start {
-            hit.statement_end
-        } else {
-            hit.close_paren + 1
-        };
+        let next = hit.start + "Qail::".len();
         if next <= cursor {
             cursor += 1;
         } else {
@@ -1827,6 +1922,8 @@ fn build_param_substitutions(
     function: &LocalFunction,
     calls: &[LocalFunctionCall],
     function_name_counts: &HashMap<String, usize>,
+    binding_index: &LiteralBindingIndex,
+    local_functions: &[LocalFunction],
 ) -> Vec<ParamSubstitutions> {
     if function_name_counts
         .get(&function.name)
@@ -1849,7 +1946,10 @@ fn build_param_substitutions(
             .zip(call.args.iter().cloned())
             .collect::<HashMap<_, _>>();
         if !values.is_empty() {
-            out.push(ParamSubstitutions { values });
+            let caller_function = find_enclosing_local_function(call.open_paren, local_functions);
+            let bindings =
+                literal_bindings_for_offset(binding_index, call.open_paren, caller_function);
+            out.push(ParamSubstitutions { values, bindings });
         }
     }
     out
@@ -1904,7 +2004,8 @@ fn resolve_string_values_inner(
     if let Some(substitutions) = substitutions
         && let Some(arg_expr) = substitutions.values.get(&key)
     {
-        resolve_string_values_inner(arg_expr, Some(substitutions), bindings, visited, out);
+        resolve_string_values_inner(arg_expr, None, &substitutions.bindings, visited, out);
+        return;
     }
     if let Some(values) = bindings.scalars.get(&key) {
         out.extend(values.iter().cloned());
@@ -1946,7 +2047,8 @@ fn resolve_array_string_values_inner(
     if let Some(substitutions) = substitutions
         && let Some(arg_expr) = substitutions.values.get(&key)
     {
-        resolve_array_string_values_inner(arg_expr, Some(substitutions), bindings, visited, out);
+        resolve_array_string_values_inner(arg_expr, None, &substitutions.bindings, visited, out);
+        return;
     }
     if let Some(values) = bindings.arrays.get(&key) {
         out.extend(values.iter().cloned());
@@ -1986,9 +2088,31 @@ fn collect_helper_rls_param_indices(
 
 fn source_contains_ident_method_call(source: &str, ident: &str, method: &str) -> bool {
     let needle = format!("{ident}.{method}");
-    for (idx, _) in source.match_indices(&needle) {
+    let bytes = source.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if starts_with_bytes(bytes, idx, b"//") {
+            idx += 2;
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, idx, b"/*") {
+            idx = consume_block_comment(bytes, idx);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, idx) {
+            idx = next;
+            continue;
+        }
+        if !starts_with_bytes(bytes, idx, needle.as_bytes()) {
+            idx += 1;
+            continue;
+        }
         let before_ok = idx == 0 || !is_ident_byte(source.as_bytes()[idx - 1]);
         if !before_ok {
+            idx += needle.len();
             continue;
         }
         let mut after = idx + needle.len();
@@ -1996,6 +2120,7 @@ fn source_contains_ident_method_call(source: &str, ident: &str, method: &str) ->
         if source.as_bytes().get(after).copied() == Some(b'(') {
             return true;
         }
+        idx += needle.len();
     }
     false
 }
@@ -2050,7 +2175,7 @@ pub(crate) fn scan_file_silent(file: &str, content: &str, usages: &mut Vec<QailU
 }
 
 fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_warnings: bool) {
-    let literal_bindings = collect_literal_bindings(content);
+    let literal_binding_index = collect_literal_binding_index(content);
 
     // ── File-level flags ─────────────────────────────────────────────
     // Detect SuperAdminToken::for_system_process() usage anywhere in file.
@@ -2118,10 +2243,17 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
             next_same_var_start.unwrap_or(usize::MAX),
         );
         let has_rls = chain_has_rls(&chain.full_chain) || has_late_rls || has_helper_param_rls;
-        let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(&chain.full_chain);
+        let literal_bindings =
+            literal_bindings_for_offset(&literal_binding_index, chain.start, enclosing_function);
         let substitution_contexts = enclosing_function
             .map(|function| {
-                build_param_substitutions(function, &local_function_calls, &function_name_counts)
+                build_param_substitutions(
+                    function,
+                    &local_function_calls,
+                    &function_name_counts,
+                    &literal_binding_index,
+                    &local_functions,
+                )
             })
             .unwrap_or_default();
 
@@ -2134,6 +2266,11 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
         let mut seen_variants = HashSet::new();
 
         for substitutions in context_iter {
+            let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(
+                &chain.full_chain,
+                substitutions,
+                &literal_bindings,
+            );
             let resolved_tables = if action == "TYPED" {
                 extract_typed_table_arg(&chain.first_arg)
                     .into_iter()
@@ -2298,9 +2435,7 @@ fn extract_columns_with_bindings(
                     substitutions,
                     bindings,
                 ) {
-                    if !col.contains('.') {
-                        columns.push(col);
-                    }
+                    columns.push(col);
                 }
             }
             "returning" | "on_conflict_update" | "on_conflict_nothing" => {
@@ -2428,7 +2563,11 @@ fn chain_has_rls(chain: &str) -> bool {
         .any(|call| matches!(call.name, "with_rls" | "rls"))
 }
 
-fn chain_has_explicit_tenant_scope(chain: &str) -> bool {
+fn chain_has_explicit_tenant_scope(
+    chain: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> bool {
     for call in scan_chain_method_calls(chain) {
         if !matches!(
             call.name,
@@ -2436,8 +2575,9 @@ fn chain_has_explicit_tenant_scope(chain: &str) -> bool {
         ) {
             continue;
         }
-        if let Some(col) = extract_string_arg(extract_first_argument(call.args))
-            && is_tenant_identifier(&col)
+        if resolve_string_values(extract_first_argument(call.args), substitutions, bindings)
+            .into_iter()
+            .any(|col| is_tenant_identifier(&col))
         {
             return true;
         }
