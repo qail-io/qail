@@ -53,7 +53,7 @@ struct LiteralBindingIndex {
     locals: Vec<ScopedLiteralBindings>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ScopedLiteralBindings {
     start: usize,
     end: usize,
@@ -162,23 +162,19 @@ fn collect_literal_binding_index(
         }
     }
 
+    index.locals.extend(collect_local_const_bindings(
+        content,
+        local_functions,
+        &statements,
+        &index.globals,
+    ));
+
     for stmt in &statements {
         let enclosing_function = find_enclosing_local_function(stmt.start, local_functions);
         let visible_bindings = literal_bindings_for_offset(&index, stmt.start, enclosing_function);
         match stmt.kind {
             BindingStatementKind::Const => {
-                if enclosing_function.is_none() {
-                    continue;
-                }
-                let bindings = collect_const_statement_bindings(stmt.text, &visible_bindings);
-                if literal_bindings_is_empty(&bindings) {
-                    continue;
-                }
-                index.locals.push(ScopedLiteralBindings {
-                    start: stmt.start,
-                    end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
-                    bindings,
-                });
+                continue;
             }
             BindingStatementKind::Let => {
                 let bindings = collect_let_statement_bindings(stmt.text, &visible_bindings);
@@ -195,6 +191,71 @@ fn collect_literal_binding_index(
 
     dedupe_literal_bindings(&mut index.globals);
     index
+}
+
+fn collect_local_const_bindings(
+    content: &str,
+    local_functions: &[LocalFunction],
+    statements: &[BindingStatement<'_>],
+    globals: &LiteralBindings,
+) -> Vec<ScopedLiteralBindings> {
+    let const_statements = statements
+        .iter()
+        .filter_map(|stmt| {
+            if !matches!(stmt.kind, BindingStatementKind::Const)
+                || find_enclosing_local_function(stmt.start, local_functions).is_none()
+            {
+                return None;
+            }
+            find_innermost_block_span(content, stmt.start).map(|(start, end)| (start, end, stmt))
+        })
+        .collect::<Vec<_>>();
+    let mut scopes = Vec::new();
+    for _ in 0..const_statements.len().max(1) {
+        let before = scopes.clone();
+        for (start, end, stmt) in &const_statements {
+            let mut visible = globals.clone();
+            let mut visible_scopes = scopes
+                .iter()
+                .filter(|scope: &&ScopedLiteralBindings| {
+                    scope.start <= stmt.start && stmt.start < scope.end
+                })
+                .collect::<Vec<_>>();
+            visible_scopes.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+            for scope in visible_scopes {
+                merge_shadowing_literal_bindings(&mut visible, &scope.bindings);
+            }
+
+            let bindings = collect_const_statement_bindings(stmt.text, &visible);
+            if literal_bindings_is_empty(&bindings) {
+                continue;
+            }
+            if let Some(existing) = scopes
+                .iter_mut()
+                .find(|scope| scope.start == *start && scope.end == *end)
+            {
+                merge_literal_bindings(&mut existing.bindings, &bindings);
+                dedupe_literal_bindings(&mut existing.bindings);
+            } else {
+                scopes.push(ScopedLiteralBindings {
+                    start: *start,
+                    end: *end,
+                    bindings,
+                });
+            }
+        }
+
+        sort_scoped_literal_bindings(&mut scopes);
+        if scopes == before {
+            break;
+        }
+    }
+
+    scopes
+}
+
+fn sort_scoped_literal_bindings(bindings: &mut [ScopedLiteralBindings]) {
+    bindings.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 }
 
 fn literal_bindings_is_empty(bindings: &LiteralBindings) -> bool {
@@ -215,7 +276,7 @@ fn literal_bindings_for_offset(
             continue;
         }
         let visible = match enclosing_function {
-            Some(function) => local.start > function.body_start && local.start < function.body_end,
+            Some(function) => local.start >= function.body_start && local.start < function.body_end,
             None => true,
         };
         if visible {
@@ -2565,6 +2626,10 @@ fn find_enclosing_local_function(
 }
 
 fn find_innermost_block_end(source: &str, offset: usize) -> Option<usize> {
+    find_innermost_block_span(source, offset).map(|(_, end)| end)
+}
+
+fn find_innermost_block_span(source: &str, offset: usize) -> Option<(usize, usize)> {
     let bytes = source.as_bytes();
     let mut stack = Vec::new();
     let mut i = 0usize;
@@ -2597,9 +2662,9 @@ fn find_innermost_block_end(source: &str, offset: usize) -> Option<usize> {
         i += 1;
     }
 
-    stack
-        .last()
-        .and_then(|open| find_matching_delim(source, *open, b'{', b'}'))
+    let open = *stack.last()?;
+    let close = find_matching_delim(source, open, b'{', b'}')?;
+    Some((open, close))
 }
 
 fn build_param_substitutions(
