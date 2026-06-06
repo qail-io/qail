@@ -1189,6 +1189,35 @@ let q = Qail::typed(users::table).column("email");
 }
 
 #[test]
+fn test_scan_typed_api_columns_and_filters() {
+    let content = r#"
+let q = Qail::typed(orders::table)
+    .typed_column(orders::id())
+    .typed_columns([orders::status(), orders::tenant_id()])
+    .typed_eq(orders::tenant_id(), tenant_id)
+    .typed_filter(orders::status(), Operator::Eq, "paid");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].table, "orders");
+    assert_eq!(usages[0].action, "TYPED");
+    for expected in ["id", "status", "tenant_id"] {
+        assert!(
+            usages[0].columns.contains(&expected.to_string()),
+            "typed API column {expected} should be scanned: {:?}",
+            usages[0]
+        );
+    }
+    assert!(
+        usages[0].has_explicit_tenant_scope,
+        "typed tenant_id filter should count as explicit tenant scope: {:?}",
+        usages[0]
+    );
+}
+
+#[test]
 fn test_scan_raw_sql_not_validated() {
     let content = r#"
 let q = Qail::raw_sql("SELECT * FROM users");
@@ -3049,6 +3078,40 @@ fn demo() {
         !diagnostics
             .iter()
             .any(|d| d.message.contains("no explicit tenant scope"))
+    );
+}
+
+#[test]
+fn test_super_admin_audit_accepts_typed_tenant_id_eq_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo(tenant_id: uuid::Uuid) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::typed(orders::table)
+        .typed_eq(orders::tenant_id(), tenant_id)
+        .typed_filter(orders::status(), Operator::Eq, "paid");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", source, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("no explicit tenant scope")),
+        "typed tenant_id equality should count as explicit tenant scope: {:?}",
+        diagnostics
     );
 }
 

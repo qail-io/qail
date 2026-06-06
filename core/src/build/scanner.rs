@@ -2575,6 +2575,23 @@ fn extract_columns_with_bindings(
                     columns.push(col);
                 }
             }
+            "typed_column" | "typed_eq" | "typed_ne" | "typed_gt" | "typed_lt" | "typed_gte"
+            | "typed_lte" | "typed_filter" => {
+                columns.extend(extract_typed_column_arg(
+                    call.args,
+                    0,
+                    substitutions,
+                    bindings,
+                ));
+            }
+            "typed_columns" => {
+                columns.extend(extract_typed_column_collection_arg(
+                    call.args,
+                    0,
+                    substitutions,
+                    bindings,
+                ));
+            }
             "set_value" | "set_opt" | "set_coalesce" | "set_coalesce_opt" => {
                 for col in resolve_string_values(
                     extract_first_argument(call.args),
@@ -3541,6 +3558,60 @@ fn resolve_string_arg(
         .unwrap_or_default()
 }
 
+fn extract_typed_column_arg(
+    args: &str,
+    index: usize,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    split_top_level_args(args)
+        .get(index)
+        .map(|arg| extract_typed_column_expr(arg, substitutions, bindings))
+        .unwrap_or_default()
+}
+
+fn extract_typed_column_collection_arg(
+    args: &str,
+    index: usize,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let args = split_top_level_args(args);
+    let Some(arg) = args.get(index) else {
+        return Vec::new();
+    };
+    let Some(inner) = extract_direct_expr_collection_inner(arg) else {
+        return extract_typed_column_expr(arg, substitutions, bindings);
+    };
+
+    let mut columns = Vec::new();
+    for expr in split_top_level_args(inner) {
+        columns.extend(extract_typed_column_expr(expr, substitutions, bindings));
+    }
+    dedupe_values(&mut columns);
+    columns
+}
+
+fn extract_typed_column_expr(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut columns = resolve_string_values(expr, substitutions, bindings);
+    for call in scan_rust_function_calls(expr) {
+        if call.path.ends_with("TypedColumn::new") {
+            columns.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
+            continue;
+        }
+        if !call.args.trim().is_empty() || !call.path.contains("::") {
+            continue;
+        }
+        columns.push(call.name.to_string());
+    }
+    dedupe_values(&mut columns);
+    columns
+}
+
 fn extract_related_tables_with_bindings(
     line: &str,
     substitutions: Option<&ParamSubstitutions>,
@@ -3703,10 +3774,15 @@ fn chain_has_explicit_tenant_scope(
 ) -> bool {
     for call in scan_chain_method_calls(chain) {
         let is_filter_scope = matches!(call.name, "eq" | "where_eq" | "is_null");
+        let is_typed_filter_scope =
+            typed_filter_call_has_tenant_scope(call.name, call.args, substitutions, bindings);
         let is_payload_scope = matches!(
             call.name,
             "set_value" | "set_opt" | "set_coalesce" | "set_coalesce_opt"
         ) && matches!(action, "ADD" | "PUT");
+        if is_typed_filter_scope {
+            return true;
+        }
         if !(is_filter_scope || is_payload_scope) {
             continue;
         }
@@ -3718,6 +3794,31 @@ fn chain_has_explicit_tenant_scope(
         }
     }
     false
+}
+
+fn typed_filter_call_has_tenant_scope(
+    name: &str,
+    args: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> bool {
+    let columns = extract_typed_column_arg(args, 0, substitutions, bindings);
+    if !columns.iter().any(|col| is_tenant_identifier(col)) {
+        return false;
+    }
+
+    match name {
+        "typed_eq" => true,
+        "typed_filter" => split_top_level_args(args)
+            .get(1)
+            .is_some_and(|op| typed_operator_is_tenant_scope(op)),
+        _ => false,
+    }
+}
+
+fn typed_operator_is_tenant_scope(op: &str) -> bool {
+    let op = op.trim();
+    matches!(op, "Operator::Eq" | "Eq" | "Operator::IsNull" | "IsNull")
 }
 
 fn is_tenant_identifier(raw_ident: &str) -> bool {
