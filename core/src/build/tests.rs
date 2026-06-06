@@ -1244,6 +1244,25 @@ fn test_extract_columns_query_builder_surface_methods() {
 }
 
 #[test]
+fn test_extract_columns_condition_builder_surface_methods() {
+    let line = r#"Qail::get("orders")
+        .filter_cond(eq("status", "paid"))
+        .having_cond(gte("total", 10))
+        .inner_join_conds(
+            "order_items",
+            vec![eq("orders.id", Value::Column("order_items.order_id".to_string()))],
+        )"#;
+    let cols = extract_columns(line);
+
+    for expected in ["status", "total", "orders.id", "order_items.order_id"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} in extracted condition columns: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_returning() {
     let line = r#"Qail::add("orders").returning(["id", "status"])"#;
     let cols = extract_columns(line);
@@ -1370,6 +1389,71 @@ let q = Qail::get("orders")
     assert!(
         diagnostics.iter().any(|d| d.message.contains("shipmentz")),
         "join_conds related table typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_filter_cond_condition_builder_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .filter_cond(eq("statuz", "paid"));
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "filter_cond condition-builder column typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_does_not_treat_expression_col_helpers_as_schema_columns() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  sales_start_date DATE
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .filter_cond(Condition {
+        left: Expr::FunctionCall {
+            name: "COALESCE".to_string(),
+            args: vec![col("sales_start_date"), col("CURRENT_DATE")],
+            alias: None,
+        },
+        op: Operator::Lte,
+        value: Value::Expr(Box::new(col("CURRENT_DATE"))),
+        is_array_unnest: false,
+    });
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("CURRENT_DATE")),
+        "SQL expression helper names must not be treated as schema columns: {:?}",
         diagnostics
     );
 }

@@ -2574,6 +2574,13 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
+            "filter_cond" | "having_cond" | "having_conds" => {
+                columns.extend(extract_condition_columns_with_bindings(
+                    call.args,
+                    substitutions,
+                    bindings,
+                ));
+            }
             "returning" | "on_conflict_update" | "on_conflict_nothing" => {
                 for col in resolve_array_string_values(
                     extract_first_argument(call.args),
@@ -2605,6 +2612,13 @@ fn extract_columns_with_bindings(
             "left_join_as" | "inner_join_as" => {
                 columns.extend(resolve_string_arg(call.args, 2, substitutions, bindings));
                 columns.extend(resolve_string_arg(call.args, 3, substitutions, bindings));
+            }
+            "join_conds" | "left_join_conds" | "inner_join_conds" => {
+                columns.extend(extract_condition_columns_with_bindings(
+                    call.args,
+                    substitutions,
+                    bindings,
+                ));
             }
             "when_matched_update" | "when_not_matched_by_source_update" => {
                 columns.extend(resolve_array_string_arg(
@@ -2672,6 +2686,144 @@ fn extract_columns_with_bindings(
         .collect();
 
     columns
+}
+
+fn extract_condition_columns_with_bindings(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut columns = Vec::new();
+    extract_condition_columns_inner(expr, substitutions, bindings, 0, &mut columns);
+    dedupe_values(&mut columns);
+    columns
+}
+
+fn extract_condition_columns_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    depth: usize,
+    columns: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    for call in scan_rust_function_calls(expr) {
+        if is_condition_builder_name(call.name) {
+            columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+        }
+        if call.path.ends_with("Value::Column") {
+            columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+        }
+        extract_condition_columns_inner(call.args, substitutions, bindings, depth + 1, columns);
+    }
+}
+
+fn is_condition_builder_name(name: &str) -> bool {
+    matches!(
+        name,
+        "eq" | "ne"
+            | "gt"
+            | "gte"
+            | "lt"
+            | "lte"
+            | "is_in"
+            | "not_in"
+            | "is_null"
+            | "is_not_null"
+            | "like"
+            | "ilike"
+            | "not_like"
+            | "between"
+            | "not_between"
+            | "regex"
+            | "regex_i"
+            | "contains"
+            | "overlaps"
+            | "similar_to"
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RustFunctionCall<'a> {
+    path: &'a str,
+    name: &'a str,
+    args: &'a str,
+}
+
+fn scan_rust_function_calls(source: &str) -> Vec<RustFunctionCall<'_>> {
+    let bytes = source.as_bytes();
+    let mut calls = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if !is_ident_byte(bytes[i])
+            || i > 0 && (is_ident_byte(bytes[i - 1]) || bytes[i - 1] == b':')
+        {
+            i += 1;
+            continue;
+        }
+
+        let path_start = i;
+        let mut cursor = i;
+        let Some((_, ident_end)) = parse_ident_at_bytes(source, cursor) else {
+            i += 1;
+            continue;
+        };
+        cursor = ident_end;
+        while starts_with_bytes(bytes, cursor, b"::") {
+            let next_ident_start = cursor + 2;
+            let Some((_, next_ident_end)) = parse_ident_at_bytes(source, next_ident_start) else {
+                break;
+            };
+            cursor = next_ident_end;
+        }
+
+        let after_path = skip_ws(bytes, cursor);
+        if bytes.get(after_path).copied() != Some(b'(') {
+            i = cursor;
+            continue;
+        }
+        let prev = source.get(..path_start).and_then(|prefix| {
+            prefix
+                .bytes()
+                .rev()
+                .find(|byte| !byte.is_ascii_whitespace())
+        });
+        if prev == Some(b'.') {
+            i = cursor;
+            continue;
+        }
+
+        let Some(close) = find_matching_delim(source, after_path, b'(', b')') else {
+            i = after_path + 1;
+            continue;
+        };
+        let path = source.get(path_start..cursor).unwrap_or_default();
+        let name = path.rsplit("::").next().unwrap_or(path);
+        let args = source.get(after_path + 1..close).unwrap_or_default();
+        calls.push(RustFunctionCall { path, name, args });
+        i = close + 1;
+    }
+
+    calls
 }
 
 fn resolve_array_string_arg(
