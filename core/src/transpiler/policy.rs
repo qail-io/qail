@@ -66,6 +66,28 @@ fn checked_sql_expr_fragment(expr: &str, context: &str) -> Result<String, String
     Ok(expr.to_string())
 }
 
+fn checked_check_cast(cast: &str) -> Result<String, String> {
+    let cast = cast.trim();
+    if cast.is_empty()
+        || cast.contains('\0')
+        || contains_unquoted_statement_delimiter(cast)
+        || !cast
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ' '))
+    {
+        return Err("/* ERROR: Invalid check expression */".to_string());
+    }
+    Ok(cast.to_string())
+}
+
+fn check_text_literal_with_cast(value: &str, cast: &Option<String>) -> Result<String, String> {
+    let literal = format!("'{}'", escape_sql_string_literal(value));
+    match cast {
+        Some(cast) => Ok(format!("{literal}::{}", checked_check_cast(cast)?)),
+        None => Ok(literal),
+    }
+}
+
 fn policy_expr_to_sql(expr: &impl std::fmt::Display) -> Result<String, String> {
     checked_sql_expr_fragment(&expr.to_string(), "policy expression")
 }
@@ -188,6 +210,29 @@ fn check_expr_to_sql(expr: &CheckExpr) -> Result<String, String> {
             op.as_sql_str(),
             escape_identifier(right_column)
         )),
+        CheckExpr::TextCompare { column, op, value } => Ok(format!(
+            "{} {} '{}'",
+            escape_identifier(column),
+            op.as_sql_str(),
+            escape_sql_string_literal(value)
+        )),
+        CheckExpr::CompareColumnToCoalesce {
+            left_column,
+            op,
+            coalesce_column,
+            fallback,
+            fallback_cast,
+        } => Ok(format!(
+            "{} {} COALESCE({}, {})",
+            escape_identifier(left_column),
+            op.as_sql_str(),
+            escape_identifier(coalesce_column),
+            check_text_literal_with_cast(fallback, fallback_cast)?
+        )),
+        CheckExpr::LowerTrimEquals { column } => {
+            let column = escape_identifier(column);
+            Ok(format!("{column} = lower(btrim({column}))"))
+        }
         CheckExpr::Regex { column, pattern } => Ok(format!(
             "{} ~ '{}'",
             escape_identifier(column),

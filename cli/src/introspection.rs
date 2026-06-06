@@ -2265,6 +2265,43 @@ mod tests {
                     && op == CheckComparisonOp::NotEqual
                     && right_column == "destination_harbor_id"
         ));
+
+        let coalesce = parse_check_expr(
+            "start_date <= COALESCE(end_date, '2099-12-31'::date)",
+            "start_date",
+        )
+        .expect("coalesce comparison should parse");
+        assert!(matches!(
+            coalesce,
+            CheckExpr::CompareColumnToCoalesce {
+                left_column,
+                op,
+                coalesce_column,
+                fallback,
+                fallback_cast,
+            } if left_column == "start_date"
+                && op == CheckComparisonOp::LessOrEqual
+                && coalesce_column == "end_date"
+                && fallback == "2099-12-31"
+                && fallback_cast.as_deref() == Some("date")
+        ));
+
+        let text_compare = parse_check_expr("module <> 'charter'::text", "module")
+            .expect("text literal comparison should parse");
+        assert!(matches!(
+            text_compare,
+            CheckExpr::TextCompare { column, op, value }
+                if column == "module"
+                    && op == CheckComparisonOp::NotEqual
+                    && value == "charter"
+        ));
+
+        let normalized = parse_check_expr("(slug)::text = lower(btrim((slug)::text))", "slug")
+            .expect("lower trim equality should parse");
+        assert!(matches!(
+            normalized,
+            CheckExpr::LowerTrimEquals { column } if column == "slug"
+        ));
     }
 
     #[test]

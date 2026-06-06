@@ -2249,6 +2249,20 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
         return Some(expr);
     }
 
+    // Try production-safe Postgres forms:
+    //   col <> 'literal'::text
+    //   col <= COALESCE(other_col, 'literal'::date)
+    //   (col)::text = lower(btrim((col)::text))
+    if let Some(expr) = parse_postgres_text_compare_check_expr(s) {
+        return Some(expr);
+    }
+    if let Some(expr) = parse_postgres_coalesce_compare_check_expr(s) {
+        return Some(expr);
+    }
+    if let Some(expr) = parse_postgres_lower_trim_check_expr(s) {
+        return Some(expr);
+    }
+
     // Try "left and right"
     if let Some(and_pos) = find_top_level_operator(s, " and ") {
         let left = parse_check_expr_from_qail(&s[..and_pos])?;
@@ -2436,6 +2450,41 @@ fn parse_postgres_regex_check_expr(s: &str) -> Option<CheckExpr> {
     Some(CheckExpr::Regex { column, pattern })
 }
 
+fn parse_postgres_text_compare_check_expr(s: &str) -> Option<CheckExpr> {
+    let (op_pos, op, op_len) = find_top_level_comparison_operator(s)?;
+    if !matches!(op, CheckComparisonOp::Equal | CheckComparisonOp::NotEqual) {
+        return None;
+    }
+    let column = parse_postgres_any_check_column(&s[..op_pos])?;
+    let value = parse_postgres_text_literal(&s[op_pos + op_len..])?;
+    Some(CheckExpr::TextCompare { column, op, value })
+}
+
+fn parse_postgres_coalesce_compare_check_expr(s: &str) -> Option<CheckExpr> {
+    let (op_pos, op, op_len) = find_top_level_comparison_operator(s)?;
+    let left_column = parse_postgres_any_check_column(&s[..op_pos])?;
+    let (coalesce_column, fallback, fallback_cast) =
+        parse_postgres_coalesce_check_rhs(&s[op_pos + op_len..])?;
+    Some(CheckExpr::CompareColumnToCoalesce {
+        left_column,
+        op,
+        coalesce_column,
+        fallback,
+        fallback_cast,
+    })
+}
+
+fn parse_postgres_lower_trim_check_expr(s: &str) -> Option<CheckExpr> {
+    let eq_pos = find_top_level_equality(s)?;
+    let column = parse_postgres_any_check_column(&s[..eq_pos])?;
+    let rhs_column = parse_lower_btrim_column(&s[eq_pos + 1..])?;
+    if rhs_column == column {
+        Some(CheckExpr::LowerTrimEquals { column })
+    } else {
+        None
+    }
+}
+
 fn find_top_level_equality(s: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     let mut paren_depth = 0usize;
@@ -2583,6 +2632,42 @@ fn parse_postgres_any_check_column(raw: &str) -> Option<String> {
     }
 }
 
+fn parse_postgres_coalesce_check_rhs(raw: &str) -> Option<(String, String, Option<String>)> {
+    let raw = strip_wrapping_check_parens(raw.trim()).trim();
+    let args = parse_single_function_call_args(raw, "COALESCE")?;
+    if args.len() != 2 {
+        return None;
+    }
+    let column = parse_postgres_any_check_column(&args[0])?;
+    let (fallback, fallback_cast) = parse_postgres_text_literal_with_cast(&args[1])?;
+    Some((column, fallback, fallback_cast))
+}
+
+fn parse_lower_btrim_column(raw: &str) -> Option<String> {
+    let lower_args = parse_single_function_call_args(raw, "lower")?;
+    if lower_args.len() != 1 {
+        return None;
+    }
+    let btrim_args = parse_single_function_call_args(&lower_args[0], "btrim")?;
+    if btrim_args.len() != 1 {
+        return None;
+    }
+    parse_postgres_any_check_column(&btrim_args[0])
+}
+
+fn parse_single_function_call_args(raw: &str, name: &str) -> Option<Vec<String>> {
+    let raw = strip_wrapping_check_parens(raw.trim()).trim();
+    let args = strip_case_insensitive_prefix(raw, name)?.trim_start();
+    if !args.starts_with('(') {
+        return None;
+    }
+    let close = find_matching_paren(args, 0)?;
+    if !args[close + 1..].trim().is_empty() {
+        return None;
+    }
+    split_function_args(&args[1..close]).ok()
+}
+
 fn strip_postgres_type_casts(mut value: &str) -> &str {
     loop {
         let trimmed = strip_wrapping_check_parens(value.trim()).trim();
@@ -2666,11 +2751,35 @@ fn parse_postgres_text_array_item(raw: &str) -> Option<String> {
 }
 
 fn parse_postgres_text_literal(raw: &str) -> Option<String> {
-    let value = strip_postgres_type_casts(raw);
+    parse_postgres_text_literal_with_cast(raw).map(|(value, _)| value)
+}
+
+fn parse_postgres_text_literal_with_cast(raw: &str) -> Option<(String, Option<String>)> {
+    let raw = raw.trim();
+    let (value, cast) = if let Some(cast_pos) = find_top_level_type_cast(raw) {
+        let value = strip_wrapping_check_parens(raw[..cast_pos].trim()).trim();
+        let cast = raw[cast_pos + 2..].trim();
+        if cast.is_empty() || !is_safe_postgres_type_cast(cast) {
+            return None;
+        }
+        (value, Some(cast.to_string()))
+    } else {
+        (raw, None)
+    };
+
+    let value = strip_postgres_type_casts(value);
     if !value.starts_with('\'') {
         return None;
     }
-    parse_enum_value(value).ok()
+    let parsed = parse_enum_value(value).ok()?;
+    Some((parsed, cast))
+}
+
+fn is_safe_postgres_type_cast(cast: &str) -> bool {
+    !cast.is_empty()
+        && cast
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ' '))
 }
 
 fn strip_case_insensitive_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
@@ -4656,6 +4765,9 @@ table partners {
   origin_harbor_id uuid check(origin_harbor_id <> destination_harbor_id) check_name origin_destination_check
   end_date date check(end_date >= start_date) check_name end_after_start_check
   start_time time check((start_time)::time without time zone < (end_time)::time without time zone) check_name start_before_end_check
+  start_date date check(start_date <= COALESCE(end_date, '2099-12-31'::date)) check_name open_ended_date_check
+  module text check(module <> 'charter'::text) check_name module_not_charter_check
+  slug text check((slug)::text = lower(btrim((slug)::text))) check_name slug_normalized_check
 }
 "#;
         let schema = parse_qail(input).unwrap();
@@ -4738,10 +4850,45 @@ table partners {
                     && right_column == "end_time"
         ));
 
+        let start_date = &schema.tables["partners"].columns[10];
+        assert!(matches!(
+            start_date.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::CompareColumnToCoalesce {
+                left_column,
+                op,
+                coalesce_column,
+                fallback,
+                fallback_cast,
+            })
+                if left_column == "start_date"
+                    && *op == CheckComparisonOp::LessOrEqual
+                    && coalesce_column == "end_date"
+                    && fallback == "2099-12-31"
+                    && fallback_cast.as_deref() == Some("date")
+        ));
+
+        let module = &schema.tables["partners"].columns[11];
+        assert!(matches!(
+            module.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::TextCompare { column, op, value })
+                if column == "module"
+                    && *op == CheckComparisonOp::NotEqual
+                    && value == "charter"
+        ));
+
+        let slug = &schema.tables["partners"].columns[12];
+        assert!(matches!(
+            slug.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::LowerTrimEquals { column }) if column == "slug"
+        ));
+
         let rendered = super::super::schema::to_qail_string(&schema);
         assert!(rendered.contains("check(duration_hours = ANY (ARRAY[8, 10, 12]))"));
         assert!(rendered.contains("check(origin_harbor_id <> destination_harbor_id)"));
         assert!(rendered.contains("check(end_date >= start_date)"));
+        assert!(rendered.contains("check(start_date <= COALESCE(end_date, '2099-12-31'::date))"));
+        assert!(rendered.contains("check(module <> 'charter')"));
+        assert!(rendered.contains("check(slug = lower(btrim(slug)))"));
     }
 
     #[test]

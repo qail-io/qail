@@ -310,6 +310,33 @@ pub enum CheckExpr {
         /// Right-hand column.
         right_column: String,
     },
+    /// column op 'text'
+    TextCompare {
+        /// Column name.
+        column: String,
+        /// Comparison operator.
+        op: CheckComparisonOp,
+        /// Text literal.
+        value: String,
+    },
+    /// column op COALESCE(other_column, 'fallback'::type)
+    CompareColumnToCoalesce {
+        /// Left-hand column.
+        left_column: String,
+        /// Comparison operator.
+        op: CheckComparisonOp,
+        /// Column used as the first COALESCE argument.
+        coalesce_column: String,
+        /// Text fallback value.
+        fallback: String,
+        /// Optional fallback type cast, such as `date`.
+        fallback_cast: Option<String>,
+    },
+    /// column = lower(btrim(column))
+    LowerTrimEquals {
+        /// Column name.
+        column: String,
+    },
     /// column ~ pattern (regex)
     Regex {
         /// Column name.
@@ -1370,6 +1397,18 @@ fn format_check_in_value(value: &str) -> String {
     format_qail_value_token(value, &['[', ']'])
 }
 
+fn format_sql_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn format_sql_text_literal_with_cast(value: &str, cast: &Option<String>) -> String {
+    let literal = format_sql_text_literal(value);
+    match cast {
+        Some(cast) => format!("{literal}::{cast}"),
+        None => literal,
+    }
+}
+
 /// Serialize CheckExpr to QAIL check syntax
 fn check_expr_str(expr: &CheckExpr) -> String {
     match expr {
@@ -1401,8 +1440,30 @@ fn check_expr_str(expr: &CheckExpr) -> String {
             op,
             right_column,
         } => format!("{} {} {}", left_column, op.as_sql_str(), right_column),
+        CheckExpr::TextCompare { column, op, value } => {
+            format!(
+                "{} {} {}",
+                column,
+                op.as_sql_str(),
+                format_sql_text_literal(value)
+            )
+        }
+        CheckExpr::CompareColumnToCoalesce {
+            left_column,
+            op,
+            coalesce_column,
+            fallback,
+            fallback_cast,
+        } => format!(
+            "{} {} COALESCE({}, {})",
+            left_column,
+            op.as_sql_str(),
+            coalesce_column,
+            format_sql_text_literal_with_cast(fallback, fallback_cast)
+        ),
+        CheckExpr::LowerTrimEquals { column } => format!("{column} = lower(btrim({column}))"),
         CheckExpr::Regex { column, pattern } => {
-            format!("{} ~ '{}'", column, pattern.replace('\'', "''"))
+            format!("{} ~ {}", column, format_sql_text_literal(pattern))
         }
         CheckExpr::MaxLength { column, max } => format!("length({}) <= {}", column, max),
         CheckExpr::MinLength { column, min } => format!("length({}) >= {}", column, min),
@@ -2072,8 +2133,27 @@ pub(crate) fn check_expr_to_sql(expr: &CheckExpr) -> String {
             op,
             right_column,
         } => format!("{left_column} {} {right_column}", op.as_sql_str()),
+        CheckExpr::TextCompare { column, op, value } => {
+            format!(
+                "{column} {} {}",
+                op.as_sql_str(),
+                format_sql_text_literal(value)
+            )
+        }
+        CheckExpr::CompareColumnToCoalesce {
+            left_column,
+            op,
+            coalesce_column,
+            fallback,
+            fallback_cast,
+        } => format!(
+            "{left_column} {} COALESCE({coalesce_column}, {})",
+            op.as_sql_str(),
+            format_sql_text_literal_with_cast(fallback, fallback_cast)
+        ),
+        CheckExpr::LowerTrimEquals { column } => format!("{column} = lower(btrim({column}))"),
         CheckExpr::Regex { column, pattern } => {
-            format!("{column} ~ '{}'", pattern.replace('\'', "''"))
+            format!("{column} ~ {}", format_sql_text_literal(pattern))
         }
         CheckExpr::MaxLength { column, max } => format!("char_length({column}) <= {max}"),
         CheckExpr::MinLength { column, min } => format!("char_length({column}) >= {min}"),
@@ -2463,6 +2543,33 @@ mod tests {
                 right_column: "destination_harbor_id".to_string(),
             }),
             "origin_harbor_id <> destination_harbor_id"
+        );
+
+        assert_eq!(
+            check_expr_to_sql(&CheckExpr::TextCompare {
+                column: "module".to_string(),
+                op: CheckComparisonOp::NotEqual,
+                value: "charter".to_string(),
+            }),
+            "module <> 'charter'"
+        );
+
+        assert_eq!(
+            check_expr_to_sql(&CheckExpr::CompareColumnToCoalesce {
+                left_column: "start_date".to_string(),
+                op: CheckComparisonOp::LessOrEqual,
+                coalesce_column: "end_date".to_string(),
+                fallback: "2099-12-31".to_string(),
+                fallback_cast: Some("date".to_string()),
+            }),
+            "start_date <= COALESCE(end_date, '2099-12-31'::date)"
+        );
+
+        assert_eq!(
+            check_expr_to_sql(&CheckExpr::LowerTrimEquals {
+                column: "slug".to_string(),
+            }),
+            "slug = lower(btrim(slug))"
         );
     }
 }
