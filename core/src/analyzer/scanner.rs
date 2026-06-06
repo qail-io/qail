@@ -202,7 +202,7 @@ impl CodebaseScanner {
         }
 
         let normalized = normalize_whitespace(candidate);
-        if let Some((_kind, table, columns)) = parse_sql_reference(&normalized) {
+        for (_kind, table, columns) in parse_sql_references(&normalized) {
             refs.push(CodeReference {
                 file: path.to_path_buf(),
                 line: line_number,
@@ -225,18 +225,16 @@ impl CodebaseScanner {
                 continue;
             }
 
-            let Some((_kind, table, columns)) = parse_sql_reference(&normalized) else {
-                continue;
-            };
-
-            refs.push(CodeReference {
-                file: path.to_path_buf(),
-                line: sql_match.line,
-                table,
-                columns,
-                query_type: QueryType::RawSql,
-                snippet: normalized.chars().take(60).collect(),
-            });
+            for (_kind, table, columns) in parse_sql_references(&normalized) {
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: sql_match.line,
+                    table,
+                    columns,
+                    query_type: QueryType::RawSql,
+                    snippet: normalized.chars().take(60).collect(),
+                });
+            }
         }
 
         refs
@@ -478,6 +476,121 @@ fn is_ident_char(ch: char) -> bool {
 
 fn normalize_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_sql_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    parse_sql_references_with_cte_aliases(sql, &[])
+}
+
+fn parse_sql_references_with_cte_aliases(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let normalized = normalize_whitespace(sql);
+    let cte_parts = parse_sql_cte_parts(&normalized, inherited_cte_aliases);
+    let mut refs = cte_parts
+        .as_ref()
+        .map(|parts| parts.references.clone())
+        .unwrap_or_default();
+
+    if let Some((kind, table, columns)) = parse_sql_reference(&normalized) {
+        let is_cte_alias = cte_parts.as_ref().is_some_and(|parts| {
+            parts
+                .aliases
+                .iter()
+                .any(|alias| sql_ident_eq(alias, &table))
+        });
+        let is_inherited_cte_alias = inherited_cte_aliases
+            .iter()
+            .any(|alias| sql_ident_eq(alias, &table));
+        if !is_cte_alias && !is_inherited_cte_alias {
+            refs.push((kind, table, columns));
+        }
+    }
+
+    refs
+}
+
+#[derive(Debug, Default)]
+struct SqlCteParts {
+    aliases: Vec<String>,
+    references: Vec<(SqlStmtKind, String, Vec<String>)>,
+}
+
+fn parse_sql_cte_parts(sql: &str, inherited_cte_aliases: &[String]) -> Option<SqlCteParts> {
+    let bytes = sql.as_bytes();
+    let mut cursor = skip_sql_ws(bytes, 0);
+    if !starts_with_keyword_at(sql, cursor, "WITH") {
+        return None;
+    }
+    cursor += "WITH".len();
+    cursor = skip_sql_ws(bytes, cursor);
+    if starts_with_keyword_at(sql, cursor, "RECURSIVE") {
+        cursor += "RECURSIVE".len();
+    }
+
+    let mut parts = SqlCteParts::default();
+    let mut known_aliases = inherited_cte_aliases.to_vec();
+
+    loop {
+        cursor = skip_sql_ws(bytes, cursor);
+        let (alias, alias_end) = parse_sql_identifier_segment(sql, cursor)?;
+        parts.aliases.push(alias.clone());
+        known_aliases.push(alias);
+        cursor = skip_sql_ws(bytes, alias_end);
+
+        if bytes.get(cursor).copied() == Some(b'(') {
+            let (_, end) = balanced_paren_segment(sql, cursor)?;
+            cursor = skip_sql_ws(bytes, end);
+        }
+
+        if !starts_with_keyword_at(sql, cursor, "AS") {
+            return None;
+        }
+        cursor += "AS".len();
+        cursor = skip_sql_ws(bytes, cursor);
+        cursor = skip_sql_cte_materialization_modifier(sql, cursor);
+
+        if bytes.get(cursor).copied() != Some(b'(') {
+            return None;
+        }
+        let (body, end) = balanced_paren_segment(sql, cursor)?;
+        parts
+            .references
+            .extend(parse_sql_references_with_cte_aliases(body, &known_aliases));
+        cursor = skip_sql_ws(bytes, end);
+
+        if bytes.get(cursor).copied() == Some(b',') {
+            cursor += 1;
+            continue;
+        }
+        break;
+    }
+
+    if parts.aliases.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+fn skip_sql_cte_materialization_modifier(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let cursor = skip_sql_ws(bytes, start);
+    if starts_with_keyword_at(sql, cursor, "MATERIALIZED") {
+        return skip_sql_ws(bytes, cursor + "MATERIALIZED".len());
+    }
+    if starts_with_keyword_at(sql, cursor, "NOT") {
+        let after_not = skip_sql_ws(bytes, cursor + "NOT".len());
+        if starts_with_keyword_at(sql, after_not, "MATERIALIZED") {
+            return skip_sql_ws(bytes, after_not + "MATERIALIZED".len());
+        }
+    }
+    cursor
+}
+
+fn sql_ident_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
 fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> {
@@ -1091,6 +1204,35 @@ fn find_keyword_top_level_from(sql: &str, keyword: &str, min_idx: usize) -> Opti
     None
 }
 
+fn starts_with_keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let kw = keyword.as_bytes();
+    if idx + kw.len() > bytes.len() {
+        return false;
+    }
+    if !bytes[idx..idx + kw.len()]
+        .iter()
+        .zip(kw)
+        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    {
+        return false;
+    }
+
+    let before_ok = if idx == 0 {
+        true
+    } else {
+        !is_ident_char(bytes[idx - 1] as char)
+    };
+    let after = idx + kw.len();
+    let after_ok = if after >= bytes.len() {
+        true
+    } else {
+        !is_ident_char(bytes[after] as char)
+    };
+
+    before_ok && after_ok
+}
+
 fn skip_sql_ws(bytes: &[u8], mut idx: usize) -> usize {
     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
         idx += 1;
@@ -1190,6 +1332,38 @@ mod tests {
         assert_eq!(kind.as_str(), "MERGE");
         assert_eq!(table, "orders");
         assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_cte_base_table() {
+        let sql = "WITH active_users AS (SELECT id, email FROM users WHERE status = $1) SELECT id FROM active_users";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        let (kind, table, cols) = &refs[0];
+        assert_eq!(kind.as_str(), "SELECT");
+        assert_eq!(table, "users");
+        assert_eq!(cols, &vec!["id", "email", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_supports_materialized_ctes() {
+        let sql = "WITH active_users AS NOT MATERIALIZED (SELECT id, email FROM users WHERE status = $1) SELECT id FROM ACTIVE_USERS";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(refs[0].1, "users");
+        assert_eq!(refs[0].2, vec!["id", "email", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_skips_intermediate_cte_aliases() {
+        let sql = "WITH raw_users AS (SELECT id, email FROM users), active_users AS (SELECT id FROM raw_users WHERE email IS NOT NULL) SELECT id FROM active_users";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(refs[0].1, "users");
+        assert_eq!(refs[0].2, vec!["id", "email"]);
     }
 
     #[test]
@@ -1328,6 +1502,42 @@ WHERE active = true
         assert_eq!(raw_sql_refs.len(), 1, "{raw_sql_refs:?}");
         assert_eq!(raw_sql_refs[0].table, "users");
         assert_eq!(raw_sql_refs[0].columns, vec!["id", "email", "active"]);
+    }
+
+    #[test]
+    fn test_non_rust_scan_tracks_raw_sql_cte_base_table() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_text_cte_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"
+            const sql = `
+                WITH active_users AS (
+                    SELECT id, email FROM users WHERE status = $1
+                )
+                SELECT id FROM active_users
+            `;
+        "#;
+
+        std::fs::write(&path, source).expect("write temp text file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let raw_sql_refs = refs
+            .iter()
+            .filter(|r| r.query_type == QueryType::RawSql)
+            .collect::<Vec<_>>();
+
+        assert_eq!(raw_sql_refs.len(), 1, "{raw_sql_refs:?}");
+        assert_eq!(raw_sql_refs[0].table, "users");
+        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email", "status"]);
     }
 
     #[test]
