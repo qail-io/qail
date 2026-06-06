@@ -110,6 +110,24 @@ pub fn detect_query_calls(source: &str) -> Vec<QueryCall> {
 
     let mut i = 0usize;
     while i < bytes.len() {
+        if starts_with(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
         let mut matched = false;
 
         for pat in QUERY_PATTERNS {
@@ -916,6 +934,30 @@ mod tests {
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].fetch_method, FetchMethod::FetchAll);
+    }
+
+    #[test]
+    fn ignores_query_calls_inside_comments_and_literals() {
+        let code = r##"
+            async fn test() {
+                // query("SELECT * FROM comment_users").fetch_all(&pool).await;
+                /*
+                query("SELECT * FROM block_users")
+                    .fetch_all(&pool)
+                    .await;
+                */
+                let doc = "query(\"SELECT * FROM string_users\").fetch_all(&pool).await";
+                let raw = r#"query("SELECT * FROM raw_string_users").fetch_all(&pool).await"#;
+                let rows = query("SELECT * FROM users")
+                    .fetch_all(&pool)
+                    .await;
+            }
+        "##;
+
+        let calls = detect_query_calls(code);
+
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].sql, "SELECT * FROM users");
     }
 
     #[test]

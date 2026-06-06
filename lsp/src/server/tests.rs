@@ -44,6 +44,27 @@ fn rust_query_kind_marks_qail_text() {
 }
 
 #[test]
+fn rust_qail_diagnostics_ignore_query_calls_inside_comments_and_literals() {
+    let src = r##"async fn run(pool: &Pool) {
+    // query("get users fields where").fetch_all(pool).await;
+    /*
+    query("get orders fields where")
+        .fetch_all(pool)
+        .await;
+    */
+    let doc = "query(\"get teams fields where\").fetch_all(pool).await";
+    let raw = r#"query("get logs fields where").fetch_all(pool).await"#;
+    let rows = query("get users fields id")
+        .fetch_all(pool)
+        .await;
+}"##;
+
+    let diags = collect_rust_qail_diagnostics(src);
+
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
 fn qail_classifier_rejects_sql_prefix() {
     assert!(!looks_like_qail_query("SELECT id FROM users"));
     assert!(looks_like_qail_query("get users fields id"));
