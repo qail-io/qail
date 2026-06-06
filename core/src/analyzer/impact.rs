@@ -449,6 +449,196 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_native_qail_qualified_join_target_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("id".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_native_join_target_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"const q = "get users join posts on users.id = posts.user_id fields users.id";"#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_native_qail_join_source_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "posts".to_string(),
+            columns: vec![crate::ast::Expr::Named("user_id".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_native_join_source_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"const q = "get users join posts on users.id = posts.user_id fields users.id";"#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_native_qail_merge_target_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_native_merge_target_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const q = `
+                merge users as u using staging_users as s on u.id = s.id
+                when matched then update set email = s.email
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_native_qail_merge_target_alias_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("id".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_native_merge_target_alias_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const q = `
+                merge users as u using staging_users as s on u.id = s.id
+                when matched then update set email = s.email
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_native_qail_merge_source_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "staging_users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_native_merge_source_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const q = `
+                merge users as u using staging_users as s on u.id = s.id
+                when matched then update set email = s.email
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_filter_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,

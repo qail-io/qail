@@ -7,6 +7,37 @@ use crate::ast::{Action, Cage, Condition, ConflictAction, Expr, MergeAction, Val
 
 use super::{CodeReference, QueryType};
 
+#[derive(Clone, Copy)]
+struct ColumnScope<'a> {
+    table: &'a str,
+    alias: Option<&'a str>,
+    include_unqualified: bool,
+}
+
+impl<'a> ColumnScope<'a> {
+    fn target(table: &'a str, alias: Option<&'a str>) -> Self {
+        Self {
+            table,
+            alias,
+            include_unqualified: true,
+        }
+    }
+
+    fn related(table: &'a str, alias: Option<&'a str>) -> Self {
+        Self {
+            table,
+            alias,
+            include_unqualified: false,
+        }
+    }
+
+    fn matches_qualifier(&self, qualifier: &str) -> bool {
+        self.alias.is_some_and(|alias| ident_eq(alias, qualifier))
+            || ident_eq(self.table, qualifier)
+            || ident_eq(bare_ident(self.table), qualifier)
+    }
+}
+
 fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<CodeReference> {
     if cmd.table.trim().is_empty() {
         return None;
@@ -17,6 +48,7 @@ fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<C
         Action::Set => format!("set {} values ...", cmd.table),
         Action::Del => format!("del {}", cmd.table),
         Action::Add => format!("add {} fields ...", cmd.table),
+        Action::Merge => format!("merge {} ...", cmd.table),
         _ => return None,
     };
     let columns = collect_reference_columns(cmd);
@@ -40,8 +72,87 @@ pub(super) fn command_to_references(
     if let Some(reference) = command_to_reference(path, line, cmd) {
         refs.push(reference);
     }
+    collect_related_table_references(path, line, cmd, &mut refs);
     collect_subquery_references(path, line, cmd, &mut refs);
     refs
+}
+
+fn collect_related_table_references(
+    path: &Path,
+    line: usize,
+    cmd: &crate::Qail,
+    refs: &mut Vec<CodeReference>,
+) {
+    for join in &cmd.joins {
+        push_scoped_reference(
+            path,
+            line,
+            cmd,
+            &join.table,
+            None,
+            format!("join {} ...", join.table),
+            refs,
+        );
+    }
+    for table in &cmd.from_tables {
+        push_scoped_reference(
+            path,
+            line,
+            cmd,
+            table,
+            None,
+            format!("from {} ...", table),
+            refs,
+        );
+    }
+    for table in &cmd.using_tables {
+        push_scoped_reference(
+            path,
+            line,
+            cmd,
+            table,
+            None,
+            format!("using {} ...", table),
+            refs,
+        );
+    }
+    if let Some(merge) = &cmd.merge
+        && let crate::ast::MergeSource::Table { name, alias } = &merge.source
+    {
+        push_scoped_reference(
+            path,
+            line,
+            cmd,
+            name,
+            alias.as_deref(),
+            format!("merge source {} ...", name),
+            refs,
+        );
+    }
+}
+
+fn push_scoped_reference(
+    path: &Path,
+    line: usize,
+    cmd: &crate::Qail,
+    table: &str,
+    alias: Option<&str>,
+    snippet: String,
+    refs: &mut Vec<CodeReference>,
+) {
+    if table.trim().is_empty() {
+        return;
+    }
+
+    let scope = ColumnScope::related(table, alias);
+    refs.push(CodeReference {
+        file: path.to_path_buf(),
+        line,
+        table: table.to_string(),
+        columns: collect_reference_columns_for_scope(cmd, scope),
+        query_type: QueryType::Qail,
+        snippet,
+    });
 }
 
 fn collect_subquery_references(
@@ -239,50 +350,58 @@ fn collect_value_subquery_references(
 }
 
 fn collect_reference_columns(cmd: &crate::Qail) -> Vec<String> {
+    let target_alias = cmd
+        .merge
+        .as_ref()
+        .and_then(|merge| merge.target_alias.as_deref());
+    collect_reference_columns_for_scope(cmd, ColumnScope::target(&cmd.table, target_alias))
+}
+
+fn collect_reference_columns_for_scope(cmd: &crate::Qail, scope: ColumnScope<'_>) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
 
-    collect_exprs_columns(&cmd.columns, &mut cols, &mut seen);
+    collect_exprs_columns(&cmd.columns, scope, &mut cols, &mut seen);
     for cage in &cmd.cages {
-        collect_cage_columns(cage, &mut cols, &mut seen);
+        collect_cage_columns(cage, scope, &mut cols, &mut seen);
     }
     for join in &cmd.joins {
         if let Some(conditions) = &join.on {
-            collect_conditions_columns(conditions, &mut cols, &mut seen);
+            collect_conditions_columns(conditions, scope, &mut cols, &mut seen);
         }
     }
-    collect_conditions_columns(&cmd.having, &mut cols, &mut seen);
-    collect_exprs_columns(&cmd.distinct_on, &mut cols, &mut seen);
+    collect_conditions_columns(&cmd.having, scope, &mut cols, &mut seen);
+    collect_exprs_columns(&cmd.distinct_on, scope, &mut cols, &mut seen);
     if let Some(returning) = &cmd.returning {
-        collect_exprs_columns(returning, &mut cols, &mut seen);
+        collect_exprs_columns(returning, scope, &mut cols, &mut seen);
     }
     if let Some(on_conflict) = &cmd.on_conflict {
         for column in &on_conflict.columns {
-            push_column_ref(column, &mut cols, &mut seen);
+            push_column_ref(column, scope, &mut cols, &mut seen);
         }
         if let ConflictAction::DoUpdate { assignments } = &on_conflict.action {
             for (column, expr) in assignments {
-                push_column_ref(column, &mut cols, &mut seen);
-                collect_expr_columns(expr, &mut cols, &mut seen);
+                push_column_ref(column, scope, &mut cols, &mut seen);
+                collect_expr_columns(expr, scope, &mut cols, &mut seen);
             }
         }
     }
     if let Some(merge) = &cmd.merge {
-        collect_conditions_columns(&merge.on, &mut cols, &mut seen);
+        collect_conditions_columns(&merge.on, scope, &mut cols, &mut seen);
         for clause in &merge.clauses {
-            collect_conditions_columns(&clause.condition, &mut cols, &mut seen);
+            collect_conditions_columns(&clause.condition, scope, &mut cols, &mut seen);
             match &clause.action {
                 MergeAction::Update { assignments } => {
                     for (column, expr) in assignments {
-                        push_column_ref(column, &mut cols, &mut seen);
-                        collect_expr_columns(expr, &mut cols, &mut seen);
+                        push_column_ref(column, scope, &mut cols, &mut seen);
+                        collect_expr_columns(expr, scope, &mut cols, &mut seen);
                     }
                 }
                 MergeAction::Insert { columns, values } => {
                     for column in columns {
-                        push_column_ref(column, &mut cols, &mut seen);
+                        push_column_ref(column, scope, &mut cols, &mut seen);
                     }
-                    collect_exprs_columns(values, &mut cols, &mut seen);
+                    collect_exprs_columns(values, scope, &mut cols, &mut seen);
                 }
                 MergeAction::Delete | MergeAction::DoNothing => {}
             }
@@ -292,79 +411,96 @@ fn collect_reference_columns(cmd: &crate::Qail) -> Vec<String> {
     cols
 }
 
-fn collect_exprs_columns(exprs: &[Expr], cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+fn collect_exprs_columns(
+    exprs: &[Expr],
+    scope: ColumnScope<'_>,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
     for expr in exprs {
-        collect_expr_columns(expr, cols, seen);
+        collect_expr_columns(expr, scope, cols, seen);
     }
 }
 
-fn collect_cage_columns(cage: &Cage, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
-    collect_conditions_columns(&cage.conditions, cols, seen);
+fn collect_cage_columns(
+    cage: &Cage,
+    scope: ColumnScope<'_>,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    collect_conditions_columns(&cage.conditions, scope, cols, seen);
 }
 
 fn collect_conditions_columns(
     conditions: &[Condition],
+    scope: ColumnScope<'_>,
     cols: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
     for condition in conditions {
-        collect_condition_columns(condition, cols, seen);
+        collect_condition_columns(condition, scope, cols, seen);
     }
 }
 
 fn collect_condition_columns(
     condition: &Condition,
+    scope: ColumnScope<'_>,
     cols: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
-    collect_expr_columns(&condition.left, cols, seen);
-    collect_value_columns(&condition.value, cols, seen);
+    collect_expr_columns(&condition.left, scope, cols, seen);
+    collect_value_columns(&condition.value, scope, cols, seen);
 }
 
-fn collect_expr_columns(expr: &Expr, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+fn collect_expr_columns(
+    expr: &Expr,
+    scope: ColumnScope<'_>,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
     match expr {
-        Expr::Star => push_column_ref("*", cols, seen),
-        Expr::Named(name) | Expr::Aliased { name, .. } => push_column_ref(name, cols, seen),
+        Expr::Star => push_column_ref("*", scope, cols, seen),
+        Expr::Named(name) | Expr::Aliased { name, .. } => push_column_ref(name, scope, cols, seen),
         Expr::Aggregate { col, filter, .. } => {
-            push_column_ref(col, cols, seen);
+            push_column_ref(col, scope, cols, seen);
             if let Some(conditions) = filter {
-                collect_conditions_columns(conditions, cols, seen);
+                collect_conditions_columns(conditions, scope, cols, seen);
             }
         }
-        Expr::JsonAccess { column, .. } => push_column_ref(column, cols, seen),
+        Expr::JsonAccess { column, .. } => push_column_ref(column, scope, cols, seen),
         Expr::Cast { expr, .. }
         | Expr::Mod { col: expr, .. }
         | Expr::Collate { expr, .. }
-        | Expr::FieldAccess { expr, .. } => collect_expr_columns(expr, cols, seen),
+        | Expr::FieldAccess { expr, .. } => collect_expr_columns(expr, scope, cols, seen),
         Expr::Subscript { expr, index, .. } => {
-            collect_expr_columns(expr, cols, seen);
-            collect_expr_columns(index, cols, seen);
+            collect_expr_columns(expr, scope, cols, seen);
+            collect_expr_columns(index, scope, cols, seen);
         }
         Expr::FunctionCall { args, .. } | Expr::ArrayConstructor { elements: args, .. } => {
-            collect_exprs_columns(args, cols, seen);
+            collect_exprs_columns(args, scope, cols, seen);
         }
         Expr::SpecialFunction { args, .. } => {
             for (_, arg) in args {
-                collect_expr_columns(arg, cols, seen);
+                collect_expr_columns(arg, scope, cols, seen);
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_expr_columns(left, cols, seen);
-            collect_expr_columns(right, cols, seen);
+            collect_expr_columns(left, scope, cols, seen);
+            collect_expr_columns(right, scope, cols, seen);
         }
-        Expr::Literal(value) => collect_value_columns(value, cols, seen),
-        Expr::RowConstructor { elements, .. } => collect_exprs_columns(elements, cols, seen),
+        Expr::Literal(value) => collect_value_columns(value, scope, cols, seen),
+        Expr::RowConstructor { elements, .. } => collect_exprs_columns(elements, scope, cols, seen),
         Expr::Case {
             when_clauses,
             else_value,
             ..
         } => {
             for (condition, value) in when_clauses {
-                collect_condition_columns(condition, cols, seen);
-                collect_expr_columns(value, cols, seen);
+                collect_condition_columns(condition, scope, cols, seen);
+                collect_expr_columns(value, scope, cols, seen);
             }
             if let Some(value) = else_value {
-                collect_expr_columns(value, cols, seen);
+                collect_expr_columns(value, scope, cols, seen);
             }
         }
         Expr::Window {
@@ -373,36 +509,79 @@ fn collect_expr_columns(expr: &Expr, cols: &mut Vec<String>, seen: &mut HashSet<
             order,
             ..
         } => {
-            collect_exprs_columns(params, cols, seen);
+            collect_exprs_columns(params, scope, cols, seen);
             for column in partition {
-                push_column_ref(column, cols, seen);
+                push_column_ref(column, scope, cols, seen);
             }
             for cage in order {
-                collect_cage_columns(cage, cols, seen);
+                collect_cage_columns(cage, scope, cols, seen);
             }
         }
         Expr::Def { .. } | Expr::Subquery { .. } | Expr::Exists { .. } => {}
     }
 }
 
-fn collect_value_columns(value: &Value, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+fn collect_value_columns(
+    value: &Value,
+    scope: ColumnScope<'_>,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
     match value {
-        Value::Column(column) => push_column_ref(column, cols, seen),
-        Value::Expr(expr) => collect_expr_columns(expr, cols, seen),
+        Value::Column(column) => push_column_ref(column, scope, cols, seen),
+        Value::Expr(expr) => collect_expr_columns(expr, scope, cols, seen),
         Value::Array(values) => {
             for value in values {
-                collect_value_columns(value, cols, seen);
+                collect_value_columns(value, scope, cols, seen);
             }
         }
         _ => {}
     }
 }
 
-fn push_column_ref(name: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+fn push_column_ref(
+    name: &str,
+    scope: ColumnScope<'_>,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+
+    let (qualifier, column) = split_column_ref(name);
+    if qualifier
+        .map(|qualifier| scope.matches_qualifier(qualifier))
+        .unwrap_or(scope.include_unqualified)
+    {
+        push_plain_column_ref(column, cols, seen);
+    }
+}
+
+fn push_plain_column_ref(name: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
     let name = name.trim();
     if !name.is_empty() && seen.insert(name.to_string()) {
         cols.push(name.to_string());
     }
+}
+
+fn split_column_ref(name: &str) -> (Option<&str>, &str) {
+    let mut parts = name.rsplitn(3, '.');
+    let column = parts.next().unwrap_or(name).trim();
+    let qualifier = parts.next().map(str::trim).filter(|part| !part.is_empty());
+    (qualifier, column)
+}
+
+fn ident_eq(left: &str, right: &str) -> bool {
+    left.trim_matches('"')
+        .eq_ignore_ascii_case(right.trim_matches('"'))
+}
+
+fn bare_ident(name: &str) -> &str {
+    name.trim_matches('"')
+        .rsplit_once('.')
+        .map_or(name.trim_matches('"'), |(_, bare)| bare.trim_matches('"'))
 }
 
 #[cfg(test)]
@@ -416,11 +595,8 @@ fn extract_payload_columns(cmd: &crate::Qail) -> Vec<String> {
         }
 
         for cond in &cage.conditions {
-            if let Expr::Named(name) = &cond.left
-                && !name.is_empty()
-                && seen.insert(name.clone())
-            {
-                cols.push(name.clone());
+            if let Expr::Named(name) = &cond.left {
+                push_plain_column_ref(name, &mut cols, &mut seen);
             }
         }
     }
@@ -475,5 +651,53 @@ mod tests {
             .find(|reference| reference.table == "orders")
             .expect("orders reference");
         assert_eq!(orders.columns, vec!["user_id", "total"]);
+    }
+
+    #[test]
+    fn test_command_references_track_join_tables_by_scope() {
+        let cmd = parse(
+            "get users join posts on users.id = posts.user_id fields users.id, posts.title where posts.status = $1",
+        )
+        .expect("get parse");
+        let refs = command_to_references(Path::new("src/users.ts"), 1, &cmd);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|reference| reference.table == "users")
+            .expect("users reference");
+        assert_eq!(users.columns, vec!["id"]);
+
+        let posts = refs
+            .iter()
+            .find(|reference| reference.table == "posts")
+            .expect("posts reference");
+        assert_eq!(posts.columns, vec!["title", "status", "user_id"]);
+    }
+
+    #[test]
+    fn test_command_references_track_merge_target_and_source_by_scope() {
+        let cmd = parse(
+            "merge users as u using staging_users as s on u.id = s.id \
+             when matched and u.name != s.name then update set name = s.name, email = s.email \
+             when not matched then insert (id, name, email) values (s.id, s.name, s.email)",
+        )
+        .expect("merge parse");
+        let refs = command_to_references(Path::new("src/users.ts"), 1, &cmd);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|reference| reference.table == "users")
+            .expect("users reference");
+        assert_eq!(users.columns, vec!["id", "name", "email"]);
+
+        let staging_users = refs
+            .iter()
+            .find(|reference| reference.table == "staging_users")
+            .expect("staging users reference");
+        assert_eq!(staging_users.columns, vec!["id", "name", "email"]);
     }
 }
