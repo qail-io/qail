@@ -3620,6 +3620,12 @@ fn extract_condition_struct_left_columns(
                     substitutions,
                     bindings,
                 ));
+                names.extend(resolve_struct_expression_column_field(
+                    body,
+                    "value",
+                    substitutions,
+                    bindings,
+                ));
                 i = close + 1;
                 continue;
             }
@@ -3629,6 +3635,55 @@ fn extract_condition_struct_left_columns(
     }
 
     names
+}
+
+fn resolve_struct_expression_column_field(
+    body: &str,
+    field: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut values = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_keyword(body, i, field) {
+            let after_field = skip_ws(bytes, i + field.len());
+            if bytes.get(after_field).copied() == Some(b':') {
+                let field_expr = body.get(after_field + 1..).unwrap_or_default();
+                extract_expression_columns_inner(
+                    extract_first_argument(field_expr),
+                    substitutions,
+                    bindings,
+                    0,
+                    &mut values,
+                );
+                i = after_field + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    values
 }
 
 fn resolve_struct_expr_column_field(

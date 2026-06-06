@@ -1746,6 +1746,31 @@ fn test_extract_columns_condition_expression_values() {
 }
 
 #[test]
+fn test_extract_columns_condition_struct_expression_values() {
+    let line = r#"Qail::get("orders")
+        .filter_cond(Condition {
+            left: col("status"),
+            op: Operator::Eq,
+            value: Value::Expr(Box::new(col("fallback_status"))),
+            is_array_unnest: false,
+        })
+        .filter_cond(Condition {
+            left: Expr::Named("total".into()),
+            op: Operator::Gt,
+            value: Value::Column("minimum_total".into()),
+            is_array_unnest: false,
+        })"#;
+    let cols = extract_columns(line);
+
+    for expected in ["status", "fallback_status", "total", "minimum_total"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} from condition struct values: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_ast_native_helper_builders() {
     let line = r#"Qail::get("orders")
         .column_expr(json("metadata", "priority").alias("priority"))
