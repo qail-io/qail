@@ -14,11 +14,14 @@ pub(crate) struct SqlUsageDiagnostic {
 }
 
 mod semantic_impl {
-    use super::super::rust_lex::{mask_non_code, starts_with_bytes as starts_with};
+    use super::super::rust_lex::{
+        consume_block_comment, consume_rust_literal, mask_non_code,
+        starts_with_bytes as starts_with,
+    };
     use super::SqlUsageDiagnostic;
 
     pub(super) fn detect_in_source(file: &str, source: &str) -> Vec<SqlUsageDiagnostic> {
-        if source.contains("qail:allow(raw_sql)") {
+        if has_raw_sql_allow(source) {
             return Vec::new();
         }
 
@@ -52,6 +55,53 @@ mod semantic_impl {
         }
 
         out
+    }
+
+    pub(super) fn has_raw_sql_allow(source: &str) -> bool {
+        source_has_allow_comment(source, "qail:allow(raw_sql)")
+    }
+
+    fn source_has_allow_comment(source: &str, marker: &str) -> bool {
+        let bytes = source.as_bytes();
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            if starts_with(bytes, i, b"//") {
+                let start = i + 2;
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                if source
+                    .get(start..i)
+                    .is_some_and(|comment| comment.contains(marker))
+                {
+                    return true;
+                }
+                continue;
+            }
+
+            if starts_with(bytes, i, b"/*") {
+                let end = consume_block_comment(bytes, i);
+                if source
+                    .get(i..end)
+                    .is_some_and(|comment| comment.contains(marker))
+                {
+                    return true;
+                }
+                i = end;
+                continue;
+            }
+
+            if let Some(next) = consume_rust_literal(bytes, i) {
+                i = next;
+                continue;
+            }
+
+            i += 1;
+        }
+
+        false
     }
 
     fn compute_line_starts(source: &str) -> Vec<usize> {
@@ -98,6 +148,10 @@ fn detect_sql_in_file(path: &Path) -> Vec<SqlUsageDiagnostic> {
     let Ok(source) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
+    if semantic_impl::has_raw_sql_allow(&source) {
+        return Vec::new();
+    }
+
     #[cfg(feature = "analyzer")]
     let mut out = semantic_impl::detect_in_source(&path.display().to_string(), &source);
     #[cfg(not(feature = "analyzer"))]
@@ -162,6 +216,7 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
+    use super::detect_sql_in_file;
     use super::semantic_impl::detect_in_source;
 
     #[test]
@@ -196,6 +251,76 @@ fn x() {
     }
 
     #[test]
+    fn allows_file_with_raw_sql_allow_block_comment() {
+        let src = r#"
+/*
+ qail:allow(raw_sql)
+*/
+fn x() {
+    let _ = Qail::raw_sql("SELECT 1");
+}
+"#;
+        let hits = detect_in_source("x.rs", src);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn raw_sql_allow_marker_inside_string_does_not_disable_guard() {
+        let src = r#"
+fn x() {
+    let _note = "qail:allow(raw_sql)";
+    let _ = Qail::raw_sql("SELECT 1");
+}
+"#;
+        let hits = detect_in_source("x.rs", src);
+        assert!(
+            hits.iter().any(|d| d.code == "SQL-001"),
+            "string allow marker must not suppress raw SQL guard: {hits:?}"
+        );
+    }
+
+    #[cfg(feature = "analyzer")]
+    #[test]
+    fn raw_sql_allow_comment_disables_file_level_literal_scan() {
+        let path = temp_rs_file(
+            "qail_sql_guard_allow_file",
+            r#"
+// qail:allow(raw_sql)
+fn x() {
+    let _sql = "SELECT 1";
+}
+"#,
+        );
+
+        let hits = detect_sql_in_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[cfg(feature = "analyzer")]
+    #[test]
+    fn raw_sql_allow_marker_inside_string_does_not_disable_file_level_literal_scan() {
+        let path = temp_rs_file(
+            "qail_sql_guard_string_allow_file",
+            r#"
+fn x() {
+    let _note = "qail:allow(raw_sql)";
+    let _sql = "SELECT id FROM users";
+}
+"#,
+        );
+
+        let hits = detect_sql_in_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            hits.iter().any(|d| d.code == "SQL-005"),
+            "string allow marker must not suppress analyzer literal scan: {hits:?}"
+        );
+    }
+
+    #[test]
     fn ignores_markers_inside_strings_and_comments() {
         let src = r#"
 fn x() {
@@ -206,5 +331,20 @@ fn x() {
 "#;
         let hits = detect_in_source("x.rs", src);
         assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[cfg(feature = "analyzer")]
+    fn temp_rs_file(prefix: &str, source: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "{}_{}_{}.rs",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, source).expect("write temp rust file");
+        path
     }
 }
