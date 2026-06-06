@@ -680,6 +680,20 @@ fn normalize_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn advance_sql_quoted_index(bytes: &[u8], idx: usize, quote: u8) -> Option<usize> {
+    let b = *bytes.get(idx)?;
+    if b == quote {
+        if bytes.get(idx + 1).copied() == Some(quote) {
+            return Some(idx + 2);
+        }
+        return None;
+    }
+    if b == b'\\' && idx + 1 < bytes.len() {
+        return Some(idx + 2);
+    }
+    Some(idx + 1)
+}
+
 fn parse_sql_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
     parse_sql_references_with_cte_aliases(sql, &[])
 }
@@ -704,6 +718,15 @@ fn parse_sql_references_with_cte_aliases(
                 .map(|parts| parts.aliases.as_slice())
                 .unwrap_or(&[]),
         ));
+        refs.extend(parse_sql_nested_query_references(
+            &normalized,
+            inherited_cte_aliases,
+            cte_parts
+                .as_ref()
+                .map(|parts| parts.aliases.as_slice())
+                .unwrap_or(&[]),
+        ));
+        dedupe_sql_references(&mut refs);
         return refs;
     }
 
@@ -721,8 +744,73 @@ fn parse_sql_references_with_cte_aliases(
             refs.push((kind, table, columns));
         }
     }
+    refs.extend(parse_sql_nested_query_references(
+        &normalized,
+        inherited_cte_aliases,
+        cte_parts
+            .as_ref()
+            .map(|parts| parts.aliases.as_slice())
+            .unwrap_or(&[]),
+    ));
+    dedupe_sql_references(&mut refs);
 
     refs
+}
+
+fn parse_sql_nested_query_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let bytes = sql.as_bytes();
+    let mut refs = Vec::new();
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+    let mut aliases = inherited_cte_aliases.to_vec();
+    aliases.extend(local_cte_aliases.iter().cloned());
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
+                continue;
+            }
+            in_quote = None;
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => in_quote = Some(b),
+            b'(' => {
+                if let Some((segment, end)) = balanced_paren_segment(sql, i) {
+                    let nested = normalize_whitespace(segment.trim());
+                    if classify_sql_kind(&nested).is_some() {
+                        refs.extend(parse_sql_references_with_cte_aliases(&nested, &aliases));
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    refs
+}
+
+fn dedupe_sql_references(refs: &mut Vec<(SqlStmtKind, String, Vec<String>)>) {
+    let mut seen = HashSet::new();
+    refs.retain(|(kind, table, columns)| {
+        seen.insert(format!(
+            "{}\x1e{}\x1e{}",
+            kind.as_str(),
+            table,
+            columns.join("\x1f")
+        ))
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -859,24 +947,15 @@ fn next_sql_table_source_start(sql: &str, start: usize, end: usize) -> Option<us
     let mut i = start;
     let mut depth = 0i32;
     let mut in_quote: Option<u8> = None;
-    let mut escaped = false;
 
     while i < end {
         let b = bytes[i];
         if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-                i += 1;
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
                 continue;
             }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-            }
+            in_quote = None;
             i += 1;
             continue;
         }
@@ -1297,6 +1376,16 @@ fn collect_sql_column_refs(
                 i = skip_sql_single_quote(bytes, i + 1);
                 continue;
             }
+            b'(' => {
+                if let Some((nested, end)) = balanced_paren_segment(segment, i)
+                    && classify_sql_kind(&normalize_whitespace(nested.trim())).is_some()
+                {
+                    i = end;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
             b'"' | b'`' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => {}
             _ => {
                 i += 1;
@@ -1506,24 +1595,15 @@ fn balanced_paren_segment(input: &str, open_idx: usize) -> Option<(&str, usize)>
     let mut i = open_idx + 1;
     let start = i;
     let mut in_quote: Option<u8> = None;
-    let mut escaped = false;
 
     while i < bytes.len() {
         let b = bytes[i];
         if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-                i += 1;
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
                 continue;
             }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-            }
+            in_quote = None;
             i += 1;
             continue;
         }
@@ -1557,6 +1637,16 @@ fn collect_sql_identifier_columns(
         match bytes[i] {
             b'\'' => {
                 i = skip_sql_single_quote(bytes, i + 1);
+                continue;
+            }
+            b'(' => {
+                if let Some((nested, end)) = balanced_paren_segment(segment, i)
+                    && classify_sql_kind(&normalize_whitespace(nested.trim())).is_some()
+                {
+                    i = end;
+                    continue;
+                }
+                i += 1;
                 continue;
             }
             b'"' | b'`' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => {}
@@ -1736,24 +1826,15 @@ fn split_sql_top_level(input: &str, delimiter: char) -> Vec<&str> {
     let mut i = 0usize;
     let mut depth = 0i32;
     let mut in_quote: Option<u8> = None;
-    let mut escaped = false;
 
     while i < bytes.len() {
         let b = bytes[i];
         if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-                i += 1;
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
                 continue;
             }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-            }
+            in_quote = None;
             i += 1;
             continue;
         }
@@ -1794,24 +1875,15 @@ fn find_keyword_top_level_from(sql: &str, keyword: &str, min_idx: usize) -> Opti
     let mut i = 0usize;
     let mut depth = 0i32;
     let mut in_quote: Option<u8> = None;
-    let mut escaped = false;
 
     while i < bytes.len() {
         let b = bytes[i];
         if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-                i += 1;
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
                 continue;
             }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-            }
+            in_quote = None;
             i += 1;
             continue;
         }
@@ -2032,6 +2104,46 @@ mod tests {
             .find(|(_, table, _)| table == "orders")
             .expect("orders reference");
         assert_eq!(orders.2, vec!["total", "user_id", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_nested_subquery_table() {
+        let sql = "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > $1)";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|(_, table, _)| table == "users")
+            .expect("users reference");
+        assert_eq!(users.2, vec!["id"]);
+
+        let orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.2, vec!["user_id", "total"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_derived_table_and_nested_subquery_sources() {
+        let sql = "SELECT s.id FROM (SELECT id FROM users WHERE status = 'active') s WHERE s.id IN (SELECT user_id FROM orders WHERE total > $1)";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|(_, table, _)| table == "users")
+            .expect("users reference");
+        assert_eq!(users.2, vec!["id", "status"]);
+
+        let orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.2, vec!["user_id", "total"]);
     }
 
     #[test]

@@ -601,4 +601,47 @@ mod tests {
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
     }
+
+    #[test]
+    fn test_dropped_raw_sql_nested_subquery_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("total".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_nested_subquery_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                SELECT id
+                FROM users
+                WHERE id IN (
+                    SELECT user_id FROM orders WHERE total > $1
+                )
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
 }
