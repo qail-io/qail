@@ -61,6 +61,11 @@ fn parse_sql_references_with_cte_aliases(
             inherited_cte_aliases,
             local_cte_aliases,
         ));
+        refs.extend(parse_sql_set_operation_references(
+            &normalized,
+            inherited_cte_aliases,
+            local_cte_aliases,
+        ));
         dedupe_sql_references(&mut refs);
         return refs;
     }
@@ -79,6 +84,12 @@ fn parse_sql_references_with_cte_aliases(
             refs.push((kind, table, columns));
         }
         refs.extend(parse_sql_auxiliary_write_references(
+            &normalized,
+            kind,
+            inherited_cte_aliases,
+            local_cte_aliases,
+        ));
+        refs.extend(parse_sql_insert_select_references(
             &normalized,
             kind,
             inherited_cte_aliases,
@@ -525,6 +536,85 @@ fn parse_sql_delete_using_references(
         .zip(columns_by_source)
         .map(|(source, columns)| (SqlStmtKind::Delete, source.table, columns))
         .collect()
+}
+
+fn parse_sql_insert_select_references(
+    sql: &str,
+    kind: SqlStmtKind,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    if kind != SqlStmtKind::Insert {
+        return Vec::new();
+    }
+
+    let Some(insert_idx) = find_keyword_top_level_from(sql, "INSERT", 0) else {
+        return Vec::new();
+    };
+    let Some(into_idx) = find_keyword_top_level_from(sql, "INTO", insert_idx + "INSERT".len())
+    else {
+        return Vec::new();
+    };
+    let Some((_, table_end)) = parse_sql_object_name_with_end(sql, into_idx + "INTO".len()) else {
+        return Vec::new();
+    };
+    let Some(select_idx) = find_keyword_top_level_from(sql, "SELECT", table_end) else {
+        return Vec::new();
+    };
+    let select_end = top_level_sql_clause_start(sql, select_idx + "SELECT".len(), &["RETURNING"])
+        .unwrap_or(sql.len());
+    let Some(select_sql) = sql.get(select_idx..select_end).map(str::trim) else {
+        return Vec::new();
+    };
+    if classify_sql_kind(select_sql) != Some(SqlStmtKind::Select) {
+        return Vec::new();
+    }
+
+    let mut aliases = inherited_cte_aliases.to_vec();
+    aliases.extend(local_cte_aliases.iter().cloned());
+    parse_sql_references_with_cte_aliases(select_sql, &aliases)
+}
+
+fn parse_sql_set_operation_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let mut refs = Vec::new();
+    let mut cursor = 0usize;
+    let mut aliases = inherited_cte_aliases.to_vec();
+    aliases.extend(local_cte_aliases.iter().cloned());
+
+    while let Some((set_idx, keyword)) = next_sql_set_operator(sql, cursor) {
+        let mut operand_start = skip_sql_ws(sql.as_bytes(), set_idx + keyword.len());
+        for modifier in ["ALL", "DISTINCT"] {
+            if starts_with_keyword_at(sql, operand_start, modifier) {
+                operand_start = skip_sql_ws(sql.as_bytes(), operand_start + modifier.len());
+                break;
+            }
+        }
+
+        let operand_end = next_sql_set_operator(sql, operand_start)
+            .map(|(idx, _)| idx)
+            .unwrap_or(sql.len());
+        if let Some(operand) = sql.get(operand_start..operand_end).map(str::trim)
+            && classify_sql_kind(operand) == Some(SqlStmtKind::Select)
+        {
+            refs.extend(parse_sql_references_with_cte_aliases(operand, &aliases));
+        }
+        cursor = operand_end;
+    }
+
+    refs
+}
+
+fn next_sql_set_operator(sql: &str, min_idx: usize) -> Option<(usize, &'static str)> {
+    ["UNION", "INTERSECT", "EXCEPT"]
+        .into_iter()
+        .filter_map(|keyword| {
+            find_keyword_top_level_from(sql, keyword, min_idx).map(|idx| (idx, keyword))
+        })
+        .min_by_key(|(idx, _)| *idx)
 }
 
 fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> {
@@ -1028,6 +1118,9 @@ fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
     if let Some(conflict) = top_level_sql_clause_segment(sql, "ON CONFLICT", table_end) {
         collect_sql_identifier_columns(conflict, &mut cols, &mut seen);
     }
+    if let Some(returning) = top_level_sql_clause_segment(sql, "RETURNING", table_end) {
+        collect_sql_identifier_columns(returning, &mut cols, &mut seen);
+    }
     cols
 }
 
@@ -1526,6 +1619,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_insert_returning_columns() {
+        let sql = "INSERT INTO users (email) VALUES ($1) RETURNING id, created_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "id", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_insert_select_source_table() {
+        let sql = "INSERT INTO archived_orders (id, total) SELECT id, total FROM orders WHERE status = $1";
+        let refs = parse_sql_references(sql);
+
+        let orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.2, vec!["id", "total", "status"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_update_columns() {
         let sql =
             "UPDATE users SET email = $1, status = 'active' WHERE id = $2 RETURNING updated_at";
@@ -1628,6 +1742,18 @@ mod tests {
             .find(|(_, table, _)| table == "orders")
             .expect("orders reference");
         assert_eq!(orders.2, vec!["total", "user_id", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_set_operation_rhs_table() {
+        let sql = "SELECT id FROM users WHERE active = true UNION ALL SELECT user_id FROM orders WHERE status = $1";
+        let refs = parse_sql_references(sql);
+
+        let orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.2, vec!["user_id", "status"]);
     }
 
     #[test]
