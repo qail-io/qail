@@ -3493,9 +3493,35 @@ fn extract_columns_with_bindings(
             // Skip computed alias names — these are not schema columns
             !aliases.contains(col.as_str())
         })
+        .filter(|col| !is_sql_pseudo_identifier(col))
         .collect();
 
     columns
+}
+
+fn is_sql_pseudo_identifier(col: &str) -> bool {
+    if col.contains('.') {
+        return false;
+    }
+    let normalized = col
+        .trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .to_ascii_uppercase();
+    matches!(
+        normalized.as_str(),
+        "CURRENT_DATE"
+            | "CURRENT_TIME"
+            | "CURRENT_TIMESTAMP"
+            | "LOCALTIME"
+            | "LOCALTIMESTAMP"
+            | "CURRENT_USER"
+            | "SESSION_USER"
+            | "CURRENT_ROLE"
+            | "CURRENT_CATALOG"
+            | "CURRENT_SCHEMA"
+            | "USER"
+    )
 }
 
 fn extract_condition_columns_with_bindings(
