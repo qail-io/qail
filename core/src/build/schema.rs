@@ -658,9 +658,48 @@ impl Schema {
         Ok(schema)
     }
 
+    /// Resolve a table/view reference against the build schema.
+    ///
+    /// Exact names win. As a Postgres convenience, bare names and
+    /// `public.<name>` are treated as aliases only when the exact name is not
+    /// present. Non-public schema-qualified names stay distinct.
+    pub fn resolve_table_name(&self, name: &str) -> Option<&str> {
+        if let Some((key, _)) = self.tables.get_key_value(name) {
+            return Some(key.as_str());
+        }
+        if let Some(view) = self.views.get(name) {
+            return Some(view.as_str());
+        }
+
+        if let Some(bare) = name.strip_prefix("public.") {
+            if bare.is_empty() {
+                return None;
+            }
+            if let Some((key, _)) = self.tables.get_key_value(bare) {
+                return Some(key.as_str());
+            }
+            if let Some(view) = self.views.get(bare) {
+                return Some(view.as_str());
+            }
+            return None;
+        }
+
+        if !name.contains('.') {
+            let qualified = format!("public.{name}");
+            if let Some((key, _)) = self.tables.get_key_value(&qualified) {
+                return Some(key.as_str());
+            }
+            if let Some(view) = self.views.get(&qualified) {
+                return Some(view.as_str());
+            }
+        }
+
+        None
+    }
+
     /// Check if table exists
     pub fn has_table(&self, name: &str) -> bool {
-        self.tables.contains_key(name) || self.views.contains(name)
+        self.resolve_table_name(name).is_some()
     }
 
     /// Get all table names that have RLS enabled
@@ -674,12 +713,13 @@ impl Schema {
 
     /// Check if a specific table has RLS enabled
     pub fn is_rls_table(&self, name: &str) -> bool {
-        self.tables.get(name).is_some_and(|t| t.rls_enabled)
+        self.table(name).is_some_and(|t| t.rls_enabled)
     }
 
     /// Get table schema
     pub fn table(&self, name: &str) -> Option<&TableSchema> {
-        self.tables.get(name)
+        let resolved = self.resolve_table_name(name)?;
+        self.tables.get(resolved)
     }
 
     /// Merge pending migrations into the schema

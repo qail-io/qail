@@ -627,6 +627,29 @@ table audit_log {
     }
 
     #[test]
+    fn rls_coverage_counts_public_qualified_source_tables() {
+        let schema = qail_core::build::Schema::parse(
+            r#"
+table orders rls {
+  id uuid primary_key
+}
+"#,
+        )
+        .expect("schema should parse");
+        let usages = vec![usage("orders", true), usage("public.orders", false)];
+
+        let stats = rls_coverage_stats(&schema, &usages).expect("orders is RLS-enabled");
+        assert_eq!(
+            stats,
+            RlsCoverageStats {
+                scoped: 1,
+                total_on_rls_tables: 2,
+                percent: 50,
+            }
+        );
+    }
+
+    #[test]
     fn check_schema_fails_when_source_query_has_schema_error() {
         let dir = unique_temp_dir("source_schema_error");
         let src_dir = dir.join("src");

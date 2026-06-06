@@ -230,10 +230,23 @@ impl Validator {
         // Qualified names like "table.column" — validate against the referenced table
         if column.contains('.') {
             let parts: Vec<&str> = column.split('.').collect();
+            if parts.len() == 3 && parts[0] == "public" {
+                let public_table = format!("{}.{}", parts[0], parts[1]);
+                if self.tables.contains(&public_table) {
+                    return self.validate_column(&public_table, parts[2]);
+                }
+                if self.tables.contains(&parts[1].to_string()) {
+                    return self.validate_column(parts[1], parts[2]);
+                }
+            }
             if parts.len() == 2 {
                 // Only validate if the referenced table is known to the validator
                 if self.tables.contains(&parts[0].to_string()) {
                     return self.validate_column(parts[0], parts[1]);
+                }
+                let public_table = format!("public.{}", parts[0]);
+                if self.tables.contains(&public_table) {
+                    return self.validate_column(&public_table, parts[1]);
                 }
             }
             // Unknown table prefix or complex dotted path — allow (might be JSON)

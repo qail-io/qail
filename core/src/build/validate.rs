@@ -142,7 +142,11 @@ pub fn validate_against_schema_diagnostics(
         }
 
         // ── Validate canonical query IR ───────────────────────────────
-        match validator.validate_command(&query.cmd) {
+        let mut cmd = query.cmd.clone();
+        if let Some(resolved_table) = schema.resolve_table_name(&query.table) {
+            cmd.table = resolved_table.to_string();
+        }
+        match validator.validate_command(&cmd) {
             Ok(()) => {}
             Err(validation_errors) => {
                 for e in validation_errors {
@@ -154,7 +158,10 @@ pub fn validate_against_schema_diagnostics(
             }
         }
         for related_table in &query.related_tables {
-            if let Err(e) = validator.validate_table(related_table) {
+            let related_table_for_validation = schema
+                .resolve_table_name(related_table)
+                .unwrap_or(related_table);
+            if let Err(e) = validator.validate_table(related_table_for_validation) {
                 push_unique(ValidationDiagnostic::schema_error(format!(
                     "{}:{}: {}",
                     query.file, query.line, e

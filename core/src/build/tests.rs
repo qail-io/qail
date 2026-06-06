@@ -1599,6 +1599,133 @@ fn demo() {
 }
 
 #[test]
+fn test_schema_validation_accepts_public_qualified_source_table_alias() {
+    let schema = Schema::parse(
+        r#"
+table orders rls {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("public.orders")
+        .column("public.orders.id")
+        .with_rls(&ctx);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics.is_empty(),
+        "public-qualified source tables should resolve to bare public schema tables: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_public_qualified_column_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("public.orders").column("public.orders.statuz");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Column 'statuz' not found in table 'orders'")),
+        "public-qualified column typos should be validated against the public table: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_accepts_bare_source_table_for_public_qualified_schema() {
+    let schema = Schema::parse(
+        r#"
+table public.orders rls {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("orders").column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, ValidationDiagnosticKind::RlsWarning)),
+        "bare source tables should inherit RLS metadata from public-qualified schema tables: {:?}",
+        diagnostics
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, ValidationDiagnosticKind::SchemaError)),
+        "bare source tables should not fail against public-qualified schema tables: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_catches_bare_column_typos_for_public_qualified_schema() {
+    let schema = Schema::parse(
+        r#"
+table public.orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::get("orders").column("orders.statuz");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Column 'statuz' not found in table 'public.orders'")),
+        "bare column prefixes should validate against public-qualified schema tables: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_schema_validation_catches_merge_action_column_typos() {
     let schema = Schema::parse(
         r#"
