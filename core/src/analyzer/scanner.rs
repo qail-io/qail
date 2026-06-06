@@ -196,9 +196,8 @@ impl CodebaseScanner {
 
         if looks_like_qail_query(candidate)
             && let Ok(cmd) = parse(candidate)
-            && let Some(qail_ref) = command_to_reference(path, line_number, &cmd)
         {
-            refs.push(qail_ref);
+            refs.extend(command_to_references(path, line_number, &cmd));
         }
 
         let normalized = normalize_whitespace(candidate);
@@ -278,6 +277,209 @@ fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<C
         query_type: QueryType::Qail,
         snippet,
     })
+}
+
+fn command_to_references(path: &Path, line: usize, cmd: &crate::Qail) -> Vec<CodeReference> {
+    let mut refs = Vec::new();
+    if let Some(reference) = command_to_reference(path, line, cmd) {
+        refs.push(reference);
+    }
+    collect_subquery_references(path, line, cmd, &mut refs);
+    refs
+}
+
+fn collect_subquery_references(
+    path: &Path,
+    line: usize,
+    cmd: &crate::Qail,
+    refs: &mut Vec<CodeReference>,
+) {
+    for expr in &cmd.columns {
+        collect_expr_subquery_references(path, line, expr, refs);
+    }
+    for cage in &cmd.cages {
+        collect_cage_subquery_references(path, line, cage, refs);
+    }
+    for join in &cmd.joins {
+        if let Some(conditions) = &join.on {
+            collect_conditions_subquery_references(path, line, conditions, refs);
+        }
+    }
+    collect_conditions_subquery_references(path, line, &cmd.having, refs);
+    for expr in &cmd.distinct_on {
+        collect_expr_subquery_references(path, line, expr, refs);
+    }
+    if let Some(returning) = &cmd.returning {
+        for expr in returning {
+            collect_expr_subquery_references(path, line, expr, refs);
+        }
+    }
+    if let Some(on_conflict) = &cmd.on_conflict
+        && let ConflictAction::DoUpdate { assignments } = &on_conflict.action
+    {
+        for (_, expr) in assignments {
+            collect_expr_subquery_references(path, line, expr, refs);
+        }
+    }
+    if let Some(merge) = &cmd.merge {
+        match &merge.source {
+            crate::ast::MergeSource::Query { query, .. } => {
+                refs.extend(command_to_references(path, line, query));
+            }
+            crate::ast::MergeSource::Table { .. } => {}
+        }
+        collect_conditions_subquery_references(path, line, &merge.on, refs);
+        for clause in &merge.clauses {
+            collect_conditions_subquery_references(path, line, &clause.condition, refs);
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (_, expr) in assignments {
+                        collect_expr_subquery_references(path, line, expr, refs);
+                    }
+                }
+                MergeAction::Insert { values, .. } => {
+                    for expr in values {
+                        collect_expr_subquery_references(path, line, expr, refs);
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
+        }
+    }
+    if let Some(source_query) = &cmd.source_query {
+        refs.extend(command_to_references(path, line, source_query));
+    }
+    for (_, set_query) in &cmd.set_ops {
+        refs.extend(command_to_references(path, line, set_query));
+    }
+    for cte in &cmd.ctes {
+        refs.extend(command_to_references(path, line, &cte.base_query));
+        if let Some(recursive_query) = &cte.recursive_query {
+            refs.extend(command_to_references(path, line, recursive_query));
+        }
+    }
+}
+
+fn collect_expr_subquery_references(
+    path: &Path,
+    line: usize,
+    expr: &Expr,
+    refs: &mut Vec<CodeReference>,
+) {
+    match expr {
+        Expr::Aggregate { filter, .. } => {
+            if let Some(conditions) = filter {
+                collect_conditions_subquery_references(path, line, conditions, refs);
+            }
+        }
+        Expr::Cast { expr, .. }
+        | Expr::Mod { col: expr, .. }
+        | Expr::Collate { expr, .. }
+        | Expr::FieldAccess { expr, .. } => {
+            collect_expr_subquery_references(path, line, expr, refs)
+        }
+        Expr::Subscript { expr, index, .. } => {
+            collect_expr_subquery_references(path, line, expr, refs);
+            collect_expr_subquery_references(path, line, index, refs);
+        }
+        Expr::FunctionCall { args, .. } | Expr::ArrayConstructor { elements: args, .. } => {
+            for arg in args {
+                collect_expr_subquery_references(path, line, arg, refs);
+            }
+        }
+        Expr::SpecialFunction { args, .. } => {
+            for (_, arg) in args {
+                collect_expr_subquery_references(path, line, arg, refs);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_subquery_references(path, line, left, refs);
+            collect_expr_subquery_references(path, line, right, refs);
+        }
+        Expr::Literal(value) => collect_value_subquery_references(path, line, value, refs),
+        Expr::RowConstructor { elements, .. } => {
+            for expr in elements {
+                collect_expr_subquery_references(path, line, expr, refs);
+            }
+        }
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            for (condition, value) in when_clauses {
+                collect_condition_subquery_references(path, line, condition, refs);
+                collect_expr_subquery_references(path, line, value, refs);
+            }
+            if let Some(value) = else_value {
+                collect_expr_subquery_references(path, line, value, refs);
+            }
+        }
+        Expr::Window { params, order, .. } => {
+            for param in params {
+                collect_expr_subquery_references(path, line, param, refs);
+            }
+            for cage in order {
+                collect_cage_subquery_references(path, line, cage, refs);
+            }
+        }
+        Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+            refs.extend(command_to_references(path, line, query));
+        }
+        Expr::Star
+        | Expr::Named(_)
+        | Expr::Aliased { .. }
+        | Expr::JsonAccess { .. }
+        | Expr::Def { .. } => {}
+    }
+}
+
+fn collect_cage_subquery_references(
+    path: &Path,
+    line: usize,
+    cage: &Cage,
+    refs: &mut Vec<CodeReference>,
+) {
+    collect_conditions_subquery_references(path, line, &cage.conditions, refs);
+}
+
+fn collect_conditions_subquery_references(
+    path: &Path,
+    line: usize,
+    conditions: &[Condition],
+    refs: &mut Vec<CodeReference>,
+) {
+    for condition in conditions {
+        collect_condition_subquery_references(path, line, condition, refs);
+    }
+}
+
+fn collect_condition_subquery_references(
+    path: &Path,
+    line: usize,
+    condition: &Condition,
+    refs: &mut Vec<CodeReference>,
+) {
+    collect_expr_subquery_references(path, line, &condition.left, refs);
+    collect_value_subquery_references(path, line, &condition.value, refs);
+}
+
+fn collect_value_subquery_references(
+    path: &Path,
+    line: usize,
+    value: &Value,
+    refs: &mut Vec<CodeReference>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_value_subquery_references(path, line, value, refs);
+            }
+        }
+        Value::Subquery(query) => refs.extend(command_to_references(path, line, query)),
+        Value::Expr(expr) => collect_expr_subquery_references(path, line, expr, refs),
+        _ => {}
+    }
 }
 
 fn collect_reference_columns(cmd: &crate::Qail) -> Vec<String> {
@@ -1849,6 +2051,28 @@ mod tests {
 
         assert_eq!(reference.table, "users");
         assert_eq!(reference.columns, vec!["id", "email", "created_at"]);
+    }
+
+    #[test]
+    fn test_command_references_track_native_qail_subqueries() {
+        let cmd =
+            parse("get users fields id where exists (get orders fields user_id where total > $1)")
+                .expect("get parse");
+        let refs = command_to_references(Path::new("src/users.ts"), 1, &cmd);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|reference| reference.table == "users")
+            .expect("users reference");
+        assert_eq!(users.columns, vec!["id"]);
+
+        let orders = refs
+            .iter()
+            .find(|reference| reference.table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.columns, vec!["user_id", "total"]);
     }
 
     #[test]
