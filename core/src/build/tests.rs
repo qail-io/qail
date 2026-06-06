@@ -2648,6 +2648,41 @@ fn demo() {
 }
 
 #[test]
+fn test_cte_source_chain_with_same_name_as_alias_validates_table() {
+    let schema = Schema::parse(
+        r#"
+table results {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _cte = Qail::get("agg").column("id").to_cte("agg");
+    let _read = Qail::get("results").with_cte(_cte).column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        !usages[0].is_cte_ref,
+        "the CTE source query itself must still validate as a real table: {usages:?}"
+    );
+
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("Table 'agg' not found")),
+        "source table matching the CTE alias must not be skipped: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn test_cte_alias_with_bound_qail_source_is_detected() {
     let content = r#"
 fn demo() {

@@ -2631,6 +2631,19 @@ fn visible_cte_alias_names(aliases: &[CteAlias], offset: usize) -> HashSet<Strin
         .collect()
 }
 
+fn chain_defines_cte_alias(
+    chain: &ScannedQailChain,
+    table: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> bool {
+    scan_chain_method_calls(&chain.full_chain)
+        .into_iter()
+        .filter(|call| call.name == "to_cte")
+        .flat_map(|call| resolve_string_values(call.args, substitutions, bindings))
+        .any(|alias| alias == table)
+}
+
 fn find_enclosing_local_function(
     offset: usize,
     functions: &[LocalFunction],
@@ -3084,7 +3097,8 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 if !seen_variants.insert(variant_key) {
                     continue;
                 }
-                let is_cte_ref = visible_cte_names.contains(&table);
+                let is_cte_ref = visible_cte_names.contains(&table)
+                    && !chain_defines_cte_alias(chain, &table, substitutions, &literal_bindings);
                 usages.push(QailUsage {
                     file: file.to_string(),
                     line: chain.line,
