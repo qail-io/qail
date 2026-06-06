@@ -2561,17 +2561,29 @@ fn extract_columns_with_bindings(
             | "in_vals"
             | "is_null"
             | "is_not_null"
-            | "array_elem_contained_in_text"
-            | "set_value"
-            | "set_opt"
-            | "set_coalesce"
-            | "set_coalesce_opt" => {
+            | "array_elem_contained_in_text" => {
                 for col in resolve_string_values(
                     extract_first_argument(call.args),
                     substitutions,
                     bindings,
                 ) {
                     columns.push(col);
+                }
+            }
+            "set_value" | "set_opt" | "set_coalesce" | "set_coalesce_opt" => {
+                for col in resolve_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
+                    columns.push(col);
+                }
+                if let Some(value_arg) = split_top_level_args(call.args).get(1) {
+                    columns.extend(extract_value_reference_columns_with_bindings(
+                        value_arg,
+                        substitutions,
+                        bindings,
+                    ));
                 }
             }
             "group_by" | "distinct_on" => {
@@ -2758,6 +2770,8 @@ fn extract_condition_columns_inner(
                     bindings,
                 ));
             }
+        } else if call.name == "recent" {
+            columns.push("created_at".to_string());
         } else if is_condition_builder_name(call.name) {
             columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
         }
@@ -2791,6 +2805,8 @@ fn is_condition_builder_name(name: &str) -> bool {
             | "overlaps"
             | "similar_to"
             | "key_exists"
+            | "recent_col"
+            | "in_list"
     )
 }
 
@@ -2931,6 +2947,14 @@ fn extract_expression_columns_with_bindings(
     columns
 }
 
+fn extract_value_reference_columns_with_bindings(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    extract_expression_columns_with_bindings(expr, substitutions, bindings)
+}
+
 fn extract_expression_columns_inner(
     expr: &str,
     substitutions: Option<&ParamSubstitutions>,
@@ -2942,8 +2966,13 @@ fn extract_expression_columns_inner(
         return;
     }
     columns.extend(extract_expr_aliased_names(expr, substitutions, bindings));
+    extract_expression_method_columns_inner(expr, substitutions, bindings, depth, columns);
     for call in scan_rust_function_calls(expr) {
-        if is_expression_column_builder_name(call.name)
+        if call.name == "percentage" {
+            columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+            columns.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
+        } else if is_expression_string_arg_builder_name(call.name)
+            || is_expression_column_builder_name(call.name)
             || is_condition_builder_name(call.name)
             || call.path.ends_with("Expr::Named")
             || call.path.ends_with("Value::Column")
@@ -2952,6 +2981,87 @@ fn extract_expression_columns_inner(
         }
         extract_expression_columns_inner(call.args, substitutions, bindings, depth + 1, columns);
     }
+}
+
+fn extract_expression_method_columns_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    depth: usize,
+    columns: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    for call in scan_chain_method_calls(expr) {
+        match call.name {
+            "when" => {
+                let args = split_top_level_args(call.args);
+                if let Some(condition_arg) = args.first() {
+                    columns.extend(extract_condition_columns_with_bindings(
+                        condition_arg,
+                        substitutions,
+                        bindings,
+                    ));
+                }
+                if let Some(then_arg) = args.get(1) {
+                    extract_expr_argument_columns_inner(
+                        then_arg,
+                        substitutions,
+                        bindings,
+                        depth + 1,
+                        columns,
+                    );
+                }
+            }
+            "otherwise" => {
+                extract_expr_argument_columns_inner(
+                    call.args,
+                    substitutions,
+                    bindings,
+                    depth + 1,
+                    columns,
+                );
+            }
+            "filter" => {
+                columns.extend(extract_condition_columns_with_bindings(
+                    call.args,
+                    substitutions,
+                    bindings,
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn extract_expr_argument_columns_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    depth: usize,
+    columns: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    columns.extend(resolve_string_values(expr, substitutions, bindings));
+    extract_expression_columns_inner(expr, substitutions, bindings, depth + 1, columns);
+}
+
+fn is_expression_string_arg_builder_name(name: &str) -> bool {
+    matches!(
+        name,
+        "json"
+            | "json_path"
+            | "json_obj"
+            | "string_agg"
+            | "substring"
+            | "substring_for"
+            | "inc"
+            | "is_null_expr"
+            | "is_not_null_expr"
+    )
 }
 
 fn is_expression_column_builder_name(name: &str) -> bool {

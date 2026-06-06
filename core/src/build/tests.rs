@@ -1298,6 +1298,33 @@ fn test_extract_columns_order_by_expr_and_condition_helpers() {
 }
 
 #[test]
+fn test_extract_columns_ast_native_helper_builders() {
+    let line = r#"Qail::get("orders")
+        .column_expr(json("metadata", "priority").alias("priority"))
+        .column_expr(string_agg("customer_name", ", ").alias("customers"))
+        .column_expr(percentage("delivered_count", "sent_count").alias("delivery_rate"))
+        .filter_cond(recent_col("updated_at", "7 days"))
+        .filter_cond(in_list("status", ["paid", "refunded"]))
+        .set_value("total_quantity", inc("usage_daily_rollups.total_quantity", 1))"#;
+    let cols = extract_columns(line);
+
+    for expected in [
+        "metadata",
+        "customer_name",
+        "delivered_count",
+        "sent_count",
+        "updated_at",
+        "status",
+        "usage_daily_rollups.total_quantity",
+    ] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} from AST-native helper builders: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_returning() {
     let line = r#"Qail::add("orders").returning(["id", "status"])"#;
     let cols = extract_columns(line);
@@ -1611,6 +1638,93 @@ let q = Qail::get("orders")
         "order_by_expr column typo should be schema-validated: {:?}",
         diagnostics
     );
+}
+
+#[test]
+fn test_schema_validation_covers_ast_native_helper_builder_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  metadata JSONB
+  customer_name TEXT
+  delivered_count INT
+  sent_count INT
+  updated_at TIMESTAMP
+  status TEXT
+  total_quantity INT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .column_expr(json("metdata", "priority").alias("priority"))
+    .column_expr(string_agg("customer_nmae", ", ").alias("customers"))
+    .column_expr(percentage("delivred_count", "sent_cout").alias("delivery_rate"))
+    .filter_cond(recent_col("updted_at", "7 days"))
+    .filter_cond(in_list("statuz", ["paid", "refunded"]))
+    .set_value("total_quantity", inc("total_quanity", 1));
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in [
+        "metdata",
+        "customer_nmae",
+        "delivred_count",
+        "sent_cout",
+        "updted_at",
+        "statuz",
+        "total_quanity",
+    ] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "AST-native helper typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
+}
+
+#[test]
+fn test_schema_validation_covers_chained_expression_builder_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+  total INT
+  payment_status TEXT
+  amount INT
+  refunded_at TIMESTAMP
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .column_expr(
+        case_when(eq("status", "paid"), col("total"))
+            .when(eq("payment_statuz", "refunded"), col("amunt"))
+            .otherwise("refundd_at")
+            .alias("status_amount")
+    )
+    .column_expr(count().filter(vec![eq("paymnt_status", "paid")]).alias("paid_count"));
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in ["payment_statuz", "amunt", "refundd_at", "paymnt_status"] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "chained expression typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
 }
 
 #[test]
