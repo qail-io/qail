@@ -43,6 +43,8 @@ pub struct QailUsage {
 struct LiteralBindings {
     scalars: HashMap<String, Vec<String>>,
     arrays: HashMap<String, Vec<String>>,
+    typed_scalars: HashMap<String, Vec<String>>,
+    typed_arrays: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,7 +146,7 @@ fn collect_literal_binding_index(
         match stmt.kind {
             BindingStatementKind::Const => {
                 let bindings = collect_const_statement_bindings(stmt.text);
-                if bindings.scalars.is_empty() && bindings.arrays.is_empty() {
+                if literal_bindings_is_empty(&bindings) {
                     continue;
                 }
                 if find_enclosing_local_function(stmt.start, local_functions).is_some() {
@@ -159,7 +161,7 @@ fn collect_literal_binding_index(
             }
             BindingStatementKind::Let => {
                 let bindings = collect_let_statement_bindings(stmt.text);
-                if !bindings.scalars.is_empty() || !bindings.arrays.is_empty() {
+                if !literal_bindings_is_empty(&bindings) {
                     index.locals.push(ScopedLiteralBindings {
                         start: stmt.start,
                         end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
@@ -172,7 +174,16 @@ fn collect_literal_binding_index(
 
     dedupe_binding_values(&mut index.globals.scalars);
     dedupe_binding_values(&mut index.globals.arrays);
+    dedupe_binding_values(&mut index.globals.typed_scalars);
+    dedupe_binding_values(&mut index.globals.typed_arrays);
     index
+}
+
+fn literal_bindings_is_empty(bindings: &LiteralBindings) -> bool {
+    bindings.scalars.is_empty()
+        && bindings.arrays.is_empty()
+        && bindings.typed_scalars.is_empty()
+        && bindings.typed_arrays.is_empty()
 }
 
 fn literal_bindings_for_offset(
@@ -203,12 +214,16 @@ fn merge_shadowing_literal_bindings(target: &mut LiteralBindings, source: &Liter
         .scalars
         .keys()
         .chain(source.arrays.keys())
+        .chain(source.typed_scalars.keys())
+        .chain(source.typed_arrays.keys())
         .cloned()
         .collect::<HashSet<_>>();
 
     for name in shadowed_names {
         target.scalars.remove(&name);
         target.arrays.remove(&name);
+        target.typed_scalars.remove(&name);
+        target.typed_arrays.remove(&name);
     }
 
     merge_literal_bindings(target, source);
@@ -225,6 +240,20 @@ fn merge_literal_bindings(target: &mut LiteralBindings, source: &LiteralBindings
     for (name, values) in &source.arrays {
         target
             .arrays
+            .entry(name.clone())
+            .or_default()
+            .extend(values.iter().cloned());
+    }
+    for (name, values) in &source.typed_scalars {
+        target
+            .typed_scalars
+            .entry(name.clone())
+            .or_default()
+            .extend(values.iter().cloned());
+    }
+    for (name, values) in &source.typed_arrays {
+        target
+            .typed_arrays
             .entry(name.clone())
             .or_default()
             .extend(values.iter().cloned());
@@ -328,7 +357,16 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
             }
             let values = extract_array_string_literals_from_expr(rhs);
             if !values.is_empty() {
-                bindings.arrays.insert(var, values);
+                bindings.arrays.insert(var.clone(), values);
+            }
+            if let Some(items) = extract_typed_column_collection_items(rhs) {
+                bindings.typed_arrays.insert(var.clone(), items);
+            } else if direct_typed_column_expr_has_column(rhs) {
+                bindings
+                    .typed_scalars
+                    .entry(var.clone())
+                    .or_default()
+                    .push(rhs.to_string());
             }
         }
 
@@ -343,6 +381,8 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
 
     dedupe_binding_values(&mut bindings.scalars);
     dedupe_binding_values(&mut bindings.arrays);
+    dedupe_binding_values(&mut bindings.typed_scalars);
+    dedupe_binding_values(&mut bindings.typed_arrays);
     bindings
 }
 
@@ -359,11 +399,23 @@ fn collect_const_statement_bindings(stmt: &str) -> LiteralBindings {
 
         let values = extract_array_string_literals_from_expr(rhs);
         if !values.is_empty() {
-            bindings.arrays.insert(name, values);
+            bindings.arrays.insert(name.clone(), values);
+        }
+
+        if let Some(items) = extract_typed_column_collection_items(rhs) {
+            bindings.typed_arrays.insert(name.clone(), items);
+        } else if direct_typed_column_expr_has_column(rhs) {
+            bindings
+                .typed_scalars
+                .entry(name.clone())
+                .or_default()
+                .push(rhs.to_string());
         }
     }
     dedupe_binding_values(&mut bindings.scalars);
     dedupe_binding_values(&mut bindings.arrays);
+    dedupe_binding_values(&mut bindings.typed_scalars);
+    dedupe_binding_values(&mut bindings.typed_arrays);
     bindings
 }
 
@@ -2111,13 +2163,15 @@ fn resolve_string_values_inner(
     let Some(key) = binding_lookup_key(expr) else {
         return;
     };
-    if !visited.insert(format!("s:{key}")) {
+    let marker = format!("s:{key}");
+    if !visited.insert(marker.clone()) {
         return;
     }
 
     if let Some(substitutions) = substitutions
         && let Some(arg_expr) = substitutions.values.get(&key)
     {
+        visited.remove(&marker);
         resolve_string_values_inner(arg_expr, None, &substitutions.bindings, visited, out);
         return;
     }
@@ -2154,13 +2208,15 @@ fn resolve_array_string_values_inner(
     let Some(key) = binding_lookup_key(expr) else {
         return;
     };
-    if !visited.insert(format!("a:{key}")) {
+    let marker = format!("a:{key}");
+    if !visited.insert(marker.clone()) {
         return;
     }
 
     if let Some(substitutions) = substitutions
         && let Some(arg_expr) = substitutions.values.get(&key)
     {
+        visited.remove(&marker);
         resolve_array_string_values_inner(arg_expr, None, &substitutions.bindings, visited, out);
         return;
     }
@@ -3566,7 +3622,7 @@ fn extract_typed_column_arg(
 ) -> Vec<String> {
     split_top_level_args(args)
         .get(index)
-        .map(|arg| extract_typed_column_expr(arg, substitutions, bindings))
+        .map(|arg| resolve_typed_column_values(arg, substitutions, bindings))
         .unwrap_or_default()
 }
 
@@ -3581,23 +3637,101 @@ fn extract_typed_column_collection_arg(
         return Vec::new();
     };
     let Some(inner) = extract_direct_expr_collection_inner(arg) else {
-        return extract_typed_column_expr(arg, substitutions, bindings);
+        return resolve_typed_column_values(arg, substitutions, bindings);
     };
 
     let mut columns = Vec::new();
     for expr in split_top_level_args(inner) {
-        columns.extend(extract_typed_column_expr(expr, substitutions, bindings));
+        columns.extend(resolve_typed_column_values(expr, substitutions, bindings));
     }
     dedupe_values(&mut columns);
     columns
 }
 
-fn extract_typed_column_expr(
+fn resolve_typed_column_values(
     expr: &str,
     substitutions: Option<&ParamSubstitutions>,
     bindings: &LiteralBindings,
 ) -> Vec<String> {
-    let mut columns = resolve_string_values(expr, substitutions, bindings);
+    let mut columns = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_typed_column_values_inner(expr, substitutions, bindings, &mut visited, &mut columns);
+    dedupe_values(&mut columns);
+    columns
+}
+
+fn resolve_typed_column_values_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    visited: &mut HashSet<String>,
+    columns: &mut Vec<String>,
+) {
+    let trimmed = expr.trim();
+
+    if let Some(inner) = extract_direct_expr_collection_inner(trimmed) {
+        for item in split_top_level_args(inner) {
+            resolve_typed_column_values_inner(item, substitutions, bindings, visited, columns);
+        }
+        return;
+    }
+
+    let direct = extract_direct_typed_column_expr(trimmed, substitutions, bindings);
+    if !direct.is_empty() {
+        columns.extend(direct);
+        return;
+    }
+
+    if !is_simple_binding_reference(trimmed) {
+        return;
+    }
+    let Some(key) = binding_lookup_key(trimmed) else {
+        return;
+    };
+    let marker = format!("t:{key}");
+    if !visited.insert(marker.clone()) {
+        return;
+    }
+
+    if let Some(substitutions) = substitutions
+        && let Some(arg_expr) = substitutions.values.get(&key)
+    {
+        visited.remove(&marker);
+        resolve_typed_column_values_inner(
+            arg_expr,
+            None,
+            &substitutions.bindings,
+            visited,
+            columns,
+        );
+        return;
+    }
+
+    if let Some(exprs) = bindings.typed_scalars.get(&key) {
+        for expr in exprs {
+            resolve_typed_column_values_inner(expr, None, bindings, visited, columns);
+        }
+    }
+    if let Some(exprs) = bindings.typed_arrays.get(&key) {
+        for expr in exprs {
+            resolve_typed_column_values_inner(expr, None, bindings, visited, columns);
+        }
+    }
+}
+
+fn direct_typed_column_expr_has_column(expr: &str) -> bool {
+    !extract_direct_typed_column_expr(expr, None, &LiteralBindings::default()).is_empty()
+}
+
+fn extract_direct_typed_column_expr(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut columns = Vec::new();
+    if let Some(column) = extract_typed_column_path_expr(expr) {
+        columns.push(column);
+    }
     for call in scan_rust_function_calls(expr) {
         if call.path.ends_with("TypedColumn::new") {
             columns.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
@@ -3610,6 +3744,81 @@ fn extract_typed_column_expr(
     }
     dedupe_values(&mut columns);
     columns
+}
+
+fn extract_typed_column_collection_items(expr: &str) -> Option<Vec<String>> {
+    let inner = extract_direct_expr_collection_inner(expr)?;
+    let items = split_top_level_args(inner)
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return None;
+    }
+
+    if items
+        .iter()
+        .any(|item| direct_typed_column_expr_has_column(item) || is_simple_binding_reference(item))
+    {
+        Some(items)
+    } else {
+        None
+    }
+}
+
+fn extract_typed_column_path_expr(expr: &str) -> Option<String> {
+    let mut trimmed = expr.trim();
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
+    while trimmed.starts_with('(') && trimmed.ends_with(')') {
+        let close = find_matching_delim(trimmed, 0, b'(', b')')?;
+        if close + 1 != trimmed.len() {
+            break;
+        }
+        trimmed = trimmed.get(1..close)?.trim();
+    }
+
+    if trimmed.contains(|ch: char| ch.is_whitespace())
+        || trimmed.contains(['(', ')', '[', ']', '{', '}', ',', '.'])
+    {
+        return None;
+    }
+    if !trimmed.contains("::") {
+        return None;
+    }
+
+    let raw_segment = trimmed.rsplit("::").next()?.trim();
+    let segment = raw_segment.strip_prefix("r#").unwrap_or(raw_segment);
+    if segment == "table" {
+        return None;
+    }
+    if segment.is_empty() || !segment.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        None
+    } else {
+        Some(segment.to_string())
+    }
+}
+
+fn is_simple_binding_reference(expr: &str) -> bool {
+    let mut trimmed = expr.trim();
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
+    while trimmed.starts_with('(') && trimmed.ends_with(')') {
+        let Some(close) = find_matching_delim(trimmed, 0, b'(', b')') else {
+            return false;
+        };
+        if close + 1 != trimmed.len() {
+            break;
+        }
+        trimmed = trimmed.get(1..close).unwrap_or_default().trim();
+    }
+
+    !trimmed.contains("::")
+        && !trimmed.is_empty()
+        && trimmed.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 fn extract_related_tables_with_bindings(

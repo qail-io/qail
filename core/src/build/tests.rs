@@ -1070,6 +1070,28 @@ async fn demo() {
 }
 
 #[test]
+fn test_scan_file_resolves_same_named_helper_binding_arguments() {
+    let content = r#"
+async fn fetch_rows(table: &str, columns: &[&str]) {
+    let _cmd = Qail::get(table).columns(columns);
+}
+
+async fn demo() {
+    let table = "orders";
+    let columns = ["id", "status"];
+    fetch_rows(table, columns).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1, "helper should resolve: {usages:?}");
+    assert_eq!(usages[0].table, "orders");
+    assert!(usages[0].columns.contains(&"id".to_string()));
+    assert!(usages[0].columns.contains(&"status".to_string()));
+}
+
+#[test]
 fn test_scan_file_resolves_multiline_helper_calls_like_charters_admin() {
     let content = r#"
 const ALIEUS_COLUMNS: &[&str] = &["id", "name"];
@@ -1213,6 +1235,73 @@ let q = Qail::typed(orders::table)
     assert!(
         usages[0].has_explicit_tenant_scope,
         "typed tenant_id filter should count as explicit tenant scope: {:?}",
+        usages[0]
+    );
+}
+
+#[test]
+fn test_scan_typed_api_columns_from_local_bindings() {
+    let content = r#"
+let status = orders::status();
+let tenant_scope = orders::tenant_id();
+let const_style = orders::currency;
+let raw_ident = orders::r#type;
+let columns = [orders::id(), status, tenant_scope, const_style, raw_ident];
+let q = Qail::typed(orders::table)
+    .typed_column(orders::created_at)
+    .typed_columns(columns);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].table, "orders");
+    for expected in [
+        "created_at",
+        "id",
+        "status",
+        "tenant_id",
+        "currency",
+        "type",
+    ] {
+        assert!(
+            usages[0].columns.contains(&expected.to_string()),
+            "typed API binding column {expected} should be scanned: {:?}",
+            usages[0]
+        );
+    }
+}
+
+#[test]
+fn test_scan_typed_api_columns_from_helper_substitution() {
+    let content = r#"
+fn list_orders(cols: impl IntoIterator, scope: TypedColumn<uuid::Uuid>) {
+    let q = Qail::typed(orders::table)
+        .typed_columns(cols)
+        .typed_eq(scope, tenant_id);
+}
+
+fn handler() {
+    let status = orders::status;
+    let cols = [orders::id(), status];
+    list_orders(cols, orders::tenant_id());
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].table, "orders");
+    for expected in ["id", "status", "tenant_id"] {
+        assert!(
+            usages[0].columns.contains(&expected.to_string()),
+            "typed helper column {expected} should be scanned: {:?}",
+            usages[0]
+        );
+    }
+    assert!(
+        usages[0].has_explicit_tenant_scope,
+        "typed helper tenant scope should be recognized: {:?}",
         usages[0]
     );
 }
