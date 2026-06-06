@@ -582,25 +582,47 @@ fn extract_first_string_literal(input: &str) -> Option<String> {
 fn extract_bind_args(chain: &str) -> Vec<String> {
     let bytes = chain.as_bytes();
     let mut out = Vec::new();
-    let mut cursor = 0usize;
+    let mut i = 0usize;
 
-    while let Some(pos) = chain.get(cursor..).and_then(|s| s.find(".bind")) {
-        let abs = cursor + pos;
-        let after_name = abs + ".bind".len();
+    while i < bytes.len() {
+        if starts_with(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if !starts_with(bytes, i, b".bind") {
+            i += 1;
+            continue;
+        }
+
+        let after_name = i + ".bind".len();
 
         if bytes.get(after_name).is_some_and(|b| is_ident_byte(*b)) {
-            cursor = after_name;
+            i = after_name;
             continue;
         }
 
         let open_idx = skip_ws(bytes, after_name);
         if bytes.get(open_idx).copied() != Some(b'(') {
-            cursor = after_name;
+            i = after_name;
             continue;
         }
 
         let Some(close_idx) = find_matching_delim(chain, open_idx, b'(', b')') else {
-            cursor = open_idx + 1;
+            i = open_idx + 1;
             continue;
         };
 
@@ -611,7 +633,7 @@ fn extract_bind_args(chain: &str) -> Vec<String> {
             }
         }
 
-        cursor = close_idx + 1;
+        i = close_idx + 1;
     }
 
     out
@@ -870,6 +892,25 @@ mod tests {
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].binds.len(), 2);
+    }
+
+    #[test]
+    fn ignores_bind_tokens_inside_comments_and_literals() {
+        let code = r#"
+            async fn test() {
+                let rows = query("SELECT * FROM users WHERE id = $1")
+                    // .bind(comment_id)
+                    .bind(user_id)
+                    .bind_note(".bind(fake_id)")
+                    .fetch_all(&pool)
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].binds, vec!["user_id"]);
     }
 
     #[test]

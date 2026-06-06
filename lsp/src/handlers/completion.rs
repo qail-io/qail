@@ -137,7 +137,113 @@ fn rust_builder_context(content: &str, position: Position) -> bool {
 
     content
         .get(stmt_start..offset)
-        .is_some_and(|context| context.contains("Qail::"))
+        .is_some_and(rust_context_contains_qail_constructor)
+}
+
+fn rust_context_contains_qail_constructor(context: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum LexState {
+        Code,
+        LineComment,
+        BlockComment { depth: usize },
+        String { escaped: bool },
+        Char { escaped: bool },
+        RawString { hashes: usize },
+    }
+
+    let bytes = context.as_bytes();
+    let limit = bytes.len();
+    let mut i = 0usize;
+    let mut state = LexState::Code;
+
+    while i < limit {
+        match state {
+            LexState::Code => {
+                if bytes[i] == b'/' && i + 1 < limit && bytes[i + 1] == b'/' {
+                    state = LexState::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'/' && i + 1 < limit && bytes[i + 1] == b'*' {
+                    state = LexState::BlockComment { depth: 1 };
+                    i += 2;
+                    continue;
+                }
+                if let Some((raw_start, hashes)) = rust_raw_string_start(bytes, i, limit) {
+                    state = LexState::RawString { hashes };
+                    i = raw_start;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    state = LexState::String { escaped: false };
+                    i += 1;
+                    continue;
+                }
+                if bytes[i] == b'\'' && rust_char_literal_end(bytes, i, limit).is_some() {
+                    state = LexState::Char { escaped: false };
+                    i += 1;
+                    continue;
+                }
+                if starts_with_bytes(bytes, i, b"Qail::")
+                    && (i == 0 || !is_ident_byte(bytes[i - 1]))
+                {
+                    return true;
+                }
+                i += 1;
+            }
+            LexState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::BlockComment { depth } => {
+                if bytes[i] == b'/' && i + 1 < limit && bytes[i + 1] == b'*' {
+                    state = LexState::BlockComment { depth: depth + 1 };
+                    i += 2;
+                } else if bytes[i] == b'*' && i + 1 < limit && bytes[i + 1] == b'/' {
+                    if depth == 1 {
+                        state = LexState::Code;
+                    } else {
+                        state = LexState::BlockComment { depth: depth - 1 };
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            LexState::String { escaped } => {
+                if escaped {
+                    state = LexState::String { escaped: false };
+                } else if bytes[i] == b'\\' {
+                    state = LexState::String { escaped: true };
+                } else if bytes[i] == b'"' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::Char { escaped } => {
+                if escaped {
+                    state = LexState::Char { escaped: false };
+                } else if bytes[i] == b'\\' {
+                    state = LexState::Char { escaped: true };
+                } else if bytes[i] == b'\'' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::RawString { hashes } => {
+                if bytes[i] == b'"' && rust_raw_string_closes(bytes, i, hashes, limit) {
+                    state = LexState::Code;
+                    i += 1 + hashes;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn rust_statement_start_before(content: &str, offset: usize) -> usize {
@@ -243,6 +349,16 @@ fn rust_statement_start_before(content: &str, offset: usize) -> usize {
     }
 
     stmt_start
+}
+
+fn starts_with_bytes(haystack: &[u8], idx: usize, needle: &[u8]) -> bool {
+    haystack
+        .get(idx..idx.saturating_add(needle.len()))
+        .is_some_and(|s| s == needle)
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 fn rust_raw_string_start(bytes: &[u8], i: usize, limit: usize) -> Option<(usize, usize)> {
@@ -526,6 +642,26 @@ foo."#;
                 character: 4,
             }
         ));
+    }
+
+    #[test]
+    fn rust_builder_context_ignores_qail_marker_inside_comment_only_context() {
+        let (src, position) = position_at_marker(
+            r#"// Qail::get("users")
+foo./*cursor*/"#,
+        );
+
+        assert!(!rust_builder_context(&src, position));
+    }
+
+    #[test]
+    fn rust_builder_context_ignores_qail_marker_inside_string_only_context() {
+        let (src, position) = position_at_marker(
+            r#"let _msg = "Qail::get(\"users\")"
+    ./*cursor*/"#,
+        );
+
+        assert!(!rust_builder_context(&src, position));
     }
 
     #[test]

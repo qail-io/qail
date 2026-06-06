@@ -259,6 +259,62 @@ table orders {
 }
 
 #[test]
+fn rust_embedded_qail_string_with_rls_marker_does_not_suppress_rls_warning() {
+    let schema = BuildSchema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .expect("schema should parse");
+    let src = r#"async fn demo(pool: &Pool) {
+    let _rows = query("get orders fields id")
+        .bind(".with_rls(")
+        .fetch_all(pool)
+        .await;
+}"#;
+
+    let diags = collect_semantic_qail_diagnostics(src, "file:///tmp/demo.rs", &schema);
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("has no .with_rls()")),
+        "string marker must not suppress RLS warning: {diags:?}"
+    );
+}
+
+#[test]
+fn rust_embedded_qail_actual_with_rls_suppresses_rls_warning() {
+    let schema = BuildSchema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .expect("schema should parse");
+    let src = r#"async fn demo(pool: &Pool, ctx: &RlsContext) {
+    let _rows = query("get orders fields id")
+        .with_rls(ctx)
+        .fetch_all(pool)
+        .await;
+}"#;
+
+    let diags = collect_semantic_qail_diagnostics(src, "file:///tmp/demo.rs", &schema);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("has no .with_rls()")),
+        "real with_rls call should suppress RLS warning: {diags:?}"
+    );
+}
+
+#[test]
 fn file_uri_maps_to_path() {
     let uri = "file:///tmp/qail/src/main.rs";
     let path = uri_to_file_path(uri).expect("file uri should parse");
