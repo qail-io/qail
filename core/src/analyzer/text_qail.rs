@@ -137,7 +137,7 @@ pub fn extract_text_literals(content: &str) -> Vec<TextLiteral> {
 
         if is_hash_comment_marker(bytes, i)
             || starts_with_bytes(bytes, i, b"//")
-            || starts_with_bytes(bytes, i, b"--")
+            || is_dash_comment_marker(bytes, i)
         {
             while i < bytes.len() && bytes[i] != b'\n' {
                 advance_byte(bytes[i], &mut line, &mut col);
@@ -355,6 +355,16 @@ fn is_hash_comment_marker(bytes: &[u8], idx: usize) -> bool {
         .is_none_or(|b| !is_ident_byte(b))
 }
 
+fn is_dash_comment_marker(bytes: &[u8], idx: usize) -> bool {
+    if !starts_with_bytes(bytes, idx, b"--") {
+        return false;
+    }
+
+    idx.checked_sub(1)
+        .and_then(|prev| bytes.get(prev).copied())
+        .is_none_or(|b| b.is_ascii_whitespace())
+}
+
 fn find_quote_terminator(input: &str, quote: char) -> Option<usize> {
     let mut escaped = false;
     for (idx, ch) in input.char_indices() {
@@ -431,6 +441,7 @@ mod tests {
     fn extract_literals_ignores_comments_and_supports_multiline() {
         let src = r#"
 // "get users fields id" should not be extracted
+-- "get tasks fields id" should not be extracted
 /* "SELECT id FROM block_users" should not be extracted */
 const q = `
   get users
@@ -476,6 +487,19 @@ class Store {
         assert_eq!(literals.len(), 2, "{literals:?}");
         assert_eq!(literals[0].text, "get users fields id");
         assert_eq!(literals[1].text, "SELECT id FROM users");
+    }
+
+    #[test]
+    fn extract_literals_preserves_js_decrement_operator_line() {
+        let src = r#"
+let counter = 1;
+counter--; const q = "get users fields id";
+"#;
+
+        let literals = extract_text_literals(src);
+
+        assert_eq!(literals.len(), 1, "{literals:?}");
+        assert_eq!(literals[0].text, "get users fields id");
     }
 
     #[test]

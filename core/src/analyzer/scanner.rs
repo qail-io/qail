@@ -793,6 +793,7 @@ WHERE active = true
 
         let source = r#"
             // "SELECT id, email FROM users"
+            -- "DELETE FROM users"
             /*
             const q = "get block_users fields id";
             const s = "DELETE FROM block_users";
@@ -835,6 +836,34 @@ WHERE active = true
         assert_eq!(refs.len(), 2, "{refs:?}");
         assert!(refs.iter().any(|r| r.query_type == QueryType::Qail));
         assert!(refs.iter().any(|r| r.query_type == QueryType::RawSql));
+    }
+
+    #[test]
+    fn test_non_rust_scan_preserves_js_decrement_operator_queries() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_text_decrement_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"
+            let counter = 1;
+            counter--; const q = "get users fields id";
+        "#;
+
+        std::fs::write(&path, source).expect("write temp text file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(refs[0].query_type, QueryType::Qail);
+        assert_eq!(refs[0].table, "users");
+        assert_eq!(refs[0].columns, vec!["id"]);
     }
 
     #[test]
