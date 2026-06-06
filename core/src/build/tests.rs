@@ -1337,6 +1337,7 @@ fn test_extract_columns_on_conflict() {
     let line = r#"Qail::put("t").on_conflict_update(&["id"], &[("name", Expr::Named("excluded.name".into()))])"#;
     let cols = extract_columns(line);
     assert!(cols.contains(&"id".to_string()));
+    assert!(cols.contains(&"name".to_string()));
 }
 
 #[test]
@@ -1689,6 +1690,39 @@ let q = Qail::get("orders")
 }
 
 #[test]
+fn test_schema_validation_covers_on_conflict_update_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+  total INT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::put("orders")
+    .on_conflict_update(
+        &["id"],
+        &[("statuz", Expr::Named("orders.totl".into()))],
+    );
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in ["statuz", "totl"] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "on_conflict_update typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
+}
+
+#[test]
 fn test_schema_validation_covers_chained_expression_builder_typos() {
     let schema = Schema::parse(
         r#"
@@ -1767,6 +1801,42 @@ let q = Qail::merge_into("orders")
         assert!(
             diagnostics.iter().any(|d| d.message.contains(expected)),
             "MERGE condition typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
+}
+
+#[test]
+fn test_schema_validation_covers_merge_on_column_alias_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+
+table stage_orders {
+  order_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::merge_into("orders")
+    .target_alias("o")
+    .using_table_as("stage_orders", "s")
+    .merge_on_column("o.idd", Operator::Eq, "s.order_idd");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in ["idd", "order_idd"] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "merge_on_column alias typo {expected} should be schema-validated: {:?}",
             diagnostics
         );
     }

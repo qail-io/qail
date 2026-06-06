@@ -2614,7 +2614,7 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
-            "returning" | "on_conflict_update" | "on_conflict_nothing" => {
+            "returning" | "on_conflict_nothing" => {
                 for col in resolve_array_string_values(
                     extract_first_argument(call.args),
                     substitutions,
@@ -2625,6 +2625,20 @@ fn extract_columns_with_bindings(
                     }
                 }
             }
+            "on_conflict_update" => {
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    0,
+                    substitutions,
+                    bindings,
+                ));
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    1,
+                    substitutions,
+                    bindings,
+                ));
+            }
             "merge_on_column" => {
                 for col in resolve_string_values(
                     extract_first_argument(call.args),
@@ -2633,6 +2647,7 @@ fn extract_columns_with_bindings(
                 ) {
                     columns.push(col);
                 }
+                columns.extend(resolve_string_arg(call.args, 2, substitutions, bindings));
             }
             "join" => {
                 columns.extend(resolve_string_arg(call.args, 2, substitutions, bindings));
@@ -3345,7 +3360,7 @@ fn extract_table_aliases_with_bindings(
     let mut aliases = HashMap::new();
     for call in scan_chain_method_calls(line) {
         match call.name {
-            "table_alias" => {
+            "table_alias" | "target_alias" => {
                 for alias in resolve_string_arg(call.args, 0, substitutions, bindings) {
                     insert_alias(&mut aliases, primary_table, &alias);
                 }
