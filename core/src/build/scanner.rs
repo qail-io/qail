@@ -4588,7 +4588,8 @@ fn chain_has_explicit_tenant_scope(
     bindings: &LiteralBindings,
 ) -> bool {
     for call in scan_chain_method_calls(chain) {
-        let is_filter_scope = matches!(call.name, "eq" | "where_eq" | "is_null");
+        let is_filter_scope =
+            string_filter_call_has_tenant_scope(call.name, call.args, substitutions, bindings);
         let is_typed_filter_scope =
             typed_filter_call_has_tenant_scope(call.name, call.args, substitutions, bindings);
         let is_payload_scope = matches!(
@@ -4609,6 +4610,30 @@ fn chain_has_explicit_tenant_scope(
         }
     }
     false
+}
+
+fn string_filter_call_has_tenant_scope(
+    name: &str,
+    args: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> bool {
+    let is_scope_column =
+        resolve_string_values(extract_first_argument(args), substitutions, bindings)
+            .into_iter()
+            .any(|col| is_tenant_identifier(&col));
+    if !is_scope_column {
+        return false;
+    }
+
+    if matches!(name, "eq" | "where_eq" | "is_null") {
+        return true;
+    }
+
+    name == "filter"
+        && split_top_level_args(args)
+            .get(1)
+            .is_some_and(|op| typed_operator_is_tenant_scope(op))
 }
 
 fn typed_filter_call_has_tenant_scope(
