@@ -4553,6 +4553,11 @@ fn is_simple_binding_reference(expr: &str) -> bool {
     while let Some(rest) = trimmed.strip_prefix('&') {
         trimmed = rest.trim_start();
     }
+    trimmed = strip_identity_method_suffixes(trimmed);
+    trimmed = trimmed.trim_matches(|ch: char| matches!(ch, '(' | ')' | '[' | ']'));
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
     while trimmed.starts_with('(') && trimmed.ends_with(')') {
         let Some(close) = find_matching_delim(trimmed, 0, b'(', b')') else {
             return false;

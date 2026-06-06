@@ -1524,6 +1524,31 @@ let q = Qail::typed(orders::table)
 }
 
 #[test]
+fn test_scan_typed_api_columns_from_identity_method_bindings() {
+    let content = r#"
+fn demo() {
+    let status = orders::status();
+    let columns = [orders::id(), status];
+    let q = Qail::typed(orders::table)
+        .typed_columns(columns.as_ref())
+        .typed_eq((&orders::tenant_id()).clone(), tenant_id);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].table, "orders");
+    for expected in ["id", "status", "tenant_id"] {
+        assert!(
+            usages[0].columns.contains(&expected.to_string()),
+            "typed identity binding column {expected} should be scanned: {:?}",
+            usages[0]
+        );
+    }
+}
+
+#[test]
 fn test_scan_typed_api_columns_from_branch_bindings() {
     let content = r#"
 fn demo(full: bool, kind: &str) {
