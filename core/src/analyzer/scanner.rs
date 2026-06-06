@@ -386,6 +386,13 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
             let table = parse_sql_object_name(&normalized, from_idx + "FROM".len())?;
             Some((kind, table, vec![]))
         }
+        SqlStmtKind::Merge => {
+            let merge_idx = find_keyword_top_level_from(&normalized, "MERGE", 0)?;
+            let into_idx =
+                find_keyword_top_level_from(&normalized, "INTO", merge_idx + "MERGE".len())?;
+            let table = parse_sql_object_name(&normalized, into_idx + "INTO".len())?;
+            Some((kind, table, vec![]))
+        }
     }
 }
 
@@ -633,6 +640,15 @@ mod tests {
         assert_eq!(kind, SqlStmtKind::Select);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["id", "email"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_merge() {
+        let sql = "MERGE INTO orders USING staging_orders ON orders.id = staging_orders.id WHEN MATCHED THEN UPDATE SET status = staging_orders.status";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind.as_str(), "MERGE");
+        assert_eq!(table, "orders");
+        assert!(cols.is_empty());
     }
 
     #[test]

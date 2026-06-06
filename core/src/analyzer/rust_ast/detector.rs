@@ -474,4 +474,19 @@ mod tests {
         let matches = detect_raw_sql(code);
         assert!(matches.is_empty(), "matches: {matches:?}");
     }
+
+    #[test]
+    fn detects_raw_merge_sql() {
+        let code = r#"
+            fn merge_orders() {
+                let sql = "MERGE INTO orders USING staging_orders ON orders.id = staging_orders.id WHEN MATCHED THEN UPDATE SET status = staging_orders.status";
+                query(sql);
+            }
+        "#;
+
+        let matches = detect_raw_sql(code);
+
+        assert_eq!(matches.len(), 1, "{matches:?}");
+        assert_eq!(matches[0].sql_type, "MERGE");
+    }
 }

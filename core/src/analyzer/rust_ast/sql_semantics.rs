@@ -9,6 +9,7 @@ pub(crate) enum SqlStmtKind {
     Insert,
     Update,
     Delete,
+    Merge,
 }
 
 impl SqlStmtKind {
@@ -18,6 +19,7 @@ impl SqlStmtKind {
             Self::Insert => "INSERT",
             Self::Update => "UPDATE",
             Self::Delete => "DELETE",
+            Self::Merge => "MERGE",
         }
     }
 }
@@ -32,7 +34,8 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
     let starts_with_dml = statement_starts_with_keyword(&normalized, "SELECT")
         || statement_starts_with_keyword(&normalized, "INSERT")
         || statement_starts_with_keyword(&normalized, "UPDATE")
-        || statement_starts_with_keyword(&normalized, "DELETE");
+        || statement_starts_with_keyword(&normalized, "DELETE")
+        || statement_starts_with_keyword(&normalized, "MERGE");
     let starts_with_wrapper = statement_starts_with_keyword(&normalized, "WITH")
         || statement_starts_with_keyword(&normalized, "EXPLAIN");
     if !starts_with_dml && !starts_with_wrapper {
@@ -51,6 +54,9 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
     }
     if let Some(pos) = find_keyword_top_level_from(&normalized, "DELETE", 0) {
         candidates.push((pos, SqlStmtKind::Delete));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "MERGE", 0) {
+        candidates.push((pos, SqlStmtKind::Merge));
     }
 
     let (_, kind) = candidates.into_iter().min_by_key(|(pos, _)| *pos)?;
@@ -75,6 +81,14 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
             find_keyword_top_level_from(&normalized, "FROM", delete_pos + "DELETE".len())
                 .is_some()
                 .then_some(SqlStmtKind::Delete)
+        }
+        SqlStmtKind::Merge => {
+            let merge_pos = find_keyword_top_level_from(&normalized, "MERGE", 0)?;
+            let into_pos =
+                find_keyword_top_level_from(&normalized, "INTO", merge_pos + "MERGE".len())?;
+            find_keyword_top_level_from(&normalized, "USING", into_pos + "INTO".len())
+                .is_some()
+                .then_some(SqlStmtKind::Merge)
         }
     }
 }
@@ -210,5 +224,15 @@ mod tests {
     fn rejects_sql_keywords_that_do_not_start_a_statement() {
         assert_eq!(classify_sql_kind("debug SELECT id FROM users"), None);
         assert_eq!(classify_sql_kind("message: DELETE FROM sessions"), None);
+    }
+
+    #[test]
+    fn classifies_postgres_merge() {
+        let sql = "MERGE INTO orders USING staging_orders ON orders.id = staging_orders.id WHEN MATCHED THEN UPDATE SET status = staging_orders.status";
+
+        assert_eq!(
+            classify_sql_kind(sql).map(|kind| kind.as_str()),
+            Some("MERGE")
+        );
     }
 }

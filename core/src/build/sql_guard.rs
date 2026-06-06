@@ -320,6 +320,27 @@ fn x() {
         );
     }
 
+    #[cfg(feature = "analyzer")]
+    #[test]
+    fn file_level_literal_scan_detects_merge_sql() {
+        let path = temp_rs_file(
+            "qail_sql_guard_merge_file",
+            r#"
+fn x() {
+    let _sql = "MERGE INTO orders USING staging_orders ON orders.id = staging_orders.id WHEN MATCHED THEN UPDATE SET status = staging_orders.status";
+}
+"#,
+        );
+
+        let hits = detect_sql_in_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            hits.iter().any(|d| d.code == "SQL-005"),
+            "MERGE raw SQL literal must be guarded: {hits:?}"
+        );
+    }
+
     #[test]
     fn ignores_markers_inside_strings_and_comments() {
         let src = r#"
