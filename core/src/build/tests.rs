@@ -1209,11 +1209,38 @@ fn test_extract_columns_is_null() {
 
 #[test]
 fn test_extract_columns_set_value() {
-    let line =
-        r#"Qail::set("orders").set_value("status", "Paid").set_coalesce("notes", "default")"#;
+    let line = r#"Qail::set("orders")
+        .set_value("status", "Paid")
+        .set_opt("amount", maybe_amount)
+        .set_coalesce("notes", "default")"#;
     let cols = extract_columns(line);
     assert!(cols.contains(&"status".to_string()));
+    assert!(cols.contains(&"amount".to_string()));
     assert!(cols.contains(&"notes".to_string()));
+}
+
+#[test]
+fn test_extract_columns_query_builder_surface_methods() {
+    let line = r#"Qail::get("orders")
+        .or_filter("status", Operator::Eq, "paid")
+        .array_elem_contained_in_text("tags", "urgent")
+        .group_by(["tenant_id", "status"])
+        .distinct_on(["tenant_id"])
+        .left_join("order_items", "orders.id", "order_items.order_id")"#;
+    let cols = extract_columns(line);
+
+    for expected in [
+        "status",
+        "tags",
+        "tenant_id",
+        "orders.id",
+        "order_items.order_id",
+    ] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} in extracted columns: {cols:?}"
+        );
+    }
 }
 
 #[test]
@@ -1241,6 +1268,83 @@ fn test_extract_columns_merge_actions() {
 
     assert!(cols.contains(&"id".to_string()));
     assert!(cols.contains(&"status".to_string()));
+}
+
+#[test]
+fn test_scan_file_extracts_related_tables_from_builder_surfaces() {
+    let content = r#"
+let q = Qail::get("orders")
+    .left_join("order_items items", "orders.id", "items.order_id")
+    .join_on_optional("tenants")
+    .update_from(["accounts"]);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    for expected in ["order_items", "tenants", "accounts"] {
+        assert!(
+            usages[0].related_tables.contains(&expected.to_string()),
+            "expected related table {expected}: {:?}",
+            usages[0].related_tables
+        );
+    }
+}
+
+#[test]
+fn test_schema_validation_covers_set_opt_column_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::set("orders")
+    .set_opt("statuz", Some("paid"))
+    .eq("id", order_id);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "set_opt column typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_join_related_table_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .left_join("order_itemz", "orders.id", "order_itemz.order_id");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("order_itemz")),
+        "join related table typo should be schema-validated: {:?}",
+        diagnostics
+    );
 }
 
 #[test]
@@ -1868,6 +1972,7 @@ fn test_explicit_tenant_scope_detects_payload_setters() {
     let content = r#"
 let q = Qail::add("usage_ledger")
     .set_value("tenant_id", tenant_id)
+    .set_opt("tenant_id", Some(tenant_id))
     .set_value("metric", "waba_messages");
 "#;
     let mut usages = Vec::new();
@@ -1884,7 +1989,7 @@ let q = Qail::add("usage_ledger")
 fn test_explicit_tenant_scope_ignores_update_payload_setters() {
     let content = r#"
 let q = Qail::set("orders")
-    .set_value("tenant_id", tenant_id)
+    .set_opt("tenant_id", Some(tenant_id))
     .eq("id", order_id);
 "#;
     let mut usages = Vec::new();

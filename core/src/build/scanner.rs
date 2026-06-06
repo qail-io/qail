@@ -2537,9 +2537,28 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
-            "filter" | "eq" | "ne" | "gt" | "lt" | "gte" | "lte" | "like" | "ilike"
-            | "where_eq" | "order_by" | "order_desc" | "order_asc" | "in_vals" | "is_null"
-            | "is_not_null" | "set_value" | "set_coalesce" | "set_coalesce_opt" => {
+            "filter"
+            | "or_filter"
+            | "eq"
+            | "ne"
+            | "gt"
+            | "lt"
+            | "gte"
+            | "lte"
+            | "like"
+            | "ilike"
+            | "where_eq"
+            | "order_by"
+            | "order_desc"
+            | "order_asc"
+            | "in_vals"
+            | "is_null"
+            | "is_not_null"
+            | "array_elem_contained_in_text"
+            | "set_value"
+            | "set_opt"
+            | "set_coalesce"
+            | "set_coalesce_opt" => {
                 for col in resolve_string_values(
                     extract_first_argument(call.args),
                     substitutions,
@@ -2547,6 +2566,13 @@ fn extract_columns_with_bindings(
                 ) {
                     columns.push(col);
                 }
+            }
+            "group_by" | "distinct_on" => {
+                columns.extend(resolve_array_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ));
             }
             "returning" | "on_conflict_update" | "on_conflict_nothing" => {
                 for col in resolve_array_string_values(
@@ -2567,6 +2593,18 @@ fn extract_columns_with_bindings(
                 ) {
                     columns.push(col);
                 }
+            }
+            "join" => {
+                columns.extend(resolve_string_arg(call.args, 2, substitutions, bindings));
+                columns.extend(resolve_string_arg(call.args, 3, substitutions, bindings));
+            }
+            "left_join" | "inner_join" => {
+                columns.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
+                columns.extend(resolve_string_arg(call.args, 2, substitutions, bindings));
+            }
+            "left_join_as" | "inner_join_as" => {
+                columns.extend(resolve_string_arg(call.args, 2, substitutions, bindings));
+                columns.extend(resolve_string_arg(call.args, 3, substitutions, bindings));
             }
             "when_matched_update" | "when_not_matched_by_source_update" => {
                 columns.extend(resolve_array_string_arg(
@@ -2648,6 +2686,18 @@ fn resolve_array_string_arg(
         .unwrap_or_default()
 }
 
+fn resolve_string_arg(
+    args: &str,
+    index: usize,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    split_top_level_args(args)
+        .get(index)
+        .map(|arg| resolve_string_values(arg, substitutions, bindings))
+        .unwrap_or_default()
+}
+
 fn extract_related_tables_with_bindings(
     line: &str,
     substitutions: Option<&ParamSubstitutions>,
@@ -2655,16 +2705,44 @@ fn extract_related_tables_with_bindings(
 ) -> Vec<String> {
     let mut tables = Vec::new();
     for call in scan_chain_method_calls(line) {
-        if matches!(call.name, "using_table" | "using_table_as") {
-            tables.extend(resolve_string_values(
-                extract_first_argument(call.args),
-                substitutions,
-                bindings,
-            ));
+        match call.name {
+            "using_table" | "using_table_as" | "left_join" | "inner_join" | "left_join_as"
+            | "inner_join_as" | "join_conds" | "left_join_conds" | "inner_join_conds"
+            | "join_on" | "join_on_optional" => {
+                tables.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+            }
+            "join" => {
+                tables.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
+            }
+            "update_from" | "delete_using" => {
+                tables.extend(resolve_array_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ));
+            }
+            _ => {}
         }
     }
+    tables = tables
+        .into_iter()
+        .filter_map(|table| normalize_related_table_name(&table))
+        .collect();
     dedupe_values(&mut tables);
     tables
+}
+
+fn normalize_related_table_name(table: &str) -> Option<String> {
+    let table = table.trim();
+    if table.is_empty() {
+        return None;
+    }
+    let base = table.split_whitespace().next().unwrap_or(table);
+    if base.contains('(') || base.contains(')') {
+        None
+    } else {
+        Some(base.to_string())
+    }
 }
 
 fn chain_has_rls(chain: &str) -> bool {
@@ -2681,9 +2759,10 @@ fn chain_has_explicit_tenant_scope(
 ) -> bool {
     for call in scan_chain_method_calls(chain) {
         let is_filter_scope = matches!(call.name, "eq" | "where_eq" | "is_null");
-        let is_payload_scope =
-            matches!(call.name, "set_value" | "set_coalesce" | "set_coalesce_opt")
-                && matches!(action, "ADD" | "PUT");
+        let is_payload_scope = matches!(
+            call.name,
+            "set_value" | "set_opt" | "set_coalesce" | "set_coalesce_opt"
+        ) && matches!(action, "ADD" | "PUT");
         if !(is_filter_scope || is_payload_scope) {
             continue;
         }
