@@ -878,6 +878,31 @@ fn list(uid: &str) {
 }
 
 #[test]
+fn test_scan_file_resolves_identity_method_literal_bindings() {
+    let content = r#"
+fn demo() {
+    let table = "users";
+    let columns = ["id", "email"];
+    let _q = Qail::get(table.clone())
+        .columns(columns.as_ref())
+        .eq("id", user_id);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].table, "users");
+    for expected in ["id", "email"] {
+        assert!(
+            usages[0].columns.contains(&expected.to_string()),
+            "identity method bindings should preserve column {expected}: {:?}",
+            usages[0]
+        );
+    }
+}
+
+#[test]
 fn test_scan_file_resolves_helper_param_tables_and_columns_from_call_sites() {
     let content = r#"
 const USERS_TABLE: &str = "users";

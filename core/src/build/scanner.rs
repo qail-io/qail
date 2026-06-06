@@ -2738,13 +2738,30 @@ fn binding_lookup_key(expr: &str) -> Option<String> {
     while let Some(rest) = trimmed.strip_prefix('&') {
         trimmed = rest.trim_start();
     }
+    trimmed = strip_identity_method_suffixes(trimmed);
     trimmed = trimmed.trim_matches(|ch: char| matches!(ch, '(' | ')' | '[' | ']'));
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
     let segment = trimmed.rsplit("::").next().unwrap_or(trimmed);
     let segment = segment.rsplit('.').next().unwrap_or(segment).trim();
     if segment.is_empty() || !segment.chars().all(|c| c.is_alphanumeric() || c == '_') {
         None
     } else {
         Some(segment.to_string())
+    }
+}
+
+fn strip_identity_method_suffixes(mut expr: &str) -> &str {
+    loop {
+        let trimmed = expr.trim_end();
+        let Some(next) = [".clone()", ".as_ref()", ".as_str()"]
+            .iter()
+            .find_map(|suffix| trimmed.strip_suffix(suffix))
+        else {
+            return trimmed;
+        };
+        expr = next.trim_end();
     }
 }
 
