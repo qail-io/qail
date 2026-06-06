@@ -266,18 +266,27 @@ fn detect_n_plus_one_in_source_with_index(
         }
 
         if let Some(work_loop_vars) = parse_work_loop_vars(trimmed) {
+            let is_inline_iterator_closure =
+                starts_iterator_loop(trimmed) && extract_closure_params(trimmed).is_some();
             if code_line.contains('{') {
                 let has_scheduler_pacing =
                     loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
                 let mut frame = LoopFrame::new(brace_depth, work_loop_vars);
                 frame.has_scheduler_pacing = has_scheduler_pacing;
                 loop_stack.push(frame);
+            } else if is_inline_iterator_closure {
+                // Expression-only iterator closures do not create a block scope.
+                // Keeping them pending makes the next unrelated `{ ... }` look
+                // like the closure body and causes false N+1 diagnostics.
             } else {
                 pending_loop = Some(PendingLoop {
                     vars: work_loop_vars,
                 });
             }
-        } else if starts_iterator_loop(trimmed) && extract_closure_params(trimmed).is_none() {
+        } else if starts_iterator_loop(trimmed)
+            && extract_closure_params(trimmed).is_none()
+            && !trimmed.contains(';')
+        {
             pending_iterator_loop = true;
         }
 
@@ -2577,6 +2586,48 @@ fn demo(conn: &Conn, ids: Vec<i64>) {
             diags.iter().any(|d| d.code == NPlusOneCode::N1002),
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn ignores_expression_only_iter_map_before_later_block() {
+        let source = r#"
+async fn load_users(conn: &Conn, ids: &[String]) {
+    let cmd = Qail::get("users").in_vals("id", ids);
+    let _ = conn.fetch_all(&cmd).await;
+}
+
+async fn demo(conn: &Conn, rows: Vec<Row>, compact: bool) {
+    let ids: Vec<String> = rows.iter().map(|r| r.text(0)).collect();
+    let _users = if compact {
+        Vec::new()
+    } else {
+        load_users(conn, &ids).await
+    };
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            !diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_method_reference_iter_map_before_later_match() {
+        let source = r#"
+async fn demo(conn: &Conn, ids: Vec<String>) {
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let cmd = Qail::get("users").in_vals("id", id_refs);
+    let _rows = match conn.fetch_all(&cmd).await {
+        Ok(rows) => rows,
+        Err(_) => Vec::new(),
+    };
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]
