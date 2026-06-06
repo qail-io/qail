@@ -146,6 +146,7 @@ pub fn check_schema(
             if let Some(src) = src_dir {
                 println!();
                 println!("{}", "── Source Validation & RLS Audit ──".cyan().bold());
+                let mut source_schema_error_count = 0usize;
 
                 // Use build module's Schema (has rls_enabled detection)
                 let mut build_schema = qail_core::build::Schema::parse(&content)
@@ -197,6 +198,7 @@ pub fn check_schema(
                             )
                         })
                         .collect();
+                    source_schema_error_count = schema_errors.len();
                     let rls_warnings: Vec<_> = diagnostics
                         .iter()
                         .filter(|d| {
@@ -299,6 +301,13 @@ pub fn check_schema(
                             diagnostics.len()
                         ));
                     }
+                }
+
+                if source_schema_error_count > 0 {
+                    return Err(anyhow::anyhow!(
+                        "Source validation: {} schema error(s) found",
+                        source_schema_error_count
+                    ));
                 }
             }
 
@@ -615,6 +624,41 @@ table audit_log {
         let usages = vec![usage("audit_log", true)];
 
         assert!(rls_coverage_stats(&schema, &usages).is_none());
+    }
+
+    #[test]
+    fn check_schema_fails_when_source_query_has_schema_error() {
+        let dir = unique_temp_dir("source_schema_error");
+        let src_dir = dir.join("src");
+        fs::create_dir_all(&src_dir).expect("create source dir");
+        let schema_path = dir.join("schema.qail");
+        fs::write(
+            &schema_path,
+            "table users {\n  id uuid primary_key\n  email text\n}\n",
+        )
+        .expect("write schema");
+        fs::write(
+            src_dir.join("main.rs"),
+            r#"
+fn demo() {
+    let _query = Qail::get("usres").columns(["id", "email"]);
+}
+"#,
+        )
+        .expect("write source");
+
+        let err = check_schema(
+            schema_path.to_str().expect("schema path should be utf8"),
+            Some(src_dir.to_str().expect("source path should be utf8")),
+            dir.join("migrations")
+                .to_str()
+                .expect("migration path should be utf8"),
+            false,
+        )
+        .expect_err("source schema errors should fail qail check");
+
+        assert!(err.to_string().contains("Source validation"));
+        fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     #[test]
