@@ -676,6 +676,109 @@ fn extract_single_block_literal(expr: &str) -> Option<String> {
     extract_string_arg(trimmed.get(1..close)?.trim())
 }
 
+fn extract_branch_array_literals(expr: &str) -> Vec<String> {
+    let trimmed = expr.trim_start();
+    let mut out = if trimmed.starts_with("match ") {
+        extract_match_array_arms(trimmed)
+    } else if trimmed.starts_with("if ") {
+        extract_if_array_blocks(trimmed)
+    } else {
+        Vec::new()
+    };
+    dedupe_values(&mut out);
+    out
+}
+
+fn extract_match_array_arms(expr: &str) -> Vec<String> {
+    let Some(open) = find_first_code_byte(expr, b'{') else {
+        return Vec::new();
+    };
+    let Some(close) = find_matching_delim(expr, open, b'{', b'}') else {
+        return Vec::new();
+    };
+    let Some(body) = expr.get(open + 1..close) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for arm in split_top_level_args(body) {
+        let Some(arrow) = find_top_level_match_arrow(arm) else {
+            continue;
+        };
+        let result = arm.get(arrow + 2..).unwrap_or_default().trim();
+        out.extend(extract_array_literal_expr(result));
+    }
+    out
+}
+
+fn extract_if_array_blocks(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < expr.len() {
+        let Some(tail) = expr.get(cursor..) else {
+            break;
+        };
+        let Some(open_rel) = find_first_code_byte(tail, b'{') else {
+            break;
+        };
+        let open = cursor + open_rel;
+        let Some(close) = find_matching_delim(expr, open, b'{', b'}') else {
+            break;
+        };
+        if let Some(block) = expr.get(open + 1..close) {
+            out.extend(extract_array_literal_expr(block));
+        }
+        cursor = close + 1;
+    }
+
+    out
+}
+
+fn extract_array_literal_expr(expr: &str) -> Vec<String> {
+    let mut trimmed = expr.trim();
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
+
+    if trimmed.starts_with('{') {
+        let Some(close) = find_matching_delim(trimmed, 0, b'{', b'}') else {
+            return Vec::new();
+        };
+        if !trimmed
+            .get(close + 1..)
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            return Vec::new();
+        }
+        return trimmed
+            .get(1..close)
+            .map(extract_array_literal_expr)
+            .unwrap_or_default();
+    }
+
+    if !trimmed.starts_with('[') {
+        return Vec::new();
+    }
+    let Some(close) = find_matching_delim(trimmed, 0, b'[', b']') else {
+        return Vec::new();
+    };
+    if !trimmed
+        .get(close + 1..)
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Vec::new();
+    }
+    trimmed
+        .get(1..close)
+        .map(collect_string_literals)
+        .unwrap_or_default()
+}
+
 /// Parse destructuring let: `let (a, b) = ...;`
 /// Returns vec of (name, possible_values) for each position.
 fn parse_destructuring_let(line: &str) -> Option<Vec<(String, Vec<String>)>> {
@@ -2591,6 +2694,12 @@ fn resolve_array_string_values_inner(
     visited: &mut HashSet<String>,
     out: &mut Vec<String>,
 ) {
+    let branch = extract_branch_array_literals(expr);
+    if !branch.is_empty() {
+        out.extend(branch);
+        return;
+    }
+
     let direct = extract_array_string_literals_from_expr(expr);
     if !direct.is_empty() {
         out.extend(direct);

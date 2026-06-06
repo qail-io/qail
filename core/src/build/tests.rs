@@ -1057,6 +1057,31 @@ fn demo(kind: &str) {
 }
 
 #[test]
+fn test_scan_file_resolves_branch_literal_column_arrays() {
+    let content = r#"
+fn demo(full: bool, kind: &str) {
+    let if_columns = if full {
+        ["id", "email"]
+    } else {
+        ["id", "status"]
+    };
+    let match_columns = match kind {
+        "profile" => ["name"],
+        _ => { ["created_at"] },
+    };
+    let _if_cmd = Qail::get("users").columns(if_columns);
+    let _match_cmd = Qail::get("users").columns(match_columns);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].columns, vec!["id", "email", "status"]);
+    assert_eq!(usages[1].columns, vec!["name", "created_at"]);
+}
+
+#[test]
 fn test_scan_file_ignores_helper_calls_in_comments_for_param_substitution() {
     let content = r#"
 async fn fetch_one(table: &str) {
