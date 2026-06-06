@@ -3972,6 +3972,51 @@ fn demo(tenant_id: uuid::Uuid) {
 }
 
 #[test]
+fn test_super_admin_audit_rejects_computed_condition_struct_tenant_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo(tenant_id: uuid::Uuid) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders")
+        .columns(["id"])
+        .filter_cond(Condition {
+            left: Expr::Binary {
+                left: Box::new(col("tenant_id")),
+                op: BinaryOp::Concat,
+                right: Box::new(col("status")),
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: tenant_id.into(),
+            is_array_unnest: false,
+        });
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", source, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::RlsWarning)
+                && d.message.contains("no explicit tenant scope")
+        }),
+        "computed tenant_id expressions must not count as explicit tenant scope: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_super_admin_audit_accepts_fully_qualified_operator_scope() {
     let schema = Schema::parse(
         r#"
