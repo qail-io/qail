@@ -1848,7 +1848,7 @@ fn scan_ident_method_calls<'a>(
     calls
 }
 
-fn extract_to_cte_aliases(source: &str) -> Vec<String> {
+fn extract_to_cte_aliases(source: &str, bindings: &LiteralBindings) -> Vec<String> {
     let bytes = source.as_bytes();
     let mut aliases = Vec::new();
     let mut i = 0usize;
@@ -1892,10 +1892,8 @@ fn extract_to_cte_aliases(source: &str) -> Vec<String> {
             i = cursor + 1;
             continue;
         };
-        if let Some(args) = source.get(cursor + 1..close)
-            && let Some(alias) = extract_string_arg(args)
-        {
-            aliases.push(alias);
+        if let Some(args) = source.get(cursor + 1..close) {
+            aliases.extend(resolve_string_values(args, None, bindings));
         }
         i = close + 1;
     }
@@ -2127,6 +2125,7 @@ fn collect_cte_aliases(
     chains: &[ScannedQailChain],
     source: &str,
     local_functions: &[LocalFunction],
+    binding_index: &LiteralBindingIndex,
 ) -> Vec<CteAlias> {
     let mut aliases = Vec::new();
     let qail_bound_vars = chains
@@ -2138,7 +2137,12 @@ fn collect_cte_aliases(
         for call in scan_chain_method_calls(&chain.full_chain) {
             match call.name {
                 "to_cte" => {
-                    if let Some(name) = extract_string_arg(call.args) {
+                    let bindings = literal_bindings_for_offset(
+                        binding_index,
+                        chain.start,
+                        find_enclosing_local_function(chain.start, local_functions),
+                    );
+                    for name in resolve_string_values(call.args, None, &bindings) {
                         push_cte_alias(&mut aliases, source, chain, name);
                     }
                 }
@@ -2147,9 +2151,6 @@ fn collect_cte_aliases(
                     if args.len() < 2 {
                         continue;
                     }
-                    let Some(alias) = extract_string_arg(args[0]) else {
-                        continue;
-                    };
                     if args[1].trim_start().starts_with("Qail::")
                         || cte_arg_is_visible_bound_qail(
                             args[1],
@@ -2159,11 +2160,23 @@ fn collect_cte_aliases(
                             local_functions,
                         )
                     {
-                        push_cte_alias(&mut aliases, source, chain, alias);
+                        let bindings = literal_bindings_for_offset(
+                            binding_index,
+                            chain.start,
+                            find_enclosing_local_function(chain.start, local_functions),
+                        );
+                        for alias in resolve_string_values(args[0], None, &bindings) {
+                            push_cte_alias(&mut aliases, source, chain, alias);
+                        }
                     }
                 }
                 "with_cte" | "with_ctes" => {
-                    for alias in extract_to_cte_aliases(call.args) {
+                    let bindings = literal_bindings_for_offset(
+                        binding_index,
+                        chain.start,
+                        find_enclosing_local_function(chain.start, local_functions),
+                    );
+                    for alias in extract_to_cte_aliases(call.args, &bindings) {
                         push_cte_alias(&mut aliases, source, chain, alias);
                     }
                 }
@@ -2191,7 +2204,12 @@ fn collect_cte_aliases(
             {
                 continue;
             }
-            if let Some(name) = extract_string_arg(call.args) {
+            let bindings = literal_bindings_for_offset(
+                binding_index,
+                call.start,
+                find_enclosing_local_function(call.start, local_functions),
+            );
+            for name in resolve_string_values(call.args, None, &bindings) {
                 push_cte_alias_at(&mut aliases, source, call.start, name);
             }
         }
@@ -2574,7 +2592,8 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
     let execution_site_rls = collect_execution_site_rls_offsets(content);
     let local_functions = collect_local_functions(content);
     let literal_binding_index = collect_literal_binding_index(content, &local_functions);
-    let cte_aliases = collect_cte_aliases(&chains, content, &local_functions);
+    let cte_aliases =
+        collect_cte_aliases(&chains, content, &local_functions, &literal_binding_index);
     let local_function_calls = collect_local_function_calls(content, &local_functions);
     let helper_rls_params = collect_helper_rls_param_indices(content, &local_functions);
     let mut function_name_counts = HashMap::new();

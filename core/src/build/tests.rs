@@ -2270,6 +2270,26 @@ fn demo() {
 }
 
 #[test]
+fn test_cte_alias_from_string_binding_is_detected() {
+    let content = r#"
+fn demo() {
+    let alias = "agg";
+    let source = Qail::get("orders").columns(["total"]);
+    let _cte = source.to_cte(alias);
+    let _read = Qail::get(alias).column("total");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        usages[1].is_cte_ref,
+        "bound CTE aliases should resolve through string bindings: {usages:?}"
+    );
+}
+
+#[test]
 fn test_cte_alias_from_inline_with_ctes_to_cte_is_visible_to_outer_query() {
     let content = r#"
 fn demo() {
