@@ -444,7 +444,7 @@ fn collect_let_statement_bindings(
             if !values.is_empty() {
                 bindings.arrays.insert(var.clone(), values);
             }
-            if let Some(items) = extract_typed_column_collection_items(rhs) {
+            if let Some(items) = extract_typed_column_binding_items(rhs, visible_bindings) {
                 bindings.typed_arrays.insert(var.clone(), items);
             } else if direct_typed_column_expr_has_column(rhs) {
                 bindings
@@ -502,7 +502,7 @@ fn collect_const_statement_bindings(
             bindings.arrays.insert(name.clone(), values);
         }
 
-        if let Some(items) = extract_typed_column_collection_items(rhs) {
+        if let Some(items) = extract_typed_column_binding_items(rhs, visible_bindings) {
             bindings.typed_arrays.insert(name.clone(), items);
         } else if direct_typed_column_expr_has_column(rhs) {
             bindings
@@ -4385,6 +4385,109 @@ fn extract_typed_column_collection_items(expr: &str) -> Option<Vec<String>> {
     } else {
         None
     }
+}
+
+fn extract_typed_column_binding_items(
+    expr: &str,
+    bindings: &LiteralBindings,
+) -> Option<Vec<String>> {
+    if let Some(items) = extract_typed_column_collection_items(expr) {
+        return Some(items);
+    }
+
+    let items = extract_branch_typed_column_collection_items(expr, bindings);
+    if items.is_empty() { None } else { Some(items) }
+}
+
+fn extract_branch_typed_column_collection_items(
+    expr: &str,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let trimmed = expr.trim_start();
+    let mut out = if trimmed.starts_with("match ") {
+        extract_match_typed_column_collection_arms(trimmed, bindings)
+    } else if trimmed.starts_with("if ") {
+        extract_if_typed_column_collection_blocks(trimmed, bindings)
+    } else {
+        Vec::new()
+    };
+    dedupe_values(&mut out);
+    out
+}
+
+fn extract_match_typed_column_collection_arms(
+    expr: &str,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let Some(open) = find_first_code_byte(expr, b'{') else {
+        return Vec::new();
+    };
+    let Some(close) = find_matching_delim(expr, open, b'{', b'}') else {
+        return Vec::new();
+    };
+    let Some(body) = expr.get(open + 1..close) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for arm in split_top_level_args(body) {
+        let Some(arrow) = find_top_level_match_arrow(arm) else {
+            continue;
+        };
+        let result = arm.get(arrow + 2..).unwrap_or_default().trim();
+        out.extend(extract_typed_column_collection_expr_items(result, bindings));
+    }
+    out
+}
+
+fn extract_if_typed_column_collection_blocks(
+    expr: &str,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < expr.len() {
+        let Some(tail) = expr.get(cursor..) else {
+            break;
+        };
+        let Some(open_rel) = find_first_code_byte(tail, b'{') else {
+            break;
+        };
+        let open = cursor + open_rel;
+        let Some(close) = find_matching_delim(expr, open, b'{', b'}') else {
+            break;
+        };
+        if let Some(block) = expr.get(open + 1..close) {
+            out.extend(extract_typed_column_collection_expr_items(block, bindings));
+        }
+        cursor = close + 1;
+    }
+
+    out
+}
+
+fn extract_typed_column_collection_expr_items(
+    expr: &str,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let Some(expr) = unwrap_single_block_expr(expr) else {
+        return Vec::new();
+    };
+    if let Some(items) = extract_typed_column_collection_items(expr) {
+        return items;
+    }
+    let Some(key) = binding_lookup_key(expr) else {
+        return Vec::new();
+    };
+    if let Some(items) = bindings.typed_arrays.get(&key) {
+        return items.clone();
+    }
+    bindings
+        .typed_scalars
+        .get(&key)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn extract_typed_column_path_expr(expr: &str) -> Option<String> {

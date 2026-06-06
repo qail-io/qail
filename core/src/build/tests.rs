@@ -1483,6 +1483,45 @@ let q = Qail::typed(orders::table)
 }
 
 #[test]
+fn test_scan_typed_api_columns_from_branch_bindings() {
+    let content = r#"
+fn demo(full: bool, kind: &str) {
+    let status_cols = [orders::id(), orders::status()];
+    let audit_cols = [orders::created_at, orders::updated_at];
+    let if_cols = if full {
+        [orders::id(), orders::tenant_id()]
+    } else {
+        status_cols
+    };
+    let match_cols = match kind {
+        "audit" => audit_cols,
+        _ => { [orders::currency, orders::r#type] },
+    };
+    let _if_q = Qail::typed(orders::table).typed_columns(if_cols);
+    let _match_q = Qail::typed(orders::table).typed_columns(match_cols);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    for expected in ["id", "tenant_id", "status"] {
+        assert!(
+            usages[0].columns.contains(&expected.to_string()),
+            "typed if-branch column {expected} should be scanned: {:?}",
+            usages[0]
+        );
+    }
+    for expected in ["created_at", "updated_at", "currency", "type"] {
+        assert!(
+            usages[1].columns.contains(&expected.to_string()),
+            "typed match-branch column {expected} should be scanned: {:?}",
+            usages[1]
+        );
+    }
+}
+
+#[test]
 fn test_scan_typed_api_columns_from_helper_substitution() {
     let content = r#"
 fn list_orders(cols: impl IntoIterator, scope: TypedColumn<uuid::Uuid>) {
