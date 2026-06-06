@@ -3126,9 +3126,9 @@ pub(crate) fn extract_string_arg(s: &str) -> Option<String> {
     Some(lit)
 }
 
-/// Extract table name from `Qail::typed(module::Table)` patterns.
-/// Parses `module::StructName` and returns the last identifier-like segment
-/// before the final `::item` as the table name.
+/// Extract table name from `Qail::typed(...)` patterns.
+/// Handles generated module markers like `users::table`, and qualified
+/// marker structs like `schema::Orders`.
 ///
 /// Examples:
 ///  - `users::table`         → `users`
@@ -3147,25 +3147,25 @@ pub(crate) fn extract_typed_table_arg(s: &str) -> Option<String> {
 
     match segments.len() {
         0 => None,
-        1 => {
-            // Single ident like `Orders` — use it directly
-            let name = segments[0];
-            if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                Some(name.to_lowercase())
-            } else {
-                None
-            }
-        }
+        1 => normalize_typed_table_segment(segments[0]),
         _ => {
-            // Multiple segments like `users::table` or `schema::users::table`
-            // Take the second-to-last segment as the table name
-            let table = segments[segments.len() - 2];
-            if table.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                Some(table.to_lowercase())
+            let last = segments[segments.len() - 1];
+            let table = if last == "table" {
+                segments[segments.len() - 2]
             } else {
-                None
-            }
+                last
+            };
+            normalize_typed_table_segment(table)
         }
+    }
+}
+
+fn normalize_typed_table_segment(segment: &str) -> Option<String> {
+    let segment = segment.strip_prefix("r#").unwrap_or(segment);
+    if segment.is_empty() || !segment.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        None
+    } else {
+        Some(segment.to_lowercase())
     }
 }
 

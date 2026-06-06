@@ -1405,6 +1405,22 @@ let q = Qail::typed(users::table).column("email");
 }
 
 #[test]
+fn test_scan_typed_api_qualified_marker_struct_table() {
+    let content = r#"
+let q = Qail::typed(schema::Orders).column("status");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(
+        usages[0].table, "orders",
+        "qualified typed marker structs should resolve from the marker name, not the module path"
+    );
+    assert!(usages[0].columns.contains(&"status".to_string()));
+}
+
+#[test]
 fn test_scan_typed_api_columns_and_filters() {
     let content = r#"
 let q = Qail::typed(orders::table)
@@ -3283,6 +3299,10 @@ fn test_extract_typed_table_arg() {
     assert_eq!(
         extract_typed_table_arg("schema::users::table)"),
         Some("users".to_string())
+    );
+    assert_eq!(
+        extract_typed_table_arg("schema::Orders)"),
+        Some("orders".to_string())
     );
     assert_eq!(
         extract_typed_table_arg("Orders)"),
