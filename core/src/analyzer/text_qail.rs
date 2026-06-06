@@ -1,5 +1,7 @@
 //! Shared helpers for recognizing QAIL text queries in source files.
 
+use super::rust_ast::sql_semantics::classify_sql_kind;
+
 /// Action keywords that can begin a QAIL text query.
 pub const QAIL_ACTION_PREFIXES: [&str; 26] = [
     "get", "set", "add", "del", "with", "make", "mod", "insert", "delete", "create", "count",
@@ -23,6 +25,10 @@ pub struct TextLiteral {
 
 /// Best-effort classifier for whether text begins with a QAIL action keyword.
 pub fn looks_like_qail_query(text: &str) -> bool {
+    if classify_sql_kind(text).is_some() {
+        return false;
+    }
+
     let head = text
         .split_whitespace()
         .next()
@@ -397,6 +403,14 @@ mod tests {
         assert!(looks_like_qail_query("count users fields id"));
         assert!(looks_like_qail_query("insert users fields id values :id"));
         assert!(!looks_like_qail_query("SELECT id FROM users"));
+        assert!(!looks_like_qail_query(
+            "WITH x AS (SELECT id FROM users) SELECT id FROM x"
+        ));
+        assert!(!looks_like_qail_query("INSERT INTO users (id) VALUES ($1)"));
+        assert!(!looks_like_qail_query("DELETE FROM users WHERE id = $1"));
+        assert!(!looks_like_qail_query(
+            "MERGE INTO users USING source_users ON users.id = source_users.id WHEN MATCHED THEN UPDATE SET name = source_users.name"
+        ));
     }
 
     #[test]

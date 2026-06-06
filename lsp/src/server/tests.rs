@@ -44,6 +44,21 @@ fn rust_query_kind_marks_qail_text() {
 }
 
 #[test]
+fn rust_query_kind_marks_sql_cte_text() {
+    let src = r#"async fn run(pool: &Pool) {
+    let rows = query("WITH x AS (SELECT id FROM users) SELECT id FROM x")
+        .fetch_all(pool)
+        .await;
+}"#;
+
+    let query = extract_rust_query_at_line(src, 1).expect("query expected");
+    assert_eq!(query.kind, EmbeddedQueryKind::Sql);
+
+    let diags = collect_rust_qail_diagnostics(src);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
 fn rust_qail_diagnostics_ignore_query_calls_inside_comments_and_literals() {
     let src = r##"async fn run(pool: &Pool) {
     // query("get users fields where").fetch_all(pool).await;
@@ -100,6 +115,20 @@ WHERE active = true
         query.text,
         "SELECT id, email\nFROM users\nWHERE active = true"
     );
+}
+
+#[test]
+fn text_query_extraction_marks_sql_cte_literals() {
+    let src = r#"const sql = "
+WITH x AS (SELECT id FROM users)
+SELECT id FROM x
+";"#;
+
+    let query = extract_text_query_at_line(src, 2).expect("sql query expected");
+    assert_eq!(query.kind, EmbeddedQueryKind::Sql);
+
+    let diags = collect_text_qail_diagnostics(src);
+    assert!(diags.is_empty(), "{diags:?}");
 }
 
 #[test]
