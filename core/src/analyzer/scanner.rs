@@ -495,15 +495,7 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
                 .trim();
             let table = parse_sql_object_name(&normalized, from_idx + "FROM".len())?;
 
-            let columns = if columns_raw == "*" {
-                vec!["*".to_string()]
-            } else {
-                split_sql_top_level(columns_raw, ',')
-                    .into_iter()
-                    .map(|c| c.trim().to_string())
-                    .filter_map(|c| normalize_projection_column(&c))
-                    .collect()
-            };
+            let columns = collect_sql_select_columns(&normalized, columns_raw, from_idx);
 
             Some((kind, table, columns))
         }
@@ -511,20 +503,26 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
             let insert_idx = find_keyword_top_level_from(&normalized, "INSERT", 0)?;
             let into_idx =
                 find_keyword_top_level_from(&normalized, "INTO", insert_idx + "INSERT".len())?;
-            let table = parse_sql_object_name(&normalized, into_idx + "INTO".len())?;
-            Some((kind, table, vec![]))
+            let (table, table_end) =
+                parse_sql_object_name_with_end(&normalized, into_idx + "INTO".len())?;
+            let columns = collect_sql_insert_columns(&normalized, table_end);
+            Some((kind, table, columns))
         }
         SqlStmtKind::Update => {
             let update_idx = find_keyword_top_level_from(&normalized, "UPDATE", 0)?;
-            let table = parse_sql_object_name(&normalized, update_idx + "UPDATE".len())?;
-            Some((kind, table, vec![]))
+            let (table, table_end) =
+                parse_sql_object_name_with_end(&normalized, update_idx + "UPDATE".len())?;
+            let columns = collect_sql_update_columns(&normalized, table_end);
+            Some((kind, table, columns))
         }
         SqlStmtKind::Delete => {
             let delete_idx = find_keyword_top_level_from(&normalized, "DELETE", 0)?;
             let from_idx =
                 find_keyword_top_level_from(&normalized, "FROM", delete_idx + "DELETE".len())?;
-            let table = parse_sql_object_name(&normalized, from_idx + "FROM".len())?;
-            Some((kind, table, vec![]))
+            let (table, table_end) =
+                parse_sql_object_name_with_end(&normalized, from_idx + "FROM".len())?;
+            let columns = collect_sql_delete_columns(&normalized, table_end);
+            Some((kind, table, columns))
         }
         SqlStmtKind::Merge => {
             let merge_idx = find_keyword_top_level_from(&normalized, "MERGE", 0)?;
@@ -537,6 +535,10 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
 }
 
 fn parse_sql_object_name(sql: &str, start: usize) -> Option<String> {
+    parse_sql_object_name_with_end(sql, start).map(|(name, _)| name)
+}
+
+fn parse_sql_object_name_with_end(sql: &str, start: usize) -> Option<(String, usize)> {
     let bytes = sql.as_bytes();
     let mut cursor = skip_sql_ws(bytes, start);
     if cursor >= bytes.len() {
@@ -592,7 +594,151 @@ fn parse_sql_object_name(sql: &str, start: usize) -> Option<String> {
     if tail.is_empty() {
         None
     } else {
-        Some(tail.to_string())
+        Some((tail.to_string(), cursor))
+    }
+}
+
+fn collect_sql_select_columns(sql: &str, columns_raw: &str, from_idx: usize) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+
+    if columns_raw == "*" {
+        push_column_ref("*", &mut cols, &mut seen);
+    } else {
+        collect_sql_projection_columns(columns_raw, &mut cols, &mut seen);
+    }
+
+    let clause_min = from_idx + "FROM".len();
+    for clause in ["WHERE", "GROUP BY", "HAVING", "ORDER BY"] {
+        if let Some(segment) = top_level_sql_clause_segment(sql, clause, clause_min) {
+            collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+        }
+    }
+
+    cols
+}
+
+fn collect_sql_projection_columns(
+    columns_raw: &str,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for projection in split_sql_top_level(columns_raw, ',') {
+        let mut base = projection.trim();
+        if let Some(as_idx) = find_keyword_top_level_from(base, "AS", 0) {
+            base = base.get(..as_idx).unwrap_or(base).trim();
+        }
+        base = strip_sql_distinct_prefix(base);
+
+        if let Some(column) = normalize_projection_column(base)
+            && is_plain_sql_column_ref(&column)
+            && !is_sql_reference_keyword(&column)
+        {
+            push_column_ref(&column, cols, seen);
+            continue;
+        }
+
+        collect_sql_identifier_columns(base, cols, seen);
+    }
+}
+
+fn strip_sql_distinct_prefix(input: &str) -> &str {
+    let trimmed = input.trim();
+    if trimmed.len() >= "DISTINCT".len()
+        && trimmed[.."DISTINCT".len()].eq_ignore_ascii_case("DISTINCT")
+        && trimmed
+            .as_bytes()
+            .get("DISTINCT".len())
+            .is_some_and(|b| b.is_ascii_whitespace())
+    {
+        trimmed["DISTINCT".len()..].trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn is_plain_sql_column_ref(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+}
+
+fn top_level_sql_clause_segment<'a>(sql: &'a str, clause: &str, min_idx: usize) -> Option<&'a str> {
+    let clause_idx = find_keyword_top_level_from(sql, clause, min_idx)?;
+    let start = clause_idx + clause.len();
+    let end = [
+        "WHERE",
+        "GROUP BY",
+        "HAVING",
+        "ORDER BY",
+        "SET",
+        "VALUES",
+        "ON CONFLICT",
+        "USING",
+        "RETURNING",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "FOR",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "WINDOW",
+    ]
+    .into_iter()
+    .filter(|keyword| *keyword != clause)
+    .filter_map(|keyword| find_keyword_top_level_from(sql, keyword, start))
+    .min()
+    .unwrap_or(sql.len());
+
+    sql.get(start..end)
+}
+
+fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    let cursor = skip_sql_ws(sql.as_bytes(), table_end);
+    if sql.as_bytes().get(cursor).copied() == Some(b'(')
+        && let Some((segment, _)) = balanced_paren_segment(sql, cursor)
+    {
+        collect_sql_column_list(segment, &mut cols, &mut seen);
+    }
+    if let Some(conflict) = top_level_sql_clause_segment(sql, "ON CONFLICT", table_end) {
+        collect_sql_identifier_columns(conflict, &mut cols, &mut seen);
+    }
+    cols
+}
+
+fn collect_sql_update_columns(sql: &str, table_end: usize) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(set_segment) = top_level_sql_clause_segment(sql, "SET", table_end) {
+        collect_sql_identifier_columns(set_segment, &mut cols, &mut seen);
+    }
+    for clause in ["FROM", "WHERE", "RETURNING"] {
+        if let Some(segment) = top_level_sql_clause_segment(sql, clause, table_end) {
+            collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+        }
+    }
+    cols
+}
+
+fn collect_sql_delete_columns(sql: &str, table_end: usize) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    for clause in ["USING", "WHERE", "RETURNING"] {
+        if let Some(segment) = top_level_sql_clause_segment(sql, clause, table_end) {
+            collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+        }
+    }
+    cols
+}
+
+fn collect_sql_column_list(segment: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    for item in split_sql_top_level(segment, ',') {
+        if let Some((column, _, _)) = parse_sql_identifier_path(item.trim(), 0) {
+            push_column_ref(&column, cols, seen);
+        }
     }
 }
 
@@ -621,6 +767,205 @@ fn normalize_projection_column(expr: &str) -> Option<String> {
     } else {
         Some(tail.to_string())
     }
+}
+
+fn balanced_paren_segment(input: &str, open_idx: usize) -> Option<(&str, usize)> {
+    let bytes = input.as_bytes();
+    if bytes.get(open_idx).copied() != Some(b'(') {
+        return None;
+    }
+
+    let mut depth = 1i32;
+    let mut i = open_idx + 1;
+    let start = i;
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if b == b'\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if b == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => in_quote = Some(b),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((input.get(start..i)?, i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn collect_sql_identifier_columns(
+    segment: &str,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let bytes = segment.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = skip_sql_single_quote(bytes, i + 1);
+                continue;
+            }
+            b'"' | b'`' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => {}
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+
+        if i > 0 && bytes[i - 1] == b':' {
+            i = parse_sql_identifier_segment(segment, i)
+                .map(|(_, next)| next)
+                .unwrap_or(i + 1);
+            continue;
+        }
+
+        let Some((column, next, segment_count)) = parse_sql_identifier_path(segment, i) else {
+            i += 1;
+            continue;
+        };
+        let after = skip_sql_ws(bytes, next);
+        if segment_count == 1 && after < bytes.len() && bytes[after] == b'(' {
+            i = next;
+            continue;
+        }
+        if !is_sql_reference_keyword(&column) {
+            push_column_ref(&column, cols, seen);
+        }
+        i = next;
+    }
+}
+
+fn parse_sql_identifier_path(input: &str, start: usize) -> Option<(String, usize, usize)> {
+    let bytes = input.as_bytes();
+    let (mut last, mut cursor) = parse_sql_identifier_segment(input, start)?;
+    let mut count = 1usize;
+
+    loop {
+        cursor = skip_sql_ws(bytes, cursor);
+        if cursor < bytes.len() && bytes[cursor] == b'.' {
+            let (segment, next) = parse_sql_identifier_segment(input, cursor + 1)?;
+            last = segment;
+            count += 1;
+            cursor = next;
+            continue;
+        }
+        break;
+    }
+
+    Some((last, cursor, count))
+}
+
+fn parse_sql_identifier_segment(input: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let cursor = skip_sql_ws(bytes, start);
+    if cursor >= bytes.len() {
+        return None;
+    }
+
+    if matches!(bytes[cursor], b'"' | b'`') {
+        let quote = bytes[cursor];
+        let mut i = cursor + 1;
+        let start_seg = i;
+        while i < bytes.len() {
+            if bytes[i] == quote {
+                return Some((input.get(start_seg..i)?.to_string(), i + 1));
+            }
+            i += 1;
+        }
+        return None;
+    }
+
+    if !matches!(bytes[cursor], b'a'..=b'z' | b'A'..=b'Z' | b'_') {
+        return None;
+    }
+
+    let mut i = cursor + 1;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+
+    Some((input.get(cursor..i)?.to_string(), i))
+}
+
+fn skip_sql_single_quote(bytes: &[u8], mut idx: usize) -> usize {
+    while idx < bytes.len() {
+        if bytes[idx] == b'\'' {
+            if idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
+                idx += 2;
+                continue;
+            }
+            return idx + 1;
+        }
+        idx += 1;
+    }
+    idx
+}
+
+fn is_sql_reference_keyword(ident: &str) -> bool {
+    matches!(
+        ident.to_ascii_uppercase().as_str(),
+        "ALL"
+            | "AND"
+            | "ANY"
+            | "ASC"
+            | "AS"
+            | "BETWEEN"
+            | "BY"
+            | "CASE"
+            | "COLLATE"
+            | "DESC"
+            | "DISTINCT"
+            | "ELSE"
+            | "END"
+            | "FALSE"
+            | "FIRST"
+            | "FROM"
+            | "GROUP"
+            | "HAVING"
+            | "IN"
+            | "IS"
+            | "LAST"
+            | "LIKE"
+            | "LIMIT"
+            | "NOT"
+            | "NULL"
+            | "NULLS"
+            | "OFFSET"
+            | "OR"
+            | "ORDER"
+            | "SELECT"
+            | "THEN"
+            | "TRUE"
+            | "WHEN"
+            | "WHERE"
+    )
 }
 
 fn split_sql_top_level(input: &str, delimiter: char) -> Vec<&str> {
@@ -770,7 +1115,7 @@ mod tests {
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind, SqlStmtKind::Select);
         assert_eq!(table, "users");
-        assert_eq!(cols, vec!["name", "email"]);
+        assert_eq!(cols, vec!["name", "email", "id"]);
     }
 
     #[test]
@@ -780,6 +1125,62 @@ mod tests {
         assert_eq!(kind, SqlStmtKind::Select);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["id", "email"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_tracks_predicate_and_order_columns() {
+        let sql = "SELECT id FROM users WHERE email = $1 ORDER BY created_at DESC";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["id", "email", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_tracks_projection_expression_columns() {
+        let sql =
+            "SELECT COUNT(email) AS email_count, date_trunc('day', created_at) AS day FROM users";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_skips_params_strings_and_keywords() {
+        let sql = "SELECT id FROM users WHERE lower(users.email) = lower(:email) AND status = 'active' ORDER BY users.created_at DESC NULLS LAST";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["id", "email", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_insert_columns() {
+        let sql = "INSERT INTO users (email, status) VALUES ($1, $2)";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_update_columns() {
+        let sql =
+            "UPDATE users SET email = $1, status = 'active' WHERE id = $2 RETURNING updated_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Update);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "status", "id", "updated_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_delete_columns() {
+        let sql = "DELETE FROM users WHERE email = $1 RETURNING deleted_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Delete);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "deleted_at"]);
     }
 
     #[test]
@@ -846,7 +1247,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(raw_sql_refs.len(), 1);
         assert_eq!(raw_sql_refs[0].table, "users");
-        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email"]);
+        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email", "active"]);
     }
 
     #[test]
@@ -891,7 +1292,7 @@ WHERE active = true
             .collect::<Vec<_>>();
         assert_eq!(raw_sql_refs.len(), 1);
         assert_eq!(raw_sql_refs[0].table, "users");
-        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email"]);
+        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email", "active"]);
     }
 
     #[test]
@@ -926,7 +1327,7 @@ WHERE active = true
 
         assert_eq!(raw_sql_refs.len(), 1, "{raw_sql_refs:?}");
         assert_eq!(raw_sql_refs[0].table, "users");
-        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email"]);
+        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email", "active"]);
     }
 
     #[test]
