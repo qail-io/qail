@@ -474,7 +474,8 @@ fn parse_sql_update_from_references(
     let Some(update_idx) = find_keyword_top_level_from(sql, "UPDATE", 0) else {
         return Vec::new();
     };
-    let Some((_, table_end)) = parse_sql_object_name_with_end(sql, update_idx + "UPDATE".len())
+    let Some((_, table_end)) =
+        parse_sql_write_object_name_with_end(sql, update_idx + "UPDATE".len())
     else {
         return Vec::new();
     };
@@ -486,13 +487,12 @@ fn parse_sql_update_from_references(
     let source_end = sql_table_source_clause_end(sql, source_start);
     let sources =
         parse_sql_select_table_sources(sql, source_start, inherited_cte_aliases, local_cte_aliases);
-    let columns_by_source = collect_sql_auxiliary_columns_by_source(
+    let columns_by_source = collect_sql_update_from_columns_by_source(
         sql,
         &sources,
         source_start,
         source_end,
         table_end,
-        &["SET", "WHERE", "RETURNING"],
     );
 
     sources
@@ -514,7 +514,8 @@ fn parse_sql_delete_using_references(
     else {
         return Vec::new();
     };
-    let Some((_, table_end)) = parse_sql_object_name_with_end(sql, from_idx + "FROM".len()) else {
+    let Some((_, table_end)) = parse_sql_write_object_name_with_end(sql, from_idx + "FROM".len())
+    else {
         return Vec::new();
     };
     let Some(using_idx) = find_keyword_top_level_from(sql, "USING", table_end) else {
@@ -684,13 +685,14 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
                 find_keyword_top_level_from(&normalized, "INTO", insert_idx + "INSERT".len())?;
             let (table, table_end) =
                 parse_sql_object_name_with_end(&normalized, into_idx + "INTO".len())?;
-            let columns = collect_sql_insert_columns(&normalized, table_end);
+            let cursor = skip_sql_optional_insert_alias(&normalized, table_end);
+            let columns = collect_sql_insert_columns(&normalized, cursor);
             Some((kind, table, columns))
         }
         SqlStmtKind::Update => {
             let update_idx = find_keyword_top_level_from(&normalized, "UPDATE", 0)?;
             let (table, table_end) =
-                parse_sql_object_name_with_end(&normalized, update_idx + "UPDATE".len())?;
+                parse_sql_write_object_name_with_end(&normalized, update_idx + "UPDATE".len())?;
             let columns = collect_sql_update_columns(&normalized, table_end);
             Some((kind, table, columns))
         }
@@ -699,7 +701,7 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
             let from_idx =
                 find_keyword_top_level_from(&normalized, "FROM", delete_idx + "DELETE".len())?;
             let (table, table_end) =
-                parse_sql_object_name_with_end(&normalized, from_idx + "FROM".len())?;
+                parse_sql_write_object_name_with_end(&normalized, from_idx + "FROM".len())?;
             let columns = collect_sql_delete_columns(&normalized, table_end);
             Some((kind, table, columns))
         }
@@ -723,6 +725,14 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
 
 fn parse_sql_object_name(sql: &str, start: usize) -> Option<String> {
     parse_sql_object_name_with_end(sql, start).map(|(name, _)| name)
+}
+
+fn parse_sql_write_object_name_with_end(sql: &str, start: usize) -> Option<(String, usize)> {
+    let mut cursor = skip_sql_ws(sql.as_bytes(), start);
+    if starts_with_keyword_at(sql, cursor, "ONLY") {
+        cursor = skip_sql_ws(sql.as_bytes(), cursor + "ONLY".len());
+    }
+    parse_sql_object_name_with_end(sql, cursor)
 }
 
 fn parse_sql_object_name_with_end(sql: &str, start: usize) -> Option<(String, usize)> {
@@ -973,7 +983,73 @@ fn collect_sql_auxiliary_columns_by_source(
         }
     }
 
+    push_unqualified_columns_to_sources(sources, unqualified, &mut columns, &mut seen);
+
     columns
+}
+
+fn collect_sql_update_from_columns_by_source(
+    sql: &str,
+    sources: &[SqlTableSource],
+    source_start: usize,
+    source_end: usize,
+    clause_min: usize,
+) -> Vec<Vec<String>> {
+    let mut qualified = Vec::new();
+    let mut unqualified = Vec::new();
+
+    collect_sql_join_condition_refs_in_range(
+        sql,
+        source_start,
+        source_end,
+        &mut qualified,
+        &mut unqualified,
+    );
+    if let Some(segment) = top_level_sql_clause_segment(sql, "SET", clause_min) {
+        for assignment in split_sql_top_level(segment, ',') {
+            let Some((_, right)) = assignment.split_once('=') else {
+                continue;
+            };
+            collect_sql_column_refs(right, &mut qualified, &mut unqualified);
+        }
+    }
+    for clause in ["WHERE", "RETURNING"] {
+        if let Some(segment) = top_level_sql_clause_segment(sql, clause, clause_min) {
+            collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
+        }
+    }
+
+    let mut columns = vec![Vec::new(); sources.len()];
+    let mut seen = vec![HashSet::new(); sources.len()];
+
+    for (qualifier, column) in qualified {
+        for (idx, source) in sources.iter().enumerate() {
+            if sql_ident_eq(&qualifier, &source.alias) || sql_ident_eq(&qualifier, &source.table) {
+                push_column_ref(&column, &mut columns[idx], &mut seen[idx]);
+            }
+        }
+    }
+
+    push_unqualified_columns_to_sources(sources, unqualified, &mut columns, &mut seen);
+
+    columns
+}
+
+fn push_unqualified_columns_to_sources(
+    sources: &[SqlTableSource],
+    unqualified: Vec<String>,
+    columns: &mut [Vec<String>],
+    seen: &mut [HashSet<String>],
+) {
+    for column in unqualified {
+        if sources.len() == 1 {
+            push_column_ref(&column, &mut columns[0], &mut seen[0]);
+        } else {
+            for idx in 0..sources.len() {
+                push_column_ref(&column, &mut columns[idx], &mut seen[idx]);
+            }
+        }
+    }
 }
 
 fn collect_sql_merge_columns_by_source(
@@ -1282,6 +1358,23 @@ fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
         collect_sql_identifier_columns(returning, &mut cols, &mut seen);
     }
     cols
+}
+
+fn skip_sql_optional_insert_alias(sql: &str, table_end: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut cursor = skip_sql_ws(bytes, table_end);
+    if starts_with_keyword_at(sql, cursor, "AS") {
+        cursor = skip_sql_ws(bytes, cursor + "AS".len());
+        return parse_sql_identifier_segment(sql, cursor)
+            .map(|(_, end)| end)
+            .unwrap_or(cursor);
+    }
+    if let Some((alias, end)) = parse_sql_identifier_segment(sql, cursor)
+        && !is_sql_table_source_boundary(&alias)
+    {
+        return end;
+    }
+    table_end
 }
 
 fn collect_sql_update_columns(sql: &str, table_end: usize) -> Vec<String> {
@@ -1788,6 +1881,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_insert_alias_columns() {
+        let sql = "INSERT INTO users AS u (email, status) VALUES ($1, $2)";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "status"]);
+    }
+
+    #[test]
     fn test_parse_sql_references_tracks_insert_select_source_table() {
         let sql = "INSERT INTO archived_orders (id, total) SELECT id, total FROM orders WHERE status = $1";
         let refs = parse_sql_references(sql);
@@ -1810,6 +1912,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_update_only_table() {
+        let sql = "UPDATE ONLY users SET email = $1 WHERE id = $2";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Update);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "id"]);
+    }
+
+    #[test]
     fn test_parse_sql_references_tracks_update_from_source_table() {
         let sql = "UPDATE orders o SET status = p.status FROM payments p WHERE o.payment_id = p.id AND p.state = $1";
         let refs = parse_sql_references(sql);
@@ -1822,6 +1933,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_references_tracks_update_from_unqualified_source_columns() {
+        let sql =
+            "UPDATE orders SET status = state FROM payments WHERE orders.payment_id = payments.id";
+        let refs = parse_sql_references(sql);
+
+        let payments = refs
+            .iter()
+            .find(|(_, table, _)| table == "payments")
+            .expect("payments reference");
+        assert_eq!(payments.2, vec!["id", "state"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_delete_columns() {
         let sql = "DELETE FROM users WHERE email = $1 RETURNING deleted_at";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
@@ -1831,9 +1955,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_delete_only_table() {
+        let sql = "DELETE FROM ONLY users WHERE email = $1";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Delete);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email"]);
+    }
+
+    #[test]
     fn test_parse_sql_references_tracks_delete_using_source_table() {
         let sql =
             "DELETE FROM sessions s USING users u WHERE s.user_id = u.id AND u.disabled = true";
+        let refs = parse_sql_references(sql);
+
+        let users = refs
+            .iter()
+            .find(|(_, table, _)| table == "users")
+            .expect("users reference");
+        assert_eq!(users.2, vec!["id", "disabled"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_delete_using_unqualified_source_columns() {
+        let sql =
+            "DELETE FROM sessions USING users WHERE sessions.user_id = id AND disabled = true";
         let refs = parse_sql_references(sql);
 
         let users = refs

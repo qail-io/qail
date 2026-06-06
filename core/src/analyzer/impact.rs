@@ -801,6 +801,90 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_raw_sql_update_from_unqualified_source_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "payments".to_string(),
+            columns: vec![crate::ast::Expr::Named("state".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_update_from_unqualified_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                UPDATE orders
+                SET status = state
+                FROM payments
+                WHERE orders.payment_id = payments.id
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_delete_using_unqualified_source_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("disabled".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_delete_using_unqualified_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                DELETE FROM sessions
+                USING users
+                WHERE sessions.user_id = id
+                  AND disabled = true
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_insert_select_source_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -865,6 +949,127 @@ mod tests {
                 SELECT id FROM users
                 UNION ALL
                 SELECT user_id FROM orders WHERE status = $1
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_insert_alias_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_insert_alias_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                INSERT INTO users AS u (email)
+                VALUES ($1)
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_update_only_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_update_only_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                UPDATE ONLY users
+                SET email = $1
+                WHERE id = $2
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_delete_only_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_delete_only_column_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                DELETE FROM ONLY users
+                WHERE email = $1
             `;
             "#,
         )
