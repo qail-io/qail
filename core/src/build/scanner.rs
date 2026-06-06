@@ -432,7 +432,7 @@ fn collect_let_statement_bindings(
                     .or_default()
                     .extend(scalar_values);
             }
-            let literals = extract_branch_literals(rhs);
+            let literals = extract_branch_literals(rhs, visible_bindings);
             if !literals.is_empty() {
                 bindings
                     .scalars
@@ -617,11 +617,11 @@ fn parse_simple_let(s: &str) -> Option<(String, &str)> {
 /// Extract string literals from static branch expressions.
 /// Handles: `if cond { "a" } else { "b" }` and
 /// `match kind { A => "a", _ => "b" }`.
-fn extract_branch_literals(expr: &str) -> Vec<String> {
+fn extract_branch_literals(expr: &str, visible_bindings: &LiteralBindings) -> Vec<String> {
     let mut literals = Vec::new();
 
     if expr.trim_start().starts_with("match ") {
-        return extract_match_literal_arms(expr);
+        return extract_match_literal_arms(expr, visible_bindings);
     }
 
     // Find all `{ "literal" }` patterns in the expression
@@ -630,10 +630,7 @@ fn extract_branch_literals(expr: &str) -> Vec<String> {
         let inside = &remaining[brace_pos + 1..];
         if let Some(close_pos) = inside.find('}') {
             let block = inside[..close_pos].trim();
-            // Check if block content is a simple string literal
-            if let Some(lit) = extract_string_arg(block) {
-                literals.push(lit);
-            }
+            literals.extend(extract_branch_scalar_expr(block, visible_bindings));
             remaining = &inside[close_pos + 1..];
         } else {
             break;
@@ -643,7 +640,7 @@ fn extract_branch_literals(expr: &str) -> Vec<String> {
     literals
 }
 
-fn extract_match_literal_arms(expr: &str) -> Vec<String> {
+fn extract_match_literal_arms(expr: &str, visible_bindings: &LiteralBindings) -> Vec<String> {
     let trimmed = expr.trim_start();
     if !trimmed.starts_with("match ") {
         return Vec::new();
@@ -665,11 +662,7 @@ fn extract_match_literal_arms(expr: &str) -> Vec<String> {
             continue;
         };
         let result = arm.get(arrow + 2..).unwrap_or_default().trim();
-        if let Some(value) =
-            extract_string_arg(result).or_else(|| extract_single_block_literal(result))
-        {
-            out.push(value);
-        }
+        out.extend(extract_branch_scalar_expr(result, visible_bindings));
     }
     dedupe_values(&mut out);
     out
@@ -748,24 +741,31 @@ fn find_top_level_match_arrow(source: &str) -> Option<usize> {
     None
 }
 
-fn extract_single_block_literal(expr: &str) -> Option<String> {
-    let trimmed = expr.trim();
-    if !trimmed.starts_with('{') {
-        return None;
-    }
-    let close = find_matching_delim(trimmed, 0, b'{', b'}')?;
-    if !trimmed.get(close + 1..)?.trim().is_empty() {
-        return None;
-    }
-    extract_string_arg(trimmed.get(1..close)?.trim())
+fn extract_branch_scalar_expr(expr: &str, visible_bindings: &LiteralBindings) -> Vec<String> {
+    let Some(expr) = unwrap_single_block_expr(expr) else {
+        return Vec::new();
+    };
+    resolve_string_values(expr, None, visible_bindings)
 }
 
-fn extract_branch_array_literals(expr: &str) -> Vec<String> {
+fn unwrap_single_block_expr(mut expr: &str) -> Option<&str> {
+    expr = expr.trim().trim_end_matches(',').trim();
+    while expr.starts_with('{') {
+        let close = find_matching_delim(expr, 0, b'{', b'}')?;
+        if !expr.get(close + 1..)?.trim().is_empty() {
+            break;
+        }
+        expr = expr.get(1..close)?.trim();
+    }
+    Some(expr)
+}
+
+fn extract_branch_array_literals(expr: &str, bindings: &LiteralBindings) -> Vec<String> {
     let trimmed = expr.trim_start();
     let mut out = if trimmed.starts_with("match ") {
-        extract_match_array_arms(trimmed)
+        extract_match_array_arms(trimmed, bindings)
     } else if trimmed.starts_with("if ") {
-        extract_if_array_blocks(trimmed)
+        extract_if_array_blocks(trimmed, bindings)
     } else {
         Vec::new()
     };
@@ -773,7 +773,7 @@ fn extract_branch_array_literals(expr: &str) -> Vec<String> {
     out
 }
 
-fn extract_match_array_arms(expr: &str) -> Vec<String> {
+fn extract_match_array_arms(expr: &str, bindings: &LiteralBindings) -> Vec<String> {
     let Some(open) = find_first_code_byte(expr, b'{') else {
         return Vec::new();
     };
@@ -790,12 +790,12 @@ fn extract_match_array_arms(expr: &str) -> Vec<String> {
             continue;
         };
         let result = arm.get(arrow + 2..).unwrap_or_default().trim();
-        out.extend(extract_array_literal_expr(result));
+        out.extend(extract_array_literal_expr(result, bindings));
     }
     out
 }
 
-fn extract_if_array_blocks(expr: &str) -> Vec<String> {
+fn extract_if_array_blocks(expr: &str, bindings: &LiteralBindings) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
 
@@ -811,7 +811,7 @@ fn extract_if_array_blocks(expr: &str) -> Vec<String> {
             break;
         };
         if let Some(block) = expr.get(open + 1..close) {
-            out.extend(extract_array_literal_expr(block));
+            out.extend(extract_array_literal_expr(block, bindings));
         }
         cursor = close + 1;
     }
@@ -819,11 +819,12 @@ fn extract_if_array_blocks(expr: &str) -> Vec<String> {
     out
 }
 
-fn extract_array_literal_expr(expr: &str) -> Vec<String> {
+fn extract_array_literal_expr(expr: &str, bindings: &LiteralBindings) -> Vec<String> {
     let mut trimmed = expr.trim();
     while let Some(rest) = trimmed.strip_prefix('&') {
         trimmed = rest.trim_start();
     }
+    trimmed = trimmed.trim_end_matches(',').trim();
 
     if trimmed.starts_with('{') {
         let Some(close) = find_matching_delim(trimmed, 0, b'{', b'}') else {
@@ -839,12 +840,12 @@ fn extract_array_literal_expr(expr: &str) -> Vec<String> {
         }
         return trimmed
             .get(1..close)
-            .map(extract_array_literal_expr)
+            .map(|inner| extract_array_literal_expr(inner, bindings))
             .unwrap_or_default();
     }
 
     if !trimmed.starts_with('[') {
-        return Vec::new();
+        return resolve_array_string_values(trimmed, None, bindings);
     }
     let Some(close) = find_matching_delim(trimmed, 0, b'[', b']') else {
         return Vec::new();
@@ -2782,7 +2783,7 @@ fn resolve_array_string_values_inner(
     visited: &mut HashSet<String>,
     out: &mut Vec<String>,
 ) {
-    let branch = extract_branch_array_literals(expr);
+    let branch = extract_branch_array_literals(expr, bindings);
     if !branch.is_empty() {
         out.extend(branch);
         return;

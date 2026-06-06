@@ -1109,17 +1109,56 @@ fn demo(kind: &str) {
 }
 
 #[test]
+fn test_scan_file_resolves_branch_literal_binding_references() {
+    let content = r#"
+const USERS_TABLE: &str = "users";
+const ORDERS_TABLE: &str = "orders";
+
+fn demo(kind: &str, prefer_users: bool) {
+    let table = if prefer_users {
+        USERS_TABLE
+    } else {
+        "tenants"
+    };
+    let match_table = match kind {
+        "orders" => ORDERS_TABLE,
+        _ => { USERS_TABLE },
+    };
+    let _if_cmd = Qail::get(table).column("id");
+    let _match_cmd = Qail::get(match_table).column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        4,
+        "branch expressions returning literal bindings should enumerate static table variants: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[1].table, "tenants");
+    assert_eq!(usages[2].table, "orders");
+    assert_eq!(usages[3].table, "users");
+}
+
+#[test]
 fn test_scan_file_resolves_branch_literal_column_arrays() {
     let content = r#"
+const FULL_COLUMNS: &[&str] = &["id", "email"];
+const STATUS_COLUMNS: &[&str] = &["id", "status"];
+const PROFILE_COLUMNS: &[&str] = &["name"];
+const CREATED_COLUMNS: &[&str] = &["created_at"];
+
 fn demo(full: bool, kind: &str) {
     let if_columns = if full {
-        ["id", "email"]
+        FULL_COLUMNS
     } else {
-        ["id", "status"]
+        STATUS_COLUMNS
     };
     let match_columns = match kind {
-        "profile" => ["name"],
-        _ => { ["created_at"] },
+        "profile" => PROFILE_COLUMNS,
+        _ => { CREATED_COLUMNS },
     };
     let _if_cmd = Qail::get("users").columns(if_columns);
     let _match_cmd = Qail::get("users").columns(match_columns);
