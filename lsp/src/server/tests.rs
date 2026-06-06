@@ -181,6 +181,63 @@ table orders {
 }
 
 #[test]
+fn rust_embedded_qail_ignores_commented_super_admin_marker() {
+    let schema = BuildSchema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .expect("schema should parse");
+    let src = r#"async fn demo(pool: &Pool) {
+    // SuperAdminToken::for_system_process("jobs");
+    let _rows = query("get orders fields id")
+        .fetch_all(pool)
+        .await;
+}"#;
+
+    let diags = collect_semantic_qail_diagnostics(src, "file:///tmp/demo.rs", &schema);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("for_system_process")),
+        "comment-only SuperAdmin marker must not trigger audit warning: {diags:?}"
+    );
+}
+
+#[test]
+fn rust_embedded_qail_string_allow_marker_does_not_disable_super_admin_audit() {
+    let schema = BuildSchema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .expect("schema should parse");
+    let src = r#"async fn demo(pool: &Pool) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _note = "qail:allow(super_admin)";
+    let _rows = query("get orders fields id")
+        .fetch_all(pool)
+        .await;
+}"#;
+
+    let diags = collect_semantic_qail_diagnostics(src, "file:///tmp/demo.rs", &schema);
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("for_system_process")),
+        "allow marker inside a string must not suppress SuperAdmin audit warning: {diags:?}"
+    );
+}
+
+#[test]
 fn file_uri_maps_to_path() {
     let uri = "file:///tmp/qail/src/main.rs";
     let path = uri_to_file_path(uri).expect("file uri should parse");

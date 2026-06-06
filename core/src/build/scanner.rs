@@ -128,6 +128,17 @@ pub fn scan_source_text(file: &str, content: &str) -> Vec<QailUsage> {
     usages
 }
 
+/// Return true when Rust source contains a real
+/// `SuperAdminToken::for_system_process(...)` call and no
+/// `qail:allow(super_admin)` comment.
+///
+/// Comment and string literal contents are ignored for the function-call check,
+/// and only comments count as allow markers.
+pub fn source_uses_super_admin_without_allow(source: &str) -> bool {
+    !source_has_allow_comment(source, "qail:allow(super_admin)")
+        && source_has_function_call(source, "for_system_process")
+}
+
 fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -3002,9 +3013,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
     // ── File-level flags ─────────────────────────────────────────────
     // Detect SuperAdminToken::for_system_process() usage anywhere in file.
     // Files can opt out with `// qail:allow(super_admin)` comment.
-    let file_has_allow_super_admin = source_has_allow_comment(content, "qail:allow(super_admin)");
-    let file_uses_super_admin =
-        !file_has_allow_super_admin && source_has_function_call(content, "for_system_process");
+    let file_uses_super_admin = source_uses_super_admin_without_allow(content);
 
     let chains = collect_qail_chains(content);
     let qail_bound_vars = chains

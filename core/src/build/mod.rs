@@ -38,7 +38,9 @@ mod validate;
 
 // ── Re-exports for public API ────────────────────────────────────────
 pub use codegen::{generate_schema_code, generate_typed_schema};
-pub use scanner::{QailUsage, scan_source_files, scan_source_text};
+pub use scanner::{
+    QailUsage, scan_source_files, scan_source_text, source_uses_super_admin_without_allow,
+};
 pub use schema::{ForeignKey, ResourceSchema, Schema, TableSchema};
 pub use validate::{
     ValidationDiagnostic, ValidationDiagnosticKind, validate, validate_against_schema_diagnostics,

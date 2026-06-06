@@ -7,7 +7,7 @@ use qail_core::analyzer::{
 use qail_core::ast::{Condition, Expr, MergeAction, MergeSource, Qail, Value};
 use qail_core::build::{
     QailUsage, Schema as BuildSchema, ValidationDiagnosticKind, scan_source_text,
-    validate_against_schema_diagnostics,
+    source_uses_super_admin_without_allow, validate_against_schema_diagnostics,
 };
 use qail_core::parse;
 use qail_core::schema::Schema;
@@ -436,8 +436,7 @@ fn collect_semantic_qail_diagnostics(
 
 fn collect_document_usages(text: &str, uri: &str) -> (Vec<QailUsage>, Vec<(usize, Range)>) {
     let file = uri.strip_prefix("file://").unwrap_or(uri).to_string();
-    let file_uses_super_admin =
-        text.contains("for_system_process(") && !text.contains("qail:allow(super_admin)");
+    let file_uses_super_admin = source_uses_super_admin_without_allow(text);
 
     if uri.ends_with(".rs") {
         return collect_rust_document_usages(&file, text, file_uses_super_admin);

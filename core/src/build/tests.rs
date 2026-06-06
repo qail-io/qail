@@ -4315,3 +4315,32 @@ fn demo() {
         "allow marker in comments should disable super-admin file flag"
     );
 }
+
+#[test]
+fn test_super_admin_file_flag_ignores_markers_inside_literals() {
+    let content = r#"
+fn demo() {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _fake_allow = "qail:allow(super_admin)";
+    let _fake_call = "SuperAdminToken::for_system_process(\"jobs\")";
+    let _q = Qail::get("orders").column("id");
+}
+"#;
+
+    assert!(
+        source_uses_super_admin_without_allow(content),
+        "string literals must not suppress the real SuperAdmin file flag"
+    );
+
+    let commented_call = r#"
+fn demo() {
+    // SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders").column("id");
+}
+"#;
+
+    assert!(
+        !source_uses_super_admin_without_allow(commented_call),
+        "comment-only SuperAdmin markers must not set the file flag"
+    );
+}
