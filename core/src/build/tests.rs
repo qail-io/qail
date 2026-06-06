@@ -1731,6 +1731,21 @@ fn test_extract_columns_order_by_expr_and_condition_helpers() {
 }
 
 #[test]
+fn test_extract_columns_condition_expression_values() {
+    let line = r#"Qail::get("orders")
+        .filter_cond(eq("status", col("fallback_status")))
+        .filter_cond(between("total", col("minimum_total"), col("maximum_total")))"#;
+    let cols = extract_columns(line);
+
+    for expected in ["status", "fallback_status", "total", "minimum_total", "maximum_total"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} from condition expression values: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_ast_native_helper_builders() {
     let line = r#"Qail::get("orders")
         .column_expr(json("metadata", "priority").alias("priority"))

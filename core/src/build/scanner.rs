@@ -3515,18 +3515,37 @@ fn extract_condition_columns_inner(
         bindings,
     ));
     for call in scan_rust_function_calls(expr) {
+        let args = split_top_level_args(call.args);
         if call.name == "cond" {
-            if let Some(left_arg) = split_top_level_args(call.args).first() {
+            if let Some(left_arg) = args.first() {
                 columns.extend(extract_direct_expr_columns(
                     left_arg,
                     substitutions,
                     bindings,
                 ));
             }
+            if let Some(value_arg) = args.get(2) {
+                extract_expression_columns_inner(
+                    value_arg,
+                    substitutions,
+                    bindings,
+                    depth + 1,
+                    columns,
+                );
+            }
         } else if call.name == "recent" {
             columns.push("created_at".to_string());
         } else if is_condition_builder_name(call.name) {
             columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+            for value_arg in args.iter().skip(1) {
+                extract_expression_columns_inner(
+                    value_arg,
+                    substitutions,
+                    bindings,
+                    depth + 1,
+                    columns,
+                );
+            }
         }
         if call.path.ends_with("Value::Column") {
             columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
