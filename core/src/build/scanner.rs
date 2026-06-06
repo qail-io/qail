@@ -39,7 +39,7 @@ pub struct QailUsage {
     pub file_uses_super_admin: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LiteralBindings {
     scalars: HashMap<String, Vec<String>>,
     arrays: HashMap<String, Vec<String>>,
@@ -141,25 +141,44 @@ fn collect_literal_binding_index(
     local_functions: &[LocalFunction],
 ) -> LiteralBindingIndex {
     let mut index = LiteralBindingIndex::default();
+    let statements = collect_binding_statements(content);
 
-    for stmt in collect_binding_statements(content) {
+    for _ in 0..statements.len().max(1) {
+        let before = index.globals.clone();
+        for stmt in &statements {
+            if !matches!(stmt.kind, BindingStatementKind::Const)
+                || find_enclosing_local_function(stmt.start, local_functions).is_some()
+            {
+                continue;
+            }
+            let bindings = collect_const_statement_bindings(stmt.text, &index.globals);
+            if !literal_bindings_is_empty(&bindings) {
+                merge_literal_bindings(&mut index.globals, &bindings);
+            }
+        }
+        dedupe_literal_bindings(&mut index.globals);
+        if index.globals == before {
+            break;
+        }
+    }
+
+    for stmt in &statements {
         let enclosing_function = find_enclosing_local_function(stmt.start, local_functions);
         let visible_bindings = literal_bindings_for_offset(&index, stmt.start, enclosing_function);
         match stmt.kind {
             BindingStatementKind::Const => {
+                if enclosing_function.is_none() {
+                    continue;
+                }
                 let bindings = collect_const_statement_bindings(stmt.text, &visible_bindings);
                 if literal_bindings_is_empty(&bindings) {
                     continue;
                 }
-                if enclosing_function.is_some() {
-                    index.locals.push(ScopedLiteralBindings {
-                        start: stmt.start,
-                        end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
-                        bindings,
-                    });
-                } else {
-                    merge_literal_bindings(&mut index.globals, &bindings);
-                }
+                index.locals.push(ScopedLiteralBindings {
+                    start: stmt.start,
+                    end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
+                    bindings,
+                });
             }
             BindingStatementKind::Let => {
                 let bindings = collect_let_statement_bindings(stmt.text, &visible_bindings);
@@ -174,10 +193,7 @@ fn collect_literal_binding_index(
         }
     }
 
-    dedupe_binding_values(&mut index.globals.scalars);
-    dedupe_binding_values(&mut index.globals.arrays);
-    dedupe_binding_values(&mut index.globals.typed_scalars);
-    dedupe_binding_values(&mut index.globals.typed_arrays);
+    dedupe_literal_bindings(&mut index.globals);
     index
 }
 
@@ -497,6 +513,13 @@ fn dedupe_binding_values(bindings: &mut HashMap<String, Vec<String>>) {
         let mut seen = HashSet::new();
         values.retain(|value| seen.insert(value.clone()));
     }
+}
+
+fn dedupe_literal_bindings(bindings: &mut LiteralBindings) {
+    dedupe_binding_values(&mut bindings.scalars);
+    dedupe_binding_values(&mut bindings.arrays);
+    dedupe_binding_values(&mut bindings.typed_scalars);
+    dedupe_binding_values(&mut bindings.typed_arrays);
 }
 
 /// Parse `ident = rest` from a let statement (after stripping `let `).

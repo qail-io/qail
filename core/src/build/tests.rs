@@ -1032,6 +1032,32 @@ fn demo() {
 }
 
 #[test]
+fn test_scan_file_resolves_forward_global_literal_aliases() {
+    let content = r#"
+const TABLE: &str = BASE_TABLE;
+const COLUMNS: &[&str] = BASE_COLUMNS;
+const BASE_TABLE: &str = "users";
+const BASE_COLUMNS: &[&str] = &["id", "email"];
+
+fn demo() {
+    let table = TABLE;
+    let columns = COLUMNS;
+    let _cmd = Qail::get(table).columns(columns);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        1,
+        "global const aliases should not depend on source order: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[0].columns, vec!["id", "email"]);
+}
+
+#[test]
 fn test_scan_file_resolves_match_literal_branches() {
     let content = r#"
 fn demo(kind: &str) {
