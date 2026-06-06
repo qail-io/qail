@@ -1275,6 +1275,7 @@ fn test_scan_file_extracts_related_tables_from_builder_surfaces() {
     let content = r#"
 let q = Qail::get("orders")
     .left_join("order_items items", "orders.id", "items.order_id")
+    .join_conds(JoinKind::Left, "shipments", vec![])
     .join_on_optional("tenants")
     .update_from(["accounts"]);
 "#;
@@ -1282,7 +1283,7 @@ let q = Qail::get("orders")
     scan_file("test.rs", content, &mut usages);
 
     assert_eq!(usages.len(), 1);
-    for expected in ["order_items", "tenants", "accounts"] {
+    for expected in ["order_items", "shipments", "tenants", "accounts"] {
         assert!(
             usages[0].related_tables.contains(&expected.to_string()),
             "expected related table {expected}: {:?}",
@@ -1343,6 +1344,32 @@ let q = Qail::get("orders")
             .iter()
             .any(|d| d.message.contains("order_itemz")),
         "join related table typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_join_conds_related_table_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .join_conds(JoinKind::Left, "shipmentz", vec![]);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("shipmentz")),
+        "join_conds related table typo should be schema-validated: {:?}",
         diagnostics
     );
 }

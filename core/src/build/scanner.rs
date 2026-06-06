@@ -2707,11 +2707,11 @@ fn extract_related_tables_with_bindings(
     for call in scan_chain_method_calls(line) {
         match call.name {
             "using_table" | "using_table_as" | "left_join" | "inner_join" | "left_join_as"
-            | "inner_join_as" | "join_conds" | "left_join_conds" | "inner_join_conds"
-            | "join_on" | "join_on_optional" => {
+            | "inner_join_as" | "left_join_conds" | "inner_join_conds" | "join_on"
+            | "join_on_optional" => {
                 tables.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
             }
-            "join" => {
+            "join" | "join_conds" => {
                 tables.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
             }
             "update_from" | "delete_using" => {
