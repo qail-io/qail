@@ -170,10 +170,46 @@ impl CodebaseScanner {
     }
 
     fn scan_text_file(&self, path: &Path, content: &str) -> Vec<CodeReference> {
+        if path.extension().is_some_and(|ext| ext == "sql") {
+            return self.scan_sql_document(path, content);
+        }
+
         let mut refs = Vec::new();
 
         for literal in extract_text_literals(content) {
             refs.extend(self.scan_text_literal(path, &literal));
+        }
+
+        refs
+    }
+
+    fn scan_sql_document(&self, path: &Path, content: &str) -> Vec<CodeReference> {
+        let mut refs = Vec::new();
+
+        for (line_number, statement) in split_sql_document_statements(content) {
+            let Some((start, end)) = trim_query_bounds(&statement) else {
+                continue;
+            };
+            let Some(candidate) = statement.get(start..end) else {
+                continue;
+            };
+            let normalized = normalize_whitespace(candidate);
+            if normalized.is_empty() {
+                continue;
+            }
+            let statement_line =
+                line_number + statement[..start].bytes().filter(|b| *b == b'\n').count();
+
+            for (_kind, table, columns) in parse_sql_references(&normalized) {
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: statement_line,
+                    table,
+                    columns,
+                    query_type: QueryType::RawSql,
+                    snippet: normalized.chars().take(60).collect(),
+                });
+            }
         }
 
         refs
@@ -251,8 +287,62 @@ fn mode_for_extension(ext: &std::ffi::OsStr) -> AnalysisMode {
 fn is_supported_source_extension(ext: &std::ffi::OsStr) -> bool {
     matches!(
         ext.to_str(),
-        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py")
+        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" | "py" | "sql")
     )
+}
+
+fn split_sql_document_statements(content: &str) -> Vec<(usize, String)> {
+    let bytes = content.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let mut start_line = 1usize;
+    let mut line = 1usize;
+    let mut i = 0usize;
+    let mut in_quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\n' {
+            line += 1;
+        }
+
+        if let Some(quote) = in_quote {
+            if b == quote {
+                if matches!(quote, b'\'' | b'"') && bytes.get(i + 1).copied() == Some(quote) {
+                    i += 2;
+                    continue;
+                }
+                in_quote = None;
+            } else if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => in_quote = Some(b),
+            b';' => {
+                if let Some(statement) = content.get(start..i) {
+                    statements.push((start_line, statement.to_string()));
+                }
+                start = i + 1;
+                start_line = line;
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    if let Some(statement) = content.get(start..)
+        && !statement.trim().is_empty()
+    {
+        statements.push((start_line, statement.to_string()));
+    }
+
+    statements
 }
 
 #[cfg(test)]
@@ -348,6 +438,45 @@ WHERE active = true
         assert_eq!(raw_sql_refs.len(), 1);
         assert_eq!(raw_sql_refs[0].table, "users");
         assert_eq!(raw_sql_refs[0].columns, vec!["id", "email", "active"]);
+    }
+
+    #[test]
+    fn test_sql_file_scan_tracks_raw_sql_document_statements() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_sql_document_{}_{}.sql",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"
+SELECT id, email FROM users WHERE active = true;
+UPDATE orders SET status = $1 WHERE id = $2;
+"#;
+
+        std::fs::write(&path, source).expect("write temp sql file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|reference| reference.table == "users")
+            .expect("users reference");
+        assert_eq!(users.line, 2);
+        assert_eq!(users.columns, vec!["id", "email", "active"]);
+
+        let orders = refs
+            .iter()
+            .find(|reference| reference.table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.line, 3);
+        assert_eq!(orders.columns, vec!["status", "id"]);
     }
 
     #[test]
@@ -587,6 +716,42 @@ WHERE active = true
 
         assert_eq!(files, vec![("panel.jsx", 1), ("widget.tsx", 1)]);
         assert_eq!(result.refs.len(), 2, "{:?}", result.refs);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_scan_with_details_includes_modern_js_module_files() {
+        let scanner = CodebaseScanner::new();
+        let root = std::env::temp_dir().join(format!(
+            "qail_scanner_modern_js_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir temp root");
+
+        for ext in ["mjs", "cjs", "mts", "cts"] {
+            std::fs::write(
+                root.join(format!("query.{ext}")),
+                r#"const sql = "SELECT id FROM users";"#,
+            )
+            .expect("write module source");
+        }
+
+        let result = scanner.scan_with_details(&root);
+
+        let mut files = result
+            .files
+            .iter()
+            .filter_map(|file| file.file.extension().and_then(|ext| ext.to_str()))
+            .collect::<Vec<_>>();
+        files.sort_unstable();
+
+        assert_eq!(files, vec!["cjs", "cts", "mjs", "mts"]);
+        assert_eq!(result.refs.len(), 4, "{:?}", result.refs);
 
         let _ = std::fs::remove_dir_all(&root);
     }
