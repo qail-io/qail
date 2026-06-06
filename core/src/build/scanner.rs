@@ -1300,7 +1300,7 @@ fn find_next_qail_constructor(source: &str, start: usize) -> Option<QailConstruc
             i = cursor + 1;
             continue;
         };
-        let statement_end = find_statement_end(source, close_paren + 1).unwrap_or(bytes.len());
+        let statement_end = find_qail_chain_end(source, close_paren);
         return Some(QailConstructorHit {
             start: i,
             action,
@@ -1310,6 +1310,67 @@ fn find_next_qail_constructor(source: &str, start: usize) -> Option<QailConstruc
         });
     }
     None
+}
+
+fn find_qail_chain_end(source: &str, constructor_close_paren: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut cursor = constructor_close_paren + 1;
+
+    loop {
+        cursor = skip_ws_and_comments(source, cursor);
+        if bytes.get(cursor).copied() == Some(b'?') {
+            cursor += 1;
+            continue;
+        }
+        if bytes.get(cursor).copied() != Some(b'.') {
+            return cursor;
+        }
+
+        let name_start = skip_ws(bytes, cursor + 1);
+        let Some((_, mut after_name)) = parse_ident_at_bytes(source, name_start) else {
+            return cursor;
+        };
+        after_name = skip_ws(bytes, after_name);
+        if starts_with_bytes(bytes, after_name, b"::") {
+            after_name = skip_ws(bytes, after_name + 2);
+            if bytes.get(after_name).copied() == Some(b'<') {
+                let Some(angle_end) = find_matching_delim(source, after_name, b'<', b'>') else {
+                    return cursor;
+                };
+                after_name = skip_ws(bytes, angle_end + 1);
+            }
+        }
+        if bytes.get(after_name).copied() != Some(b'(') {
+            return cursor;
+        }
+        let Some(close) = find_matching_delim(source, after_name, b'(', b')') else {
+            return cursor;
+        };
+        cursor = close + 1;
+    }
+}
+
+fn skip_ws_and_comments(source: &str, mut idx: usize) -> usize {
+    let bytes = source.as_bytes();
+    while idx < bytes.len() {
+        if bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+            continue;
+        }
+        if starts_with_bytes(bytes, idx, b"//") {
+            idx += 2;
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, idx, b"/*") {
+            idx = consume_block_comment(bytes, idx);
+            continue;
+        }
+        break;
+    }
+    idx
 }
 
 fn extract_first_argument(args: &str) -> &str {
@@ -1787,6 +1848,62 @@ fn scan_ident_method_calls<'a>(
     calls
 }
 
+fn extract_to_cte_aliases(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut aliases = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if bytes[i] != b'.' {
+            i += 1;
+            continue;
+        }
+        let name_start = skip_ws(bytes, i + 1);
+        let Some((name, mut cursor)) = parse_ident_at_bytes(source, name_start) else {
+            i += 1;
+            continue;
+        };
+        if name != "to_cte" {
+            i += 1;
+            continue;
+        }
+        cursor = skip_ws(bytes, cursor);
+        if bytes.get(cursor).copied() != Some(b'(') {
+            i += 1;
+            continue;
+        }
+        let Some(close) = find_matching_delim(source, cursor, b'(', b')') else {
+            i = cursor + 1;
+            continue;
+        };
+        if let Some(args) = source.get(cursor + 1..close)
+            && let Some(alias) = extract_string_arg(args)
+        {
+            aliases.push(alias);
+        }
+        i = close + 1;
+    }
+
+    dedupe_values(&mut aliases);
+    aliases
+}
+
 fn extract_bound_var_from_prefix(prefix: &str) -> Option<String> {
     let mut s = prefix.trim_start();
     s = s.strip_prefix("let ")?;
@@ -2042,6 +2159,11 @@ fn collect_cte_aliases(
                             local_functions,
                         )
                     {
+                        push_cte_alias(&mut aliases, source, chain, alias);
+                    }
+                }
+                "with_cte" | "with_ctes" => {
+                    for alias in extract_to_cte_aliases(call.args) {
                         push_cte_alias(&mut aliases, source, chain, alias);
                     }
                 }

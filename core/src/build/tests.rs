@@ -2270,6 +2270,26 @@ fn demo() {
 }
 
 #[test]
+fn test_cte_alias_from_inline_with_ctes_to_cte_is_visible_to_outer_query() {
+    let content = r#"
+fn demo() {
+    let _read = Qail::get("agg")
+        .with_ctes(vec![Qail::get("orders").columns(["total"]).to_cte("agg")])
+        .column("total");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        usages[0].is_cte_ref,
+        "inline with_ctes(...to_cte(...)) should mark the outer CTE read: {usages:?}"
+    );
+    assert_eq!(usages[1].table, "orders");
+}
+
+#[test]
 fn test_cte_with_inline_detection() {
     // .with("alias", query) should also be detected as CTE
     let content = r#"
@@ -2887,6 +2907,27 @@ let q = Qail::add("usage_ledger")
     assert!(
         usages[0].has_explicit_tenant_scope,
         "tenant_id payload setters should count as explicit tenant scope"
+    );
+}
+
+#[test]
+fn test_explicit_tenant_scope_survives_fallible_builder_chain() {
+    let content = r#"
+fn build(rls: &RlsContext) -> Result<Qail, String> {
+    Ok(Qail::add("usage_ledger")
+        .with_rls(rls)
+        .map_err(|e| format!("usage ledger query build: {e}"))?
+        .set_value("tenant_id", tenant_id)
+        .set_value("metric", "waba_messages"))
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_explicit_tenant_scope,
+        "fallible builder chains must continue past ? to see tenant payload scope"
     );
 }
 
