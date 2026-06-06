@@ -2754,6 +2754,26 @@ let q = Qail::get("results").with("agg", Qail::get("orders"));
 }
 
 #[test]
+fn test_cte_with_qualified_inline_qail_source_detection() {
+    let content = r#"
+fn demo() {
+    let q = Qail::get("results")
+        .with("agg", qail_core::ast::Qail::get("orders"));
+    let read = Qail::get("agg").column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 3);
+    assert_eq!(usages[1].table, "orders");
+    assert!(
+        usages[2].is_cte_ref,
+        "qualified inline Qail CTE source should make later alias reads CTE refs: {usages:?}"
+    );
+}
+
+#[test]
 fn test_cte_with_non_qail_rhs_not_marked_as_cte_alias() {
     let content = r#"
 let q = Qail::get("results").with("agg", some_non_qail_value);

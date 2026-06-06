@@ -2510,7 +2510,7 @@ fn collect_cte_aliases(
                     if args.len() < 2 {
                         continue;
                     }
-                    if args[1].trim_start().starts_with("Qail::")
+                    if arg_starts_with_qail_constructor(args[1])
                         || cte_arg_is_visible_bound_qail(
                             args[1],
                             chain,
@@ -2574,6 +2574,18 @@ fn collect_cte_aliases(
         }
     }
     aliases
+}
+
+fn arg_starts_with_qail_constructor(arg: &str) -> bool {
+    let trimmed = arg.trim_start();
+    if trimmed.starts_with("Qail::") {
+        return true;
+    }
+    let Some(hit) = find_next_qail_constructor(trimmed, 0) else {
+        return false;
+    };
+    let prefix = trimmed.get(..hit.start).unwrap_or_default().trim();
+    prefix.is_empty() || prefix.ends_with("::")
 }
 
 fn push_cte_alias(
