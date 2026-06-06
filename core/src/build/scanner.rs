@@ -355,15 +355,13 @@ fn collect_let_statement_bindings(
                     .or_default()
                     .extend(scalar_values);
             }
-            if rhs.starts_with("if ") {
-                let literals = extract_branch_literals(rhs);
-                if !literals.is_empty() {
-                    bindings
-                        .scalars
-                        .entry(var.clone())
-                        .or_default()
-                        .extend(literals);
-                }
+            let literals = extract_branch_literals(rhs);
+            if !literals.is_empty() {
+                bindings
+                    .scalars
+                    .entry(var.clone())
+                    .or_default()
+                    .extend(literals);
             }
             let values = resolve_array_string_values(rhs, None, visible_bindings);
             if !values.is_empty() {
@@ -532,10 +530,15 @@ fn parse_simple_let(s: &str) -> Option<(String, &str)> {
     Some((ident, rest))
 }
 
-/// Extract string literals from if/else branches.
-/// Handles: `if cond { "a" } else { "b" }` → ["a", "b"]
+/// Extract string literals from static branch expressions.
+/// Handles: `if cond { "a" } else { "b" }` and
+/// `match kind { A => "a", _ => "b" }`.
 fn extract_branch_literals(expr: &str) -> Vec<String> {
     let mut literals = Vec::new();
+
+    if expr.trim_start().starts_with("match ") {
+        return extract_match_literal_arms(expr);
+    }
 
     // Find all `{ "literal" }` patterns in the expression
     let mut remaining = expr;
@@ -554,6 +557,123 @@ fn extract_branch_literals(expr: &str) -> Vec<String> {
     }
 
     literals
+}
+
+fn extract_match_literal_arms(expr: &str) -> Vec<String> {
+    let trimmed = expr.trim_start();
+    if !trimmed.starts_with("match ") {
+        return Vec::new();
+    }
+
+    let Some(open) = find_first_code_byte(trimmed, b'{') else {
+        return Vec::new();
+    };
+    let Some(close) = find_matching_delim(trimmed, open, b'{', b'}') else {
+        return Vec::new();
+    };
+    let Some(body) = trimmed.get(open + 1..close) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for arm in split_top_level_args(body) {
+        let Some(arrow) = find_top_level_match_arrow(arm) else {
+            continue;
+        };
+        let result = arm.get(arrow + 2..).unwrap_or_default().trim();
+        if let Some(value) =
+            extract_string_arg(result).or_else(|| extract_single_block_literal(result))
+        {
+            out.push(value);
+        }
+    }
+    dedupe_values(&mut out);
+    out
+}
+
+fn find_first_code_byte(source: &str, needle: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+        if bytes[i] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_top_level_match_arrow(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        match bytes[i] {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b'{' => brace += 1,
+            b'}' => brace = brace.saturating_sub(1),
+            b'=' if paren == 0
+                && bracket == 0
+                && brace == 0
+                && bytes.get(i + 1).copied() == Some(b'>') =>
+            {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn extract_single_block_literal(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let close = find_matching_delim(trimmed, 0, b'{', b'}')?;
+    if !trimmed.get(close + 1..)?.trim().is_empty() {
+        return None;
+    }
+    extract_string_arg(trimmed.get(1..close)?.trim())
 }
 
 /// Parse destructuring let: `let (a, b) = ...;`

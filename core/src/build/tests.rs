@@ -1032,6 +1032,31 @@ fn demo() {
 }
 
 #[test]
+fn test_scan_file_resolves_match_literal_branches() {
+    let content = r#"
+fn demo(kind: &str) {
+    let table = match kind {
+        "account" => "users",
+        "booking" => { "orders" },
+        _ => "tenants",
+    };
+    let _cmd = Qail::get(table).column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        3,
+        "match expressions returning literals should enumerate possible static tables: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[1].table, "orders");
+    assert_eq!(usages[2].table, "tenants");
+}
+
+#[test]
 fn test_scan_file_ignores_helper_calls_in_comments_for_param_substitution() {
     let content = r#"
 async fn fetch_one(table: &str) {
