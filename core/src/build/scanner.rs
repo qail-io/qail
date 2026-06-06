@@ -2392,9 +2392,8 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 continue;
             }
 
-            let columns =
+            let raw_columns =
                 extract_columns_with_bindings(&chain.full_chain, substitutions, &literal_bindings);
-            let columns_key = columns.join("\x1f");
             let related_tables = extract_related_tables_with_bindings(
                 &chain.full_chain,
                 substitutions,
@@ -2406,6 +2405,14 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
             let related_tables_key = related_tables.join("\x1d");
 
             for table in resolved_tables {
+                let alias_map = extract_table_aliases_with_bindings(
+                    &chain.full_chain,
+                    &table,
+                    substitutions,
+                    &literal_bindings,
+                );
+                let columns = normalize_columns_with_aliases(&raw_columns, &alias_map);
+                let columns_key = columns.join("\x1f");
                 let variant_key = format!("{table}\x1e{columns_key}\x1e{related_tables_key}");
                 if !seen_variants.insert(variant_key) {
                     continue;
@@ -2581,6 +2588,20 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
+            "column_expr" | "select_expr" => {
+                columns.extend(extract_expression_columns_with_bindings(
+                    call.args,
+                    substitutions,
+                    bindings,
+                ));
+            }
+            "columns_expr" | "select_exprs" | "distinct_on_expr" | "group_by_expr" => {
+                columns.extend(extract_expression_columns_with_bindings(
+                    call.args,
+                    substitutions,
+                    bindings,
+                ));
+            }
             "returning" | "on_conflict_update" | "on_conflict_nothing" => {
                 for col in resolve_array_string_values(
                     extract_first_argument(call.args),
@@ -2745,6 +2766,154 @@ fn is_condition_builder_name(name: &str) -> bool {
     )
 }
 
+fn extract_expression_columns_with_bindings(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut columns = Vec::new();
+    extract_expression_columns_inner(expr, substitutions, bindings, 0, &mut columns);
+    dedupe_values(&mut columns);
+    columns
+}
+
+fn extract_expression_columns_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    depth: usize,
+    columns: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    columns.extend(extract_expr_aliased_names(expr, substitutions, bindings));
+    for call in scan_rust_function_calls(expr) {
+        if is_expression_column_builder_name(call.name)
+            || is_condition_builder_name(call.name)
+            || call.path.ends_with("Expr::Named")
+            || call.path.ends_with("Value::Column")
+        {
+            columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+        }
+        extract_expression_columns_inner(call.args, substitutions, bindings, depth + 1, columns);
+    }
+}
+
+fn is_expression_column_builder_name(name: &str) -> bool {
+    matches!(
+        name,
+        "col"
+            | "count_distinct"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "array_agg"
+            | "json_agg"
+            | "jsonb_agg"
+            | "bool_and"
+            | "bool_or"
+    )
+}
+
+fn extract_expr_aliased_names(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let bytes = expr.as_bytes();
+    let needle = b"Expr::Aliased";
+    let mut names = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, needle) {
+            let after = skip_ws(bytes, i + needle.len());
+            if bytes.get(after).copied() == Some(b'{')
+                && let Some(close) = find_matching_delim(expr, after, b'{', b'}')
+                && let Some(body) = expr.get(after + 1..close)
+            {
+                names.extend(resolve_struct_string_field(
+                    body,
+                    "name",
+                    substitutions,
+                    bindings,
+                ));
+                i = close + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    names
+}
+
+fn resolve_struct_string_field(
+    body: &str,
+    field: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut values = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_keyword(body, i, field) {
+            let after_field = skip_ws(bytes, i + field.len());
+            if bytes.get(after_field).copied() == Some(b':') {
+                let field_expr = body.get(after_field + 1..).unwrap_or_default();
+                values.extend(resolve_string_values(
+                    extract_first_argument(field_expr),
+                    substitutions,
+                    bindings,
+                ));
+                i = after_field + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    values
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RustFunctionCall<'a> {
     path: &'a str,
@@ -2894,6 +3063,107 @@ fn normalize_related_table_name(table: &str) -> Option<String> {
         None
     } else {
         Some(base.to_string())
+    }
+}
+
+fn extract_table_aliases_with_bindings(
+    line: &str,
+    primary_table: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for call in scan_chain_method_calls(line) {
+        match call.name {
+            "table_alias" => {
+                for alias in resolve_string_arg(call.args, 0, substitutions, bindings) {
+                    insert_alias(&mut aliases, primary_table, &alias);
+                }
+            }
+            "left_join_as" | "inner_join_as" | "using_table_as" => {
+                for table in resolve_string_arg(call.args, 0, substitutions, bindings) {
+                    for alias in resolve_string_arg(call.args, 1, substitutions, bindings) {
+                        insert_alias(&mut aliases, &table, &alias);
+                    }
+                }
+            }
+            "left_join" | "inner_join" | "left_join_conds" | "inner_join_conds" => {
+                for table in resolve_string_arg(call.args, 0, substitutions, bindings) {
+                    insert_alias_from_table_ref(&mut aliases, &table);
+                }
+            }
+            "join" | "join_conds" => {
+                for table in resolve_string_arg(call.args, 1, substitutions, bindings) {
+                    insert_alias_from_table_ref(&mut aliases, &table);
+                }
+            }
+            "update_from" | "delete_using" => {
+                for table in resolve_array_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
+                    insert_alias_from_table_ref(&mut aliases, &table);
+                }
+            }
+            _ => {}
+        }
+    }
+    aliases
+}
+
+fn insert_alias_from_table_ref(aliases: &mut HashMap<String, String>, table_ref: &str) {
+    if let Some((table, alias)) = split_table_alias(table_ref) {
+        insert_alias(aliases, &table, &alias);
+    }
+}
+
+fn insert_alias(aliases: &mut HashMap<String, String>, table: &str, alias: &str) {
+    let Some(table) = normalize_related_table_name(table) else {
+        return;
+    };
+    let alias = alias.trim();
+    if alias.is_empty()
+        || alias.eq_ignore_ascii_case("as")
+        || alias == table
+        || !alias
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return;
+    }
+    aliases.insert(alias.to_string(), table);
+}
+
+fn split_table_alias(table_ref: &str) -> Option<(String, String)> {
+    let parts = table_ref.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table, alias] => Some(((*table).to_string(), (*alias).to_string())),
+        [table, as_kw, alias] if as_kw.eq_ignore_ascii_case("as") => {
+            Some(((*table).to_string(), (*alias).to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn normalize_columns_with_aliases(
+    columns: &[String],
+    aliases: &HashMap<String, String>,
+) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| normalize_column_with_aliases(column, aliases))
+        .collect()
+}
+
+fn normalize_column_with_aliases(column: &str, aliases: &HashMap<String, String>) -> String {
+    let Some((prefix, suffix)) = column.split_once('.') else {
+        return column.to_string();
+    };
+    if let Some(table) = aliases.get(prefix) {
+        format!("{table}.{suffix}")
+    } else {
+        column.to_string()
     }
 }
 

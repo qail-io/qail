@@ -1263,6 +1263,25 @@ fn test_extract_columns_condition_builder_surface_methods() {
 }
 
 #[test]
+fn test_extract_columns_expression_projection_surface_methods() {
+    let line = r#"Qail::get("orders")
+        .column_expr(col("status").with_alias("order_status"))
+        .select_expr(sum("total").alias("total_sum"))
+        .columns_expr(vec![
+            Expr::Aliased { name: "users.email".to_string(), alias: "user_email".to_string() },
+            count_filter(vec![eq("payment_status", "paid")]).alias("paid_count"),
+        ])"#;
+    let cols = extract_columns(line);
+
+    for expected in ["status", "total", "users.email", "payment_status"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} in extracted expression columns: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_returning() {
     let line = r#"Qail::add("orders").returning(["id", "status"])"#;
     let cols = extract_columns(line);
@@ -1389,6 +1408,164 @@ let q = Qail::get("orders")
     assert!(
         diagnostics.iter().any(|d| d.message.contains("shipmentz")),
         "join_conds related table typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_resolves_primary_table_alias_columns() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .table_alias("o")
+    .column("o.statuz");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "primary table alias columns should validate against the aliased table: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_resolves_join_alias_columns() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  user_id UUID
+}
+
+table users {
+  id UUID
+  email TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .left_join_as("users", "u", "orders.user_id", "u.id")
+    .column("u.emial");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("emial")),
+        "join alias columns should validate against the joined table: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_column_expr_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+  total INT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .column_expr(col("statuz").with_alias("order_status"))
+    .column_expr(sum("totl").alias("sum_total"));
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "column_expr col() typo should be schema-validated: {:?}",
+        diagnostics
+    );
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("totl")),
+        "column_expr aggregate typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_expr_aliased_projection_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .column_expr(Expr::Aliased {
+        name: "statuz".to_string(),
+        alias: "order_status".to_string(),
+    });
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "Expr::Aliased projection name should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_resolves_join_alias_expression_columns() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  user_id UUID
+}
+
+table users {
+  id UUID
+  email TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .left_join_as("users", "u", "orders.user_id", "u.id")
+    .column_expr(col("u.emial").with_alias("user_email"));
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("emial")),
+        "join alias expression columns should validate against the joined table: {:?}",
         diagnostics
     );
 }
