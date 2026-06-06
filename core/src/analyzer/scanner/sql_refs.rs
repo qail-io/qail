@@ -45,23 +45,21 @@ fn parse_sql_references_with_cte_aliases(
         .as_ref()
         .map(|parts| parts.references.clone())
         .unwrap_or_default();
+    let local_cte_aliases = cte_parts
+        .as_ref()
+        .map(|parts| parts.aliases.as_slice())
+        .unwrap_or(&[]);
 
     if classify_sql_kind(&normalized) == Some(SqlStmtKind::Select) {
         refs.extend(parse_sql_select_references(
             &normalized,
             inherited_cte_aliases,
-            cte_parts
-                .as_ref()
-                .map(|parts| parts.aliases.as_slice())
-                .unwrap_or(&[]),
+            local_cte_aliases,
         ));
         refs.extend(parse_sql_nested_query_references(
             &normalized,
             inherited_cte_aliases,
-            cte_parts
-                .as_ref()
-                .map(|parts| parts.aliases.as_slice())
-                .unwrap_or(&[]),
+            local_cte_aliases,
         ));
         dedupe_sql_references(&mut refs);
         return refs;
@@ -80,14 +78,17 @@ fn parse_sql_references_with_cte_aliases(
         if !is_cte_alias && !is_inherited_cte_alias {
             refs.push((kind, table, columns));
         }
+        refs.extend(parse_sql_auxiliary_write_references(
+            &normalized,
+            kind,
+            inherited_cte_aliases,
+            local_cte_aliases,
+        ));
     }
     refs.extend(parse_sql_nested_query_references(
         &normalized,
         inherited_cte_aliases,
-        cte_parts
-            .as_ref()
-            .map(|parts| parts.aliases.as_slice())
-            .unwrap_or(&[]),
+        local_cte_aliases,
     ));
     dedupe_sql_references(&mut refs);
 
@@ -219,6 +220,7 @@ fn parse_sql_select_table_sources(
             "INTERSECT",
             "EXCEPT",
             "WINDOW",
+            "RETURNING",
         ],
     )
     .unwrap_or(sql.len());
@@ -343,6 +345,8 @@ fn is_sql_table_source_boundary(ident: &str) -> bool {
             | "ORDER"
             | "OUTER"
             | "RIGHT"
+            | "RETURNING"
+            | "SET"
             | "UNION"
             | "USING"
             | "WHERE"
@@ -429,6 +433,98 @@ fn skip_sql_cte_materialization_modifier(sql: &str, start: usize) -> usize {
 
 fn sql_ident_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
+}
+
+fn parse_sql_auxiliary_write_references(
+    sql: &str,
+    kind: SqlStmtKind,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    match kind {
+        SqlStmtKind::Update => {
+            parse_sql_update_from_references(sql, inherited_cte_aliases, local_cte_aliases)
+        }
+        SqlStmtKind::Delete => {
+            parse_sql_delete_using_references(sql, inherited_cte_aliases, local_cte_aliases)
+        }
+        SqlStmtKind::Select | SqlStmtKind::Insert | SqlStmtKind::Merge => Vec::new(),
+    }
+}
+
+fn parse_sql_update_from_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(update_idx) = find_keyword_top_level_from(sql, "UPDATE", 0) else {
+        return Vec::new();
+    };
+    let Some((_, table_end)) = parse_sql_object_name_with_end(sql, update_idx + "UPDATE".len())
+    else {
+        return Vec::new();
+    };
+    let Some(from_idx) = find_keyword_top_level_from(sql, "FROM", table_end) else {
+        return Vec::new();
+    };
+
+    let source_start = from_idx + "FROM".len();
+    let source_end = sql_table_source_clause_end(sql, source_start);
+    let sources =
+        parse_sql_select_table_sources(sql, source_start, inherited_cte_aliases, local_cte_aliases);
+    let columns_by_source = collect_sql_auxiliary_columns_by_source(
+        sql,
+        &sources,
+        source_start,
+        source_end,
+        table_end,
+        &["SET", "WHERE", "RETURNING"],
+    );
+
+    sources
+        .into_iter()
+        .zip(columns_by_source)
+        .map(|(source, columns)| (SqlStmtKind::Update, source.table, columns))
+        .collect()
+}
+
+fn parse_sql_delete_using_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(delete_idx) = find_keyword_top_level_from(sql, "DELETE", 0) else {
+        return Vec::new();
+    };
+    let Some(from_idx) = find_keyword_top_level_from(sql, "FROM", delete_idx + "DELETE".len())
+    else {
+        return Vec::new();
+    };
+    let Some((_, table_end)) = parse_sql_object_name_with_end(sql, from_idx + "FROM".len()) else {
+        return Vec::new();
+    };
+    let Some(using_idx) = find_keyword_top_level_from(sql, "USING", table_end) else {
+        return Vec::new();
+    };
+
+    let source_start = using_idx + "USING".len();
+    let source_end = sql_table_source_clause_end(sql, source_start);
+    let sources =
+        parse_sql_select_table_sources(sql, source_start, inherited_cte_aliases, local_cte_aliases);
+    let columns_by_source = collect_sql_auxiliary_columns_by_source(
+        sql,
+        &sources,
+        source_start,
+        source_end,
+        table_end,
+        &["WHERE", "RETURNING"],
+    );
+
+    sources
+        .into_iter()
+        .zip(columns_by_source)
+        .map(|(source, columns)| (SqlStmtKind::Delete, source.table, columns))
+        .collect()
 }
 
 fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> {
@@ -651,10 +747,21 @@ fn collect_sql_join_condition_refs(
             "INTERSECT",
             "EXCEPT",
             "WINDOW",
+            "RETURNING",
         ],
     )
     .unwrap_or(sql.len());
 
+    collect_sql_join_condition_refs_in_range(sql, start, end, qualified, unqualified);
+}
+
+fn collect_sql_join_condition_refs_in_range(
+    sql: &str,
+    start: usize,
+    end: usize,
+    qualified: &mut Vec<(String, String)>,
+    unqualified: &mut Vec<String>,
+) {
     let mut cursor = start;
     while cursor < end {
         let on_idx = find_keyword_top_level_from(sql, "ON", cursor).filter(|idx| *idx < end);
@@ -689,6 +796,44 @@ fn collect_sql_join_condition_refs(
         }
         cursor = segment_end;
     }
+}
+
+fn collect_sql_auxiliary_columns_by_source(
+    sql: &str,
+    sources: &[SqlTableSource],
+    source_start: usize,
+    source_end: usize,
+    clause_min: usize,
+    clauses: &[&str],
+) -> Vec<Vec<String>> {
+    let mut qualified = Vec::new();
+    let mut unqualified = Vec::new();
+
+    collect_sql_join_condition_refs_in_range(
+        sql,
+        source_start,
+        source_end,
+        &mut qualified,
+        &mut unqualified,
+    );
+    for clause in clauses {
+        if let Some(segment) = top_level_sql_clause_segment(sql, clause, clause_min) {
+            collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
+        }
+    }
+
+    let mut columns = vec![Vec::new(); sources.len()];
+    let mut seen = vec![HashSet::new(); sources.len()];
+
+    for (qualifier, column) in qualified {
+        for (idx, source) in sources.iter().enumerate() {
+            if sql_ident_eq(&qualifier, &source.alias) || sql_ident_eq(&qualifier, &source.table) {
+                push_column_ref(&column, &mut columns[idx], &mut seen[idx]);
+            }
+        }
+    }
+
+    columns
 }
 
 fn next_sql_join_condition_end(sql: &str, start: usize, end: usize) -> usize {
@@ -817,6 +962,7 @@ fn top_level_sql_clause_segment<'a>(sql: &'a str, clause: &str, min_idx: usize) 
         start,
         &[
             "WHERE",
+            "FROM",
             "GROUP BY",
             "HAVING",
             "ORDER BY",
@@ -845,6 +991,29 @@ fn top_level_sql_clause_start(sql: &str, min_idx: usize, clauses: &[&str]) -> Op
         .iter()
         .filter_map(|keyword| find_keyword_top_level_from(sql, keyword, min_idx))
         .min()
+}
+
+fn sql_table_source_clause_end(sql: &str, start: usize) -> usize {
+    top_level_sql_clause_start(
+        sql,
+        start,
+        &[
+            "WHERE",
+            "GROUP BY",
+            "HAVING",
+            "ORDER BY",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
+            "FOR",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "WINDOW",
+            "RETURNING",
+        ],
+    )
+    .unwrap_or(sql.len())
 }
 
 fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
@@ -1367,12 +1536,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_references_tracks_update_from_source_table() {
+        let sql = "UPDATE orders o SET status = p.status FROM payments p WHERE o.payment_id = p.id AND p.state = $1";
+        let refs = parse_sql_references(sql);
+
+        let payments = refs
+            .iter()
+            .find(|(_, table, _)| table == "payments")
+            .expect("payments reference");
+        assert_eq!(payments.2, vec!["status", "id", "state"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_delete_columns() {
         let sql = "DELETE FROM users WHERE email = $1 RETURNING deleted_at";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind, SqlStmtKind::Delete);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["email", "deleted_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_delete_using_source_table() {
+        let sql =
+            "DELETE FROM sessions s USING users u WHERE s.user_id = u.id AND u.disabled = true";
+        let refs = parse_sql_references(sql);
+
+        let users = refs
+            .iter()
+            .find(|(_, table, _)| table == "users")
+            .expect("users reference");
+        assert_eq!(users.2, vec!["id", "disabled"]);
     }
 
     #[test]
