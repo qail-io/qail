@@ -3154,7 +3154,7 @@ pub(crate) fn extract_typed_table_arg(s: &str) -> Option<String> {
     // Collect the full path: identifier::Identifier::...
     let ident: String = s
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':' || *c == '#')
         .collect();
 
     let segments: Vec<&str> = ident.split("::").filter(|s| !s.is_empty()).collect();
