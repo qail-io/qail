@@ -459,7 +459,10 @@ fn parse_sql_auxiliary_write_references(
         SqlStmtKind::Delete => {
             parse_sql_delete_using_references(sql, inherited_cte_aliases, local_cte_aliases)
         }
-        SqlStmtKind::Select | SqlStmtKind::Insert | SqlStmtKind::Merge => Vec::new(),
+        SqlStmtKind::Merge => {
+            parse_sql_merge_source_references(sql, inherited_cte_aliases, local_cte_aliases)
+        }
+        SqlStmtKind::Select | SqlStmtKind::Insert => Vec::new(),
     }
 }
 
@@ -535,6 +538,45 @@ fn parse_sql_delete_using_references(
         .into_iter()
         .zip(columns_by_source)
         .map(|(source, columns)| (SqlStmtKind::Delete, source.table, columns))
+        .collect()
+}
+
+fn parse_sql_merge_source_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(merge_idx) = find_keyword_top_level_from(sql, "MERGE", 0) else {
+        return Vec::new();
+    };
+    let Some(into_idx) = find_keyword_top_level_from(sql, "INTO", merge_idx + "MERGE".len()) else {
+        return Vec::new();
+    };
+    let Some((_, target_end)) = parse_sql_object_name_with_end(sql, into_idx + "INTO".len()) else {
+        return Vec::new();
+    };
+    let (_, target_alias_end) = parse_sql_optional_table_alias(sql, target_end);
+    let Some(using_idx) = find_keyword_top_level_from(sql, "USING", target_alias_end) else {
+        return Vec::new();
+    };
+    let source_start = using_idx + "USING".len();
+    let source_end = top_level_sql_clause_start(sql, source_start, &["ON"]).unwrap_or(sql.len());
+    if sql
+        .as_bytes()
+        .get(skip_sql_ws(sql.as_bytes(), source_start))
+        == Some(&b'(')
+    {
+        return Vec::new();
+    }
+
+    let sources =
+        parse_sql_select_table_sources(sql, source_start, inherited_cte_aliases, local_cte_aliases);
+    let columns_by_source = collect_sql_merge_columns_by_source(sql, &sources, source_end);
+
+    sources
+        .into_iter()
+        .zip(columns_by_source)
+        .map(|(source, columns)| (SqlStmtKind::Merge, source.table, columns))
         .collect()
 }
 
@@ -665,8 +707,16 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
             let merge_idx = find_keyword_top_level_from(&normalized, "MERGE", 0)?;
             let into_idx =
                 find_keyword_top_level_from(&normalized, "INTO", merge_idx + "MERGE".len())?;
-            let table = parse_sql_object_name(&normalized, into_idx + "INTO".len())?;
-            Some((kind, table, vec![]))
+            let (table, table_end) =
+                parse_sql_object_name_with_end(&normalized, into_idx + "INTO".len())?;
+            let (alias, alias_end) = parse_sql_optional_table_alias(&normalized, table_end);
+            let columns = collect_sql_merge_target_columns(
+                &normalized,
+                &table,
+                alias.as_deref().unwrap_or(&table),
+                alias_end,
+            );
+            Some((kind, table, columns))
         }
     }
 }
@@ -924,6 +974,116 @@ fn collect_sql_auxiliary_columns_by_source(
     }
 
     columns
+}
+
+fn collect_sql_merge_columns_by_source(
+    sql: &str,
+    sources: &[SqlTableSource],
+    on_idx: usize,
+) -> Vec<Vec<String>> {
+    let mut qualified = Vec::new();
+    let mut unqualified = Vec::new();
+
+    if let Some(segment) = sql.get(on_idx..) {
+        collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
+    }
+
+    columns_for_qualified_refs(sources, qualified)
+}
+
+fn collect_sql_merge_target_columns(
+    sql: &str,
+    target_table: &str,
+    target_alias: &str,
+    min_idx: usize,
+) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    let source = SqlTableSource {
+        table: target_table.to_string(),
+        alias: target_alias.to_string(),
+    };
+
+    if let Some(on_idx) = find_keyword_top_level_from(sql, "ON", min_idx) {
+        let mut qualified = Vec::new();
+        let mut unqualified = Vec::new();
+        if let Some(segment) = sql.get(on_idx..) {
+            collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
+        }
+        for column_set in columns_for_qualified_refs(&[source], qualified) {
+            for column in column_set {
+                push_column_ref(&column, &mut cols, &mut seen);
+            }
+        }
+    }
+
+    collect_sql_merge_update_target_columns(sql, min_idx, &mut cols, &mut seen);
+    collect_sql_merge_insert_target_columns(sql, min_idx, &mut cols, &mut seen);
+
+    cols
+}
+
+fn columns_for_qualified_refs(
+    sources: &[SqlTableSource],
+    qualified: Vec<(String, String)>,
+) -> Vec<Vec<String>> {
+    let mut columns = vec![Vec::new(); sources.len()];
+    let mut seen = vec![HashSet::new(); sources.len()];
+
+    for (qualifier, column) in qualified {
+        for (idx, source) in sources.iter().enumerate() {
+            if sql_ident_eq(&qualifier, &source.alias) || sql_ident_eq(&qualifier, &source.table) {
+                push_column_ref(&column, &mut columns[idx], &mut seen[idx]);
+            }
+        }
+    }
+
+    columns
+}
+
+fn collect_sql_merge_update_target_columns(
+    sql: &str,
+    min_idx: usize,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut cursor = min_idx;
+    while let Some(set_idx) = find_keyword_top_level_from(sql, "SET", cursor) {
+        let start = set_idx + "SET".len();
+        let end =
+            top_level_sql_clause_start(sql, start, &["WHEN", "RETURNING"]).unwrap_or(sql.len());
+        if let Some(segment) = sql.get(start..end) {
+            for assignment in split_sql_top_level(segment, ',') {
+                let left = assignment
+                    .split_once('=')
+                    .map_or(assignment, |(left, _)| left);
+                if let Some((column, _, _)) = parse_sql_identifier_path(left.trim(), 0) {
+                    push_column_ref(&column, cols, seen);
+                }
+            }
+        }
+        cursor = end;
+    }
+}
+
+fn collect_sql_merge_insert_target_columns(
+    sql: &str,
+    min_idx: usize,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut cursor = min_idx;
+    while let Some(insert_idx) = find_keyword_top_level_from(sql, "INSERT", cursor) {
+        let after_insert = skip_sql_ws(sql.as_bytes(), insert_idx + "INSERT".len());
+        if sql.as_bytes().get(after_insert).copied() == Some(b'(')
+            && let Some((segment, end)) = balanced_paren_segment(sql, after_insert)
+        {
+            collect_sql_column_list(segment, cols, seen);
+            cursor = end;
+            continue;
+        }
+        cursor = insert_idx + "INSERT".len();
+    }
 }
 
 fn next_sql_join_condition_end(sql: &str, start: usize, end: usize) -> usize {
@@ -1689,7 +1849,19 @@ mod tests {
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind.as_str(), "MERGE");
         assert_eq!(table, "orders");
-        assert!(cols.is_empty());
+        assert_eq!(cols, vec!["id", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_merge_source_table() {
+        let sql = "MERGE INTO orders o USING staging_orders s ON o.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status WHEN NOT MATCHED THEN INSERT (id, status) VALUES (s.id, s.status)";
+        let refs = parse_sql_references(sql);
+
+        let staging_orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "staging_orders")
+            .expect("staging orders reference");
+        assert_eq!(staging_orders.2, vec!["id", "status"]);
     }
 
     #[test]
