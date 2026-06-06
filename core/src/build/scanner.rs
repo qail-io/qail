@@ -67,6 +67,13 @@ struct CteAlias {
     end: usize,
 }
 
+struct AliasExtractionContext<'a> {
+    current_chain: &'a ScannedQailChain,
+    qail_bound_vars: &'a [(&'a str, &'a ScannedQailChain)],
+    source: &'a str,
+    local_functions: &'a [LocalFunction],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BindingStatementKind {
     Let,
@@ -3123,10 +3130,12 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                     &table,
                     substitutions,
                     &literal_bindings,
-                    chain,
-                    &qail_bound_vars,
-                    content,
-                    &local_functions,
+                    &AliasExtractionContext {
+                        current_chain: chain,
+                        qail_bound_vars: &qail_bound_vars,
+                        source: content,
+                        local_functions: &local_functions,
+                    },
                 );
                 let columns = normalize_columns_with_aliases(&raw_columns, &alias_map);
                 let columns_key = columns.join("\x1f");
@@ -4820,10 +4829,7 @@ fn extract_table_aliases_with_bindings(
     primary_table: &str,
     substitutions: Option<&ParamSubstitutions>,
     bindings: &LiteralBindings,
-    current_chain: &ScannedQailChain,
-    qail_bound_vars: &[(&str, &ScannedQailChain)],
-    source: &str,
-    local_functions: &[LocalFunction],
+    context: &AliasExtractionContext<'_>,
 ) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
     for call in scan_chain_method_calls(line) {
@@ -4850,10 +4856,10 @@ fn extract_table_aliases_with_bindings(
                 if tables.is_empty() {
                     tables.extend(resolve_bound_qail_constructor_tables(
                         args[0],
-                        current_chain,
-                        qail_bound_vars,
-                        source,
-                        local_functions,
+                        context.current_chain,
+                        context.qail_bound_vars,
+                        context.source,
+                        context.local_functions,
                         substitutions,
                         bindings,
                     ));
