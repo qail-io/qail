@@ -44,6 +44,17 @@ fn merge_migrations_for_source_audit(
         .map_err(|e| anyhow::anyhow!("Failed to merge migrations from {}: {}", migrations_dir, e))
 }
 
+fn validate_source_audit_dir(src: &str) -> Result<()> {
+    let path = Path::new(src);
+    if !path.exists() {
+        return Err(anyhow::anyhow!("Source directory '{}' not found", src));
+    }
+    if !path.is_dir() {
+        return Err(anyhow::anyhow!("Source path '{}' is not a directory", src));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RlsCoverageStats {
     scoped: usize,
@@ -146,6 +157,7 @@ pub fn check_schema(
             if let Some(src) = src_dir {
                 println!();
                 println!("{}", "── Source Validation & RLS Audit ──".cyan().bold());
+                validate_source_audit_dir(src)?;
                 let mut source_schema_error_count = 0usize;
 
                 // Use build module's Schema (has rls_enabled detection)
@@ -681,6 +693,51 @@ fn demo() {
         .expect_err("source schema errors should fail qail check");
 
         assert!(err.to_string().contains("Source validation"));
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn check_schema_fails_when_source_dir_is_missing() {
+        let dir = unique_temp_dir("missing_source_dir");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let schema_path = dir.join("schema.qail");
+        fs::write(&schema_path, "table users {\n  id uuid primary_key\n}\n").expect("write schema");
+        let missing_src = dir.join("missing-src");
+
+        let err = check_schema(
+            schema_path.to_str().expect("schema path should be utf8"),
+            Some(missing_src.to_str().expect("source path should be utf8")),
+            dir.join("migrations")
+                .to_str()
+                .expect("migration path should be utf8"),
+            false,
+        )
+        .expect_err("missing explicit --src should fail");
+
+        assert!(err.to_string().contains("Source directory"));
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn check_schema_fails_when_source_path_is_file() {
+        let dir = unique_temp_dir("source_path_file");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let schema_path = dir.join("schema.qail");
+        let src_path = dir.join("main.rs");
+        fs::write(&schema_path, "table users {\n  id uuid primary_key\n}\n").expect("write schema");
+        fs::write(&src_path, r#"let q = Qail::get("users");"#).expect("write source file");
+
+        let err = check_schema(
+            schema_path.to_str().expect("schema path should be utf8"),
+            Some(src_path.to_str().expect("source path should be utf8")),
+            dir.join("migrations")
+                .to_str()
+                .expect("migration path should be utf8"),
+            false,
+        )
+        .expect_err("file-valued explicit --src should fail");
+
+        assert!(err.to_string().contains("not a directory"));
         fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
