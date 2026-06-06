@@ -493,6 +493,18 @@ fn parse_sql_references_with_cte_aliases(
         .map(|parts| parts.references.clone())
         .unwrap_or_default();
 
+    if classify_sql_kind(&normalized) == Some(SqlStmtKind::Select) {
+        refs.extend(parse_sql_select_references(
+            &normalized,
+            inherited_cte_aliases,
+            cte_parts
+                .as_ref()
+                .map(|parts| parts.aliases.as_slice())
+                .unwrap_or(&[]),
+        ));
+        return refs;
+    }
+
     if let Some((kind, table, columns)) = parse_sql_reference(&normalized) {
         let is_cte_alias = cte_parts.as_ref().is_some_and(|parts| {
             parts
@@ -509,6 +521,214 @@ fn parse_sql_references_with_cte_aliases(
     }
 
     refs
+}
+
+#[derive(Debug, Clone)]
+struct SqlTableSource {
+    table: String,
+    alias: String,
+}
+
+fn parse_sql_select_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(select_idx) = find_keyword_top_level_from(sql, "SELECT", 0) else {
+        return Vec::new();
+    };
+    let Some(from_idx) = find_keyword_top_level_from(sql, "FROM", select_idx + "SELECT".len())
+    else {
+        return Vec::new();
+    };
+    let Some(columns_raw) = sql
+        .get(select_idx + "SELECT".len()..from_idx)
+        .map(str::trim)
+    else {
+        return Vec::new();
+    };
+
+    let sources = parse_sql_select_table_sources(
+        sql,
+        from_idx + "FROM".len(),
+        inherited_cte_aliases,
+        local_cte_aliases,
+    );
+    if sources.is_empty() {
+        return Vec::new();
+    }
+
+    let columns_by_source =
+        collect_sql_select_columns_by_source(sql, columns_raw, from_idx, &sources);
+
+    sources
+        .into_iter()
+        .zip(columns_by_source)
+        .map(|(source, columns)| (SqlStmtKind::Select, source.table, columns))
+        .collect()
+}
+
+fn parse_sql_select_table_sources(
+    sql: &str,
+    start: usize,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<SqlTableSource> {
+    let mut sources = Vec::new();
+    let mut cursor = start;
+    let from_end = top_level_sql_clause_start(
+        sql,
+        start,
+        &[
+            "WHERE",
+            "GROUP BY",
+            "HAVING",
+            "ORDER BY",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
+            "FOR",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "WINDOW",
+        ],
+    )
+    .unwrap_or(sql.len());
+
+    loop {
+        cursor = skip_sql_ws(sql.as_bytes(), cursor);
+        if cursor >= from_end {
+            break;
+        }
+
+        if starts_with_keyword_at(sql, cursor, "LATERAL") {
+            cursor = skip_sql_ws(sql.as_bytes(), cursor + "LATERAL".len());
+        }
+        if starts_with_keyword_at(sql, cursor, "ONLY") {
+            cursor = skip_sql_ws(sql.as_bytes(), cursor + "ONLY".len());
+        }
+
+        let source_end = if sql.as_bytes().get(cursor).copied() == Some(b'(') {
+            balanced_paren_segment(sql, cursor)
+                .map(|(_, end)| end)
+                .unwrap_or(cursor)
+        } else if let Some((table, table_end)) = parse_sql_object_name_with_end(sql, cursor) {
+            let (alias, alias_end) = parse_sql_optional_table_alias(sql, table_end);
+            if !is_sql_cte_alias(&table, inherited_cte_aliases, local_cte_aliases) {
+                sources.push(SqlTableSource {
+                    alias: alias.unwrap_or_else(|| table.clone()),
+                    table,
+                });
+            }
+            alias_end
+        } else {
+            break;
+        };
+
+        let Some(next_start) = next_sql_table_source_start(sql, source_end, from_end) else {
+            break;
+        };
+        cursor = next_start;
+    }
+
+    sources
+}
+
+fn parse_sql_optional_table_alias(sql: &str, start: usize) -> (Option<String>, usize) {
+    let bytes = sql.as_bytes();
+    let mut cursor = skip_sql_ws(bytes, start);
+    if starts_with_keyword_at(sql, cursor, "AS") {
+        cursor = skip_sql_ws(bytes, cursor + "AS".len());
+    }
+
+    let Some((alias, end)) = parse_sql_identifier_segment(sql, cursor) else {
+        return (None, start);
+    };
+    if is_sql_table_source_boundary(&alias) {
+        return (None, start);
+    }
+
+    (Some(alias), end)
+}
+
+fn next_sql_table_source_start(sql: &str, start: usize, end: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut i = start;
+    let mut depth = 0i32;
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+
+    while i < end {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if b == b'\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if b == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => in_quote = Some(b),
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => return Some(i + 1),
+            _ => {
+                if depth == 0 && starts_with_keyword_at(sql, i, "JOIN") {
+                    return Some(i + "JOIN".len());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn is_sql_cte_alias(
+    table: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> bool {
+    inherited_cte_aliases
+        .iter()
+        .chain(local_cte_aliases.iter())
+        .any(|alias| sql_ident_eq(alias, table))
+}
+
+fn is_sql_table_source_boundary(ident: &str) -> bool {
+    matches!(
+        ident.to_ascii_uppercase().as_str(),
+        "CROSS"
+            | "FULL"
+            | "GROUP"
+            | "HAVING"
+            | "INNER"
+            | "INTERSECT"
+            | "JOIN"
+            | "LEFT"
+            | "LIMIT"
+            | "NATURAL"
+            | "OFFSET"
+            | "ON"
+            | "ORDER"
+            | "OUTER"
+            | "RIGHT"
+            | "UNION"
+            | "USING"
+            | "WHERE"
+    )
 }
 
 #[derive(Debug, Default)]
@@ -731,6 +951,191 @@ fn collect_sql_select_columns(sql: &str, columns_raw: &str, from_idx: usize) -> 
     cols
 }
 
+fn collect_sql_select_columns_by_source(
+    sql: &str,
+    columns_raw: &str,
+    from_idx: usize,
+    sources: &[SqlTableSource],
+) -> Vec<Vec<String>> {
+    let mut qualified = Vec::new();
+    let mut unqualified = Vec::new();
+
+    collect_sql_projection_column_refs(columns_raw, &mut qualified, &mut unqualified);
+    collect_sql_join_condition_refs(sql, from_idx, &mut qualified, &mut unqualified);
+
+    let clause_min = from_idx + "FROM".len();
+    for clause in ["WHERE", "GROUP BY", "HAVING", "ORDER BY"] {
+        if let Some(segment) = top_level_sql_clause_segment(sql, clause, clause_min) {
+            collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
+        }
+    }
+
+    let mut columns = vec![Vec::new(); sources.len()];
+    let mut seen = vec![HashSet::new(); sources.len()];
+
+    for (qualifier, column) in qualified {
+        for (idx, source) in sources.iter().enumerate() {
+            if sql_ident_eq(&qualifier, &source.alias) || sql_ident_eq(&qualifier, &source.table) {
+                push_column_ref(&column, &mut columns[idx], &mut seen[idx]);
+            }
+        }
+    }
+
+    for column in unqualified {
+        if sources.len() == 1 {
+            push_column_ref(&column, &mut columns[0], &mut seen[0]);
+        } else {
+            for idx in 0..sources.len() {
+                push_column_ref(&column, &mut columns[idx], &mut seen[idx]);
+            }
+        }
+    }
+
+    columns
+}
+
+fn collect_sql_projection_column_refs(
+    columns_raw: &str,
+    qualified: &mut Vec<(String, String)>,
+    unqualified: &mut Vec<String>,
+) {
+    for projection in split_sql_top_level(columns_raw, ',') {
+        let mut base = projection.trim();
+        if let Some(as_idx) = find_keyword_top_level_from(base, "AS", 0) {
+            base = base.get(..as_idx).unwrap_or(base).trim();
+        }
+        base = strip_sql_distinct_prefix(base);
+
+        collect_sql_column_refs(base, qualified, unqualified);
+    }
+}
+
+fn collect_sql_join_condition_refs(
+    sql: &str,
+    from_idx: usize,
+    qualified: &mut Vec<(String, String)>,
+    unqualified: &mut Vec<String>,
+) {
+    let start = from_idx + "FROM".len();
+    let end = top_level_sql_clause_start(
+        sql,
+        start,
+        &[
+            "WHERE",
+            "GROUP BY",
+            "HAVING",
+            "ORDER BY",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
+            "FOR",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "WINDOW",
+        ],
+    )
+    .unwrap_or(sql.len());
+
+    let mut cursor = start;
+    while cursor < end {
+        let on_idx = find_keyword_top_level_from(sql, "ON", cursor).filter(|idx| *idx < end);
+        let using_idx = find_keyword_top_level_from(sql, "USING", cursor).filter(|idx| *idx < end);
+        let Some((keyword, idx)) = (match (on_idx, using_idx) {
+            (Some(on), Some(using)) if on < using => Some(("ON", on)),
+            (Some(_), Some(using)) => Some(("USING", using)),
+            (Some(on), None) => Some(("ON", on)),
+            (None, Some(using)) => Some(("USING", using)),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+
+        if keyword == "USING" {
+            let after = skip_sql_ws(sql.as_bytes(), idx + "USING".len());
+            if sql.as_bytes().get(after).copied() == Some(b'(')
+                && let Some((segment, segment_end)) = balanced_paren_segment(sql, after)
+            {
+                collect_sql_column_list(segment, unqualified, &mut HashSet::new());
+                cursor = segment_end;
+                continue;
+            }
+            cursor = idx + "USING".len();
+            continue;
+        }
+
+        let segment_start = idx + "ON".len();
+        let segment_end = next_sql_join_condition_end(sql, segment_start, end);
+        if let Some(segment) = sql.get(segment_start..segment_end) {
+            collect_sql_column_refs(segment, qualified, unqualified);
+        }
+        cursor = segment_end;
+    }
+}
+
+fn next_sql_join_condition_end(sql: &str, start: usize, end: usize) -> usize {
+    find_keyword_top_level_from(sql, "JOIN", start)
+        .filter(|idx| *idx < end)
+        .unwrap_or(end)
+}
+
+fn collect_sql_column_refs(
+    segment: &str,
+    qualified: &mut Vec<(String, String)>,
+    unqualified: &mut Vec<String>,
+) {
+    let bytes = segment.as_bytes();
+    let mut i = 0usize;
+    let mut seen_qualified = HashSet::new();
+    let mut seen_unqualified = HashSet::new();
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = skip_sql_single_quote(bytes, i + 1);
+                continue;
+            }
+            b'"' | b'`' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => {}
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+
+        if i > 0 && bytes[i - 1] == b':' {
+            i = parse_sql_identifier_segment(segment, i)
+                .map(|(_, next)| next)
+                .unwrap_or(i + 1);
+            continue;
+        }
+
+        let Some((parts, next)) = parse_sql_identifier_path_parts(segment, i) else {
+            i += 1;
+            continue;
+        };
+        let after = skip_sql_ws(bytes, next);
+        if parts.len() == 1 && after < bytes.len() && bytes[after] == b'(' {
+            i = next;
+            continue;
+        }
+
+        if let Some(column) = parts.last()
+            && !is_sql_reference_keyword(column)
+        {
+            if parts.len() >= 2 {
+                let qualifier = parts[parts.len() - 2].clone();
+                if seen_qualified.insert((qualifier.clone(), column.clone())) {
+                    qualified.push((qualifier, column.clone()));
+                }
+            } else if seen_unqualified.insert(column.clone()) {
+                unqualified.push(column.clone());
+            }
+        }
+
+        i = next;
+    }
+}
+
 fn collect_sql_projection_columns(
     columns_raw: &str,
     cols: &mut Vec<String>,
@@ -779,32 +1184,39 @@ fn is_plain_sql_column_ref(value: &str) -> bool {
 fn top_level_sql_clause_segment<'a>(sql: &'a str, clause: &str, min_idx: usize) -> Option<&'a str> {
     let clause_idx = find_keyword_top_level_from(sql, clause, min_idx)?;
     let start = clause_idx + clause.len();
-    let end = [
-        "WHERE",
-        "GROUP BY",
-        "HAVING",
-        "ORDER BY",
-        "SET",
-        "VALUES",
-        "ON CONFLICT",
-        "USING",
-        "RETURNING",
-        "LIMIT",
-        "OFFSET",
-        "FETCH",
-        "FOR",
-        "UNION",
-        "INTERSECT",
-        "EXCEPT",
-        "WINDOW",
-    ]
-    .into_iter()
-    .filter(|keyword| *keyword != clause)
-    .filter_map(|keyword| find_keyword_top_level_from(sql, keyword, start))
-    .min()
+    let end = top_level_sql_clause_start(
+        sql,
+        start,
+        &[
+            "WHERE",
+            "GROUP BY",
+            "HAVING",
+            "ORDER BY",
+            "SET",
+            "VALUES",
+            "ON CONFLICT",
+            "USING",
+            "RETURNING",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
+            "FOR",
+            "UNION",
+            "INTERSECT",
+            "EXCEPT",
+            "WINDOW",
+        ],
+    )
     .unwrap_or(sql.len());
 
     sql.get(start..end)
+}
+
+fn top_level_sql_clause_start(sql: &str, min_idx: usize, clauses: &[&str]) -> Option<usize> {
+    clauses
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level_from(sql, keyword, min_idx))
+        .min()
 }
 
 fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
@@ -995,6 +1407,31 @@ fn parse_sql_identifier_path(input: &str, start: usize) -> Option<(String, usize
     Some((last, cursor, count))
 }
 
+fn parse_sql_identifier_path_parts(input: &str, start: usize) -> Option<(Vec<String>, usize)> {
+    let bytes = input.as_bytes();
+    let (first, mut cursor) = parse_sql_identifier_segment(input, start)?;
+    let mut parts = vec![first];
+
+    loop {
+        cursor = skip_sql_ws(bytes, cursor);
+        if cursor < bytes.len() && bytes[cursor] == b'.' {
+            let next_start = skip_sql_ws(bytes, cursor + 1);
+            if bytes.get(next_start).copied() == Some(b'*') {
+                parts.push("*".to_string());
+                cursor = next_start + 1;
+                break;
+            }
+            let (segment, next) = parse_sql_identifier_segment(input, next_start)?;
+            parts.push(segment);
+            cursor = next;
+            continue;
+        }
+        break;
+    }
+
+    Some((parts, cursor))
+}
+
 fn parse_sql_identifier_segment(input: &str, start: usize) -> Option<(String, usize)> {
     let bytes = input.as_bytes();
     let cursor = skip_sql_ws(bytes, start);
@@ -1053,6 +1490,7 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "BY"
             | "CASE"
             | "COLLATE"
+            | "CROSS"
             | "DESC"
             | "DISTINCT"
             | "ELSE"
@@ -1063,19 +1501,27 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "GROUP"
             | "HAVING"
             | "IN"
+            | "INNER"
             | "IS"
+            | "JOIN"
             | "LAST"
+            | "LEFT"
             | "LIKE"
             | "LIMIT"
+            | "NATURAL"
             | "NOT"
             | "NULL"
             | "NULLS"
             | "OFFSET"
+            | "ON"
             | "OR"
             | "ORDER"
+            | "OUTER"
+            | "RIGHT"
             | "SELECT"
             | "THEN"
             | "TRUE"
+            | "USING"
             | "WHEN"
             | "WHERE"
     )
@@ -1364,6 +1810,26 @@ mod tests {
         assert_eq!(refs.len(), 1, "{refs:?}");
         assert_eq!(refs[0].1, "users");
         assert_eq!(refs[0].2, vec!["id", "email"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_joined_table_columns() {
+        let sql = "SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id WHERE o.status = $1 ORDER BY o.created_at DESC";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|(_, table, _)| table == "users")
+            .expect("users reference");
+        assert_eq!(users.2, vec!["id"]);
+
+        let orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.2, vec!["total", "user_id", "status", "created_at"]);
     }
 
     #[test]
