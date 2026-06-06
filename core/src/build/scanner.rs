@@ -4878,6 +4878,10 @@ fn condition_expression_has_tenant_scope(
     substitutions: Option<&ParamSubstitutions>,
     bindings: &LiteralBindings,
 ) -> bool {
+    if condition_struct_has_tenant_scope(expr, substitutions, bindings) {
+        return true;
+    }
+
     for call in scan_rust_function_calls(expr) {
         if string_filter_call_has_tenant_scope(call.name, call.args, substitutions, bindings) {
             return true;
@@ -4903,6 +4907,92 @@ fn condition_expression_has_tenant_scope(
     }
 
     false
+}
+
+fn condition_struct_has_tenant_scope(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> bool {
+    let bytes = expr.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_keyword(expr, i, "Condition") {
+            let after = skip_ws(bytes, i + "Condition".len());
+            if bytes.get(after).copied() == Some(b'{')
+                && let Some(close) = find_matching_delim(expr, after, b'{', b'}')
+                && let Some(body) = expr.get(after + 1..close)
+            {
+                let has_scope_left =
+                    resolve_struct_expr_column_field(body, "left", substitutions, bindings)
+                        .into_iter()
+                        .any(|col| is_tenant_identifier(&col));
+                let has_scope_operator = resolve_struct_field_expr(body, "op")
+                    .is_some_and(typed_operator_is_tenant_scope);
+                if has_scope_left && has_scope_operator {
+                    return true;
+                }
+                i = close + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    false
+}
+
+fn resolve_struct_field_expr<'a>(body: &'a str, field: &str) -> Option<&'a str> {
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_keyword(body, i, field) {
+            let after_field = skip_ws(bytes, i + field.len());
+            if bytes.get(after_field).copied() == Some(b':') {
+                let field_expr = body.get(after_field + 1..).unwrap_or_default();
+                return Some(extract_first_argument(field_expr));
+            }
+        }
+
+        i += 1;
+    }
+
+    None
 }
 
 fn string_filter_call_has_tenant_scope(
