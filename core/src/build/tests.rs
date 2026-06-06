@@ -2436,6 +2436,37 @@ let q = Qail::merge_into("orders")
 }
 
 #[test]
+fn test_schema_validation_covers_merge_query_source_alias_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+}
+
+table stage_orders {
+  order_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::merge_into("orders")
+    .using_query_as(Qail::get("stage_orders"), "s")
+    .merge_on_column("id", Operator::Eq, "s.order_idd");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("order_idd")),
+        "MERGE query source aliases should validate source columns against the query table: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_schema_validation_resolves_inline_using_table_alias_columns() {
     let schema = Schema::parse(
         r#"

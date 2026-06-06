@@ -4775,6 +4775,18 @@ fn extract_table_aliases_with_bindings(
                     }
                 }
             }
+            "using_query_as" => {
+                let args = split_top_level_args(call.args);
+                if args.len() < 2 {
+                    continue;
+                }
+                for table in resolve_inline_qail_constructor_tables(args[0], substitutions, bindings)
+                {
+                    for alias in resolve_string_arg(call.args, 1, substitutions, bindings) {
+                        insert_alias(&mut aliases, &table, &alias);
+                    }
+                }
+            }
             "using_table" | "left_join" | "inner_join" | "left_join_conds" | "inner_join_conds" => {
                 for table in resolve_string_arg(call.args, 0, substitutions, bindings) {
                     insert_alias_from_table_ref(&mut aliases, &table);
@@ -4798,6 +4810,25 @@ fn extract_table_aliases_with_bindings(
         }
     }
     aliases
+}
+
+fn resolve_inline_qail_constructor_tables(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let Some(hit) = find_next_qail_constructor(expr, 0) else {
+        return Vec::new();
+    };
+    let args = expr
+        .get(hit.open_paren + 1..hit.close_paren)
+        .unwrap_or_default();
+    let first_arg = extract_first_argument(args);
+    if hit.action == "TYPED" {
+        extract_typed_table_arg(first_arg).into_iter().collect()
+    } else {
+        resolve_string_values(first_arg, substitutions, bindings)
+    }
 }
 
 fn insert_alias_from_table_ref(aliases: &mut HashMap<String, String>, table_ref: &str) {
