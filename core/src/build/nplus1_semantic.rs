@@ -1698,6 +1698,28 @@ fn method_shape_fragment(
         .collect::<Vec<_>>();
 
     match method {
+        "typed_eq" | "typed_ne" | "typed_gt" | "typed_gte" | "typed_lt" | "typed_lte" => {
+            let column = normalize_column_token(parts.first().copied().unwrap_or_default());
+            let value_kind = classify_value_kind(parts.get(1).copied(), loop_vars);
+            let uses_loop_var = value_kind == "loop";
+            (
+                format!("f:{method}:{column}:{value_kind}"),
+                uses_loop_var,
+                false,
+            )
+        }
+        "typed_filter" => {
+            let column = normalize_column_token(parts.first().copied().unwrap_or_default());
+            let operator = normalize_operator_token(parts.get(1).copied().unwrap_or_default());
+            let value_kind = classify_value_kind(parts.get(2).copied(), loop_vars);
+            let uses_loop_var = value_kind == "loop";
+            let batched = is_batched_operator(&operator);
+            (
+                format!("f:typed_filter:{operator}:{column}:{value_kind}"),
+                uses_loop_var,
+                batched,
+            )
+        }
         "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "like" | "ilike" | "starts_with" => {
             let column = normalize_column_token(parts.first().copied().unwrap_or_default());
             let value_kind = classify_value_kind(parts.get(1).copied(), loop_vars);
@@ -2290,6 +2312,24 @@ async fn demo(ids: Vec<i64>, conn: &Conn) {
 async fn demo(ids: Vec<i64>, conn: &Conn) {
     for id in ids {
         let cmd = Qail::get("users").where_eq("id", id);
+        let _ = conn.fetch_all(&cmd).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn detects_typed_loop_variable_dependent_query_execution() {
+        let source = r#"
+async fn demo(ids: Vec<i64>, conn: &Conn) {
+    for id in ids {
+        let cmd = Qail::typed(users::table).typed_eq(users::id(), id);
         let _ = conn.fetch_all(&cmd).await;
     }
 }
