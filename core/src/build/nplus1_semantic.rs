@@ -192,6 +192,9 @@ const ITER_LOOP_PATTERNS: [&str; 4] = [
     ".try_for_each_concurrent(",
 ];
 
+const ITER_MAP_LOOP_PATTERNS: [&str; 3] =
+    [".iter().map(", ".iter_mut().map(", ".into_iter().map("];
+
 /// Detect semantic N+1 patterns in a single Rust source file.
 #[cfg(any(test, feature = "analyzer"))]
 pub(crate) fn detect_n_plus_one_in_file(file: &str, source: &str) -> Vec<NPlusOneDiagnostic> {
@@ -1203,6 +1206,7 @@ fn starts_iterator_loop(trimmed_line: &str) -> bool {
 
 fn contains_iterator_loop_pattern(line: &str) -> bool {
     ITER_LOOP_PATTERNS.iter().any(|pat| line.contains(pat))
+        || ITER_MAP_LOOP_PATTERNS.iter().any(|pat| line.contains(pat))
 }
 
 fn strip_loop_label(trimmed_line: &str) -> &str {
@@ -2547,6 +2551,24 @@ fn demo(conn: &Conn, ids: Vec<i64>) {
         let cmd = Qail::get("users").eq("id", *id);
         let _ = conn.fetch_all(&cmd);
     });
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn detects_iter_map_query_execution() {
+        let source = r#"
+fn demo(conn: &Conn, ids: Vec<i64>) {
+    let _rows = ids.iter().map(|id| {
+        let cmd = Qail::get("users").eq("id", *id);
+        conn.fetch_all(&cmd)
+    }).collect::<Vec<_>>();
 }
 "#;
 
