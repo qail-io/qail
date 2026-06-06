@@ -216,7 +216,38 @@ pub enum MigrationHint {
 // Phase 1: CHECK Constraints (AST-native)
 // ============================================================================
 
-/// CHECK constraint expression (AST-native, no raw SQL)
+/// Binary comparison operator used by AST-native CHECK constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckComparisonOp {
+    /// Equality (`=`)
+    Equal,
+    /// Inequality (`<>`)
+    NotEqual,
+    /// Greater than (`>`)
+    GreaterThan,
+    /// Greater than or equal (`>=`)
+    GreaterOrEqual,
+    /// Less than (`<`)
+    LessThan,
+    /// Less than or equal (`<=`)
+    LessOrEqual,
+}
+
+impl CheckComparisonOp {
+    /// SQL spelling for this comparison operator.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            CheckComparisonOp::Equal => "=",
+            CheckComparisonOp::NotEqual => "<>",
+            CheckComparisonOp::GreaterThan => ">",
+            CheckComparisonOp::GreaterOrEqual => ">=",
+            CheckComparisonOp::LessThan => "<",
+            CheckComparisonOp::LessOrEqual => "<=",
+        }
+    }
+}
+
+/// CHECK constraint expression (AST-native where possible, raw SQL fallback when needed)
 #[derive(Debug, Clone)]
 pub enum CheckExpr {
     /// column > value
@@ -262,6 +293,22 @@ pub enum CheckExpr {
         column: String,
         /// Allowed values.
         values: Vec<String>,
+    },
+    /// column IN (integer values)
+    InIntegers {
+        /// Column name.
+        column: String,
+        /// Allowed integer values.
+        values: Vec<i64>,
+    },
+    /// left_column op right_column
+    CompareColumns {
+        /// Left-hand column.
+        left_column: String,
+        /// Comparison operator.
+        op: CheckComparisonOp,
+        /// Right-hand column.
+        right_column: String,
     },
     /// column ~ pattern (regex)
     Regex {
@@ -1340,6 +1387,20 @@ fn check_expr_str(expr: &CheckExpr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        CheckExpr::InIntegers { column, values } => format!(
+            "{} = ANY (ARRAY[{}])",
+            column,
+            values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        CheckExpr::CompareColumns {
+            left_column,
+            op,
+            right_column,
+        } => format!("{} {} {}", left_column, op.as_sql_str(), right_column),
         CheckExpr::Regex { column, pattern } => {
             format!("{} ~ '{}'", column, pattern.replace('\'', "''"))
         }
@@ -1998,6 +2059,19 @@ pub(crate) fn check_expr_to_sql(expr: &CheckExpr) -> String {
                 .join(", ");
             format!("{column} IN ({quoted})")
         }
+        CheckExpr::InIntegers { column, values } => format!(
+            "{column} IN ({})",
+            values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        CheckExpr::CompareColumns {
+            left_column,
+            op,
+            right_column,
+        } => format!("{left_column} {} {right_column}", op.as_sql_str()),
         CheckExpr::Regex { column, pattern } => {
             format!("{column} ~ '{}'", pattern.replace('\'', "''"))
         }
@@ -2369,6 +2443,26 @@ mod tests {
                 "ALTER TABLE trips ADD CONSTRAINT fk_trips_schedule FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             ),
             "generated SQL should include composite foreign key, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_check_expr_sql_renders_integer_in_and_column_comparison() {
+        assert_eq!(
+            check_expr_to_sql(&CheckExpr::InIntegers {
+                column: "duration_hours".to_string(),
+                values: vec![8, 10, 12],
+            }),
+            "duration_hours IN (8, 10, 12)"
+        );
+
+        assert_eq!(
+            check_expr_to_sql(&CheckExpr::CompareColumns {
+                left_column: "origin_harbor_id".to_string(),
+                op: CheckComparisonOp::NotEqual,
+                right_column: "destination_harbor_id".to_string(),
+            }),
+            "origin_harbor_id <> destination_harbor_id"
         );
     }
 }

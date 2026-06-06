@@ -2071,6 +2071,12 @@ fn parse_check_expr(
         return cmp_to_check_expr(cmp);
     }
 
+    if let Some(expr) = qail_core::migrate::parse_check_expr_fragment(&s)
+        && !matches!(&expr, qail_core::migrate::schema::CheckExpr::Sql(_))
+    {
+        return Some(expr);
+    }
+
     Some(CheckExpr::Sql(s))
 }
 
@@ -2211,6 +2217,54 @@ mod tests {
         );
         assert!(parse_required_i32(None, "ordinal").is_err());
         assert!(parse_required_i32(Some("not-an-int".to_string()), "ordinal").is_err());
+    }
+
+    #[test]
+    fn check_introspection_uses_structured_postgres_expression_parser() {
+        use qail_core::migrate::schema::{CheckComparisonOp, CheckExpr};
+
+        let text_any = parse_check_expr(
+            "sender_type = ANY (ARRAY['user'::text, 'bot'::text])",
+            "sender_type",
+        )
+        .expect("text ANY should parse");
+        assert!(matches!(
+            text_any,
+            CheckExpr::In { column, values }
+                if column == "sender_type" && values == vec!["user".to_string(), "bot".to_string()]
+        ));
+
+        let int_any = parse_check_expr("duration_hours = ANY (ARRAY[8, 10, 12])", "duration_hours")
+            .expect("integer ANY should parse");
+        assert!(matches!(
+            int_any,
+            CheckExpr::InIntegers { column, values }
+                if column == "duration_hours" && values == vec![8, 10, 12]
+        ));
+
+        let regex = parse_check_expr(
+            "(order_prefix)::text ~ '^[A-Z][A-Z0-9]{1,11}$'::text",
+            "order_prefix",
+        )
+        .expect("regex should parse");
+        assert!(matches!(
+            regex,
+            CheckExpr::Regex { column, pattern }
+                if column == "order_prefix" && pattern == "^[A-Z][A-Z0-9]{1,11}$"
+        ));
+
+        let compare = parse_check_expr(
+            "origin_harbor_id <> destination_harbor_id",
+            "origin_harbor_id",
+        )
+        .expect("column comparison should parse");
+        assert!(matches!(
+            compare,
+            CheckExpr::CompareColumns { left_column, op, right_column }
+                if left_column == "origin_harbor_id"
+                    && op == CheckComparisonOp::NotEqual
+                    && right_column == "destination_harbor_id"
+        ));
     }
 
     #[test]

@@ -169,6 +169,25 @@ fn check_expr_to_sql(expr: &CheckExpr) -> Result<String, String> {
                 vals.join(", ")
             ))
         }
+        CheckExpr::InIntegers { column, values } => Ok(format!(
+            "{} IN ({})",
+            escape_identifier(column),
+            values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        CheckExpr::CompareColumns {
+            left_column,
+            op,
+            right_column,
+        } => Ok(format!(
+            "{} {} {}",
+            escape_identifier(left_column),
+            op.as_sql_str(),
+            escape_identifier(right_column)
+        )),
         CheckExpr::Regex { column, pattern } => Ok(format!(
             "{} ~ '{}'",
             escape_identifier(column),

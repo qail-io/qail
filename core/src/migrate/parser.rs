@@ -19,10 +19,10 @@
 
 use super::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use super::schema::{
-    CheckConstraint, CheckExpr, Column, Comment, Deferrable, EnumType, Extension, FkAction,
-    Generated, Grant, Index, IndexMethod, MigrationHint, MultiColumnForeignKey, Privilege,
-    ResourceDef, ResourceKind, Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table,
-    ViewDef,
+    CheckComparisonOp, CheckConstraint, CheckExpr, Column, Comment, Deferrable, EnumType,
+    Extension, FkAction, Generated, Grant, Index, IndexMethod, MigrationHint,
+    MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema, SchemaFunctionDef,
+    SchemaTriggerDef, Sequence, Table, ViewDef,
 };
 use super::types::ColumnType;
 use crate::ast::Expr;
@@ -2213,6 +2213,10 @@ fn is_column_constraint_keyword(token: &str) -> bool {
 ///   "col < 100"          → LessThan
 ///   "col between 0 200"  → Between
 ///   "col >= 0 and col <= 200" → And(GreaterOrEqual, LessOrEqual)
+pub fn parse_check_expr_fragment(s: &str) -> Option<CheckExpr> {
+    parse_check_expr_from_qail(s)
+}
+
 fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     let s = strip_wrapping_check_parens(s.trim()).trim();
 
@@ -2291,6 +2295,13 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
             };
             return Some(constructor(col, val));
         }
+    }
+
+    // Try simple column-to-column comparisons:
+    //   origin_harbor_id <> destination_harbor_id
+    //   (start_time)::time without time zone < (end_time)::time without time zone
+    if let Some(expr) = parse_column_comparison_check_expr(s) {
+        return Some(expr);
     }
 
     // Try "length(col) >= min" / "length(col) <= max"
@@ -2401,12 +2412,21 @@ fn find_top_level_type_cast(s: &str) -> Option<usize> {
 fn parse_postgres_any_array_check_expr(s: &str) -> Option<CheckExpr> {
     let eq_pos = find_top_level_equality(s)?;
     let column = parse_postgres_any_check_column(&s[..eq_pos])?;
-    let values = parse_postgres_any_text_array_values(&s[eq_pos + 1..])?;
-    if values.is_empty() {
-        return None;
+    let raw_values = &s[eq_pos + 1..];
+
+    if let Some(values) = parse_postgres_any_text_array_values(raw_values)
+        && !values.is_empty()
+    {
+        return Some(CheckExpr::In { column, values });
     }
 
-    Some(CheckExpr::In { column, values })
+    if let Some(values) = parse_postgres_any_integer_array_values(raw_values)
+        && !values.is_empty()
+    {
+        return Some(CheckExpr::InIntegers { column, values });
+    }
+
+    None
 }
 
 fn parse_postgres_regex_check_expr(s: &str) -> Option<CheckExpr> {
@@ -2491,6 +2511,69 @@ fn find_top_level_regex_operator(s: &str) -> Option<usize> {
     None
 }
 
+fn parse_column_comparison_check_expr(s: &str) -> Option<CheckExpr> {
+    let (op_pos, op, op_len) = find_top_level_comparison_operator(s)?;
+    let left_column = parse_postgres_any_check_column(&s[..op_pos])?;
+    let right_column = parse_postgres_any_check_column(&s[op_pos + op_len..])?;
+    Some(CheckExpr::CompareColumns {
+        left_column,
+        op,
+        right_column,
+    })
+}
+
+fn find_top_level_comparison_operator(s: &str) -> Option<(usize, CheckComparisonOp, usize)> {
+    let mut quote: Option<char> = None;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '<' if paren_depth == 0 && bracket_depth == 0 => {
+                if s[idx..].starts_with("<=") {
+                    return Some((idx, CheckComparisonOp::LessOrEqual, 2));
+                }
+                if s[idx..].starts_with("<>") {
+                    return Some((idx, CheckComparisonOp::NotEqual, 2));
+                }
+                return Some((idx, CheckComparisonOp::LessThan, 1));
+            }
+            '>' if paren_depth == 0 && bracket_depth == 0 => {
+                if s[idx..].starts_with(">=") {
+                    return Some((idx, CheckComparisonOp::GreaterOrEqual, 2));
+                }
+                return Some((idx, CheckComparisonOp::GreaterThan, 1));
+            }
+            '!' if paren_depth == 0 && bracket_depth == 0 && s[idx..].starts_with("!=") => {
+                return Some((idx, CheckComparisonOp::NotEqual, 2));
+            }
+            '=' if paren_depth == 0 && bracket_depth == 0 => {
+                return Some((idx, CheckComparisonOp::Equal, 1));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn parse_postgres_any_check_column(raw: &str) -> Option<String> {
     let column = strip_postgres_type_casts(raw);
     if is_native_identifier(column) {
@@ -2540,6 +2623,38 @@ fn parse_postgres_any_text_array_values(raw: &str) -> Option<Vec<String>> {
 
     let mut seen = HashSet::new();
     if values.iter().any(|value| !seen.insert(value)) {
+        return None;
+    }
+
+    Some(values)
+}
+
+fn parse_postgres_any_integer_array_values(raw: &str) -> Option<Vec<i64>> {
+    let raw = raw.trim();
+    let any_args = strip_case_insensitive_prefix(raw, "ANY")?.trim_start();
+    let open = any_args.find('(')?;
+    if !any_args[..open].trim().is_empty() {
+        return None;
+    }
+    let close = find_matching_paren(any_args, open)?;
+    if !any_args[close + 1..].trim().is_empty() {
+        return None;
+    }
+
+    let array_expr = strip_postgres_type_casts(&any_args[open + 1..close]);
+    let after_array = strip_case_insensitive_prefix(array_expr, "ARRAY")?.trim_start();
+    if !after_array.starts_with('[') {
+        return None;
+    }
+
+    let body = list_body_before_closing_bracket(&after_array[1..])?;
+    let mut values = Vec::new();
+    for item in split_top_level_csv(body).ok()? {
+        values.push(parse_check_integer_literal(&item)?);
+    }
+
+    let mut seen = HashSet::new();
+    if values.iter().any(|value| !seen.insert(*value)) {
         return None;
     }
 
@@ -4538,6 +4653,9 @@ table partners {
   client_type varchar(30) not_null default 'hotel'::character varying check((client_type)::text = ANY (ARRAY[('hotel'::character varying)::text, ('travel_agent'::character varying)::text])) check_name chk_client_type
   duration_hours int not_null check(duration_hours = ANY (ARRAY[8, 10, 12])) check_name duration_hours_check
   order_prefix text check((order_prefix)::text ~ '^[A-Z][A-Z0-9]{1,11}$'::text) check_name order_prefix_check
+  origin_harbor_id uuid check(origin_harbor_id <> destination_harbor_id) check_name origin_destination_check
+  end_date date check(end_date >= start_date) check_name end_after_start_check
+  start_time time check((start_time)::time without time zone < (end_time)::time without time zone) check_name start_before_end_check
 }
 "#;
         let schema = parse_qail(input).unwrap();
@@ -4582,7 +4700,8 @@ table partners {
         let duration_hours = &schema.tables["partners"].columns[5];
         assert!(matches!(
             duration_hours.check.as_ref().map(|check| &check.expr),
-            Some(CheckExpr::Sql(sql)) if sql.contains("duration_hours") && sql.contains("ANY")
+            Some(CheckExpr::InIntegers { column, values })
+                if column == "duration_hours" && values == &[8, 10, 12]
         ));
 
         let order_prefix = &schema.tables["partners"].columns[6];
@@ -4591,6 +4710,38 @@ table partners {
             Some(CheckExpr::Regex { column, pattern })
                 if column == "order_prefix" && pattern == "^[A-Z][A-Z0-9]{1,11}$"
         ));
+
+        let origin_harbor_id = &schema.tables["partners"].columns[7];
+        assert!(matches!(
+            origin_harbor_id.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::CompareColumns { left_column, op, right_column })
+                if left_column == "origin_harbor_id"
+                    && *op == CheckComparisonOp::NotEqual
+                    && right_column == "destination_harbor_id"
+        ));
+
+        let end_date = &schema.tables["partners"].columns[8];
+        assert!(matches!(
+            end_date.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::CompareColumns { left_column, op, right_column })
+                if left_column == "end_date"
+                    && *op == CheckComparisonOp::GreaterOrEqual
+                    && right_column == "start_date"
+        ));
+
+        let start_time = &schema.tables["partners"].columns[9];
+        assert!(matches!(
+            start_time.check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::CompareColumns { left_column, op, right_column })
+                if left_column == "start_time"
+                    && *op == CheckComparisonOp::LessThan
+                    && right_column == "end_time"
+        ));
+
+        let rendered = super::super::schema::to_qail_string(&schema);
+        assert!(rendered.contains("check(duration_hours = ANY (ARRAY[8, 10, 12]))"));
+        assert!(rendered.contains("check(origin_harbor_id <> destination_harbor_id)"));
+        assert!(rendered.contains("check(end_date >= start_date)"));
     }
 
     #[test]

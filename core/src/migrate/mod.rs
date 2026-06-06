@@ -29,13 +29,13 @@ pub mod types;
 pub use alter::{AlterOp, AlterTable, TableConstraint};
 pub use diff::{diff_schemas, diff_schemas_checked, validate_state_diff_support};
 pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependencies};
-pub use parser::{parse_qail, parse_qail_file};
+pub use parser::{parse_check_expr_fragment, parse_qail, parse_qail_file};
 pub use policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy, session_bool_check, tenant_check};
 pub use policy_parser::parse_policy_expr;
 pub use schema::{
-    CheckConstraint, CheckExpr, Column, Comment, CommentTarget, Deferrable, EnumType, Extension,
-    FkAction, ForeignKey, Generated, Grant, GrantAction, Index, IndexMethod, MigrationHint,
-    MultiColumnForeignKey, Privilege, Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table,
-    ViewDef, schema_to_commands, to_qail_string,
+    CheckComparisonOp, CheckConstraint, CheckExpr, Column, Comment, CommentTarget, Deferrable,
+    EnumType, Extension, FkAction, ForeignKey, Generated, Grant, GrantAction, Index, IndexMethod,
+    MigrationHint, MultiColumnForeignKey, Privilege, Schema, SchemaFunctionDef, SchemaTriggerDef,
+    Sequence, Table, ViewDef, schema_to_commands, to_qail_string,
 };
 pub use types::ColumnType;
