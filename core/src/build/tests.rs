@@ -1955,6 +1955,42 @@ let q = Qail::get("orders")
 }
 
 #[test]
+fn test_schema_validation_covers_direct_expr_string_left_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+  payment_status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .filter_cond(cond("statuz".into(), Operator::Eq, "paid"))
+    .filter_cond(Condition {
+        left: "paymnt_status".into(),
+        op: Operator::Eq,
+        value: Value::String("paid".to_string()),
+        is_array_unnest: false,
+    });
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in ["statuz", "paymnt_status"] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "direct Expr string-left typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
+}
+
+#[test]
 fn test_schema_validation_does_not_treat_expression_col_helpers_as_schema_columns() {
     let schema = Schema::parse(
         r#"

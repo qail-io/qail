@@ -2952,6 +2952,7 @@ fn extract_direct_expr_columns(
     if trimmed.starts_with("Expr::Aliased") {
         columns.extend(extract_expr_aliased_names(trimmed, substitutions, bindings));
     }
+    columns.extend(resolve_string_values(trimmed, substitutions, bindings));
     for call in scan_rust_function_calls(trimmed) {
         if !trimmed
             .get(..call.start)
