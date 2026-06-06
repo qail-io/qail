@@ -1006,6 +1006,32 @@ fn orders() {
 }
 
 #[test]
+fn test_scan_file_resolves_aliases_to_literal_bindings() {
+    let content = r#"
+const BASE_TABLE: &str = "users";
+const TABLE: &str = BASE_TABLE;
+const BASE_COLUMNS: &[&str] = &["id", "email"];
+const COLUMNS: &[&str] = BASE_COLUMNS;
+
+fn demo() {
+    let table = TABLE;
+    let columns = COLUMNS;
+    let _cmd = Qail::get(table).columns(columns);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        1,
+        "aliases to const literal bindings should remain statically scannable: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[0].columns, vec!["id", "email"]);
+}
+
+#[test]
 fn test_scan_file_ignores_helper_calls_in_comments_for_param_substitution() {
     let content = r#"
 async fn fetch_one(table: &str) {

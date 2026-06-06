@@ -143,13 +143,15 @@ fn collect_literal_binding_index(
     let mut index = LiteralBindingIndex::default();
 
     for stmt in collect_binding_statements(content) {
+        let enclosing_function = find_enclosing_local_function(stmt.start, local_functions);
+        let visible_bindings = literal_bindings_for_offset(&index, stmt.start, enclosing_function);
         match stmt.kind {
             BindingStatementKind::Const => {
-                let bindings = collect_const_statement_bindings(stmt.text);
+                let bindings = collect_const_statement_bindings(stmt.text, &visible_bindings);
                 if literal_bindings_is_empty(&bindings) {
                     continue;
                 }
-                if find_enclosing_local_function(stmt.start, local_functions).is_some() {
+                if enclosing_function.is_some() {
                     index.locals.push(ScopedLiteralBindings {
                         start: stmt.start,
                         end: find_innermost_block_end(content, stmt.start).unwrap_or(content.len()),
@@ -160,7 +162,7 @@ fn collect_literal_binding_index(
                 }
             }
             BindingStatementKind::Let => {
-                let bindings = collect_let_statement_bindings(stmt.text);
+                let bindings = collect_let_statement_bindings(stmt.text, &visible_bindings);
                 if !literal_bindings_is_empty(&bindings) {
                     index.locals.push(ScopedLiteralBindings {
                         start: stmt.start,
@@ -334,7 +336,10 @@ fn line_end(source: &str, start: usize) -> usize {
         .unwrap_or(source.len())
 }
 
-fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
+fn collect_let_statement_bindings(
+    stmt: &str,
+    visible_bindings: &LiteralBindings,
+) -> LiteralBindings {
     let mut bindings = LiteralBindings::default();
     let line = stmt.trim();
 
@@ -342,8 +347,13 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
         let rest = rest.trim();
         if let Some((var, rhs)) = parse_simple_let(rest) {
             let rhs = rhs.trim().trim_end_matches(';').trim();
-            if let Some(lit) = extract_string_arg(rhs) {
-                bindings.scalars.entry(var.clone()).or_default().push(lit);
+            let scalar_values = resolve_string_values(rhs, None, visible_bindings);
+            if !scalar_values.is_empty() {
+                bindings
+                    .scalars
+                    .entry(var.clone())
+                    .or_default()
+                    .extend(scalar_values);
             }
             if rhs.starts_with("if ") {
                 let literals = extract_branch_literals(rhs);
@@ -355,7 +365,7 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
                         .extend(literals);
                 }
             }
-            let values = extract_array_string_literals_from_expr(rhs);
+            let values = resolve_array_string_values(rhs, None, visible_bindings);
             if !values.is_empty() {
                 bindings.arrays.insert(var.clone(), values);
             }
@@ -367,6 +377,17 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
                     .entry(var.clone())
                     .or_default()
                     .push(rhs.to_string());
+            } else if let Some(key) = binding_lookup_key(rhs) {
+                if let Some(items) = visible_bindings.typed_arrays.get(&key) {
+                    bindings.typed_arrays.insert(var.clone(), items.clone());
+                }
+                if let Some(items) = visible_bindings.typed_scalars.get(&key) {
+                    bindings
+                        .typed_scalars
+                        .entry(var.clone())
+                        .or_default()
+                        .extend(items.iter().cloned());
+                }
             }
         }
 
@@ -386,18 +407,22 @@ fn collect_let_statement_bindings(stmt: &str) -> LiteralBindings {
     bindings
 }
 
-fn collect_const_statement_bindings(stmt: &str) -> LiteralBindings {
+fn collect_const_statement_bindings(
+    stmt: &str,
+    visible_bindings: &LiteralBindings,
+) -> LiteralBindings {
     let mut bindings = LiteralBindings::default();
     if let Some((name, rhs)) = parse_const_binding(stmt) {
-        if let Some(value) = extract_string_arg(rhs) {
+        let scalar_values = resolve_string_values(rhs, None, visible_bindings);
+        if !scalar_values.is_empty() {
             bindings
                 .scalars
                 .entry(name.clone())
                 .or_default()
-                .push(value);
+                .extend(scalar_values);
         }
 
-        let values = extract_array_string_literals_from_expr(rhs);
+        let values = resolve_array_string_values(rhs, None, visible_bindings);
         if !values.is_empty() {
             bindings.arrays.insert(name.clone(), values);
         }
@@ -410,6 +435,17 @@ fn collect_const_statement_bindings(stmt: &str) -> LiteralBindings {
                 .entry(name.clone())
                 .or_default()
                 .push(rhs.to_string());
+        } else if let Some(key) = binding_lookup_key(rhs) {
+            if let Some(items) = visible_bindings.typed_arrays.get(&key) {
+                bindings.typed_arrays.insert(name.clone(), items.clone());
+            }
+            if let Some(items) = visible_bindings.typed_scalars.get(&key) {
+                bindings
+                    .typed_scalars
+                    .entry(name.clone())
+                    .or_default()
+                    .extend(items.iter().cloned());
+            }
         }
     }
     dedupe_binding_values(&mut bindings.scalars);
