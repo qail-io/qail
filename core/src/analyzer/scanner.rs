@@ -809,6 +809,35 @@ WHERE active = true
     }
 
     #[test]
+    fn test_non_rust_scan_preserves_js_private_field_queries() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_text_private_fields_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"
+            class Store {
+                #qail = "get users fields id";
+                #sql = "SELECT id FROM users";
+            }
+        "#;
+
+        std::fs::write(&path, source).expect("write temp text file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert!(refs.iter().any(|r| r.query_type == QueryType::Qail));
+        assert!(refs.iter().any(|r| r.query_type == QueryType::RawSql));
+    }
+
+    #[test]
     fn test_scan_with_details_includes_zero_ref_files_in_directories() {
         let scanner = CodebaseScanner::new();
         let root = std::env::temp_dir().join(format!(

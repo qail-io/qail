@@ -129,7 +129,7 @@ pub fn extract_text_literals(content: &str) -> Vec<TextLiteral> {
             continue;
         }
 
-        if bytes[i] == b'#'
+        if is_hash_comment_marker(bytes, i)
             || starts_with_bytes(bytes, i, b"//")
             || starts_with_bytes(bytes, i, b"--")
         {
@@ -334,6 +334,21 @@ fn is_ident_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_hash_comment_marker(bytes: &[u8], idx: usize) -> bool {
+    if bytes.get(idx).copied() != Some(b'#') {
+        return false;
+    }
+
+    bytes
+        .get(idx + 1)
+        .copied()
+        .is_none_or(|b| !is_ident_byte(b))
+}
+
 fn find_quote_terminator(input: &str, quote: char) -> Option<usize> {
     let mut escaped = false;
     for (idx, ch) in input.char_indices() {
@@ -431,6 +446,22 @@ const q = "get users fields id";
         assert_eq!(literals.len(), 1, "{literals:?}");
         assert_eq!(literals[0].text, "get users fields id");
         assert_eq!(literals[0].start_line, 6);
+    }
+
+    #[test]
+    fn extract_literals_preserves_js_private_fields() {
+        let src = r#"
+class Store {
+    #query = "get users fields id";
+    #sql = "SELECT id FROM users";
+}
+"#;
+
+        let literals = extract_text_literals(src);
+
+        assert_eq!(literals.len(), 2, "{literals:?}");
+        assert_eq!(literals[0].text, "get users fields id");
+        assert_eq!(literals[1].text, "SELECT id FROM users");
     }
 
     #[test]
