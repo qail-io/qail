@@ -1742,10 +1742,11 @@ fn test_extract_columns_string_backed_expr_helpers() {
 
 #[test]
 fn test_extract_columns_returning() {
-    let line = r#"Qail::add("orders").returning(["id", "status"])"#;
+    let line = r#"Qail::add("orders").returning(["id", "status", "orders.created_at"])"#;
     let cols = extract_columns(line);
     assert!(cols.contains(&"id".to_string()));
     assert!(cols.contains(&"status".to_string()));
+    assert!(cols.contains(&"orders.created_at".to_string()));
 }
 
 #[test]
@@ -2439,6 +2440,34 @@ let q = Qail::get("orders")
             .iter()
             .any(|d| d.message.contains("CURRENT_DATE")),
         "SQL expression helper names must not be treated as schema columns: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_qualified_returning_column_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::set("orders")
+    .set_value("status", "paid")
+    .returning(["orders.statuz"]);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "qualified returning column typos should be schema-validated: {:?}",
         diagnostics
     );
 }

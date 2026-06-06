@@ -3328,7 +3328,14 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
-            "returning" | "on_conflict_nothing" => {
+            "returning" => {
+                columns.extend(resolve_array_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ));
+            }
+            "on_conflict_nothing" => {
                 for col in resolve_array_string_values(
                     extract_first_argument(call.args),
                     substitutions,
