@@ -1998,23 +1998,31 @@ fn simple_arg_base_ident(arg: &str) -> Option<&str> {
     let mut expr = arg.trim();
 
     loop {
-        let next = strip_wrapping_parens(expr).unwrap_or(expr);
-        if next.len() == expr.len() {
-            break;
-        }
-        expr = next.trim();
-    }
+        let before = expr;
 
-    while let Some(next) = expr.strip_prefix('&').or_else(|| expr.strip_prefix('*')) {
-        expr = next.trim_start();
-        if let Some(next) = expr.strip_prefix("mut ") {
+        while let Some(next) = strip_wrapping_parens(expr) {
+            if next.len() == expr.len() {
+                break;
+            }
+            expr = next.trim();
+        }
+
+        while let Some(next) = expr.strip_prefix('&').or_else(|| expr.strip_prefix('*')) {
             expr = next.trim_start();
+            if let Some(next) = expr.strip_prefix("mut ") {
+                expr = next.trim_start();
+            }
         }
-    }
 
-    for suffix in [".as_ref()", ".as_str()"] {
-        if let Some(base) = expr.strip_suffix(suffix) {
+        if let Some(base) = [".clone()", ".as_ref()", ".as_str()"]
+            .iter()
+            .find_map(|suffix| expr.strip_suffix(suffix))
+        {
             expr = base.trim_end();
+            continue;
+        }
+
+        if expr == before {
             break;
         }
     }
@@ -2975,6 +2983,20 @@ async fn apply_commands(conn: &Conn, cmds: &[Qail]) {
 async fn apply_commands(conn: &Conn, cmds: &[Qail]) {
     for cmd in cmds {
         conn.execute(&cmd).await.unwrap();
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn ignores_cloned_prebuilt_qail_command_replay_loop() {
+        let source = r#"
+async fn apply_commands(conn: &Conn, cmds: &[Qail]) {
+    for cmd in cmds {
+        conn.execute(cmd.clone()).await.unwrap();
     }
 }
 "#;
