@@ -44,6 +44,36 @@ fn merge_migrations_for_source_audit(
         .map_err(|e| anyhow::anyhow!("Failed to merge migrations from {}: {}", migrations_dir, e))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RlsCoverageStats {
+    scoped: usize,
+    total_on_rls_tables: usize,
+    percent: u32,
+}
+
+fn rls_coverage_stats(
+    build_schema: &qail_core::build::Schema,
+    usages: &[qail_core::build::QailUsage],
+) -> Option<RlsCoverageStats> {
+    let mut scoped = 0usize;
+    let mut total_on_rls_tables = 0usize;
+
+    for usage in usages {
+        if build_schema.is_rls_table(&usage.table) {
+            total_on_rls_tables += 1;
+            if usage.has_rls {
+                scoped += 1;
+            }
+        }
+    }
+
+    (total_on_rls_tables > 0).then(|| RlsCoverageStats {
+        scoped,
+        total_on_rls_tables,
+        percent: (scoped as f64 / total_on_rls_tables as f64 * 100.0) as u32,
+    })
+}
+
 /// Validate a QAIL schema file with detailed error reporting.
 /// When `src_dir` is provided, also scans source for query validation + RLS audit.
 pub fn check_schema(
@@ -179,11 +209,7 @@ pub fn check_schema(
 
                     // Query stats
                     let total_queries = usages.len();
-                    let rls_scoped = usages.iter().filter(|u| u.has_rls).count();
-                    let on_rls_tables = usages
-                        .iter()
-                        .filter(|u| build_schema.is_rls_table(&u.table))
-                        .count();
+                    let rls_coverage = rls_coverage_stats(&build_schema, &usages);
 
                     println!(
                         "  {} {} queries scanned in {}",
@@ -203,13 +229,7 @@ pub fn check_schema(
                     }
 
                     // RLS audit results
-                    if on_rls_tables > 0 {
-                        let coverage = if on_rls_tables > 0 {
-                            (rls_scoped as f64 / on_rls_tables as f64 * 100.0) as u32
-                        } else {
-                            100
-                        };
-
+                    if let Some(coverage) = rls_coverage {
                         println!();
                         println!(
                             "  {} RLS Coverage: {}/{} queries scoped ({}%)",
@@ -218,12 +238,12 @@ pub fn check_schema(
                             } else {
                                 "⚠".yellow()
                             },
-                            rls_scoped,
-                            on_rls_tables,
-                            if coverage == 100 {
-                                format!("{}", coverage).green()
+                            coverage.scoped,
+                            coverage.total_on_rls_tables,
+                            if coverage.percent == 100 {
+                                format!("{}", coverage.percent).green()
                             } else {
-                                format!("{}", coverage).yellow()
+                                format!("{}", coverage.percent).yellow()
                             }
                         );
 
@@ -527,12 +547,74 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn usage(table: &str, has_rls: bool) -> qail_core::build::QailUsage {
+        qail_core::build::QailUsage {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            column: 1,
+            table: table.to_string(),
+            is_dynamic_table: false,
+            columns: vec!["id".to_string()],
+            action: "GET".to_string(),
+            related_tables: Vec::new(),
+            is_cte_ref: false,
+            has_rls,
+            has_explicit_tenant_scope: false,
+            file_uses_super_admin: false,
+        }
+    }
+
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("qail_schema_{name}_{nanos}"))
+    }
+
+    #[test]
+    fn rls_coverage_counts_scoped_queries_only_on_rls_tables() {
+        let schema = qail_core::build::Schema::parse(
+            r#"
+table orders rls {
+  id uuid primary_key
+}
+table audit_log {
+  id uuid primary_key
+}
+"#,
+        )
+        .expect("schema should parse");
+        let usages = vec![
+            usage("orders", true),
+            usage("orders", false),
+            usage("audit_log", true),
+        ];
+
+        let stats = rls_coverage_stats(&schema, &usages).expect("orders is RLS-enabled");
+        assert_eq!(
+            stats,
+            RlsCoverageStats {
+                scoped: 1,
+                total_on_rls_tables: 2,
+                percent: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn rls_coverage_is_absent_when_no_queries_target_rls_tables() {
+        let schema = qail_core::build::Schema::parse(
+            r#"
+table audit_log {
+  id uuid primary_key
+}
+"#,
+        )
+        .expect("schema should parse");
+        let usages = vec![usage("audit_log", true)];
+
+        assert!(rls_coverage_stats(&schema, &usages).is_none());
     }
 
     #[test]
