@@ -192,7 +192,7 @@ fn replacement_edit_for_diagnostic(
 }
 
 fn with_rls_insertion_rel(snippet: &str) -> Option<usize> {
-    if let Some(build_idx) = snippet.find(".build(") {
+    if let Some(build_idx) = find_method_call_outside_non_code(snippet, ".build") {
         return Some(build_idx);
     }
 
@@ -213,7 +213,10 @@ fn with_rls_edit_for_diagnostic(content: &str, diagnostic: &Diagnostic) -> Optio
     let (range_start, range_end) = range_to_offsets(&index, &diagnostic.range)?;
     let snippet = content.get(range_start..range_end)?;
 
-    if !snippet.contains("Qail::") || snippet.contains(".with_rls(") || snippet.contains(".rls(") {
+    if !snippet.contains("Qail::")
+        || has_method_call_outside_non_code(snippet, ".with_rls")
+        || has_method_call_outside_non_code(snippet, ".rls")
+    {
         return None;
     }
 
@@ -242,9 +245,9 @@ fn missing_tenant_scope_edit(
     if !snippet.contains("Qail::") {
         return None;
     }
-    if snippet.contains(".eq(\"tenant_id\"")
-        || snippet.contains(".where_eq(\"tenant_id\"")
-        || snippet.contains(".is_null(\"tenant_id\"")
+    if has_method_call_with_first_string_arg(snippet, ".eq", "tenant_id")
+        || has_method_call_with_first_string_arg(snippet, ".where_eq", "tenant_id")
+        || has_method_call_with_first_string_arg(snippet, ".is_null", "tenant_id")
     {
         return None;
     }
@@ -260,6 +263,233 @@ fn missing_tenant_scope_edit(
         },
         new_text: new_text.to_string(),
     })
+}
+
+fn has_method_call_outside_non_code(source: &str, method: &str) -> bool {
+    find_method_call_outside_non_code(source, method).is_some()
+}
+
+fn has_method_call_with_first_string_arg(source: &str, method: &str, expected: &str) -> bool {
+    for (_, open_idx) in method_calls_outside_non_code(source, method) {
+        let bytes = source.as_bytes();
+        let arg_start = skip_ws(bytes, open_idx + 1);
+        if string_literal_equals_at(source, arg_start, expected) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn find_method_call_outside_non_code(source: &str, method: &str) -> Option<usize> {
+    method_calls_outside_non_code(source, method)
+        .into_iter()
+        .next()
+        .map(|(method_idx, _)| method_idx)
+}
+
+fn method_calls_outside_non_code(source: &str, method: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let needle = method.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, needle)
+            && !bytes
+                .get(i + needle.len())
+                .copied()
+                .is_some_and(is_ident_byte)
+        {
+            let open_idx = skip_ws(bytes, i + needle.len());
+            if bytes.get(open_idx).copied() == Some(b'(') {
+                out.push((i, open_idx));
+            }
+            i += needle.len();
+            continue;
+        }
+
+        i += 1;
+    }
+
+    out
+}
+
+fn string_literal_equals_at(source: &str, start: usize, expected: &str) -> bool {
+    let bytes = source.as_bytes();
+
+    if let Some((_, content_start, hashes)) = raw_string_prefix(bytes, start)
+        && let Some(end_quote) = find_raw_string_end(bytes, content_start, hashes)
+    {
+        return source
+            .get(content_start..end_quote)
+            .is_some_and(|raw| raw == expected);
+    }
+
+    if bytes.get(start).copied() != Some(b'"') {
+        return false;
+    }
+
+    let mut i = start + 1;
+    let mut value = String::new();
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            let Some(next) = bytes.get(i + 1).copied() else {
+                return false;
+            };
+            value.push(next as char);
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return value == expected;
+        }
+        value.push(bytes[i] as char);
+        i += 1;
+    }
+
+    false
+}
+
+fn skip_ws(bytes: &[u8], mut idx: usize) -> usize {
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn starts_with_bytes(haystack: &[u8], idx: usize, needle: &[u8]) -> bool {
+    haystack
+        .get(idx..idx.saturating_add(needle.len()))
+        .is_some_and(|s| s == needle)
+}
+
+fn consume_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    let mut depth = 1usize;
+
+    while i < bytes.len() && depth > 0 {
+        if starts_with_bytes(bytes, i, b"/*") {
+            depth += 1;
+            i += 2;
+        } else if starts_with_bytes(bytes, i, b"*/") {
+            depth = depth.saturating_sub(1);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    i
+}
+
+fn consume_rust_literal(bytes: &[u8], start: usize) -> Option<usize> {
+    if let Some((_, content_start, hashes)) = raw_string_prefix(bytes, start) {
+        let end_quote = find_raw_string_end(bytes, content_start, hashes)?;
+        return Some(end_quote + 1 + hashes);
+    }
+
+    if bytes.get(start).copied() == Some(b'"') || starts_with_bytes(bytes, start, b"b\"") {
+        let quote_offset = if bytes.get(start).copied() == Some(b'"') {
+            start
+        } else {
+            start + 1
+        };
+
+        let mut i = quote_offset + 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'"' {
+                return Some(i + 1);
+            }
+            i += 1;
+        }
+        return Some(bytes.len());
+    }
+
+    if bytes.get(start).copied() == Some(b'\'') {
+        let mut i = start + 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'\'' {
+                return Some(i + 1);
+            }
+            i += 1;
+        }
+        return Some(bytes.len());
+    }
+
+    None
+}
+
+fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> {
+    if bytes.get(idx).copied() == Some(b'r') {
+        let mut j = idx + 1;
+        while bytes.get(j).copied() == Some(b'#') {
+            j += 1;
+        }
+        if bytes.get(j).copied() == Some(b'"') {
+            let hashes = j - (idx + 1);
+            return Some((idx, j + 1, hashes));
+        }
+        return None;
+    }
+
+    if bytes.get(idx).copied() == Some(b'b') && bytes.get(idx + 1).copied() == Some(b'r') {
+        let mut j = idx + 2;
+        while bytes.get(j).copied() == Some(b'#') {
+            j += 1;
+        }
+        if bytes.get(j).copied() == Some(b'"') {
+            let hashes = j - (idx + 2);
+            return Some((idx, j + 1, hashes));
+        }
+    }
+
+    None
+}
+
+fn find_raw_string_end(bytes: &[u8], mut idx: usize, hashes: usize) -> Option<usize> {
+    while idx < bytes.len() {
+        if bytes[idx] == b'"' {
+            let mut ok = true;
+            for off in 0..hashes {
+                if bytes.get(idx + 1 + off).copied() != Some(b'#') {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn semantic_quickfix_actions(
@@ -756,6 +986,60 @@ mod tests {
     }
 
     #[test]
+    fn rls_quickfix_ignores_build_marker_inside_string() {
+        let src = r#"let cmd = Qail::get("orders").eq("note", ".build(");"#;
+        let diag = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: src.len() as u32,
+                },
+            },
+            code: Some(NumberOrString::String("QAIL-RLS".to_string())),
+            message: "⚠️ RLS AUDIT: Qail::get(\"orders\") has no .with_rls()".to_string(),
+            ..Default::default()
+        };
+
+        let edit = with_rls_edit_for_diagnostic(src, &diag).expect("rls edit expected");
+        let rewritten = apply_edit(src, &edit);
+        assert_eq!(
+            rewritten,
+            r#"let cmd = Qail::get("orders").eq("note", ".build(").with_rls(&ctx)?;"#
+        );
+    }
+
+    #[test]
+    fn rls_quickfix_ignores_with_rls_marker_inside_string() {
+        let src = r#"let cmd = Qail::get("orders").eq("note", ".with_rls(");"#;
+        let diag = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: src.len() as u32,
+                },
+            },
+            code: Some(NumberOrString::String("QAIL-RLS".to_string())),
+            message: "⚠️ RLS AUDIT: Qail::get(\"orders\") has no .with_rls()".to_string(),
+            ..Default::default()
+        };
+
+        let edit = with_rls_edit_for_diagnostic(src, &diag).expect("rls edit expected");
+        let rewritten = apply_edit(src, &edit);
+        assert_eq!(
+            rewritten,
+            r#"let cmd = Qail::get("orders").eq("note", ".with_rls(").with_rls(&ctx)?;"#
+        );
+    }
+
+    #[test]
     fn rls_quickfix_adds_tenant_scope_eq_scaffold() {
         let src = r#"let _q = Qail::get("orders").columns(["id"]);"#;
         let diag = Diagnostic {
@@ -808,6 +1092,34 @@ mod tests {
         assert_eq!(
             rewritten,
             r#"let _q = Qail::typed(Orders).is_null("tenant_id").build();"#
+        );
+    }
+
+    #[test]
+    fn rls_tenant_quickfix_ignores_tenant_marker_inside_string() {
+        let src = r#"let _q = Qail::get("orders").eq("note", ".eq(\"tenant_id\"");"#;
+        let diag = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: src.len() as u32,
+                },
+            },
+            code: Some(NumberOrString::String("QAIL-RLS".to_string())),
+            message: "⚠️ RLS AUDIT: no explicit tenant scope".to_string(),
+            ..Default::default()
+        };
+
+        let edit = missing_tenant_scope_edit(src, &diag, ".eq(\"tenant_id\", tenant_id)")
+            .expect("tenant scope edit expected");
+        let rewritten = apply_edit(src, &edit);
+        assert_eq!(
+            rewritten,
+            r#"let _q = Qail::get("orders").eq("note", ".eq(\"tenant_id\"").eq("tenant_id", tenant_id);"#
         );
     }
 }
