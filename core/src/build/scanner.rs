@@ -4495,7 +4495,7 @@ fn extract_table_aliases_with_bindings(
                     }
                 }
             }
-            "left_join" | "inner_join" | "left_join_conds" | "inner_join_conds" => {
+            "using_table" | "left_join" | "inner_join" | "left_join_conds" | "inner_join_conds" => {
                 for table in resolve_string_arg(call.args, 0, substitutions, bindings) {
                     insert_alias_from_table_ref(&mut aliases, &table);
                 }
