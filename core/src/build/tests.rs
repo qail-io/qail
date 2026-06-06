@@ -2400,6 +2400,40 @@ let q = Qail::merge_into("orders")
 }
 
 #[test]
+fn test_schema_validation_covers_merge_update_value_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+
+table stage_orders {
+  order_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::merge_into("orders")
+    .using_table_as("stage_orders", "s")
+    .merge_on_column("id", Operator::Eq, "s.order_id")
+    .when_matched_update(&[("status", Expr::Named("s.statuz".into()))]);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("statuz")),
+        "MERGE update value expressions should validate source columns: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_schema_validation_covers_merge_on_column_alias_typos() {
     let schema = Schema::parse(
         r#"
@@ -2462,6 +2496,38 @@ let q = Qail::merge_into("orders")
     assert!(
         diagnostics.iter().any(|d| d.message.contains("order_idd")),
         "MERGE query source aliases should validate source columns against the query table: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_bound_merge_query_source_alias_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+}
+
+table stage_orders {
+  order_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let source = Qail::get("stage_orders");
+let q = Qail::merge_into("orders")
+    .using_query_as(source, "s")
+    .merge_on_column("id", Operator::Eq, "s.order_idd");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("order_idd")),
+        "bound MERGE query source aliases should validate source columns against the query table: {:?}",
         diagnostics
     );
 }

@@ -3000,6 +3000,10 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
         !file_has_allow_super_admin && source_has_function_call(content, "for_system_process");
 
     let chains = collect_qail_chains(content);
+    let qail_bound_vars = chains
+        .iter()
+        .filter_map(|chain| chain.bound_var.as_ref().map(|var| (var.as_str(), chain)))
+        .collect::<Vec<_>>();
     let execution_site_rls = collect_execution_site_rls_offsets(content);
     let local_functions = collect_local_functions(content);
     let literal_binding_index = collect_literal_binding_index(content, &local_functions);
@@ -3119,6 +3123,10 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                     &table,
                     substitutions,
                     &literal_bindings,
+                    chain,
+                    &qail_bound_vars,
+                    content,
+                    &local_functions,
                 );
                 let columns = normalize_columns_with_aliases(&raw_columns, &alias_map);
                 let columns_key = columns.join("\x1f");
@@ -4806,6 +4814,10 @@ fn extract_table_aliases_with_bindings(
     primary_table: &str,
     substitutions: Option<&ParamSubstitutions>,
     bindings: &LiteralBindings,
+    current_chain: &ScannedQailChain,
+    qail_bound_vars: &[(&str, &ScannedQailChain)],
+    source: &str,
+    local_functions: &[LocalFunction],
 ) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
     for call in scan_chain_method_calls(line) {
@@ -4827,8 +4839,20 @@ fn extract_table_aliases_with_bindings(
                 if args.len() < 2 {
                     continue;
                 }
-                for table in resolve_inline_qail_constructor_tables(args[0], substitutions, bindings)
-                {
+                let mut tables =
+                    resolve_inline_qail_constructor_tables(args[0], substitutions, bindings);
+                if tables.is_empty() {
+                    tables.extend(resolve_bound_qail_constructor_tables(
+                        args[0],
+                        current_chain,
+                        qail_bound_vars,
+                        source,
+                        local_functions,
+                        substitutions,
+                        bindings,
+                    ));
+                }
+                for table in tables {
                     for alias in resolve_string_arg(call.args, 1, substitutions, bindings) {
                         insert_alias(&mut aliases, &table, &alias);
                     }
@@ -4857,6 +4881,41 @@ fn extract_table_aliases_with_bindings(
         }
     }
     aliases
+}
+
+fn resolve_bound_qail_constructor_tables(
+    expr: &str,
+    current_chain: &ScannedQailChain,
+    qail_bound_vars: &[(&str, &ScannedQailChain)],
+    source: &str,
+    local_functions: &[LocalFunction],
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let Some(key) = binding_lookup_key(expr) else {
+        return Vec::new();
+    };
+    let Some((_, source_chain)) = qail_bound_vars
+        .iter()
+        .filter(|(var, source_chain)| {
+            *var == key
+                && source_chain.start <= current_chain.start
+                && current_chain.start
+                    < find_innermost_block_end(source, source_chain.start).unwrap_or(source.len())
+                && same_enclosing_function(source_chain.start, current_chain.start, local_functions)
+        })
+        .max_by_key(|(_, source_chain)| source_chain.start)
+    else {
+        return Vec::new();
+    };
+
+    if source_chain.action == "TYPED" {
+        extract_typed_table_arg(&source_chain.first_arg)
+            .into_iter()
+            .collect()
+    } else {
+        resolve_string_values(&source_chain.first_arg, substitutions, bindings)
+    }
 }
 
 fn resolve_inline_qail_constructor_tables(
