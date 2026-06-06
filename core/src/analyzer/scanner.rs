@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Action, CageKind, Expr};
+#[cfg(test)]
+use crate::ast::CageKind;
+use crate::ast::{Action, Cage, Condition, ConflictAction, Expr, MergeAction, Value};
 use crate::parse;
 
 use super::rust_ast::RustAnalyzer;
@@ -261,22 +263,14 @@ fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<C
         return None;
     }
 
-    let (snippet, columns) = match cmd.action {
-        Action::Get => (
-            format!("get {} fields ...", cmd.table),
-            extract_columns_from_exprs(&cmd.columns),
-        ),
-        Action::Set => (
-            format!("set {} values ...", cmd.table),
-            extract_payload_columns(cmd),
-        ),
-        Action::Del => (format!("del {}", cmd.table), vec![]),
-        Action::Add => (
-            format!("add {} fields ...", cmd.table),
-            extract_columns_from_exprs(&cmd.columns),
-        ),
+    let snippet = match cmd.action {
+        Action::Get => format!("get {} fields ...", cmd.table),
+        Action::Set => format!("set {} values ...", cmd.table),
+        Action::Del => format!("del {}", cmd.table),
+        Action::Add => format!("add {} fields ...", cmd.table),
         _ => return None,
     };
+    let columns = collect_reference_columns(cmd);
 
     Some(CodeReference {
         file: path.to_path_buf(),
@@ -288,28 +282,174 @@ fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<C
     })
 }
 
-fn extract_columns_from_exprs(exprs: &[Expr]) -> Vec<String> {
+fn collect_reference_columns(cmd: &crate::Qail) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
 
-    for expr in exprs {
-        let name = match expr {
-            Expr::Star => "*".to_string(),
-            Expr::Named(name) => name.clone(),
-            Expr::Aliased { name, .. } => name.clone(),
-            Expr::Aggregate { col, .. } => col.clone(),
-            Expr::JsonAccess { column, .. } => column.clone(),
-            _ => continue,
-        };
-
-        if !name.is_empty() && seen.insert(name.clone()) {
-            cols.push(name);
+    collect_exprs_columns(&cmd.columns, &mut cols, &mut seen);
+    for cage in &cmd.cages {
+        collect_cage_columns(cage, &mut cols, &mut seen);
+    }
+    for join in &cmd.joins {
+        if let Some(conditions) = &join.on {
+            collect_conditions_columns(conditions, &mut cols, &mut seen);
+        }
+    }
+    collect_conditions_columns(&cmd.having, &mut cols, &mut seen);
+    collect_exprs_columns(&cmd.distinct_on, &mut cols, &mut seen);
+    if let Some(returning) = &cmd.returning {
+        collect_exprs_columns(returning, &mut cols, &mut seen);
+    }
+    if let Some(on_conflict) = &cmd.on_conflict {
+        for column in &on_conflict.columns {
+            push_column_ref(column, &mut cols, &mut seen);
+        }
+        if let ConflictAction::DoUpdate { assignments } = &on_conflict.action {
+            for (column, expr) in assignments {
+                push_column_ref(column, &mut cols, &mut seen);
+                collect_expr_columns(expr, &mut cols, &mut seen);
+            }
+        }
+    }
+    if let Some(merge) = &cmd.merge {
+        collect_conditions_columns(&merge.on, &mut cols, &mut seen);
+        for clause in &merge.clauses {
+            collect_conditions_columns(&clause.condition, &mut cols, &mut seen);
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (column, expr) in assignments {
+                        push_column_ref(column, &mut cols, &mut seen);
+                        collect_expr_columns(expr, &mut cols, &mut seen);
+                    }
+                }
+                MergeAction::Insert { columns, values } => {
+                    for column in columns {
+                        push_column_ref(column, &mut cols, &mut seen);
+                    }
+                    collect_exprs_columns(values, &mut cols, &mut seen);
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
+            }
         }
     }
 
     cols
 }
 
+fn collect_exprs_columns(exprs: &[Expr], cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    for expr in exprs {
+        collect_expr_columns(expr, cols, seen);
+    }
+}
+
+fn collect_cage_columns(cage: &Cage, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    collect_conditions_columns(&cage.conditions, cols, seen);
+}
+
+fn collect_conditions_columns(
+    conditions: &[Condition],
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for condition in conditions {
+        collect_condition_columns(condition, cols, seen);
+    }
+}
+
+fn collect_condition_columns(
+    condition: &Condition,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    collect_expr_columns(&condition.left, cols, seen);
+    collect_value_columns(&condition.value, cols, seen);
+}
+
+fn collect_expr_columns(expr: &Expr, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    match expr {
+        Expr::Star => push_column_ref("*", cols, seen),
+        Expr::Named(name) | Expr::Aliased { name, .. } => push_column_ref(name, cols, seen),
+        Expr::Aggregate { col, filter, .. } => {
+            push_column_ref(col, cols, seen);
+            if let Some(conditions) = filter {
+                collect_conditions_columns(conditions, cols, seen);
+            }
+        }
+        Expr::JsonAccess { column, .. } => push_column_ref(column, cols, seen),
+        Expr::Cast { expr, .. }
+        | Expr::Mod { col: expr, .. }
+        | Expr::Collate { expr, .. }
+        | Expr::FieldAccess { expr, .. } => collect_expr_columns(expr, cols, seen),
+        Expr::Subscript { expr, index, .. } => {
+            collect_expr_columns(expr, cols, seen);
+            collect_expr_columns(index, cols, seen);
+        }
+        Expr::FunctionCall { args, .. } | Expr::ArrayConstructor { elements: args, .. } => {
+            collect_exprs_columns(args, cols, seen);
+        }
+        Expr::SpecialFunction { args, .. } => {
+            for (_, arg) in args {
+                collect_expr_columns(arg, cols, seen);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_columns(left, cols, seen);
+            collect_expr_columns(right, cols, seen);
+        }
+        Expr::Literal(value) => collect_value_columns(value, cols, seen),
+        Expr::RowConstructor { elements, .. } => collect_exprs_columns(elements, cols, seen),
+        Expr::Case {
+            when_clauses,
+            else_value,
+            ..
+        } => {
+            for (condition, value) in when_clauses {
+                collect_condition_columns(condition, cols, seen);
+                collect_expr_columns(value, cols, seen);
+            }
+            if let Some(value) = else_value {
+                collect_expr_columns(value, cols, seen);
+            }
+        }
+        Expr::Window {
+            params,
+            partition,
+            order,
+            ..
+        } => {
+            collect_exprs_columns(params, cols, seen);
+            for column in partition {
+                push_column_ref(column, cols, seen);
+            }
+            for cage in order {
+                collect_cage_columns(cage, cols, seen);
+            }
+        }
+        Expr::Def { .. } | Expr::Subquery { .. } | Expr::Exists { .. } => {}
+    }
+}
+
+fn collect_value_columns(value: &Value, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    match value {
+        Value::Column(column) => push_column_ref(column, cols, seen),
+        Value::Expr(expr) => collect_expr_columns(expr, cols, seen),
+        Value::Array(values) => {
+            for value in values {
+                collect_value_columns(value, cols, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_column_ref(name: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let name = name.trim();
+    if !name.is_empty() && seen.insert(name.to_string()) {
+        cols.push(name.to_string());
+    }
+}
+
+#[cfg(test)]
 fn extract_payload_columns(cmd: &crate::Qail) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
@@ -660,6 +800,17 @@ mod tests {
     }
 
     #[test]
+    fn test_command_reference_tracks_filter_columns() {
+        let cmd = parse("get users fields id where email = $1 order by created_at desc")
+            .expect("get parse");
+        let reference =
+            command_to_reference(Path::new("src/users.ts"), 1, &cmd).expect("reference");
+
+        assert_eq!(reference.table, "users");
+        assert_eq!(reference.columns, vec!["id", "email", "created_at"]);
+    }
+
+    #[test]
     fn test_non_rust_scan_uses_parser_and_sql_classifier() {
         let scanner = CodebaseScanner::new();
         let tmp_name = format!(
@@ -687,7 +838,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(qail_refs.len(), 1);
         assert_eq!(qail_refs[0].table, "users");
-        assert_eq!(qail_refs[0].columns, vec!["id", "email"]);
+        assert_eq!(qail_refs[0].columns, vec!["id", "email", "active"]);
 
         let raw_sql_refs = refs
             .iter()
@@ -732,7 +883,7 @@ WHERE active = true
             .collect::<Vec<_>>();
         assert_eq!(qail_refs.len(), 1);
         assert_eq!(qail_refs[0].table, "users");
-        assert_eq!(qail_refs[0].columns, vec!["id", "email"]);
+        assert_eq!(qail_refs[0].columns, vec!["id", "email", "active"]);
 
         let raw_sql_refs = refs
             .iter()
