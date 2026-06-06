@@ -1852,11 +1852,15 @@ fn test_extract_columns_merge_actions() {
     let line = r#"Qail::merge_into("orders")
         .merge_on_column("id", Operator::Eq, "source.order_id")
         .when_matched_update(&[("status", Expr::Named("source.status".into()))])
-        .when_not_matched_insert(&["id", "status"], &[Expr::Named("source.order_id".into()), Expr::Named("source.status".into())])"#;
+        .when_not_matched_insert(&["id", "status", "created_at"], &[Expr::Named("source.order_id".into()), col("source.status"), col("source.created_at")])"#;
     let cols = extract_columns(line);
 
     assert!(cols.contains(&"id".to_string()));
     assert!(cols.contains(&"status".to_string()));
+    assert!(cols.contains(&"source.order_id".to_string()));
+    assert!(cols.contains(&"source.status".to_string()));
+    assert!(cols.contains(&"created_at".to_string()));
+    assert!(cols.contains(&"source.created_at".to_string()));
 }
 
 #[test]

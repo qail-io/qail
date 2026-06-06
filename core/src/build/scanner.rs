@@ -3430,27 +3430,37 @@ fn extract_columns_with_bindings(
                 ));
             }
             "when_not_matched_insert" => {
-                columns.extend(resolve_array_string_arg(
-                    call.args,
-                    0,
-                    substitutions,
-                    bindings,
-                ));
+                let args = split_top_level_args(call.args);
+                columns.extend(resolve_array_string_arg(call.args, 0, substitutions, bindings));
+                if let Some(values_arg) = args.get(1) {
+                    extract_expr_collection_argument_columns_inner(
+                        values_arg,
+                        substitutions,
+                        bindings,
+                        0,
+                        &mut columns,
+                    );
+                }
             }
             "when_not_matched_insert_if" => {
-                if let Some(condition_arg) = split_top_level_args(call.args).first() {
+                let args = split_top_level_args(call.args);
+                if let Some(condition_arg) = args.first() {
                     columns.extend(extract_condition_columns_with_bindings(
                         condition_arg,
                         substitutions,
                         bindings,
                     ));
                 }
-                columns.extend(resolve_array_string_arg(
-                    call.args,
-                    1,
-                    substitutions,
-                    bindings,
-                ));
+                columns.extend(resolve_array_string_arg(call.args, 1, substitutions, bindings));
+                if let Some(values_arg) = args.get(2) {
+                    extract_expr_collection_argument_columns_inner(
+                        values_arg,
+                        substitutions,
+                        bindings,
+                        0,
+                        &mut columns,
+                    );
+                }
             }
             _ => {}
         }
