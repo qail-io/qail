@@ -192,8 +192,7 @@ const ITER_LOOP_PATTERNS: [&str; 4] = [
     ".try_for_each_concurrent(",
 ];
 
-const ITER_MAP_LOOP_PATTERNS: [&str; 3] =
-    [".iter().map(", ".iter_mut().map(", ".into_iter().map("];
+const ITER_MAP_LOOP_PATTERNS: [&str; 3] = [".iter().map(", ".iter_mut().map(", ".into_iter().map("];
 
 /// Detect semantic N+1 patterns in a single Rust source file.
 #[cfg(any(test, feature = "analyzer"))]
