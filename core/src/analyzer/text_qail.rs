@@ -108,6 +108,27 @@ pub fn extract_text_literals(content: &str) -> Vec<TextLiteral> {
     let mut col = 1usize;
 
     while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"/*") {
+            advance_byte(bytes[i], &mut line, &mut col);
+            i += 1;
+            advance_byte(bytes[i], &mut line, &mut col);
+            i += 1;
+
+            while i < bytes.len() {
+                if starts_with_bytes(bytes, i, b"*/") {
+                    advance_byte(bytes[i], &mut line, &mut col);
+                    i += 1;
+                    advance_byte(bytes[i], &mut line, &mut col);
+                    i += 1;
+                    break;
+                }
+
+                advance_byte(bytes[i], &mut line, &mut col);
+                i += 1;
+            }
+            continue;
+        }
+
         if bytes[i] == b'#'
             || starts_with_bytes(bytes, i, b"//")
             || starts_with_bytes(bytes, i, b"--")
@@ -381,6 +402,7 @@ mod tests {
     fn extract_literals_ignores_comments_and_supports_multiline() {
         let src = r#"
 // "get users fields id" should not be extracted
+/* "SELECT id FROM block_users" should not be extracted */
 const q = `
   get users
   fields id, email
@@ -392,6 +414,23 @@ const sql = "SELECT id FROM users";
         assert_eq!(literals.len(), 2);
         assert!(literals[0].text.contains("get users"));
         assert!(literals[1].text.contains("SELECT id FROM users"));
+    }
+
+    #[test]
+    fn extract_literals_ignores_multiline_block_comments() {
+        let src = r#"
+/*
+const q = "get ghost fields id";
+const sql = "SELECT id FROM ghosts";
+*/
+const q = "get users fields id";
+"#;
+
+        let literals = extract_text_literals(src);
+
+        assert_eq!(literals.len(), 1, "{literals:?}");
+        assert_eq!(literals[0].text, "get users fields id");
+        assert_eq!(literals[0].start_line, 6);
     }
 
     #[test]

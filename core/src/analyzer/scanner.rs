@@ -770,6 +770,10 @@ WHERE active = true
 
         let source = r#"
             // "SELECT id, email FROM users"
+            /*
+            const q = "get block_users fields id";
+            const s = "DELETE FROM block_users";
+            */
             const msg = "ok";
             # "DELETE FROM users"
         "#;
