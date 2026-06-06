@@ -2251,6 +2251,25 @@ let q = Qail::get("agg").columns(["total"]);
 }
 
 #[test]
+fn test_cte_alias_from_bound_query_to_cte_call_is_detected() {
+    let content = r#"
+fn demo() {
+    let source = Qail::get("orders").columns(["total"]);
+    let _cte = source.to_cte("agg");
+    let _read = Qail::get("agg").column("total");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        usages[1].is_cte_ref,
+        "bound query .to_cte(...) should mark later alias refs as CTE refs: {usages:?}"
+    );
+}
+
+#[test]
 fn test_cte_with_inline_detection() {
     // .with("alias", query) should also be detected as CTE
     let content = r#"

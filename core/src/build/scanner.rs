@@ -690,6 +690,12 @@ struct MethodCall<'a> {
     args: &'a str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IdentMethodCall<'a> {
+    args: &'a str,
+    start: usize,
+}
+
 fn collect_local_functions(source: &str) -> Vec<LocalFunction> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
@@ -1716,6 +1722,71 @@ fn scan_chain_method_calls(chain: &str) -> Vec<MethodCall<'_>> {
     out
 }
 
+fn scan_ident_method_calls<'a>(
+    source: &'a str,
+    ident: &str,
+    method: &str,
+) -> Vec<IdentMethodCall<'a>> {
+    let bytes = source.as_bytes();
+    let ident_bytes = ident.as_bytes();
+    let mut calls = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, ident_bytes)
+            && !(i > 0 && is_ident_byte(bytes[i - 1]))
+            && !bytes
+                .get(i + ident_bytes.len())
+                .copied()
+                .is_some_and(is_ident_byte)
+        {
+            let after_ident = skip_ws(bytes, i + ident_bytes.len());
+            if bytes.get(after_ident).copied() != Some(b'.') {
+                i += 1;
+                continue;
+            }
+            let method_start = skip_ws(bytes, after_ident + 1);
+            if !starts_with_keyword(source, method_start, method) {
+                i += 1;
+                continue;
+            }
+            let after_method = skip_ws(bytes, method_start + method.len());
+            if bytes.get(after_method).copied() != Some(b'(') {
+                i += 1;
+                continue;
+            }
+            let Some(close) = find_matching_delim(source, after_method, b'(', b')') else {
+                i = after_method + 1;
+                continue;
+            };
+            let args = source.get(after_method + 1..close).unwrap_or_default();
+            calls.push(IdentMethodCall { args, start: i });
+            i = close + 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    calls
+}
+
 fn extract_bound_var_from_prefix(prefix: &str) -> Option<String> {
     let mut s = prefix.trim_start();
     s = s.strip_prefix("let ")?;
@@ -1978,6 +2049,31 @@ fn collect_cte_aliases(
             }
         }
     }
+
+    for (idx, (var, source_chain)) in qail_bound_vars.iter().enumerate() {
+        let scope_end =
+            find_innermost_block_end(source, source_chain.start).unwrap_or(source.len());
+        let next_same_var_start = qail_bound_vars
+            .iter()
+            .skip(idx + 1)
+            .filter(|(other_var, _)| other_var == var)
+            .map(|(_, other_chain)| other_chain.start)
+            .next()
+            .unwrap_or(scope_end);
+
+        for call in scan_ident_method_calls(source, var, "to_cte") {
+            if call.start < source_chain.end
+                || call.start >= next_same_var_start
+                || call.start >= scope_end
+                || !same_enclosing_function(source_chain.start, call.start, local_functions)
+            {
+                continue;
+            }
+            if let Some(name) = extract_string_arg(call.args) {
+                push_cte_alias_at(&mut aliases, source, call.start, name);
+            }
+        }
+    }
     aliases
 }
 
@@ -1987,18 +2083,18 @@ fn push_cte_alias(
     chain: &ScannedQailChain,
     name: String,
 ) {
-    let end = find_innermost_block_end(source, chain.start).unwrap_or(source.len());
+    push_cte_alias_at(aliases, source, chain.start, name);
+}
+
+fn push_cte_alias_at(aliases: &mut Vec<CteAlias>, source: &str, start: usize, name: String) {
+    let end = find_innermost_block_end(source, start).unwrap_or(source.len());
     if aliases
         .iter()
-        .any(|alias| alias.name == name && alias.start == chain.start && alias.end == end)
+        .any(|alias| alias.name == name && alias.start == start && alias.end == end)
     {
         return;
     }
-    aliases.push(CteAlias {
-        name,
-        start: chain.start,
-        end,
-    });
+    aliases.push(CteAlias { name, start, end });
 }
 
 fn cte_arg_is_visible_bound_qail(
