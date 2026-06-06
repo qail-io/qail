@@ -213,7 +213,7 @@ fn with_rls_edit_for_diagnostic(content: &str, diagnostic: &Diagnostic) -> Optio
     let (range_start, range_end) = range_to_offsets(&index, &diagnostic.range)?;
     let snippet = content.get(range_start..range_end)?;
 
-    if !snippet.contains("Qail::")
+    if !has_qail_constructor_outside_non_code(snippet)
         || has_method_call_outside_non_code(snippet, ".with_rls")
         || has_method_call_outside_non_code(snippet, ".rls")
     {
@@ -242,7 +242,7 @@ fn missing_tenant_scope_edit(
     let (range_start, range_end) = range_to_offsets(&index, &diagnostic.range)?;
     let snippet = content.get(range_start..range_end)?;
 
-    if !snippet.contains("Qail::") {
+    if !has_qail_constructor_outside_non_code(snippet) {
         return None;
     }
     if has_method_call_with_first_string_arg(snippet, ".eq", "tenant_id")
@@ -267,6 +267,39 @@ fn missing_tenant_scope_edit(
 
 fn has_method_call_outside_non_code(source: &str, method: &str) -> bool {
     find_method_call_outside_non_code(source, method).is_some()
+}
+
+fn has_qail_constructor_outside_non_code(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b"Qail::") && (i == 0 || !is_ident_byte(bytes[i - 1])) {
+            return true;
+        }
+
+        i += 1;
+    }
+
+    false
 }
 
 fn has_method_call_with_first_string_arg(source: &str, method: &str, expected: &str) -> bool {
@@ -1040,6 +1073,31 @@ mod tests {
     }
 
     #[test]
+    fn rls_quickfix_requires_real_qail_constructor() {
+        let src = r#"let msg = "Qail::get(\"orders\")";"#;
+        let diag = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: src.len() as u32,
+                },
+            },
+            code: Some(NumberOrString::String("QAIL-RLS".to_string())),
+            message: "⚠️ RLS AUDIT: Qail::get(\"orders\") has no .with_rls()".to_string(),
+            ..Default::default()
+        };
+
+        assert!(
+            with_rls_edit_for_diagnostic(src, &diag).is_none(),
+            "Qail:: inside a string literal must not enable the RLS quickfix"
+        );
+    }
+
+    #[test]
     fn rls_quickfix_adds_tenant_scope_eq_scaffold() {
         let src = r#"let _q = Qail::get("orders").columns(["id"]);"#;
         let diag = Diagnostic {
@@ -1120,6 +1178,32 @@ mod tests {
         assert_eq!(
             rewritten,
             r#"let _q = Qail::get("orders").eq("note", ".eq(\"tenant_id\"").eq("tenant_id", tenant_id);"#
+        );
+    }
+
+    #[test]
+    fn rls_tenant_quickfix_requires_real_qail_constructor() {
+        let src = r#"// Qail::get("orders")
+let msg = "no query";"#;
+        let diag = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: "let msg = \"no query\";".len() as u32,
+                },
+            },
+            code: Some(NumberOrString::String("QAIL-RLS".to_string())),
+            message: "⚠️ RLS AUDIT: no explicit tenant scope".to_string(),
+            ..Default::default()
+        };
+
+        assert!(
+            missing_tenant_scope_edit(src, &diag, ".eq(\"tenant_id\", tenant_id)").is_none(),
+            "Qail:: inside a comment must not enable tenant-scope quickfixes"
         );
     }
 }

@@ -224,7 +224,10 @@ fn is_valid_query_boundary(bytes: &[u8], start: usize, pat: &QueryFnPattern) -> 
         return false;
     }
 
-    if pat.requires_colon_guard && prev == Some(b':') {
+    if pat.requires_colon_guard
+        && prev == Some(b':')
+        && start.checked_sub(2).and_then(|idx| bytes.get(idx).copied()) != Some(b':')
+    {
         return false;
     }
 
@@ -348,7 +351,12 @@ fn find_await_in_chain(source: &str, start: usize) -> Option<usize> {
         }
 
         if paren == 0 && bracket == 0 && brace == 0 {
-            if starts_with(bytes, i, b".await") {
+            if starts_with(bytes, i, b".await")
+                && !bytes
+                    .get(i + ".await".len())
+                    .copied()
+                    .is_some_and(is_ident_byte)
+            {
                 return Some(i);
             }
             if bytes[i] == b';' {
@@ -858,6 +866,41 @@ mod tests {
         assert_eq!(calls[0].fetch_method, FetchMethod::FetchAll);
         assert_eq!(calls[0].query_fn, "query_as");
         assert_eq!(calls[0].return_type.as_deref(), Some("User"));
+    }
+
+    #[test]
+    fn detects_qualified_sqlx_query_calls() {
+        let code = r#"
+            async fn test() {
+                let rows = sqlx::query("SELECT * FROM users")
+                    .fetch_all(&pool)
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].query_fn, "query");
+        assert_eq!(calls[0].sql, "SELECT * FROM users");
+    }
+
+    #[test]
+    fn await_detection_requires_exact_keyword() {
+        let code = r#"
+            async fn test() {
+                let rows = query("SELECT * FROM users")
+                    .fetch_all(&pool)
+                    .awaiting()
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].end_line, 6,
+            ".awaiting() must not terminate the detected query span"
+        );
     }
 
     #[test]

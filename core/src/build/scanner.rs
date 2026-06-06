@@ -136,7 +136,7 @@ pub fn scan_source_text(file: &str, content: &str) -> Vec<QailUsage> {
 /// and only comments count as allow markers.
 pub fn source_uses_super_admin_without_allow(source: &str) -> bool {
     !source_has_allow_comment(source, "qail:allow(super_admin)")
-        && source_has_function_call(source, "for_system_process")
+        && source_has_associated_function_call(source, "SuperAdminToken", "for_system_process")
 }
 
 fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
@@ -2359,11 +2359,21 @@ fn collect_execution_site_rls_offsets(source: &str) -> HashMap<String, Vec<usize
             continue;
         }
 
-        if starts_with_bytes(bytes, i, b".with_rls") {
-            if let Some(var) = extract_receiver_ident_before_dot(source, i) {
-                out.entry(var).or_default().push(i);
+        if bytes[i] == b'.' {
+            let name_start = skip_ws(bytes, i + 1);
+            let Some((name, mut cursor)) = parse_ident_at_bytes(source, name_start) else {
+                i += 1;
+                continue;
+            };
+            if matches!(name, "with_rls" | "rls") {
+                cursor = skip_ws(bytes, cursor);
+                if bytes.get(cursor).copied() == Some(b'(')
+                    && let Some(var) = extract_receiver_ident_before_dot(source, i)
+                {
+                    out.entry(var).or_default().push(i);
+                }
             }
-            i += ".with_rls".len();
+            i = cursor.max(i + 1);
             continue;
         }
 
@@ -2414,9 +2424,9 @@ fn source_has_allow_comment(source: &str, marker: &str) -> bool {
     false
 }
 
-fn source_has_function_call(source: &str, name: &str) -> bool {
+fn source_has_associated_function_call(source: &str, type_name: &str, fn_name: &str) -> bool {
     let bytes = source.as_bytes();
-    let needle = name.as_bytes();
+    let needle = fn_name.as_bytes();
     let mut i = 0usize;
 
     while i < bytes.len() {
@@ -2444,7 +2454,10 @@ fn source_has_function_call(source: &str, name: &str) -> bool {
                 .is_some_and(is_ident_byte)
         {
             let after = skip_ws(bytes, i + needle.len());
-            if bytes.get(after).copied() == Some(b'(') {
+            if bytes.get(after).copied() == Some(b'(')
+                && associated_call_qualifier_before(source, i)
+                    .is_some_and(|qualifier| qualifier == type_name)
+            {
                 return true;
             }
         }
@@ -2453,6 +2466,37 @@ fn source_has_function_call(source: &str, name: &str) -> bool {
     }
 
     false
+}
+
+fn associated_call_qualifier_before(source: &str, fn_start: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let before_fn = skip_ws_back(bytes, fn_start);
+    if before_fn < 2 || source.get(before_fn - 2..before_fn)? != "::" {
+        return None;
+    }
+
+    let before_colons = skip_ws_back(bytes, before_fn - 2);
+    parse_ident_before(source, before_colons)
+}
+
+fn skip_ws_back(bytes: &[u8], mut idx: usize) -> usize {
+    while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
+        idx -= 1;
+    }
+    idx
+}
+
+fn parse_ident_before(source: &str, end: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let mut start = end;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == end {
+        None
+    } else {
+        source.get(start..end)
+    }
 }
 
 fn collect_qail_chains(source: &str) -> Vec<ScannedQailChain> {

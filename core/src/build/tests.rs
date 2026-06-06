@@ -3616,6 +3616,45 @@ async fn unscoped(conn: &mut qail_pg::PooledConnection) {
 }
 
 #[test]
+fn test_rls_detection_late_with_rls_requires_exact_method_name() {
+    let content = r#"
+async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
+    let cmd = Qail::get("orders").columns(["id"]);
+    let _ = conn.fetch_all_uncached(&cmd.with_rls_disabled(ctx)).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        !usages[0].has_rls,
+        "longer method names that only start with with_rls must not mark a query as RLS-scoped"
+    );
+}
+
+#[test]
+fn test_rls_detection_late_rls_on_bound_query_var() {
+    let content = r#"
+async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
+    let cmd = Qail::get("orders")
+        .columns(["id"])
+        .limit(1);
+
+    let _ = conn.fetch_all_uncached(&cmd.rls(ctx)).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_rls,
+        "execution-site cmd.rls(...) should mark the bound query as RLS-scoped"
+    );
+}
+
+#[test]
 fn test_rls_detection_helper_param_with_rls_on_inline_qail_arg() {
     let content = r#"
 async fn exec_with_rls(
@@ -4342,5 +4381,17 @@ fn demo() {
     assert!(
         !source_uses_super_admin_without_allow(commented_call),
         "comment-only SuperAdmin markers must not set the file flag"
+    );
+
+    let unrelated_call = r#"
+fn demo() {
+    let _job = JobToken::for_system_process("jobs");
+    let _q = Qail::get("orders").column("id");
+}
+"#;
+
+    assert!(
+        !source_uses_super_admin_without_allow(unrelated_call),
+        "only SuperAdminToken::for_system_process(...) should set the file flag"
     );
 }

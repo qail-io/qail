@@ -47,7 +47,21 @@ pub fn sql_to_qail(sql: &str) -> Result<String, String> {
 fn starts_with_keyword(sql: &str, keyword: &str) -> bool {
     let sql = sql.trim_start();
     let upper = sql.to_ascii_uppercase();
-    upper.starts_with(&keyword.to_ascii_uppercase())
+    let keyword = keyword.to_ascii_uppercase();
+    if !upper.starts_with(&keyword) {
+        return false;
+    }
+
+    let after = keyword.len();
+    if after >= upper.len() {
+        return true;
+    }
+
+    !upper
+        .as_bytes()
+        .get(after)
+        .copied()
+        .is_some_and(is_ident_byte)
 }
 
 fn transform_cte_select(sql: &str) -> String {
@@ -941,5 +955,20 @@ mod tests {
         let result = sql_to_qail(sql).unwrap();
         assert!(result.contains("DropIndex"), "{result}");
         assert!(result.contains("idx_users_email"), "{result}");
+    }
+
+    #[test]
+    fn statement_keyword_detection_requires_token_boundary() {
+        let selected = sql_to_qail("SELECTED id FROM users").unwrap();
+        assert!(
+            selected.contains("not yet mapped"),
+            "SELECTED must not be treated as SELECT: {selected}"
+        );
+
+        let tablespace = sql_to_qail("CREATE TABLESPACE fastspace LOCATION '/data'").unwrap();
+        assert!(
+            tablespace.contains("not yet mapped"),
+            "CREATE TABLESPACE must not be treated as CREATE TABLE: {tablespace}"
+        );
     }
 }
