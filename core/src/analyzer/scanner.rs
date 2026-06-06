@@ -87,7 +87,7 @@ impl CodebaseScanner {
 
         if path.is_file() {
             if let Some(ext) = path.extension()
-                && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
+                && is_supported_source_extension(ext)
             {
                 let mode = mode_for_extension(ext);
                 let file_refs = self.scan_file(path);
@@ -132,7 +132,7 @@ impl CodebaseScanner {
                 }
                 self.scan_dir_with_details(&path, result);
             } else if let Some(ext) = path.extension()
-                && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
+                && is_supported_source_extension(ext)
             {
                 let mode = mode_for_extension(ext);
                 let file_refs = self.scan_file(&path);
@@ -247,6 +247,13 @@ fn mode_for_extension(ext: &std::ffi::OsStr) -> AnalysisMode {
     } else {
         AnalysisMode::TextSemantic
     }
+}
+
+fn is_supported_source_extension(ext: &std::ffi::OsStr) -> bool {
+    matches!(
+        ext.to_str(),
+        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py")
+    )
 }
 
 fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<CodeReference> {
@@ -825,6 +832,44 @@ WHERE active = true
         assert_eq!(entries[1].0, "with_ref.ts");
         assert_eq!(entries[1].1, AnalysisMode::TextSemantic);
         assert_eq!(entries[1].2, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_scan_with_details_includes_tsx_and_jsx_files() {
+        let scanner = CodebaseScanner::new();
+        let root = std::env::temp_dir().join(format!(
+            "qail_scanner_jsx_tsx_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir temp root");
+
+        let tsx = root.join("widget.tsx");
+        std::fs::write(&tsx, r#"const q = "get users fields id";"#).expect("write tsx");
+        let jsx = root.join("panel.jsx");
+        std::fs::write(&jsx, r#"const s = "SELECT id FROM users";"#).expect("write jsx");
+
+        let result = scanner.scan_with_details(&root);
+
+        let mut files = result
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.file.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                    f.ref_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        files.sort_by_key(|(name, _)| *name);
+
+        assert_eq!(files, vec![("panel.jsx", 1), ("widget.tsx", 1)]);
+        assert_eq!(result.refs.len(), 2, "{:?}", result.refs);
 
         let _ = std::fs::remove_dir_all(&root);
     }

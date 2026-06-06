@@ -29,6 +29,16 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
         return None;
     }
 
+    let starts_with_dml = statement_starts_with_keyword(&normalized, "SELECT")
+        || statement_starts_with_keyword(&normalized, "INSERT")
+        || statement_starts_with_keyword(&normalized, "UPDATE")
+        || statement_starts_with_keyword(&normalized, "DELETE");
+    let starts_with_wrapper = statement_starts_with_keyword(&normalized, "WITH")
+        || statement_starts_with_keyword(&normalized, "EXPLAIN");
+    if !starts_with_dml && !starts_with_wrapper {
+        return None;
+    }
+
     let mut candidates = Vec::new();
     if let Some(pos) = find_keyword_top_level_from(&normalized, "SELECT", 0) {
         candidates.push((pos, SqlStmtKind::Select));
@@ -71,6 +81,10 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
 
 fn normalize_whitespace(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn statement_starts_with_keyword(sql: &str, keyword: &str) -> bool {
+    find_keyword_top_level_from(sql, keyword, 0) == Some(0)
 }
 
 fn find_keyword_top_level_from(text: &str, keyword: &str, min_idx: usize) -> Option<usize> {
@@ -190,5 +204,11 @@ mod tests {
     fn ignores_keywords_inside_strings() {
         let sql = "UPDATE users SET note = 'DELETE FROM x', active = true";
         assert_eq!(classify_sql_kind(sql), Some(SqlStmtKind::Update));
+    }
+
+    #[test]
+    fn rejects_sql_keywords_that_do_not_start_a_statement() {
+        assert_eq!(classify_sql_kind("debug SELECT id FROM users"), None);
+        assert_eq!(classify_sql_kind("message: DELETE FROM sessions"), None);
     }
 }
