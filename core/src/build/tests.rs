@@ -3820,6 +3820,39 @@ fn demo(tenant_id: uuid::Uuid) {
 }
 
 #[test]
+fn test_super_admin_audit_accepts_filter_cond_tenant_id_eq_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo(tenant_id: uuid::Uuid) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders")
+        .columns(["id"])
+        .filter_cond(eq("tenant_id", tenant_id));
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", source, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("no explicit tenant scope")),
+        "tenant_id filter_cond equality should count as explicit tenant scope: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_super_admin_audit_accepts_fully_qualified_operator_scope() {
     let schema = Schema::parse(
         r#"

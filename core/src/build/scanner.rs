@@ -4818,6 +4818,11 @@ fn chain_has_explicit_tenant_scope(
     bindings: &LiteralBindings,
 ) -> bool {
     for call in scan_chain_method_calls(chain) {
+        if call.name == "filter_cond"
+            && condition_expression_has_tenant_scope(call.args, substitutions, bindings)
+        {
+            return true;
+        }
         let is_filter_scope =
             string_filter_call_has_tenant_scope(call.name, call.args, substitutions, bindings);
         let is_typed_filter_scope =
@@ -4839,6 +4844,38 @@ fn chain_has_explicit_tenant_scope(
             return true;
         }
     }
+    false
+}
+
+fn condition_expression_has_tenant_scope(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> bool {
+    for call in scan_rust_function_calls(expr) {
+        if string_filter_call_has_tenant_scope(call.name, call.args, substitutions, bindings) {
+            return true;
+        }
+
+        if call.name == "cond" {
+            let args = split_top_level_args(call.args);
+            let is_scope_left = args
+                .first()
+                .map(|left| {
+                    extract_direct_expr_columns(left, substitutions, bindings)
+                        .into_iter()
+                        .any(|col| is_tenant_identifier(&col))
+                })
+                .unwrap_or(false);
+            let is_scope_operator = args
+                .get(1)
+                .is_some_and(|op| typed_operator_is_tenant_scope(op));
+            if is_scope_left && is_scope_operator {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
