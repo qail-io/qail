@@ -3673,6 +3673,45 @@ fn demo(tenant_id: uuid::Uuid) {
 }
 
 #[test]
+fn test_super_admin_audit_accepts_fully_qualified_operator_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo(tenant_id: uuid::Uuid) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _string_q = Qail::get("orders")
+        .columns(["id"])
+        .filter("tenant_id", qail_core::ast::Operator::Eq, tenant_id);
+    let _typed_q = Qail::typed(orders::table)
+        .typed_filter(orders::tenant_id(), qail_core::ast::Operator::Eq, tenant_id)
+        .typed_filter(orders::status(), qail_core::ast::Operator::Eq, "paid");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", source, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(usages.iter().all(|usage| usage.has_explicit_tenant_scope));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("no explicit tenant scope")),
+        "fully qualified tenant filter operators should count as explicit tenant scope: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_super_admin_audit_warns_when_update_only_sets_tenant_id() {
     let schema = Schema::parse(
         r#"

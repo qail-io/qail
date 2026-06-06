@@ -4775,7 +4775,8 @@ fn typed_filter_call_has_tenant_scope(
 
 fn typed_operator_is_tenant_scope(op: &str) -> bool {
     let op = op.trim();
-    matches!(op, "Operator::Eq" | "Eq" | "Operator::IsNull" | "IsNull")
+    let op = op.rsplit("::").next().unwrap_or(op).trim();
+    matches!(op, "Eq" | "IsNull")
 }
 
 fn is_tenant_identifier(raw_ident: &str) -> bool {
