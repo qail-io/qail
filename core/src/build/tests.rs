@@ -1143,6 +1143,33 @@ fn demo(kind: &str, prefer_users: bool) {
 }
 
 #[test]
+fn test_scan_file_resolves_nested_if_branch_literal_bindings() {
+    let content = r#"
+const USERS_TABLE: &str = "users";
+const ORDERS_TABLE: &str = "orders";
+
+fn demo(prefer_users: bool) {
+    let table = if prefer_users {
+        { USERS_TABLE }
+    } else {
+        ORDERS_TABLE
+    };
+    let _cmd = Qail::get(table).column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        2,
+        "nested if branch blocks returning literal bindings should remain statically scannable: {usages:?}"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[1].table, "orders");
+}
+
+#[test]
 fn test_scan_file_resolves_branch_literal_column_arrays() {
     let content = r#"
 const FULL_COLUMNS: &[&str] = &["id", "email"];

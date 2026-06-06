@@ -618,26 +618,16 @@ fn parse_simple_let(s: &str) -> Option<(String, &str)> {
 /// Handles: `if cond { "a" } else { "b" }` and
 /// `match kind { A => "a", _ => "b" }`.
 fn extract_branch_literals(expr: &str, visible_bindings: &LiteralBindings) -> Vec<String> {
-    let mut literals = Vec::new();
+    let trimmed = expr.trim_start();
 
-    if expr.trim_start().starts_with("match ") {
+    if trimmed.starts_with("match ") {
         return extract_match_literal_arms(expr, visible_bindings);
     }
-
-    // Find all `{ "literal" }` patterns in the expression
-    let mut remaining = expr;
-    while let Some(brace_pos) = remaining.find('{') {
-        let inside = &remaining[brace_pos + 1..];
-        if let Some(close_pos) = inside.find('}') {
-            let block = inside[..close_pos].trim();
-            literals.extend(extract_branch_scalar_expr(block, visible_bindings));
-            remaining = &inside[close_pos + 1..];
-        } else {
-            break;
-        }
+    if trimmed.starts_with("if ") {
+        return extract_if_scalar_blocks(trimmed, visible_bindings);
     }
 
-    literals
+    Vec::new()
 }
 
 fn extract_match_literal_arms(expr: &str, visible_bindings: &LiteralBindings) -> Vec<String> {
@@ -746,6 +736,31 @@ fn extract_branch_scalar_expr(expr: &str, visible_bindings: &LiteralBindings) ->
         return Vec::new();
     };
     resolve_string_values(expr, None, visible_bindings)
+}
+
+fn extract_if_scalar_blocks(expr: &str, bindings: &LiteralBindings) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < expr.len() {
+        let Some(tail) = expr.get(cursor..) else {
+            break;
+        };
+        let Some(open_rel) = find_first_code_byte(tail, b'{') else {
+            break;
+        };
+        let open = cursor + open_rel;
+        let Some(close) = find_matching_delim(expr, open, b'{', b'}') else {
+            break;
+        };
+        if let Some(block) = expr.get(open + 1..close) {
+            out.extend(extract_branch_scalar_expr(block, bindings));
+        }
+        cursor = close + 1;
+    }
+
+    dedupe_values(&mut out);
+    out
 }
 
 fn unwrap_single_block_expr(mut expr: &str) -> Option<&str> {
