@@ -2473,6 +2473,65 @@ fn demo() {
 }
 
 #[test]
+fn test_source_audit_warns_on_unscoped_export_rls_table() {
+    let schema = Schema::parse(
+        r#"
+table orders rls {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::export("orders").column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, ValidationDiagnosticKind::RlsWarning)),
+        "export on RLS table should be scanned and warned when unscoped: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_source_audit_validates_existing_table_constructor_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn demo() {
+    let _q = Qail::truncate("ordres");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::SchemaError) && d.message.contains("ordres")
+        }),
+        "existing-table constructors should be scanned for table typos: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_schema_validation_catches_bare_column_typos_for_public_qualified_schema() {
     let schema = Schema::parse(
         r#"

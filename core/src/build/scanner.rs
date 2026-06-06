@@ -1219,6 +1219,11 @@ fn find_next_qail_constructor(source: &str, start: usize) -> Option<QailConstruc
             "del" => "DEL",
             "put" => "PUT",
             "merge_into" => "MERGE",
+            "export" => "EXPORT",
+            "truncate" => "TRUNCATE",
+            "explain" => "EXPLAIN",
+            "explain_analyze" => "EXPLAIN_ANALYZE",
+            "lock" => "LOCK",
             "typed" => "TYPED",
             "raw_sql" => "RAW",
             _ => {
@@ -3734,6 +3739,11 @@ pub(crate) fn usage_action_to_ast(action: &str) -> Result<crate::ast::Action, St
         "DEL" => Ok(Action::Del),
         "PUT" => Ok(Action::Put),
         "MERGE" => Ok(Action::Merge),
+        "EXPORT" => Ok(Action::Export),
+        "TRUNCATE" => Ok(Action::Truncate),
+        "EXPLAIN" => Ok(Action::Explain),
+        "EXPLAIN_ANALYZE" => Ok(Action::ExplainAnalyze),
+        "LOCK" => Ok(Action::Lock),
         _ => Err(format!("unknown scanner action '{}'", action)),
     }
 }
