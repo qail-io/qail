@@ -3431,7 +3431,12 @@ fn extract_columns_with_bindings(
             }
             "when_not_matched_insert" => {
                 let args = split_top_level_args(call.args);
-                columns.extend(resolve_array_string_arg(call.args, 0, substitutions, bindings));
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    0,
+                    substitutions,
+                    bindings,
+                ));
                 if let Some(values_arg) = args.get(1) {
                     extract_expr_collection_argument_columns_inner(
                         values_arg,
@@ -3451,7 +3456,12 @@ fn extract_columns_with_bindings(
                         bindings,
                     ));
                 }
-                columns.extend(resolve_array_string_arg(call.args, 1, substitutions, bindings));
+                columns.extend(resolve_array_string_arg(
+                    call.args,
+                    1,
+                    substitutions,
+                    bindings,
+                ));
                 if let Some(values_arg) = args.get(2) {
                     extract_expr_collection_argument_columns_inner(
                         values_arg,

@@ -1737,7 +1737,13 @@ fn test_extract_columns_condition_expression_values() {
         .filter_cond(between("total", col("minimum_total"), col("maximum_total")))"#;
     let cols = extract_columns(line);
 
-    for expected in ["status", "fallback_status", "total", "minimum_total", "maximum_total"] {
+    for expected in [
+        "status",
+        "fallback_status",
+        "total",
+        "minimum_total",
+        "maximum_total",
+    ] {
         assert!(
             cols.contains(&expected.to_string()),
             "expected {expected} from condition expression values: {cols:?}"
