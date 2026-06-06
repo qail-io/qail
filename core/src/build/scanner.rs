@@ -2376,6 +2376,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
 
         for substitutions in context_iter {
             let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(
+                action,
                 &chain.full_chain,
                 substitutions,
                 &literal_bindings,
@@ -2673,15 +2674,17 @@ fn chain_has_rls(chain: &str) -> bool {
 }
 
 fn chain_has_explicit_tenant_scope(
+    action: &str,
     chain: &str,
     substitutions: Option<&ParamSubstitutions>,
     bindings: &LiteralBindings,
 ) -> bool {
     for call in scan_chain_method_calls(chain) {
-        if !matches!(
-            call.name,
-            "eq" | "where_eq" | "is_null" | "set_value" | "set_coalesce" | "set_coalesce_opt"
-        ) {
+        let is_filter_scope = matches!(call.name, "eq" | "where_eq" | "is_null");
+        let is_payload_scope =
+            matches!(call.name, "set_value" | "set_coalesce" | "set_coalesce_opt")
+                && matches!(action, "ADD" | "PUT");
+        if !(is_filter_scope || is_payload_scope) {
             continue;
         }
         if resolve_string_values(extract_first_argument(call.args), substitutions, bindings)

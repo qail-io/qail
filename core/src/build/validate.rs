@@ -8,13 +8,22 @@ use super::schema::Schema;
 
 fn has_explicit_tenant_scope(cmd: &crate::ast::Qail) -> bool {
     cmd.cages.iter().any(|cage| {
-        matches!(
-            cage.kind,
-            crate::ast::CageKind::Filter | crate::ast::CageKind::Payload
-        ) && cage
-            .conditions
-            .iter()
-            .any(is_explicit_tenant_scope_condition)
+        let cage_can_scope = match cage.kind {
+            crate::ast::CageKind::Filter => true,
+            crate::ast::CageKind::Payload => {
+                matches!(
+                    cmd.action,
+                    crate::ast::Action::Add | crate::ast::Action::Put
+                )
+            }
+            _ => false,
+        };
+
+        cage_can_scope
+            && cage
+                .conditions
+                .iter()
+                .any(is_explicit_tenant_scope_condition)
     })
 }
 

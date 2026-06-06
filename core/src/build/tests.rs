@@ -1881,6 +1881,23 @@ let q = Qail::add("usage_ledger")
 }
 
 #[test]
+fn test_explicit_tenant_scope_ignores_update_payload_setters() {
+    let content = r#"
+let q = Qail::set("orders")
+    .set_value("tenant_id", tenant_id)
+    .eq("id", order_id);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        !usages[0].has_explicit_tenant_scope,
+        "tenant_id update payload setters are not tenant filters"
+    );
+}
+
+#[test]
 fn test_rls_detection_late_with_rls_on_bound_query_var() {
     let content = r#"
 async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
@@ -2193,6 +2210,42 @@ fn demo(tenant_id: uuid::Uuid) {
             .iter()
             .any(|d| d.message.contains("no explicit tenant scope")),
         "tenant_id constants should count as explicit tenant scope: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_super_admin_audit_warns_when_update_only_sets_tenant_id() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo(order_id: uuid::Uuid, tenant_id: uuid::Uuid) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::set("orders")
+        .set_value("tenant_id", tenant_id)
+        .set_value("status", "paid")
+        .eq("id", order_id);
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", source, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::RlsWarning)
+                && d.message.contains("no explicit tenant scope")
+        }),
+        "tenant_id update payload must not silence SuperAdmin tenant-scope warning: {:?}",
         diagnostics
     );
 }
