@@ -1282,6 +1282,22 @@ fn test_extract_columns_expression_projection_surface_methods() {
 }
 
 #[test]
+fn test_extract_columns_order_by_expr_and_condition_helpers() {
+    let line = r#"Qail::get("orders")
+        .order_by_expr(col("created_at"), SortOrder::Desc)
+        .filter_cond(key_exists("metadata", "priority"))
+        .filter_cond(cond(col("status"), Operator::Eq, "paid"))"#;
+    let cols = extract_columns(line);
+
+    for expected in ["created_at", "metadata", "status"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} in expression/condition columns: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_returning() {
     let line = r#"Qail::add("orders").returning(["id", "status"])"#;
     let cols = extract_columns(line);
@@ -1568,6 +1584,78 @@ let q = Qail::get("orders")
         "join alias expression columns should validate against the joined table: {:?}",
         diagnostics
     );
+}
+
+#[test]
+fn test_schema_validation_covers_order_by_expr_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  created_at TIMESTAMP
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .order_by_expr(col("cretaed_at"), SortOrder::Desc);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("cretaed_at")),
+        "order_by_expr column typo should be schema-validated: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_covers_merge_condition_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+
+table stage_orders {
+  order_id UUID
+  status TEXT
+  active BOOL
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::merge_into("orders")
+    .using_table_as("stage_orders", "s")
+    .merge_on_condition(Condition {
+        left: Expr::Named("orders.idd".to_string()),
+        op: Operator::Eq,
+        value: Value::Column("s.order_idd".to_string()),
+        is_array_unnest: false,
+    })
+    .when_matched_update_if(
+        vec![eq("s.actve", true)],
+        &[("status", Expr::Named("s.status".to_string()))],
+    );
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in ["idd", "order_idd", "actve"] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "MERGE condition typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
 }
 
 #[test]

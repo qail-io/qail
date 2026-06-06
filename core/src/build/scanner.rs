@@ -2581,14 +2581,14 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
-            "filter_cond" | "having_cond" | "having_conds" => {
+            "filter_cond" | "having_cond" | "having_conds" | "merge_on_condition" => {
                 columns.extend(extract_condition_columns_with_bindings(
                     call.args,
                     substitutions,
                     bindings,
                 ));
             }
-            "column_expr" | "select_expr" => {
+            "column_expr" | "select_expr" | "order_by_expr" => {
                 columns.extend(extract_expression_columns_with_bindings(
                     call.args,
                     substitutions,
@@ -2650,6 +2650,13 @@ fn extract_columns_with_bindings(
                 ));
             }
             "when_matched_update_if" => {
+                if let Some(condition_arg) = split_top_level_args(call.args).first() {
+                    columns.extend(extract_condition_columns_with_bindings(
+                        condition_arg,
+                        substitutions,
+                        bindings,
+                    ));
+                }
                 columns.extend(resolve_array_string_arg(
                     call.args,
                     1,
@@ -2666,6 +2673,13 @@ fn extract_columns_with_bindings(
                 ));
             }
             "when_not_matched_insert_if" => {
+                if let Some(condition_arg) = split_top_level_args(call.args).first() {
+                    columns.extend(extract_condition_columns_with_bindings(
+                        condition_arg,
+                        substitutions,
+                        bindings,
+                    ));
+                }
                 columns.extend(resolve_array_string_arg(
                     call.args,
                     1,
@@ -2730,8 +2744,21 @@ fn extract_condition_columns_inner(
     if depth > 8 {
         return;
     }
+    columns.extend(extract_condition_struct_left_columns(
+        expr,
+        substitutions,
+        bindings,
+    ));
     for call in scan_rust_function_calls(expr) {
-        if is_condition_builder_name(call.name) {
+        if call.name == "cond" {
+            if let Some(left_arg) = split_top_level_args(call.args).first() {
+                columns.extend(extract_direct_expr_columns(
+                    left_arg,
+                    substitutions,
+                    bindings,
+                ));
+            }
+        } else if is_condition_builder_name(call.name) {
             columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
         }
         if call.path.ends_with("Value::Column") {
@@ -2763,7 +2790,134 @@ fn is_condition_builder_name(name: &str) -> bool {
             | "contains"
             | "overlaps"
             | "similar_to"
+            | "key_exists"
     )
+}
+
+fn extract_condition_struct_left_columns(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let bytes = expr.as_bytes();
+    let mut names = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_keyword(expr, i, "Condition") {
+            let after = skip_ws(bytes, i + "Condition".len());
+            if bytes.get(after).copied() == Some(b'{')
+                && let Some(close) = find_matching_delim(expr, after, b'{', b'}')
+                && let Some(body) = expr.get(after + 1..close)
+            {
+                names.extend(resolve_struct_expr_column_field(
+                    body,
+                    "left",
+                    substitutions,
+                    bindings,
+                ));
+                i = close + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    names
+}
+
+fn resolve_struct_expr_column_field(
+    body: &str,
+    field: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut values = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_keyword(body, i, field) {
+            let after_field = skip_ws(bytes, i + field.len());
+            if bytes.get(after_field).copied() == Some(b':') {
+                let field_expr = body.get(after_field + 1..).unwrap_or_default();
+                values.extend(extract_direct_expr_columns(
+                    extract_first_argument(field_expr),
+                    substitutions,
+                    bindings,
+                ));
+                i = after_field + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    values
+}
+
+fn extract_direct_expr_columns(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut columns = Vec::new();
+    let trimmed = expr.trim();
+    if trimmed.starts_with("Expr::Aliased") {
+        columns.extend(extract_expr_aliased_names(trimmed, substitutions, bindings));
+    }
+    for call in scan_rust_function_calls(trimmed) {
+        if !trimmed
+            .get(..call.start)
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            continue;
+        }
+        if call.name == "col"
+            || call.path.ends_with("Expr::Named")
+            || call.path.ends_with("Value::Column")
+        {
+            columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+        }
+    }
+    dedupe_values(&mut columns);
+    columns
 }
 
 fn extract_expression_columns_with_bindings(
@@ -2919,6 +3073,7 @@ struct RustFunctionCall<'a> {
     path: &'a str,
     name: &'a str,
     args: &'a str,
+    start: usize,
 }
 
 fn scan_rust_function_calls(source: &str) -> Vec<RustFunctionCall<'_>> {
@@ -2988,7 +3143,12 @@ fn scan_rust_function_calls(source: &str) -> Vec<RustFunctionCall<'_>> {
         let path = source.get(path_start..cursor).unwrap_or_default();
         let name = path.rsplit("::").next().unwrap_or(path);
         let args = source.get(after_path + 1..close).unwrap_or_default();
-        calls.push(RustFunctionCall { path, name, args });
+        calls.push(RustFunctionCall {
+            path,
+            name,
+            args,
+            start: path_start,
+        });
         i = close + 1;
     }
 
