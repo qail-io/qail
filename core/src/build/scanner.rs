@@ -2600,7 +2600,16 @@ fn extract_columns_with_bindings(
                     bindings,
                 ));
             }
-            "column_expr" | "select_expr" | "order_by_expr" => {
+            "select_expr" => {
+                extract_expr_argument_columns_inner(
+                    call.args,
+                    substitutions,
+                    bindings,
+                    0,
+                    &mut columns,
+                );
+            }
+            "column_expr" | "order_by_expr" => {
                 columns.extend(extract_expression_columns_with_bindings(
                     call.args,
                     substitutions,
@@ -2608,6 +2617,13 @@ fn extract_columns_with_bindings(
                 ));
             }
             "columns_expr" | "select_exprs" | "distinct_on_expr" | "group_by_expr" => {
+                extract_expr_collection_argument_columns_inner(
+                    call.args,
+                    substitutions,
+                    bindings,
+                    0,
+                    &mut columns,
+                );
                 columns.extend(extract_expression_columns_with_bindings(
                     call.args,
                     substitutions,
@@ -2981,12 +2997,97 @@ fn extract_expression_columns_inner(
         return;
     }
     columns.extend(extract_expr_aliased_names(expr, substitutions, bindings));
+    columns.extend(extract_string_receiver_expression_columns(
+        expr,
+        substitutions,
+        bindings,
+    ));
     extract_expression_method_columns_inner(expr, substitutions, bindings, depth, columns);
     for call in scan_rust_function_calls(expr) {
-        if call.name == "percentage" {
-            columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
-            columns.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
-        } else if is_expression_string_arg_builder_name(call.name)
+        let args = split_top_level_args(call.args);
+        match call.name {
+            "percentage" => {
+                columns.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+                columns.extend(resolve_string_arg(call.args, 1, substitutions, bindings));
+            }
+            "cast" => {
+                if let Some(expr_arg) = args.first() {
+                    extract_expr_argument_columns_inner(
+                        expr_arg,
+                        substitutions,
+                        bindings,
+                        depth + 1,
+                        columns,
+                    );
+                }
+            }
+            "binary" => {
+                for index in [0, 2] {
+                    if let Some(expr_arg) = args.get(index) {
+                        extract_expr_argument_columns_inner(
+                            expr_arg,
+                            substitutions,
+                            bindings,
+                            depth + 1,
+                            columns,
+                        );
+                    }
+                }
+            }
+            "add_expr" | "and_expr" | "or_expr" | "nullif" => {
+                for expr_arg in args.iter().take(2) {
+                    extract_expr_argument_columns_inner(
+                        expr_arg,
+                        substitutions,
+                        bindings,
+                        depth + 1,
+                        columns,
+                    );
+                }
+            }
+            "replace" => {
+                for expr_arg in args.iter().take(3) {
+                    extract_expr_argument_columns_inner(
+                        expr_arg,
+                        substitutions,
+                        bindings,
+                        depth + 1,
+                        columns,
+                    );
+                }
+            }
+            "coalesce" | "concat" => {
+                if let Some(exprs_arg) = args.first() {
+                    extract_expr_collection_argument_columns_inner(
+                        exprs_arg,
+                        substitutions,
+                        bindings,
+                        depth + 1,
+                        columns,
+                    );
+                }
+            }
+            "case_when" => {
+                if let Some(condition_arg) = args.first() {
+                    columns.extend(extract_condition_columns_with_bindings(
+                        condition_arg,
+                        substitutions,
+                        bindings,
+                    ));
+                }
+                if let Some(then_arg) = args.get(1) {
+                    extract_expr_argument_columns_inner(
+                        then_arg,
+                        substitutions,
+                        bindings,
+                        depth + 1,
+                        columns,
+                    );
+                }
+            }
+            _ => {}
+        }
+        if is_expression_string_arg_builder_name(call.name)
             || is_expression_column_builder_name(call.name)
             || is_condition_builder_name(call.name)
             || call.path.ends_with("Expr::Named")
@@ -3045,9 +3146,101 @@ fn extract_expression_method_columns_inner(
                     bindings,
                 ));
             }
+            "or_default" => {
+                extract_expr_argument_columns_inner(
+                    call.args,
+                    substitutions,
+                    bindings,
+                    depth + 1,
+                    columns,
+                );
+            }
             _ => {}
         }
     }
+}
+
+fn extract_string_receiver_expression_columns(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let bytes = expr.as_bytes();
+    let mut columns = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some((lit, next)) = parse_string_literal_at(expr, i) {
+            if expression_receiver_method_after(expr, next).is_some() {
+                columns.push(lit);
+            }
+            i = next;
+            continue;
+        }
+
+        if is_ident_byte(bytes[i])
+            && (i == 0 || !is_ident_byte(bytes[i - 1]) && bytes[i - 1] != b'.')
+            && let Some((name, name_end)) = parse_ident_at_bytes(expr, i)
+        {
+            if expression_receiver_method_after(expr, name_end).is_some() {
+                columns.extend(resolve_string_values(name, substitutions, bindings));
+            }
+            i = name_end;
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    columns
+}
+
+fn expression_receiver_method_after(expr: &str, receiver_end: usize) -> Option<&str> {
+    let bytes = expr.as_bytes();
+    let dot = skip_ws(bytes, receiver_end);
+    if bytes.get(dot).copied() != Some(b'.') {
+        return None;
+    }
+    let name_start = skip_ws(bytes, dot + 1);
+    let (name, name_end) = parse_ident_at_bytes(expr, name_start)?;
+    if !is_expression_receiver_method_name(name) {
+        return None;
+    }
+    let args_start = skip_ws(bytes, name_end);
+    (bytes.get(args_start).copied() == Some(b'(')).then_some(name)
+}
+
+fn is_expression_receiver_method_name(name: &str) -> bool {
+    matches!(
+        name,
+        "with_alias"
+            | "or_default"
+            | "json"
+            | "path"
+            | "cast"
+            | "upper"
+            | "lower"
+            | "trim"
+            | "length"
+            | "abs"
+    )
 }
 
 fn extract_expr_argument_columns_inner(
@@ -3062,6 +3255,44 @@ fn extract_expr_argument_columns_inner(
     }
     columns.extend(resolve_string_values(expr, substitutions, bindings));
     extract_expression_columns_inner(expr, substitutions, bindings, depth + 1, columns);
+}
+
+fn extract_expr_collection_argument_columns_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    depth: usize,
+    columns: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    let Some(inner) = extract_direct_expr_collection_inner(expr) else {
+        extract_expression_columns_inner(expr, substitutions, bindings, depth + 1, columns);
+        return;
+    };
+    for expr_arg in split_top_level_args(inner) {
+        extract_expr_argument_columns_inner(expr_arg, substitutions, bindings, depth + 1, columns);
+    }
+}
+
+fn extract_direct_expr_collection_inner(expr: &str) -> Option<&str> {
+    let mut trimmed = expr.trim();
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
+
+    if trimmed.starts_with('[') {
+        let close = find_matching_delim(trimmed, 0, b'[', b']')?;
+        return trimmed.get(1..close);
+    }
+
+    let rest = trimmed.strip_prefix("vec!")?.trim_start();
+    if !rest.starts_with('[') {
+        return None;
+    }
+    let close = find_matching_delim(rest, 0, b'[', b']')?;
+    rest.get(1..close)
 }
 
 fn is_expression_string_arg_builder_name(name: &str) -> bool {

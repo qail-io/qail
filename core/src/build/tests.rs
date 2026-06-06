@@ -1325,6 +1325,39 @@ fn test_extract_columns_ast_native_helper_builders() {
 }
 
 #[test]
+fn test_extract_columns_string_backed_expr_helpers() {
+    let line = r#"Qail::get("orders")
+        .column_expr(cast("created_at", "text").alias("created_text"))
+        .column_expr(binary("total", BinaryOp::Add, "fee").alias("gross_total"))
+        .column_expr(replace("phone", text("+"), text("")).alias("normalized_phone"))
+        .column_expr(concat(["first_name", "last_name"]).alias("full_name"))
+        .column_expr(coalesce(["nickname", "display_name"]).alias("preferred_name"))
+        .column_expr("email".lower().with_alias("email_lower"))"#;
+    let cols = extract_columns(line);
+
+    for expected in [
+        "created_at",
+        "total",
+        "fee",
+        "phone",
+        "first_name",
+        "last_name",
+        "nickname",
+        "display_name",
+        "email",
+    ] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} from string-backed expression helpers: {cols:?}"
+        );
+    }
+    assert!(
+        !cols.contains(&"+".to_string()),
+        "text literal arguments should not be extracted as columns: {cols:?}"
+    );
+}
+
+#[test]
 fn test_extract_columns_returning() {
     let line = r#"Qail::add("orders").returning(["id", "status"])"#;
     let cols = extract_columns(line);
@@ -1690,6 +1723,58 @@ let q = Qail::get("orders")
 }
 
 #[test]
+fn test_schema_validation_covers_string_backed_expr_helper_typos() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  created_at TIMESTAMP
+  total INT
+  fee INT
+  phone TEXT
+  first_name TEXT
+  last_name TEXT
+  nickname TEXT
+  display_name TEXT
+  email TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("orders")
+    .column_expr(cast("cretaed_at", "text").alias("created_text"))
+    .column_expr(binary("totl", BinaryOp::Add, "feee").alias("gross_total"))
+    .column_expr(replace("phoen", text("+"), text("")).alias("normalized_phone"))
+    .column_expr(concat(["first_nmae", "last_nmae"]).alias("full_name"))
+    .column_expr(coalesce(["nicknmae", "display_nmae"]).alias("preferred_name"))
+    .column_expr("emial".lower().with_alias("email_lower"));
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    for expected in [
+        "cretaed_at",
+        "totl",
+        "feee",
+        "phoen",
+        "first_nmae",
+        "last_nmae",
+        "nicknmae",
+        "display_nmae",
+        "emial",
+    ] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "string-backed expression helper typo {expected} should be schema-validated: {:?}",
+            diagnostics
+        );
+    }
+}
+
+#[test]
 fn test_schema_validation_covers_on_conflict_update_typos() {
     let schema = Schema::parse(
         r#"
@@ -1903,6 +1988,34 @@ let q = Qail::get("orders")
             .iter()
             .any(|d| d.message.contains("CURRENT_DATE")),
         "SQL expression helper names must not be treated as schema columns: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_schema_validation_does_not_treat_set_value_string_literals_as_columns() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  status TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::set("orders")
+    .set_value("status", "paid")
+    .eq("id", order_id);
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.is_empty(),
+        "set_value string literals should remain values, not schema columns: {:?}",
         diagnostics
     );
 }
