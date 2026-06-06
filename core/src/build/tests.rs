@@ -1777,6 +1777,30 @@ fn test_extract_columns_condition_struct_expression_values() {
 }
 
 #[test]
+fn test_extract_columns_condition_struct_left_expression_columns() {
+    let line = r#"Qail::get("orders")
+        .filter_cond(Condition {
+            left: Expr::Binary {
+                left: Box::new(col("subtotal")),
+                op: BinaryOp::Add,
+                right: Box::new(col("tax")),
+                alias: None,
+            },
+            op: Operator::Gt,
+            value: Value::Expr(Box::new(col("minimum_total"))),
+            is_array_unnest: false,
+        })"#;
+    let cols = extract_columns(line);
+
+    for expected in ["subtotal", "tax", "minimum_total"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "expected {expected} from condition struct left expression: {cols:?}"
+        );
+    }
+}
+
+#[test]
 fn test_extract_columns_ast_native_helper_builders() {
     let line = r#"Qail::get("orders")
         .column_expr(json("metadata", "priority").alias("priority"))

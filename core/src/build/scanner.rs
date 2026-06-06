@@ -3775,11 +3775,13 @@ fn resolve_struct_expr_column_field(
             let after_field = skip_ws(bytes, i + field.len());
             if bytes.get(after_field).copied() == Some(b':') {
                 let field_expr = body.get(after_field + 1..).unwrap_or_default();
-                values.extend(extract_direct_expr_columns(
+                extract_expression_columns_inner(
                     extract_first_argument(field_expr),
                     substitutions,
                     bindings,
-                ));
+                    0,
+                    &mut values,
+                );
                 i = after_field + 1;
                 continue;
             }
