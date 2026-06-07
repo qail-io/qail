@@ -691,6 +691,37 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_column_named_like_collation_is_not_blocked_by_raw_sql_collation() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("C".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_collation_not_column",
+            r#"
+            const sql = `
+                SELECT id
+                FROM users
+                WHERE lower(name COLLATE "C") LIKE $1 ESCAPE '\'
+                  AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 day'
+                ORDER BY EXTRACT(EPOCH FROM created_at)
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_cte_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -764,6 +795,358 @@ mod tests {
         .expect("write temp source");
         let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
         let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_select_star_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_select_star_column",
+            r#"
+            const sql = `
+                SELECT *
+                FROM users
+                WHERE active = true
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_all_star_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_all_star_column",
+            r#"
+            const sql = `
+                SELECT ALL *
+                FROM users
+                WHERE active = true
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_distinct_on_star_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_distinct_on_star_column",
+            r#"
+            const sql = `
+                SELECT DISTINCT ON (tenant_id) *
+                FROM users
+                WHERE active = true
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_join_select_star_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("total".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_join_select_star_column",
+            r#"
+            const sql = `
+                SELECT *
+                FROM users u
+                JOIN orders o ON o.user_id = u.id
+                WHERE o.status = $1
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_distinct_on_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("tenant_id".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_distinct_on_column",
+            r#"
+            const sql = `
+                SELECT DISTINCT ON (tenant_id) id
+                FROM users
+                WHERE status = $1
+                ORDER BY tenant_id, created_at DESC
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_filter_projection_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_filter_projection_column",
+            r#"
+            const sql = `
+                SELECT COUNT(*) FILTER (WHERE active) AS active_count
+                FROM users
+                WHERE status = $1
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_grouping_sets_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("status".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_grouping_sets_column",
+            r#"
+            const sql = `
+                SELECT tenant_id, status, count(*)
+                FROM orders
+                GROUP BY GROUPING SETS ((tenant_id, status), (tenant_id), ())
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_rollup_cube_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("channel".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_rollup_cube_column",
+            r#"
+            const sql = `
+                SELECT region, product, sum(total)
+                FROM orders
+                GROUP BY ROLLUP(region, product), CUBE(channel, status)
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_tablesample_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_tablesample_column",
+            r#"
+            const sql = `
+                SELECT id
+                FROM users TABLESAMPLE BERNOULLI(10) REPEATABLE (42)
+                WHERE active = true
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_tablesample_join_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("user_id".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_tablesample_join_column",
+            r#"
+            const sql = `
+                SELECT u.id, o.total
+                FROM users TABLESAMPLE SYSTEM (25) u
+                JOIN orders TABLESAMPLE BERNOULLI(10) o ON o.user_id = u.id
+                WHERE o.status = $1
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_only_inheritance_star_alias_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_only_star_alias_column",
+            r#"
+            const sql = `
+                SELECT u.id
+                FROM ONLY users * AS u
+                WHERE u.active = true
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_rows_from_join_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_rows_from_join_column",
+            r#"
+            const sql = `
+                SELECT u.id
+                FROM ROWS FROM (jsonb_to_recordset($1) AS (id int)) AS r(id)
+                JOIN users u ON u.id = r.id
+                WHERE u.active = true
+            `;
+            "#,
+        );
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();

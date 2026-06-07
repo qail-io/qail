@@ -413,12 +413,15 @@ fn parse_sql_select_table_sources(
             cursor = skip_sql_ws(sql.as_bytes(), cursor + "ONLY".len());
         }
 
-        let source_end = if sql.as_bytes().get(cursor).copied() == Some(b'(') {
+        let source_end = if let Some(rows_from_end) = skip_sql_rows_from_source(sql, cursor) {
+            rows_from_end
+        } else if sql.as_bytes().get(cursor).copied() == Some(b'(') {
             balanced_paren_segment(sql, cursor)
                 .map(|(_, end)| end)
                 .unwrap_or(cursor)
         } else if let Some((table, table_end)) = parse_sql_object_name_with_end(sql, cursor) {
-            let after_table = skip_sql_ws(sql.as_bytes(), table_end);
+            let table_ref_end = skip_sql_table_inheritance_star(sql, table_end);
+            let after_table = skip_sql_ws(sql.as_bytes(), table_ref_end);
             if sql.as_bytes().get(after_table).copied() == Some(b'(') {
                 let function_end = balanced_paren_segment(sql, after_table)
                     .map(|(_, end)| end)
@@ -426,14 +429,16 @@ fn parse_sql_select_table_sources(
                 let (_, alias_end) = parse_sql_optional_table_alias(sql, function_end);
                 alias_end
             } else {
-                let (alias, alias_end) = parse_sql_optional_table_alias(sql, table_end);
+                let tablesample_end = skip_sql_tablesample_clause(sql, table_ref_end);
+                let (alias, alias_end) = parse_sql_optional_table_alias(sql, tablesample_end);
+                let source_end = skip_sql_tablesample_clause(sql, alias_end.max(tablesample_end));
                 if !is_sql_cte_alias(&table, inherited_cte_aliases, local_cte_aliases) {
                     sources.push(SqlTableSource {
                         alias: alias.unwrap_or_else(|| table.clone()),
                         table,
                     });
                 }
-                alias_end
+                source_end.max(alias_end).max(tablesample_end)
             }
         } else {
             break;
@@ -463,6 +468,68 @@ fn parse_sql_optional_table_alias(sql: &str, start: usize) -> (Option<String>, u
     }
 
     (Some(alias), end)
+}
+
+fn skip_sql_rows_from_source(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut cursor = skip_sql_ws(bytes, start);
+    if !starts_with_keyword_at(sql, cursor, "ROWS") {
+        return None;
+    }
+    cursor = skip_sql_ws(bytes, cursor + "ROWS".len());
+    if !starts_with_keyword_at(sql, cursor, "FROM") {
+        return None;
+    }
+    cursor = skip_sql_ws(bytes, cursor + "FROM".len());
+    if bytes.get(cursor).copied() != Some(b'(') {
+        return None;
+    }
+
+    let (_, rows_end) = balanced_paren_segment(sql, cursor)?;
+    let (_, alias_end) = parse_sql_optional_table_alias(sql, rows_end);
+    Some(alias_end.max(rows_end))
+}
+
+fn skip_sql_table_inheritance_star(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let cursor = skip_sql_ws(bytes, start);
+    if bytes.get(cursor).copied() == Some(b'*') {
+        skip_sql_ws(bytes, cursor + 1)
+    } else {
+        start
+    }
+}
+
+fn skip_sql_tablesample_clause(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut cursor = skip_sql_ws(bytes, start);
+    if !starts_with_keyword_at(sql, cursor, "TABLESAMPLE") {
+        return start;
+    }
+
+    cursor = skip_sql_ws(bytes, cursor + "TABLESAMPLE".len());
+    let Some((_, method_end, _)) = parse_sql_identifier_path(sql, cursor) else {
+        return cursor;
+    };
+
+    cursor = skip_sql_ws(bytes, method_end);
+    if bytes.get(cursor).copied() == Some(b'(') {
+        cursor = balanced_paren_segment(sql, cursor)
+            .map(|(_, end)| end)
+            .unwrap_or(cursor);
+    }
+
+    cursor = skip_sql_ws(bytes, cursor);
+    if starts_with_keyword_at(sql, cursor, "REPEATABLE") {
+        cursor = skip_sql_ws(bytes, cursor + "REPEATABLE".len());
+        if bytes.get(cursor).copied() == Some(b'(') {
+            cursor = balanced_paren_segment(sql, cursor)
+                .map(|(_, end)| end)
+                .unwrap_or(cursor);
+        }
+    }
+
+    cursor
 }
 
 fn next_sql_table_source_start(sql: &str, start: usize, end: usize) -> Option<usize> {
@@ -527,13 +594,16 @@ fn is_sql_table_source_boundary(ident: &str) -> bool {
             | "OFFSET"
             | "ON"
             | "ORDER"
+            | "ORDINALITY"
             | "OUTER"
             | "RIGHT"
             | "RETURNING"
             | "SET"
+            | "TABLESAMPLE"
             | "UNION"
             | "USING"
             | "WHERE"
+            | "WITH"
     )
 }
 
@@ -1947,6 +2017,16 @@ fn collect_sql_projection_column_refs(
             base = base.get(..as_idx).unwrap_or(base).trim();
         }
         base = strip_sql_distinct_prefix(base);
+        if let Some((distinct_on_segment, remainder)) = split_sql_distinct_on_projection(base) {
+            collect_sql_column_refs(distinct_on_segment, qualified, unqualified);
+            base = remainder;
+        }
+        if base == "*" {
+            if !unqualified.iter().any(|column| column == "*") {
+                unqualified.push("*".to_string());
+            }
+            continue;
+        }
 
         collect_sql_column_refs(base, qualified, unqualified);
     }
@@ -2330,6 +2410,14 @@ fn collect_sql_column_refs(
             i = next;
             continue;
         }
+        if parts.len() == 1 && previous_sql_keyword_is(segment, i, "COLLATE") {
+            i = next;
+            continue;
+        }
+        if parts.len() == 1 && should_skip_sql_syntax_identifier(segment, i, next, &parts[0]) {
+            i = next;
+            continue;
+        }
 
         if let Some(column) = parts.last()
             && !is_sql_reference_keyword(column)
@@ -2359,6 +2447,14 @@ fn collect_sql_projection_columns(
             base = base.get(..as_idx).unwrap_or(base).trim();
         }
         base = strip_sql_distinct_prefix(base);
+        if let Some((distinct_on_segment, remainder)) = split_sql_distinct_on_projection(base) {
+            collect_sql_identifier_columns(distinct_on_segment, cols, seen);
+            base = remainder;
+        }
+        if base == "*" {
+            push_column_ref("*", cols, seen);
+            continue;
+        }
 
         if let Some(column) = normalize_projection_column(base)
             && is_plain_sql_column_ref(&column)
@@ -2375,17 +2471,32 @@ fn collect_sql_projection_columns(
 
 fn strip_sql_distinct_prefix(input: &str) -> &str {
     let trimmed = input.trim();
-    if trimmed.len() >= "DISTINCT".len()
-        && trimmed[.."DISTINCT".len()].eq_ignore_ascii_case("DISTINCT")
-        && trimmed
-            .as_bytes()
-            .get("DISTINCT".len())
-            .is_some_and(|b| b.is_ascii_whitespace())
-    {
-        trimmed["DISTINCT".len()..].trim_start()
-    } else {
-        trimmed
+    for keyword in ["DISTINCT", "ALL"] {
+        if trimmed.len() >= keyword.len()
+            && trimmed[..keyword.len()].eq_ignore_ascii_case(keyword)
+            && trimmed
+                .as_bytes()
+                .get(keyword.len())
+                .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            return trimmed[keyword.len()..].trim_start();
+        }
     }
+    trimmed
+}
+
+fn split_sql_distinct_on_projection(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim_start();
+    if !starts_with_keyword_at(trimmed, 0, "ON") {
+        return None;
+    }
+    let after_on = skip_sql_ws(trimmed.as_bytes(), "ON".len());
+    if trimmed.as_bytes().get(after_on).copied() != Some(b'(') {
+        return None;
+    }
+
+    let (segment, end) = balanced_paren_segment(trimmed, after_on)?;
+    Some((segment, trimmed.get(end..).unwrap_or_default().trim_start()))
 }
 
 fn is_plain_sql_column_ref(value: &str) -> bool {
@@ -2833,6 +2944,14 @@ fn collect_sql_identifier_columns(
             i = next;
             continue;
         }
+        if segment_count == 1 && previous_sql_keyword_is(segment, i, "COLLATE") {
+            i = next;
+            continue;
+        }
+        if segment_count == 1 && should_skip_sql_syntax_identifier(segment, i, next, &column) {
+            i = next;
+            continue;
+        }
         if !is_sql_reference_keyword(&column) {
             push_column_ref(&column, cols, seen);
         }
@@ -2918,6 +3037,64 @@ fn previous_sql_keyword_is(input: &str, idx: usize, keyword: &str) -> bool {
         .is_some_and(|word| word.eq_ignore_ascii_case(keyword))
 }
 
+fn should_skip_sql_syntax_identifier(segment: &str, start: usize, end: usize, ident: &str) -> bool {
+    let upper = ident.to_ascii_uppercase();
+    match upper.as_str() {
+        "AT" => {
+            let after = skip_sql_ws(segment.as_bytes(), end);
+            starts_with_keyword_at(segment, after, "TIME")
+        }
+        "TIME" => previous_sql_keyword_is(segment, start, "AT"),
+        "ZONE" => previous_sql_keyword_is(segment, start, "TIME"),
+        "INTERVAL" => {
+            matches!(
+                previous_sql_non_ws_byte(segment, start),
+                Some(b'+' | b'-' | b'*' | b'/' | b'(' | b'=' | b'<' | b'>')
+            )
+        }
+        "ESCAPE" => has_unclosed_like_before(segment, start),
+        "EPOCH" => {
+            let after = skip_sql_ws(segment.as_bytes(), end);
+            starts_with_keyword_at(segment, after, "FROM")
+        }
+        _ => false,
+    }
+}
+
+fn previous_sql_non_ws_byte(segment: &str, idx: usize) -> Option<u8> {
+    segment
+        .as_bytes()
+        .get(..idx)?
+        .iter()
+        .rev()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+}
+
+fn has_unclosed_like_before(segment: &str, idx: usize) -> bool {
+    let mut cursor = 0usize;
+    let mut like_idx = None;
+    while let Some(found) = find_keyword_top_level_from(segment, "LIKE", cursor) {
+        if found >= idx {
+            break;
+        }
+        like_idx = Some(found);
+        cursor = found + "LIKE".len();
+    }
+
+    let Some(like_idx) = like_idx else {
+        return false;
+    };
+    for boundary in ["AND", "OR", "WHERE", "HAVING", "ORDER BY", "GROUP BY"] {
+        if find_keyword_top_level_from(segment, boundary, like_idx + "LIKE".len())
+            .is_some_and(|found| found < idx)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn parse_sql_quoted_identifier(input: &str, start: usize) -> Option<(String, usize)> {
     let bytes = input.as_bytes();
     let quote = *bytes.get(start)?;
@@ -2971,6 +3148,10 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "CONFLICT"
             | "CONSTRAINT"
             | "CROSS"
+            | "CUBE"
+            | "CURRENT_DATE"
+            | "CURRENT_TIME"
+            | "CURRENT_TIMESTAMP"
             | "DESC"
             | "DISTINCT"
             | "DO"
@@ -2982,6 +3163,7 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "FROM"
             | "FOLLOWING"
             | "GROUP"
+            | "GROUPING"
             | "GROUPS"
             | "HAVING"
             | "IN"
@@ -2993,6 +3175,8 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "LEFT"
             | "LIKE"
             | "LIMIT"
+            | "LOCALTIME"
+            | "LOCALTIMESTAMP"
             | "NATURAL"
             | "NOT"
             | "NOTHING"
@@ -3002,6 +3186,7 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "ON"
             | "OR"
             | "ORDER"
+            | "ORDINALITY"
             | "OUTER"
             | "OVER"
             | "PARTITION"
@@ -3010,8 +3195,11 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "RIGHT"
             | "ROW"
             | "ROWS"
+            | "ROLLUP"
             | "SELECT"
             | "SET"
+            | "SETS"
+            | "TABLESAMPLE"
             | "THEN"
             | "TIES"
             | "TRUE"
@@ -3022,6 +3210,7 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "WHEN"
             | "WHERE"
             | "WINDOW"
+            | "WITH"
     )
 }
 
@@ -3348,6 +3537,30 @@ mod tests {
         assert_eq!(kind, SqlStmtKind::Select);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["id", "email", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_skip_expression_syntax_keywords() {
+        let sql = r#"SELECT id FROM users WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '1 day' AND starts_at AT TIME ZONE 'UTC' > CURRENT_DATE AND lower(name COLLATE "C") LIKE $1 ESCAPE '\' ORDER BY EXTRACT(EPOCH FROM created_at)"#;
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(
+            ref_columns(&refs, "users"),
+            vec!["id", "created_at", "starts_at", "name"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_columns_named_like_expression_syntax() {
+        let sql = "SELECT time, interval FROM events WHERE zone = $1 AND escape = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(
+            ref_columns(&refs, "events"),
+            vec!["time", "interval", "zone", "escape"]
+        );
     }
 
     #[test]
@@ -3924,6 +4137,148 @@ mod tests {
             .find(|(_, table, _)| table == "orders")
             .expect("orders reference");
         assert_eq!(orders.2, vec!["total", "user_id", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_select_star_columns() {
+        let sql = "SELECT * FROM users WHERE active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["*", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_all_star_columns() {
+        let sql = "SELECT ALL * FROM users WHERE active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["*", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_distinct_on_star_columns() {
+        let sql = "SELECT DISTINCT ON (tenant_id) * FROM users WHERE active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(
+            ref_columns(&refs, "users"),
+            vec!["tenant_id", "*", "active"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_join_select_star_columns() {
+        let sql = "SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE o.status = $1";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id", "*"]);
+        assert_eq!(ref_columns(&refs, "orders"), vec!["user_id", "status", "*"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_distinct_on_and_filter_columns() {
+        let sql = "SELECT DISTINCT ON (tenant_id) id, COUNT(*) FILTER (WHERE active) AS active_count FROM users WHERE status = $1 ORDER BY tenant_id, created_at DESC";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(
+            ref_columns(&refs, "users"),
+            vec!["tenant_id", "id", "active", "status", "created_at"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_grouping_sets_without_syntax_keywords() {
+        let sql = "SELECT tenant_id, status, count(*) FROM orders GROUP BY GROUPING SETS ((tenant_id, status), (tenant_id), ()) HAVING count(*) > 0";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "orders"), vec!["tenant_id", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_rollup_cube_group_columns() {
+        let sql = "SELECT region, product, sum(total) FROM orders GROUP BY ROLLUP (region, product), CUBE (channel, status)";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(
+            ref_columns(&refs, "orders"),
+            vec!["region", "product", "total", "channel", "status"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_grouping_function_columns_without_keywords() {
+        let sql = "SELECT GROUPING(tenant_id), tenant_id FROM users GROUP BY GROUPING SETS ((tenant_id), ())";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["tenant_id"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_tablesample_columns_without_fake_source() {
+        let sql =
+            "SELECT id FROM users TABLESAMPLE BERNOULLI(10) REPEATABLE (42) WHERE active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_tablesample_alias_columns() {
+        let sql = "SELECT u.id FROM users TABLESAMPLE SYSTEM (25) AS u WHERE u.active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_alias_before_tablesample_columns() {
+        let sql = "SELECT u.id FROM users u TABLESAMPLE SYSTEM (25) WHERE u.active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_tablesample_join_columns() {
+        let sql = "SELECT u.id, o.total FROM users TABLESAMPLE SYSTEM (25) u JOIN orders TABLESAMPLE BERNOULLI(10) o ON o.user_id = u.id WHERE o.status = $1";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id"]);
+        assert_eq!(
+            ref_columns(&refs, "orders"),
+            vec!["total", "user_id", "status"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_tracks_only_inheritance_star_alias_columns() {
+        let sql = "SELECT u.id FROM ONLY users * AS u WHERE u.active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_skips_rows_from_table_function_source() {
+        let sql = "SELECT u.id FROM ROWS FROM (jsonb_to_recordset($1) AS (id int)) AS r(id) JOIN users u ON u.id = r.id WHERE u.active = true";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert!(!has_table_ref(&refs, "ROWS"), "{refs:?}");
+        assert_eq!(ref_columns(&refs, "users"), vec!["id", "active"]);
     }
 
     #[test]
