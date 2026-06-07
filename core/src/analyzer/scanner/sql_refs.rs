@@ -2020,14 +2020,12 @@ fn collect_sql_projection_column_refs(
     unqualified: &mut Vec<String>,
 ) {
     for projection in split_sql_top_level(columns_raw, ',') {
-        let mut base = projection.trim();
-        if let Some(as_idx) = find_keyword_top_level_from(base, "AS", 0) {
-            base = base.get(..as_idx).unwrap_or(base).trim();
-        }
-        base = strip_sql_distinct_prefix(base);
+        let mut base = strip_sql_distinct_prefix(projection.trim());
         if let Some((distinct_on_segment, remainder)) = split_sql_distinct_on_projection(base) {
             collect_sql_column_refs(distinct_on_segment, qualified, unqualified);
-            base = remainder;
+            base = strip_sql_projection_alias(remainder);
+        } else {
+            base = strip_sql_projection_alias(base);
         }
         if base == "*" {
             if !unqualified.iter().any(|column| column == "*") {
@@ -2460,14 +2458,12 @@ fn collect_sql_projection_columns(
     seen: &mut HashSet<String>,
 ) {
     for projection in split_sql_top_level(columns_raw, ',') {
-        let mut base = projection.trim();
-        if let Some(as_idx) = find_keyword_top_level_from(base, "AS", 0) {
-            base = base.get(..as_idx).unwrap_or(base).trim();
-        }
-        base = strip_sql_distinct_prefix(base);
+        let mut base = strip_sql_distinct_prefix(projection.trim());
         if let Some((distinct_on_segment, remainder)) = split_sql_distinct_on_projection(base) {
             collect_sql_identifier_columns(distinct_on_segment, cols, seen);
-            base = remainder;
+            base = strip_sql_projection_alias(remainder);
+        } else {
+            base = strip_sql_projection_alias(base);
         }
         if base == "*" {
             push_column_ref("*", cols, seen);
@@ -2881,9 +2877,69 @@ fn strip_sql_projection_alias(projection: &str) -> &str {
     let projection = projection.trim();
     if let Some(as_idx) = find_keyword_top_level_from(projection, "AS", 0) {
         projection.get(..as_idx).unwrap_or(projection).trim()
+    } else if let Some(alias_start) = sql_trailing_projection_alias_start(projection) {
+        projection.get(..alias_start).unwrap_or(projection).trim()
     } else {
         projection
     }
+}
+
+fn sql_trailing_projection_alias_start(projection: &str) -> Option<usize> {
+    let trimmed_end = projection.trim_end().len();
+    if trimmed_end == 0 {
+        return None;
+    }
+    let bytes = projection.as_bytes();
+    let mut alias_start = trimmed_end;
+    let quote = bytes[trimmed_end - 1];
+
+    if matches!(quote, b'"' | b'`') {
+        alias_start = find_sql_opening_quote_before(projection, trimmed_end - 1, quote)?;
+    } else {
+        while alias_start > 0 && is_ident_char(bytes[alias_start - 1] as char) {
+            alias_start -= 1;
+        }
+        if alias_start == trimmed_end {
+            return None;
+        }
+        let first = bytes[alias_start];
+        if !matches!(first, b'a'..=b'z' | b'A'..=b'Z' | b'_') {
+            return None;
+        }
+    }
+
+    if alias_start == 0 || !bytes[alias_start - 1].is_ascii_whitespace() {
+        return None;
+    }
+    let base = projection.get(..alias_start)?.trim_end();
+    if base.is_empty() || sql_projection_alias_base_blocks_strip(base) {
+        return None;
+    }
+
+    Some(alias_start)
+}
+
+fn find_sql_opening_quote_before(input: &str, close_idx: usize, quote: u8) -> Option<usize> {
+    input
+        .as_bytes()
+        .get(..close_idx)?
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(idx, byte)| (*byte == quote).then_some(idx))
+}
+
+fn sql_projection_alias_base_blocks_strip(base: &str) -> bool {
+    let previous = base
+        .rsplit(|ch: char| !is_ident_char(ch))
+        .find(|part| !part.is_empty());
+
+    previous.is_some_and(|word| {
+        matches!(
+            word.to_ascii_uppercase().as_str(),
+            "AT" | "COLLATE" | "TIME" | "ZONE"
+        )
+    })
 }
 
 fn collect_sql_column_list(segment: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
@@ -3714,6 +3770,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_skips_projection_alias_without_as() {
+        let sql = "SELECT lower(email) email_lower, id user_id FROM users";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "id"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_skips_schema_qualified_function_names() {
         let sql = "SELECT pg_catalog.lower(email), public.coalesce(name, email) FROM users WHERE pg_catalog.lower(users.status) = $1";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
@@ -3818,6 +3883,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_insert_returning_alias_without_as_is_not_column() {
+        let sql = "INSERT INTO users (email) VALUES ($1) RETURNING id user_id";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "id"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_insert_alias_columns() {
         let sql = "INSERT INTO users AS u (email, status) VALUES ($1, $2)";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
@@ -3913,6 +3987,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_update_returning_alias_without_as_is_not_column() {
+        let sql = "UPDATE users SET email = $1 WHERE id = $2 RETURNING updated_at changed_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Update);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "id", "updated_at"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_update_only_table() {
         let sql = "UPDATE ONLY users SET email = $1 WHERE id = $2";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
@@ -3964,6 +4047,15 @@ mod tests {
     #[test]
     fn test_parse_sql_reference_delete_returning_alias_is_not_column() {
         let sql = "DELETE FROM users WHERE email = $1 RETURNING deleted_at AS removed_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Delete);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "deleted_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_delete_returning_alias_without_as_is_not_column() {
+        let sql = "DELETE FROM users WHERE email = $1 RETURNING deleted_at removed_at";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind, SqlStmtKind::Delete);
         assert_eq!(table, "users");
@@ -4023,6 +4115,15 @@ mod tests {
     #[test]
     fn test_parse_sql_reference_merge_returning_alias_columns() {
         let sql = "MERGE INTO orders o USING staging_orders s ON o.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status RETURNING created_at AS merged_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind.as_str(), "MERGE");
+        assert_eq!(table, "orders");
+        assert_eq!(cols, vec!["id", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_merge_returning_alias_without_as_columns() {
+        let sql = "MERGE INTO orders o USING staging_orders s ON o.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status RETURNING created_at merged_at";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind.as_str(), "MERGE");
         assert_eq!(table, "orders");

@@ -751,6 +751,34 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_column_named_like_projection_alias_without_as_is_not_blocked() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email_lower".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_projection_alias_without_as_not_column",
+            r#"
+            const sql = `
+                SELECT lower(email) email_lower, id user_id
+                FROM users
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_column_named_like_cast_type_is_not_blocked() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -1747,6 +1775,35 @@ mod tests {
                 INSERT INTO users (email)
                 VALUES ($1)
                 RETURNING id AS user_id
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_returning_alias_without_as_is_not_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("user_id".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_returning_alias_without_as_not_column",
+            r#"
+            const sql = `
+                INSERT INTO users (email)
+                VALUES ($1)
+                RETURNING id user_id
             `;
             "#,
         );
