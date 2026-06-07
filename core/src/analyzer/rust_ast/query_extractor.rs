@@ -667,7 +667,8 @@ fn classify_sql_type(sql: &str) -> SqlType {
             | SqlStmtKind::Vacuum
             | SqlStmtKind::Reindex
             | SqlStmtKind::Cluster
-            | SqlStmtKind::Refresh,
+            | SqlStmtKind::Refresh
+            | SqlStmtKind::Drop,
         ) => SqlType::Unknown,
         None => SqlType::Unknown,
     }

@@ -1636,4 +1636,107 @@ mod tests {
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
     }
+
+    #[test]
+    fn test_dropped_raw_sql_drop_table_reference_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "users".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_drop_table_reference",
+            "const sql = `DROP TABLE IF EXISTS users, orders CASCADE`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_create_trigger_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("status".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_create_trigger_column",
+            "const sql = `CREATE TRIGGER order_status_changed BEFORE UPDATE OF status ON orders FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION audit_order()`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_publication_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_publication_column",
+            "const sql = `CREATE PUBLICATION tenant_pub FOR TABLE users (email) WHERE (active)`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_create_table_referenced_table_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "orgs".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_create_table_referenced_table",
+            "const sql = `CREATE TABLE invoices (org_id uuid REFERENCES orgs(id))`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_alter_policy_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("tenant_id".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_alter_policy_column",
+            "const sql = `ALTER POLICY tenant_users ON users USING (tenant_id = current_setting('app.tenant_id')::uuid)`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
 }

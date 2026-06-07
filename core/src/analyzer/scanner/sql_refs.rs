@@ -266,6 +266,7 @@ fn is_sql_utility_reference_kind(kind: SqlStmtKind) -> bool {
             | SqlStmtKind::Reindex
             | SqlStmtKind::Cluster
             | SqlStmtKind::Refresh
+            | SqlStmtKind::Drop
     )
 }
 
@@ -648,7 +649,8 @@ fn parse_sql_auxiliary_write_references(
         | SqlStmtKind::Vacuum
         | SqlStmtKind::Reindex
         | SqlStmtKind::Cluster
-        | SqlStmtKind::Refresh => Vec::new(),
+        | SqlStmtKind::Refresh
+        | SqlStmtKind::Drop => Vec::new(),
     }
 }
 
@@ -751,6 +753,7 @@ fn parse_sql_utility_references(
             &["VERBOSE"],
         ),
         SqlStmtKind::Refresh => parse_sql_refresh_references(sql),
+        SqlStmtKind::Drop => parse_sql_drop_references(sql),
         SqlStmtKind::Select
         | SqlStmtKind::Insert
         | SqlStmtKind::Update
@@ -767,6 +770,18 @@ fn parse_sql_create_references(
     inherited_cte_aliases: &[String],
     local_cte_aliases: &[String],
 ) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    if find_keyword_top_level_from(sql, "TRIGGER", 0).is_some() {
+        return parse_sql_create_trigger_references(sql);
+    }
+    if find_keyword_top_level_from(sql, "RULE", 0).is_some() {
+        return parse_sql_create_rule_references(sql, inherited_cte_aliases, local_cte_aliases);
+    }
+    if find_keyword_top_level_from(sql, "PUBLICATION", 0).is_some() {
+        return parse_sql_create_publication_references(sql);
+    }
+    if find_keyword_top_level_from(sql, "STATISTICS", 0).is_some() {
+        return parse_sql_create_statistics_references(sql);
+    }
     if find_keyword_top_level_from(sql, "POLICY", 0).is_some() {
         return parse_sql_create_policy_references(sql);
     }
@@ -785,6 +800,13 @@ fn parse_sql_create_references(
         return Vec::new();
     };
 
+    if Some(object_idx) == table_idx {
+        let refs = parse_sql_create_table_references(sql, object_idx);
+        if !refs.is_empty() {
+            return refs;
+        }
+    }
+
     let Some((_, object_end)) = parse_sql_object_name_with_end(sql, object_idx) else {
         return Vec::new();
     };
@@ -801,6 +823,188 @@ fn parse_sql_create_references(
     let mut aliases = inherited_cte_aliases.to_vec();
     aliases.extend(local_cte_aliases.iter().cloned());
     parse_sql_references_with_cte_aliases(query, &aliases)
+}
+
+fn parse_sql_create_trigger_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(trigger_idx) = find_keyword_top_level_from(sql, "TRIGGER", 0) else {
+        return Vec::new();
+    };
+    let Some(on_idx) = find_keyword_top_level_from(sql, "ON", trigger_idx + "TRIGGER".len()) else {
+        return Vec::new();
+    };
+    let Some((table, table_end)) = parse_sql_write_object_name_with_end(sql, on_idx + "ON".len())
+    else {
+        return Vec::new();
+    };
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(update_of_idx) = find_keyword_top_level_from(sql, "UPDATE OF", trigger_idx)
+        && update_of_idx < on_idx
+        && let Some(segment) = sql.get(update_of_idx + "UPDATE OF".len()..on_idx)
+    {
+        collect_sql_column_list(segment, &mut cols, &mut seen);
+    }
+    collect_sql_parenthesized_clause_columns(sql, "WHEN", table_end, &mut cols, &mut seen);
+
+    vec![(SqlStmtKind::Create, table, cols)]
+}
+
+fn parse_sql_create_rule_references(
+    sql: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(rule_idx) = find_keyword_top_level_from(sql, "RULE", 0) else {
+        return Vec::new();
+    };
+    let Some(on_idx) = find_keyword_top_level_from(sql, "ON", rule_idx + "RULE".len()) else {
+        return Vec::new();
+    };
+    let Some(to_idx) = find_keyword_top_level_from(sql, "TO", on_idx + "ON".len()) else {
+        return Vec::new();
+    };
+    let Some((table, table_end)) = parse_sql_write_object_name_with_end(sql, to_idx + "TO".len())
+    else {
+        return Vec::new();
+    };
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(where_idx) = find_keyword_top_level_from(sql, "WHERE", table_end) {
+        let do_idx = find_keyword_top_level_from(sql, "DO", table_end).unwrap_or(sql.len());
+        if where_idx < do_idx
+            && let Some(segment) = sql.get(where_idx + "WHERE".len()..do_idx)
+        {
+            collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+        }
+    }
+
+    let mut refs = vec![(SqlStmtKind::Create, table, cols)];
+    if let Some(do_idx) = find_keyword_top_level_from(sql, "DO", table_end)
+        && let Some(action) = sql.get(do_idx + "DO".len()..).map(str::trim)
+    {
+        refs.extend(parse_sql_rule_action_references(
+            action,
+            inherited_cte_aliases,
+            local_cte_aliases,
+        ));
+    }
+    refs
+}
+
+fn parse_sql_rule_action_references(
+    action: &str,
+    inherited_cte_aliases: &[String],
+    local_cte_aliases: &[String],
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let mut action = action.trim();
+    for keyword in ["ALSO", "INSTEAD"] {
+        if starts_with_keyword_at(action, 0, keyword) {
+            action = action.get(keyword.len()..).unwrap_or_default().trim_start();
+            break;
+        }
+    }
+    if starts_with_keyword_at(action, 0, "NOTHING") {
+        return Vec::new();
+    }
+
+    let mut aliases = inherited_cte_aliases.to_vec();
+    aliases.extend(local_cte_aliases.iter().cloned());
+    if action.starts_with('(')
+        && let Some((segment, _)) = balanced_paren_segment(action, 0)
+    {
+        let mut refs = Vec::new();
+        for stmt in split_sql_top_level(segment, ';') {
+            let stmt = stmt.trim();
+            if classify_sql_kind(stmt).is_some() {
+                refs.extend(parse_sql_references_with_cte_aliases(stmt, &aliases));
+            }
+        }
+        return refs;
+    }
+    if classify_sql_kind(action).is_some() {
+        return parse_sql_references_with_cte_aliases(action, &aliases);
+    }
+    Vec::new()
+}
+
+fn parse_sql_create_publication_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(for_idx) = find_keyword_top_level_from(sql, "FOR", 0) else {
+        return Vec::new();
+    };
+    let Some(table_idx) = find_keyword_top_level_from(sql, "TABLE", for_idx + "FOR".len()) else {
+        return Vec::new();
+    };
+    parse_sql_publication_table_references(sql, table_idx, SqlStmtKind::Create)
+}
+
+fn parse_sql_create_statistics_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(on_idx) = find_keyword_top_level_from(sql, "ON", 0) else {
+        return Vec::new();
+    };
+    let Some(from_idx) = find_keyword_top_level_from(sql, "FROM", on_idx + "ON".len()) else {
+        return Vec::new();
+    };
+    let Some((table, _)) = parse_sql_write_object_name_with_end(sql, from_idx + "FROM".len())
+    else {
+        return Vec::new();
+    };
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(segment) = sql.get(on_idx + "ON".len()..from_idx) {
+        collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+    }
+    vec![(SqlStmtKind::Create, table, cols)]
+}
+
+fn parse_sql_create_table_references(
+    sql: &str,
+    table_idx: usize,
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let cursor = skip_sql_optional_if_not_exists(sql, table_idx + "TABLE".len());
+    let Some((_, table_end)) = parse_sql_write_object_name_with_end(sql, cursor) else {
+        return Vec::new();
+    };
+
+    let mut refs = Vec::new();
+    let mut scan = table_end;
+    while let Some(like_idx) = find_keyword_at_depth_from(sql, "LIKE", scan, 1) {
+        let Some((table, table_end)) =
+            parse_sql_write_object_name_with_end(sql, like_idx + "LIKE".len())
+        else {
+            scan = like_idx + "LIKE".len();
+            continue;
+        };
+        refs.push((SqlStmtKind::Create, table, Vec::new()));
+        scan = table_end;
+    }
+
+    scan = table_end;
+    while let Some(references_idx) = find_keyword_at_depth_from(sql, "REFERENCES", scan, 1) {
+        let Some((table, ref_table_end)) =
+            parse_sql_object_name_with_end(sql, references_idx + "REFERENCES".len())
+        else {
+            scan = references_idx + "REFERENCES".len();
+            continue;
+        };
+        let mut cols = Vec::new();
+        let mut seen = HashSet::new();
+        let after = skip_sql_ws(sql.as_bytes(), ref_table_end);
+        if sql.as_bytes().get(after).copied() == Some(b'(')
+            && let Some((segment, end)) = balanced_paren_segment(sql, after)
+        {
+            collect_sql_column_list(segment, &mut cols, &mut seen);
+            refs.push((SqlStmtKind::Create, table, cols));
+            scan = end;
+            continue;
+        }
+        refs.push((SqlStmtKind::Create, table, cols));
+        scan = ref_table_end;
+    }
+
+    refs
 }
 
 fn parse_sql_create_index_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
@@ -860,6 +1064,24 @@ fn parse_sql_alter_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String
     let Some(alter_idx) = find_keyword_top_level_from(sql, "ALTER", 0) else {
         return Vec::new();
     };
+    if find_keyword_top_level_from(sql, "POLICY", alter_idx + "ALTER".len()).is_some() {
+        return parse_sql_alter_policy_references(sql);
+    }
+    if find_keyword_top_level_from(sql, "PUBLICATION", alter_idx + "ALTER".len()).is_some() {
+        return parse_sql_alter_publication_references(sql);
+    }
+    if find_keyword_top_level_from(sql, "TRIGGER", alter_idx + "ALTER".len()).is_some() {
+        return parse_sql_alter_trigger_references(sql);
+    }
+    if let Some(view_idx) =
+        find_keyword_top_level_from(sql, "MATERIALIZED VIEW", alter_idx + "ALTER".len())
+    {
+        return parse_sql_alter_view_references(sql, view_idx + "MATERIALIZED VIEW".len());
+    }
+    if let Some(view_idx) = find_keyword_top_level_from(sql, "VIEW", alter_idx + "ALTER".len()) {
+        return parse_sql_alter_view_references(sql, view_idx + "VIEW".len());
+    }
+
     let Some(table_idx) = find_keyword_top_level_from(sql, "TABLE", alter_idx + "ALTER".len())
     else {
         return Vec::new();
@@ -882,6 +1104,61 @@ fn parse_sql_alter_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String
     let mut refs = vec![(SqlStmtKind::Alter, table, cols)];
     refs.extend(parse_sql_alter_referenced_table_references(sql, table_end));
     refs
+}
+
+fn parse_sql_alter_policy_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(policy_idx) = find_keyword_top_level_from(sql, "POLICY", 0) else {
+        return Vec::new();
+    };
+    let Some(on_idx) = find_keyword_top_level_from(sql, "ON", policy_idx + "POLICY".len()) else {
+        return Vec::new();
+    };
+    let Some((table, table_end)) = parse_sql_write_object_name_with_end(sql, on_idx + "ON".len())
+    else {
+        return Vec::new();
+    };
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    collect_sql_parenthesized_clause_columns(sql, "USING", table_end, &mut cols, &mut seen);
+    collect_sql_parenthesized_clause_columns(sql, "WITH CHECK", table_end, &mut cols, &mut seen);
+    vec![(SqlStmtKind::Alter, table, cols)]
+}
+
+fn parse_sql_alter_publication_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(publication_idx) = find_keyword_top_level_from(sql, "PUBLICATION", 0) else {
+        return Vec::new();
+    };
+    let Some(table_idx) =
+        find_keyword_top_level_from(sql, "TABLE", publication_idx + "PUBLICATION".len())
+    else {
+        return Vec::new();
+    };
+    parse_sql_publication_table_references(sql, table_idx, SqlStmtKind::Alter)
+}
+
+fn parse_sql_alter_trigger_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(trigger_idx) = find_keyword_top_level_from(sql, "TRIGGER", 0) else {
+        return Vec::new();
+    };
+    let Some(on_idx) = find_keyword_top_level_from(sql, "ON", trigger_idx + "TRIGGER".len()) else {
+        return Vec::new();
+    };
+    let Some((table, _)) = parse_sql_write_object_name_with_end(sql, on_idx + "ON".len()) else {
+        return Vec::new();
+    };
+    vec![(SqlStmtKind::Alter, table, Vec::new())]
+}
+
+fn parse_sql_alter_view_references(
+    sql: &str,
+    start: usize,
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let cursor = skip_sql_optional_if_exists(sql, start);
+    let Some((table, _)) = parse_sql_write_object_name_with_end(sql, cursor) else {
+        return Vec::new();
+    };
+    vec![(SqlStmtKind::Alter, table, Vec::new())]
 }
 
 fn parse_sql_alter_referenced_table_references(
@@ -1016,6 +1293,94 @@ fn parse_sql_refresh_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<Stri
     vec![(SqlStmtKind::Refresh, table, Vec::new())]
 }
 
+fn parse_sql_drop_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(drop_idx) = find_keyword_top_level_from(sql, "DROP", 0) else {
+        return Vec::new();
+    };
+
+    for (keyword, after_len) in [
+        ("MATERIALIZED VIEW", "MATERIALIZED VIEW".len()),
+        ("FOREIGN TABLE", "FOREIGN TABLE".len()),
+        ("TABLE", "TABLE".len()),
+        ("VIEW", "VIEW".len()),
+    ] {
+        if let Some(keyword_idx) =
+            find_keyword_top_level_from(sql, keyword, drop_idx + "DROP".len())
+        {
+            return parse_sql_drop_object_list(sql, keyword_idx + after_len);
+        }
+    }
+
+    for keyword in ["POLICY", "TRIGGER", "RULE"] {
+        if let Some(keyword_idx) =
+            find_keyword_top_level_from(sql, keyword, drop_idx + "DROP".len())
+        {
+            return parse_sql_drop_on_table_reference(sql, keyword_idx + keyword.len());
+        }
+    }
+
+    Vec::new()
+}
+
+fn parse_sql_drop_object_list(sql: &str, start: usize) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let list_start = skip_sql_optional_if_exists(sql, start);
+    let list_end =
+        top_level_sql_clause_start(sql, list_start, &["CASCADE", "RESTRICT"]).unwrap_or(sql.len());
+    parse_sql_table_list(sql, list_start, list_end)
+        .into_iter()
+        .map(|table| (SqlStmtKind::Drop, table, Vec::new()))
+        .collect()
+}
+
+fn parse_sql_drop_on_table_reference(
+    sql: &str,
+    start: usize,
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(on_idx) = find_keyword_top_level_from(sql, "ON", start) else {
+        return Vec::new();
+    };
+    let Some((table, _)) = parse_sql_write_object_name_with_end(sql, on_idx + "ON".len()) else {
+        return Vec::new();
+    };
+    vec![(SqlStmtKind::Drop, table, Vec::new())]
+}
+
+fn parse_sql_publication_table_references(
+    sql: &str,
+    table_idx: usize,
+    kind: SqlStmtKind,
+) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let list_start = table_idx + "TABLE".len();
+    let list_end = top_level_sql_clause_start(sql, list_start, &["WITH"]).unwrap_or(sql.len());
+    let Some(list) = sql.get(list_start..list_end) else {
+        return Vec::new();
+    };
+
+    split_sql_top_level(list, ',')
+        .into_iter()
+        .filter_map(|item| parse_sql_publication_table_item(item, kind))
+        .collect()
+}
+
+fn parse_sql_publication_table_item(
+    item: &str,
+    kind: SqlStmtKind,
+) -> Option<(SqlStmtKind, String, Vec<String>)> {
+    let (table, table_end) = parse_sql_write_object_name_with_end(item, 0)?;
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    let after_table = skip_sql_ws(item.as_bytes(), table_end);
+    let mut cursor = table_end;
+    if item.as_bytes().get(after_table).copied() == Some(b'(')
+        && let Some((segment, end)) = balanced_paren_segment(item, after_table)
+    {
+        collect_sql_column_list(segment, &mut cols, &mut seen);
+        cursor = end;
+    }
+    collect_sql_clause_columns_until(item, "WHERE", cursor, &[], &mut cols, &mut seen);
+    Some((kind, table, cols))
+}
+
 fn collect_sql_columns_after_keyword(
     sql: &str,
     keyword: &str,
@@ -1055,6 +1420,25 @@ fn collect_sql_parenthesized_clause_columns(
             continue;
         }
         cursor = keyword_idx + keyword.len();
+    }
+}
+
+fn collect_sql_clause_columns_until(
+    sql: &str,
+    keyword: &str,
+    min_idx: usize,
+    end_clauses: &[&str],
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut cursor = min_idx;
+    while let Some(keyword_idx) = find_keyword_top_level_from(sql, keyword, cursor) {
+        let start = keyword_idx + keyword.len();
+        let end = top_level_sql_clause_start(sql, start, end_clauses).unwrap_or(sql.len());
+        if let Some(segment) = sql.get(start..end) {
+            collect_sql_identifier_columns(segment, cols, seen);
+        }
+        cursor = end;
     }
 }
 
@@ -1412,7 +1796,8 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
         | SqlStmtKind::Vacuum
         | SqlStmtKind::Reindex
         | SqlStmtKind::Cluster
-        | SqlStmtKind::Refresh => None,
+        | SqlStmtKind::Refresh
+        | SqlStmtKind::Drop => None,
     }
 }
 
@@ -2714,6 +3099,65 @@ fn find_sql_top_level_byte(sql: &str, min_idx: usize, needle: u8) -> Option<usiz
     None
 }
 
+fn find_keyword_at_depth_from(
+    sql: &str,
+    keyword: &str,
+    min_idx: usize,
+    target_depth: i32,
+) -> Option<usize> {
+    if keyword.is_empty() {
+        return None;
+    }
+
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0i32;
+    let mut in_quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
+                continue;
+            }
+            in_quote = None;
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => {
+                in_quote = Some(b);
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                if i >= min_idx && depth == target_depth && starts_with_keyword_at(sql, i, keyword)
+                {
+                    return Some(i);
+                }
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if i >= min_idx && depth == target_depth && starts_with_keyword_at(sql, i, keyword) {
+            return Some(i);
+        }
+        i += 1;
+    }
+
+    None
+}
+
 fn find_keyword_top_level_from(sql: &str, keyword: &str, min_idx: usize) -> Option<usize> {
     if keyword.is_empty() {
         return None;
@@ -3230,6 +3674,59 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_references_track_create_trigger_columns() {
+        let sql = "CREATE TRIGGER order_status_changed BEFORE UPDATE OF status, total ON orders FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status AND NEW.total > 0) EXECUTE FUNCTION audit_order()";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(ref_columns(&refs, "orders"), vec!["status", "total"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_create_rule_target_and_action() {
+        let sql = "CREATE RULE active_user_update AS ON UPDATE TO active_users WHERE old.active DO ALSO UPDATE users SET email = new.email WHERE users.id = old.id";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(ref_columns(&refs, "active_users"), vec!["active"]);
+        assert_eq!(ref_columns(&refs, "users"), vec!["email", "id"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_create_publication_tables() {
+        let sql = "CREATE PUBLICATION tenant_pub FOR TABLE users (email, status) WHERE (active), orders WHERE (total > 0 AND status = 'paid')";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(
+            ref_columns(&refs, "users"),
+            vec!["email", "status", "active"]
+        );
+        assert_eq!(ref_columns(&refs, "orders"), vec!["total", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_create_statistics_columns() {
+        let sql = "CREATE STATISTICS users_stats ON lower(email), status, tenant_id FROM users";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(
+            ref_columns(&refs, "users"),
+            vec!["email", "status", "tenant_id"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_create_table_like_and_inline_references() {
+        let sql = "CREATE TABLE invoices (LIKE invoice_template INCLUDING ALL, org_id uuid REFERENCES orgs(id), user_id uuid REFERENCES users(id))";
+        let refs = parse_sql_references(sql);
+        let check_refs =
+            parse_sql_references("CREATE TABLE users (name text CHECK (name LIKE pattern))");
+
+        assert!(has_table_ref(&refs, "invoice_template"), "{refs:?}");
+        assert_eq!(ref_columns(&refs, "orgs"), vec!["id"]);
+        assert_eq!(ref_columns(&refs, "users"), vec!["id"]);
+        assert!(check_refs.is_empty(), "{check_refs:?}");
+    }
+
+    #[test]
     fn test_parse_sql_references_track_alter_table_column_operations() {
         let sql = "ALTER TABLE users DROP COLUMN old_email, RENAME COLUMN legacy_name TO name, ALTER COLUMN status TYPE text USING status::text";
         let refs = parse_sql_references(sql);
@@ -3258,6 +3755,72 @@ mod tests {
 
         assert_eq!(ref_columns(&refs, "users"), vec!["org_id"]);
         assert_eq!(ref_columns(&refs, "orgs"), vec!["id"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_alter_policy_columns() {
+        let sql = "ALTER POLICY tenant_users ON users USING (tenant_id = current_setting('app.tenant_id')::uuid) WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid AND active = true)";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(ref_columns(&refs, "users"), vec!["tenant_id", "active"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_alter_publication_tables() {
+        let sql = "ALTER PUBLICATION tenant_pub SET TABLE users (email) WHERE (active), orders WHERE (status = 'paid')";
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(ref_columns(&refs, "users"), vec!["email", "active"]);
+        assert_eq!(ref_columns(&refs, "orders"), vec!["status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_alter_view_and_trigger_targets() {
+        let view_refs = parse_sql_references("ALTER VIEW active_users RENAME TO users_active");
+        let mat_view_refs =
+            parse_sql_references("ALTER MATERIALIZED VIEW active_orders SET SCHEMA reporting");
+        let trigger_refs =
+            parse_sql_references("ALTER TRIGGER sync_users ON users RENAME TO sync_users_v2");
+
+        assert!(has_table_ref(&view_refs, "active_users"), "{view_refs:?}");
+        assert!(
+            has_table_ref(&mat_view_refs, "active_orders"),
+            "{mat_view_refs:?}"
+        );
+        assert!(has_table_ref(&trigger_refs, "users"), "{trigger_refs:?}");
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_drop_table_like_objects() {
+        let table_refs = parse_sql_references("DROP TABLE IF EXISTS users, orders CASCADE");
+        let view_refs = parse_sql_references("DROP VIEW IF EXISTS active_users, stale_users");
+        let mat_view_refs =
+            parse_sql_references("DROP MATERIALIZED VIEW IF EXISTS active_orders RESTRICT");
+        let foreign_table_refs = parse_sql_references("DROP FOREIGN TABLE IF EXISTS remote_users");
+
+        assert!(has_table_ref(&table_refs, "users"), "{table_refs:?}");
+        assert!(has_table_ref(&table_refs, "orders"), "{table_refs:?}");
+        assert!(has_table_ref(&view_refs, "active_users"), "{view_refs:?}");
+        assert!(has_table_ref(&view_refs, "stale_users"), "{view_refs:?}");
+        assert!(
+            has_table_ref(&mat_view_refs, "active_orders"),
+            "{mat_view_refs:?}"
+        );
+        assert!(
+            has_table_ref(&foreign_table_refs, "remote_users"),
+            "{foreign_table_refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_drop_policy_trigger_rule_targets() {
+        let policy_refs = parse_sql_references("DROP POLICY IF EXISTS tenant_users ON users");
+        let trigger_refs = parse_sql_references("DROP TRIGGER IF EXISTS sync_users ON users");
+        let rule_refs = parse_sql_references("DROP RULE IF EXISTS active_users_update ON users");
+
+        assert!(has_table_ref(&policy_refs, "users"), "{policy_refs:?}");
+        assert!(has_table_ref(&trigger_refs, "users"), "{trigger_refs:?}");
+        assert!(has_table_ref(&rule_refs, "users"), "{rule_refs:?}");
     }
 
     #[test]

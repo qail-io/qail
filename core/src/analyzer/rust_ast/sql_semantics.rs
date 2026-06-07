@@ -23,6 +23,7 @@ pub(crate) enum SqlStmtKind {
     Reindex,
     Cluster,
     Refresh,
+    Drop,
 }
 
 impl SqlStmtKind {
@@ -46,6 +47,7 @@ impl SqlStmtKind {
             Self::Reindex => "REINDEX",
             Self::Cluster => "CLUSTER",
             Self::Refresh => "REFRESH",
+            Self::Drop => "DROP",
         }
     }
 }
@@ -74,7 +76,8 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
         || statement_starts_with_keyword(&normalized, "VACUUM")
         || statement_starts_with_keyword(&normalized, "REINDEX")
         || statement_starts_with_keyword(&normalized, "CLUSTER")
-        || statement_starts_with_keyword(&normalized, "REFRESH");
+        || statement_starts_with_keyword(&normalized, "REFRESH")
+        || statement_starts_with_keyword(&normalized, "DROP");
     let starts_with_wrapper = statement_starts_with_keyword(&normalized, "WITH")
         || statement_starts_with_keyword(&normalized, "EXPLAIN");
     if !starts_with_dml && !starts_with_wrapper {
@@ -136,6 +139,9 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
     if let Some(pos) = find_keyword_top_level_from(&normalized, "REFRESH", 0) {
         candidates.push((pos, SqlStmtKind::Refresh));
     }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "DROP", 0) {
+        candidates.push((pos, SqlStmtKind::Drop));
+    }
 
     let (_, kind) = candidates.into_iter().min_by_key(|(pos, _)| *pos)?;
     match kind {
@@ -177,9 +183,17 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
                 .then_some(SqlStmtKind::Lock)
         }
         SqlStmtKind::Create => Some(SqlStmtKind::Create),
-        SqlStmtKind::Alter => find_keyword_top_level_from(&normalized, "TABLE", 0)
-            .is_some()
-            .then_some(SqlStmtKind::Alter),
+        SqlStmtKind::Alter => [
+            "TABLE",
+            "VIEW",
+            "MATERIALIZED VIEW",
+            "POLICY",
+            "PUBLICATION",
+            "TRIGGER",
+        ]
+        .into_iter()
+        .any(|keyword| find_keyword_top_level_from(&normalized, keyword, 0).is_some())
+        .then_some(SqlStmtKind::Alter),
         SqlStmtKind::Comment => find_keyword_top_level_from(&normalized, "ON", 0)
             .is_some()
             .then_some(SqlStmtKind::Comment),
@@ -193,7 +207,8 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
         | SqlStmtKind::Vacuum
         | SqlStmtKind::Reindex
         | SqlStmtKind::Cluster
-        | SqlStmtKind::Refresh => Some(kind),
+        | SqlStmtKind::Refresh
+        | SqlStmtKind::Drop => Some(kind),
     }
 }
 
@@ -367,6 +382,16 @@ mod tests {
             Some(SqlStmtKind::Alter)
         );
         assert_eq!(
+            classify_sql_kind("ALTER VIEW active_users RENAME TO users_active"),
+            Some(SqlStmtKind::Alter)
+        );
+        assert_eq!(
+            classify_sql_kind(
+                "ALTER POLICY tenant_users ON users USING (tenant_id = current_setting('app.tenant_id')::uuid)"
+            ),
+            Some(SqlStmtKind::Alter)
+        );
+        assert_eq!(
             classify_sql_kind("COMMENT ON COLUMN users.email IS 'legacy'"),
             Some(SqlStmtKind::Comment)
         );
@@ -397,6 +422,10 @@ mod tests {
         assert_eq!(
             classify_sql_kind("REFRESH MATERIALIZED VIEW active_users"),
             Some(SqlStmtKind::Refresh)
+        );
+        assert_eq!(
+            classify_sql_kind("DROP TABLE IF EXISTS users"),
+            Some(SqlStmtKind::Drop)
         );
     }
 }
