@@ -654,7 +654,20 @@ fn classify_sql_type(sql: &str) -> SqlType {
         Some(SqlStmtKind::Update) => SqlType::Update,
         Some(SqlStmtKind::Delete) => SqlType::Delete,
         Some(
-            SqlStmtKind::Merge | SqlStmtKind::Truncate | SqlStmtKind::Copy | SqlStmtKind::Lock,
+            SqlStmtKind::Merge
+            | SqlStmtKind::Truncate
+            | SqlStmtKind::Copy
+            | SqlStmtKind::Lock
+            | SqlStmtKind::Create
+            | SqlStmtKind::Alter
+            | SqlStmtKind::Comment
+            | SqlStmtKind::Grant
+            | SqlStmtKind::Revoke
+            | SqlStmtKind::Analyze
+            | SqlStmtKind::Vacuum
+            | SqlStmtKind::Reindex
+            | SqlStmtKind::Cluster
+            | SqlStmtKind::Refresh,
         ) => SqlType::Unknown,
         None => SqlType::Unknown,
     }

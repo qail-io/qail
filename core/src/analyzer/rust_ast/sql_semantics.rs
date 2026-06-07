@@ -13,6 +13,16 @@ pub(crate) enum SqlStmtKind {
     Truncate,
     Copy,
     Lock,
+    Create,
+    Alter,
+    Comment,
+    Grant,
+    Revoke,
+    Analyze,
+    Vacuum,
+    Reindex,
+    Cluster,
+    Refresh,
 }
 
 impl SqlStmtKind {
@@ -26,6 +36,16 @@ impl SqlStmtKind {
             Self::Truncate => "TRUNCATE",
             Self::Copy => "COPY",
             Self::Lock => "LOCK",
+            Self::Create => "CREATE",
+            Self::Alter => "ALTER",
+            Self::Comment => "COMMENT",
+            Self::Grant => "GRANT",
+            Self::Revoke => "REVOKE",
+            Self::Analyze => "ANALYZE",
+            Self::Vacuum => "VACUUM",
+            Self::Reindex => "REINDEX",
+            Self::Cluster => "CLUSTER",
+            Self::Refresh => "REFRESH",
         }
     }
 }
@@ -44,7 +64,17 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
         || statement_starts_with_keyword(&normalized, "MERGE")
         || statement_starts_with_keyword(&normalized, "TRUNCATE")
         || statement_starts_with_keyword(&normalized, "COPY")
-        || statement_starts_with_keyword(&normalized, "LOCK");
+        || statement_starts_with_keyword(&normalized, "LOCK")
+        || statement_starts_with_keyword(&normalized, "CREATE")
+        || statement_starts_with_keyword(&normalized, "ALTER")
+        || statement_starts_with_keyword(&normalized, "COMMENT")
+        || statement_starts_with_keyword(&normalized, "GRANT")
+        || statement_starts_with_keyword(&normalized, "REVOKE")
+        || statement_starts_with_keyword(&normalized, "ANALYZE")
+        || statement_starts_with_keyword(&normalized, "VACUUM")
+        || statement_starts_with_keyword(&normalized, "REINDEX")
+        || statement_starts_with_keyword(&normalized, "CLUSTER")
+        || statement_starts_with_keyword(&normalized, "REFRESH");
     let starts_with_wrapper = statement_starts_with_keyword(&normalized, "WITH")
         || statement_starts_with_keyword(&normalized, "EXPLAIN");
     if !starts_with_dml && !starts_with_wrapper {
@@ -75,6 +105,36 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
     }
     if let Some(pos) = find_keyword_top_level_from(&normalized, "LOCK", 0) {
         candidates.push((pos, SqlStmtKind::Lock));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "CREATE", 0) {
+        candidates.push((pos, SqlStmtKind::Create));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "ALTER", 0) {
+        candidates.push((pos, SqlStmtKind::Alter));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "COMMENT", 0) {
+        candidates.push((pos, SqlStmtKind::Comment));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "GRANT", 0) {
+        candidates.push((pos, SqlStmtKind::Grant));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "REVOKE", 0) {
+        candidates.push((pos, SqlStmtKind::Revoke));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "ANALYZE", 0) {
+        candidates.push((pos, SqlStmtKind::Analyze));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "VACUUM", 0) {
+        candidates.push((pos, SqlStmtKind::Vacuum));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "REINDEX", 0) {
+        candidates.push((pos, SqlStmtKind::Reindex));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "CLUSTER", 0) {
+        candidates.push((pos, SqlStmtKind::Cluster));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "REFRESH", 0) {
+        candidates.push((pos, SqlStmtKind::Refresh));
     }
 
     let (_, kind) = candidates.into_iter().min_by_key(|(pos, _)| *pos)?;
@@ -116,6 +176,24 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
                 .is_some()
                 .then_some(SqlStmtKind::Lock)
         }
+        SqlStmtKind::Create => Some(SqlStmtKind::Create),
+        SqlStmtKind::Alter => find_keyword_top_level_from(&normalized, "TABLE", 0)
+            .is_some()
+            .then_some(SqlStmtKind::Alter),
+        SqlStmtKind::Comment => find_keyword_top_level_from(&normalized, "ON", 0)
+            .is_some()
+            .then_some(SqlStmtKind::Comment),
+        SqlStmtKind::Grant => find_keyword_top_level_from(&normalized, "ON", 0)
+            .is_some()
+            .then_some(SqlStmtKind::Grant),
+        SqlStmtKind::Revoke => find_keyword_top_level_from(&normalized, "ON", 0)
+            .is_some()
+            .then_some(SqlStmtKind::Revoke),
+        SqlStmtKind::Analyze
+        | SqlStmtKind::Vacuum
+        | SqlStmtKind::Reindex
+        | SqlStmtKind::Cluster
+        | SqlStmtKind::Refresh => Some(kind),
     }
 }
 
@@ -275,6 +353,50 @@ mod tests {
         assert_eq!(
             classify_sql_kind("LOCK TABLE users IN ACCESS EXCLUSIVE MODE"),
             Some(SqlStmtKind::Lock)
+        );
+    }
+
+    #[test]
+    fn classifies_postgres_schema_utility_statements() {
+        assert_eq!(
+            classify_sql_kind("CREATE INDEX users_email_idx ON users (email)"),
+            Some(SqlStmtKind::Create)
+        );
+        assert_eq!(
+            classify_sql_kind("ALTER TABLE users DROP COLUMN email"),
+            Some(SqlStmtKind::Alter)
+        );
+        assert_eq!(
+            classify_sql_kind("COMMENT ON COLUMN users.email IS 'legacy'"),
+            Some(SqlStmtKind::Comment)
+        );
+        assert_eq!(
+            classify_sql_kind("GRANT SELECT (email) ON TABLE users TO app"),
+            Some(SqlStmtKind::Grant)
+        );
+        assert_eq!(
+            classify_sql_kind("REVOKE UPDATE (email) ON users FROM app"),
+            Some(SqlStmtKind::Revoke)
+        );
+        assert_eq!(
+            classify_sql_kind("ANALYZE users (email)"),
+            Some(SqlStmtKind::Analyze)
+        );
+        assert_eq!(
+            classify_sql_kind("VACUUM (VERBOSE, ANALYZE) users"),
+            Some(SqlStmtKind::Vacuum)
+        );
+        assert_eq!(
+            classify_sql_kind("REINDEX TABLE users"),
+            Some(SqlStmtKind::Reindex)
+        );
+        assert_eq!(
+            classify_sql_kind("CLUSTER users USING users_email_idx"),
+            Some(SqlStmtKind::Cluster)
+        );
+        assert_eq!(
+            classify_sql_kind("REFRESH MATERIALIZED VIEW active_users"),
+            Some(SqlStmtKind::Refresh)
         );
     }
 }

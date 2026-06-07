@@ -1471,4 +1471,169 @@ mod tests {
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
     }
+
+    #[test]
+    fn test_dropped_raw_sql_create_index_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_create_index_column",
+            "const sql = `CREATE INDEX users_email_idx ON users (email) WHERE active = true`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_create_view_source_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_create_view_source_column",
+            "const sql = `CREATE VIEW active_users AS SELECT id FROM users WHERE active = true`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_alter_fk_referenced_table_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "orgs".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_alter_fk_referenced_table",
+            "const sql = `ALTER TABLE users ADD CONSTRAINT users_org_fk FOREIGN KEY (org_id) REFERENCES orgs(id)`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_comment_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_comment_column",
+            "const sql = `COMMENT ON COLUMN users.email IS 'legacy email'`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_grant_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("status".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_grant_column",
+            "const sql = `GRANT SELECT (email), UPDATE (status) ON TABLE users TO app_role`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_copy_where_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_copy_where_column",
+            "const sql = `COPY users (email) FROM STDIN WHERE active = true`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_maintenance_table_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "users".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_maintenance_table",
+            "const sql = `VACUUM (VERBOSE, ANALYZE) users (deleted_at)`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_refresh_view_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "active_users".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_refresh_view",
+            "const sql = `REFRESH MATERIALIZED VIEW CONCURRENTLY active_users`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
 }
