@@ -1368,9 +1368,12 @@ fn parse_sql_privilege_references(
     let Some(cursor) = sql_privilege_table_target_start(sql, on_idx + "ON".len()) else {
         return Vec::new();
     };
-    let Some((table, _)) = parse_sql_write_object_name_with_end(sql, cursor) else {
+    let target_end =
+        top_level_sql_clause_start(sql, cursor, &["TO", "FROM", "GRANTED BY"]).unwrap_or(sql.len());
+    let tables = parse_sql_table_list(sql, cursor, target_end);
+    if tables.is_empty() {
         return Vec::new();
-    };
+    }
 
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
@@ -1386,7 +1389,10 @@ fn parse_sql_privilege_references(
         }
     }
 
-    vec![(kind, table, cols)]
+    tables
+        .into_iter()
+        .map(|table| (kind, table, cols.clone()))
+        .collect()
 }
 
 fn sql_privilege_table_target_start(sql: &str, start: usize) -> Option<usize> {
@@ -4638,6 +4644,14 @@ mod tests {
 
         assert_eq!(ref_columns(&grant_refs, "users"), vec!["email", "status"]);
         assert_eq!(ref_columns(&revoke_refs, "users"), vec!["status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_multi_table_privileges() {
+        let refs = parse_sql_references("GRANT SELECT ON TABLE users, orders TO app_role");
+
+        assert!(has_table_ref(&refs, "users"), "{refs:?}");
+        assert!(has_table_ref(&refs, "orders"), "{refs:?}");
     }
 
     #[test]
