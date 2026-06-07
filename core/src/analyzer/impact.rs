@@ -334,6 +334,23 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn scan_temp_source(prefix: &str, source: &str) -> Vec<CodeReference> {
+        let tmp_name = format!(
+            "{}_{}_{}.ts",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(&path, source).expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+        code_refs
+    }
+
     #[test]
     fn test_detect_dropped_table() {
         let cmd = Qail {
@@ -1368,6 +1385,87 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_truncate_table_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "users".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_truncate_table",
+            "const sql = `TRUNCATE TABLE users`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_multi_truncate_table_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "orders".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_multi_truncate_table",
+            "const sql = `TRUNCATE TABLE users, orders CASCADE`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_copy_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_copy_column",
+            "const sql = `COPY users (email, status) FROM STDIN`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_lock_table_is_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "users".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_lock_table",
+            "const sql = `LOCK TABLE users IN ACCESS EXCLUSIVE MODE`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
         let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");

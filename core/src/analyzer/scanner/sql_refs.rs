@@ -589,8 +589,38 @@ fn parse_sql_auxiliary_write_references(
         SqlStmtKind::Merge => {
             parse_sql_merge_source_references(sql, inherited_cte_aliases, local_cte_aliases)
         }
-        SqlStmtKind::Select | SqlStmtKind::Insert => Vec::new(),
+        SqlStmtKind::Truncate => parse_sql_truncate_references(sql),
+        SqlStmtKind::Select | SqlStmtKind::Insert | SqlStmtKind::Copy | SqlStmtKind::Lock => {
+            Vec::new()
+        }
     }
+}
+
+fn parse_sql_truncate_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
+    let Some(truncate_idx) = find_keyword_top_level_from(sql, "TRUNCATE", 0) else {
+        return Vec::new();
+    };
+    let list_start = skip_optional_sql_keyword(sql, truncate_idx + "TRUNCATE".len(), "TABLE");
+    let list_end = top_level_sql_clause_start(
+        sql,
+        list_start,
+        &[
+            "RESTART IDENTITY",
+            "CONTINUE IDENTITY",
+            "CASCADE",
+            "RESTRICT",
+        ],
+    )
+    .unwrap_or(sql.len());
+    let Some(list) = sql.get(list_start..list_end) else {
+        return Vec::new();
+    };
+
+    split_sql_top_level(list, ',')
+        .into_iter()
+        .filter_map(|item| parse_sql_write_object_name_with_end(item, 0).map(|(table, _)| table))
+        .map(|table| (SqlStmtKind::Truncate, table, Vec::new()))
+        .collect()
 }
 
 fn parse_sql_update_from_references(
@@ -859,6 +889,36 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
             );
             Some((kind, table, columns))
         }
+        SqlStmtKind::Truncate => {
+            let truncate_idx = find_keyword_top_level_from(&normalized, "TRUNCATE", 0)?;
+            let cursor =
+                skip_optional_sql_keyword(&normalized, truncate_idx + "TRUNCATE".len(), "TABLE");
+            let (table, _) = parse_sql_write_object_name_with_end(&normalized, cursor)?;
+            Some((kind, table, Vec::new()))
+        }
+        SqlStmtKind::Copy => {
+            let copy_idx = find_keyword_top_level_from(&normalized, "COPY", 0)?;
+            let cursor = copy_idx + "COPY".len();
+            if normalized
+                .as_bytes()
+                .get(skip_sql_ws(normalized.as_bytes(), cursor))
+                .copied()
+                == Some(b'(')
+            {
+                return None;
+            }
+            let (table, table_end) = parse_sql_object_name_with_end(&normalized, cursor)?;
+            let columns = collect_sql_copy_columns(&normalized, table_end);
+            Some((kind, table, columns))
+        }
+        SqlStmtKind::Lock => {
+            let lock_idx = find_keyword_top_level_from(&normalized, "LOCK", 0)?;
+            let table_idx =
+                find_keyword_top_level_from(&normalized, "TABLE", lock_idx + "LOCK".len())?;
+            let (table, _) =
+                parse_sql_write_object_name_with_end(&normalized, table_idx + "TABLE".len())?;
+            Some((kind, table, Vec::new()))
+        }
     }
 }
 
@@ -872,6 +932,15 @@ fn parse_sql_write_object_name_with_end(sql: &str, start: usize) -> Option<(Stri
         cursor = skip_sql_ws(sql.as_bytes(), cursor + "ONLY".len());
     }
     parse_sql_object_name_with_end(sql, cursor)
+}
+
+fn skip_optional_sql_keyword(sql: &str, start: usize, keyword: &str) -> usize {
+    let cursor = skip_sql_ws(sql.as_bytes(), start);
+    if starts_with_keyword_at(sql, cursor, keyword) {
+        skip_sql_ws(sql.as_bytes(), cursor + keyword.len())
+    } else {
+        cursor
+    }
 }
 
 fn parse_sql_object_name_with_end(sql: &str, start: usize) -> Option<(String, usize)> {
@@ -1414,6 +1483,7 @@ fn collect_sql_projection_columns(
 
         if let Some(column) = normalize_projection_column(base)
             && is_plain_sql_column_ref(&column)
+            && !is_sql_numeric_literal(&column)
             && !is_sql_reference_keyword(&column)
         {
             push_column_ref(&column, cols, seen);
@@ -1443,6 +1513,11 @@ fn is_plain_sql_column_ref(value: &str) -> bool {
     value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+}
+
+fn is_sql_numeric_literal(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn top_level_sql_clause_segment<'a>(sql: &'a str, clause: &str, min_idx: usize) -> Option<&'a str> {
@@ -1744,6 +1819,18 @@ fn collect_sql_column_list(segment: &str, cols: &mut Vec<String>, seen: &mut Has
             push_column_ref(&column, cols, seen);
         }
     }
+}
+
+fn collect_sql_copy_columns(sql: &str, table_end: usize) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    let cursor = skip_sql_ws(sql.as_bytes(), table_end);
+    if sql.as_bytes().get(cursor).copied() == Some(b'(')
+        && let Some((segment, _)) = balanced_paren_segment(sql, cursor)
+    {
+        collect_sql_column_list(segment, &mut cols, &mut seen);
+    }
+    cols
 }
 
 fn normalize_projection_column(expr: &str) -> Option<String> {
@@ -2211,6 +2298,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_select_numeric_projection_is_not_column() {
+        let sql = "SELECT 1 FROM users WHERE active = true";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["active"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_quoted_schema_table() {
         let sql = r#"SELECT "id", "email" FROM "public"."users" WHERE "id" = $1"#;
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
@@ -2459,6 +2555,53 @@ mod tests {
             .find(|(_, table, _)| table == "staging_orders")
             .expect("staging orders reference");
         assert_eq!(staging_orders.2, vec!["id", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_truncate_table() {
+        let sql = "TRUNCATE TABLE ONLY users";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+
+        assert_eq!(kind, SqlStmtKind::Truncate);
+        assert_eq!(table, "users");
+        assert!(cols.is_empty(), "{cols:?}");
+    }
+
+    #[test]
+    fn test_parse_sql_references_track_multi_table_truncate() {
+        let sql = "TRUNCATE TABLE users, orders CASCADE";
+        let refs = parse_sql_references(sql);
+
+        assert!(
+            refs.iter()
+                .any(|(kind, table, _)| *kind == SqlStmtKind::Truncate && table == "users"),
+            "{refs:?}"
+        );
+        assert!(
+            refs.iter()
+                .any(|(kind, table, _)| *kind == SqlStmtKind::Truncate && table == "orders"),
+            "{refs:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_reference_copy_table_columns() {
+        let sql = "COPY users (email, status) FROM STDIN";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+
+        assert_eq!(kind, SqlStmtKind::Copy);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_lock_table() {
+        let sql = "LOCK TABLE users IN ACCESS EXCLUSIVE MODE";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+
+        assert_eq!(kind, SqlStmtKind::Lock);
+        assert_eq!(table, "users");
+        assert!(cols.is_empty(), "{cols:?}");
     }
 
     #[test]

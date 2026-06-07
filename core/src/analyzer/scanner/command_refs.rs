@@ -68,12 +68,26 @@ pub(super) fn command_to_references(
     line: usize,
     cmd: &crate::Qail,
 ) -> Vec<CodeReference> {
+    command_to_references_with_cte_aliases(path, line, cmd, &[])
+}
+
+fn command_to_references_with_cte_aliases(
+    path: &Path,
+    line: usize,
+    cmd: &crate::Qail,
+    inherited_cte_aliases: &[String],
+) -> Vec<CodeReference> {
     let mut refs = Vec::new();
-    if let Some(reference) = command_to_reference(path, line, cmd) {
+    let mut local_cte_aliases = inherited_cte_aliases.to_vec();
+    local_cte_aliases.extend(cmd.ctes.iter().map(|cte| cte.name.clone()));
+
+    if !is_cte_alias(&cmd.table, &local_cte_aliases)
+        && let Some(reference) = command_to_reference(path, line, cmd)
+    {
         refs.push(reference);
     }
-    collect_related_table_references(path, line, cmd, &mut refs);
-    collect_subquery_references(path, line, cmd, &mut refs);
+    collect_related_table_references(path, line, cmd, &local_cte_aliases, &mut refs);
+    collect_subquery_references(path, line, cmd, &local_cte_aliases, &mut refs);
     refs
 }
 
@@ -81,9 +95,13 @@ fn collect_related_table_references(
     path: &Path,
     line: usize,
     cmd: &crate::Qail,
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
     for join in &cmd.joins {
+        if is_cte_alias(&join.table, cte_aliases) {
+            continue;
+        }
         push_scoped_reference(
             path,
             line,
@@ -95,6 +113,9 @@ fn collect_related_table_references(
         );
     }
     for table in &cmd.from_tables {
+        if is_cte_alias(table, cte_aliases) {
+            continue;
+        }
         push_scoped_reference(
             path,
             line,
@@ -106,6 +127,9 @@ fn collect_related_table_references(
         );
     }
     for table in &cmd.using_tables {
+        if is_cte_alias(table, cte_aliases) {
+            continue;
+        }
         push_scoped_reference(
             path,
             line,
@@ -118,6 +142,7 @@ fn collect_related_table_references(
     }
     if let Some(merge) = &cmd.merge
         && let crate::ast::MergeSource::Table { name, alias } = &merge.source
+        && !is_cte_alias(name, cte_aliases)
     {
         push_scoped_reference(
             path,
@@ -159,54 +184,66 @@ fn collect_subquery_references(
     path: &Path,
     line: usize,
     cmd: &crate::Qail,
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
     for expr in &cmd.columns {
-        collect_expr_subquery_references(path, line, expr, refs);
+        collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
     }
     for cage in &cmd.cages {
-        collect_cage_subquery_references(path, line, cage, refs);
+        collect_cage_subquery_references(path, line, cage, cte_aliases, refs);
     }
     for join in &cmd.joins {
         if let Some(conditions) = &join.on {
-            collect_conditions_subquery_references(path, line, conditions, refs);
+            collect_conditions_subquery_references(path, line, conditions, cte_aliases, refs);
         }
     }
-    collect_conditions_subquery_references(path, line, &cmd.having, refs);
+    collect_conditions_subquery_references(path, line, &cmd.having, cte_aliases, refs);
     for expr in &cmd.distinct_on {
-        collect_expr_subquery_references(path, line, expr, refs);
+        collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
     }
     if let Some(returning) = &cmd.returning {
         for expr in returning {
-            collect_expr_subquery_references(path, line, expr, refs);
+            collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
         }
     }
     if let Some(on_conflict) = &cmd.on_conflict
         && let ConflictAction::DoUpdate { assignments } = &on_conflict.action
     {
         for (_, expr) in assignments {
-            collect_expr_subquery_references(path, line, expr, refs);
+            collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
         }
     }
     if let Some(merge) = &cmd.merge {
         match &merge.source {
             crate::ast::MergeSource::Query { query, .. } => {
-                refs.extend(command_to_references(path, line, query));
+                refs.extend(command_to_references_with_cte_aliases(
+                    path,
+                    line,
+                    query,
+                    cte_aliases,
+                ));
             }
             crate::ast::MergeSource::Table { .. } => {}
         }
-        collect_conditions_subquery_references(path, line, &merge.on, refs);
+        collect_conditions_subquery_references(path, line, &merge.on, cte_aliases, refs);
         for clause in &merge.clauses {
-            collect_conditions_subquery_references(path, line, &clause.condition, refs);
+            collect_conditions_subquery_references(
+                path,
+                line,
+                &clause.condition,
+                cte_aliases,
+                refs,
+            );
             match &clause.action {
                 MergeAction::Update { assignments } => {
                     for (_, expr) in assignments {
-                        collect_expr_subquery_references(path, line, expr, refs);
+                        collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
                     }
                 }
                 MergeAction::Insert { values, .. } => {
                     for expr in values {
-                        collect_expr_subquery_references(path, line, expr, refs);
+                        collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
                     }
                 }
                 MergeAction::Delete | MergeAction::DoNothing => {}
@@ -214,15 +251,39 @@ fn collect_subquery_references(
         }
     }
     if let Some(source_query) = &cmd.source_query {
-        refs.extend(command_to_references(path, line, source_query));
+        refs.extend(command_to_references_with_cte_aliases(
+            path,
+            line,
+            source_query,
+            cte_aliases,
+        ));
     }
     for (_, set_query) in &cmd.set_ops {
-        refs.extend(command_to_references(path, line, set_query));
+        refs.extend(command_to_references_with_cte_aliases(
+            path,
+            line,
+            set_query,
+            cte_aliases,
+        ));
     }
+    let mut known_aliases = cte_aliases.to_vec();
     for cte in &cmd.ctes {
-        refs.extend(command_to_references(path, line, &cte.base_query));
+        if !known_aliases.iter().any(|alias| ident_eq(alias, &cte.name)) {
+            known_aliases.push(cte.name.clone());
+        }
+        refs.extend(command_to_references_with_cte_aliases(
+            path,
+            line,
+            &cte.base_query,
+            &known_aliases,
+        ));
         if let Some(recursive_query) = &cte.recursive_query {
-            refs.extend(command_to_references(path, line, recursive_query));
+            refs.extend(command_to_references_with_cte_aliases(
+                path,
+                line,
+                recursive_query,
+                &known_aliases,
+            ));
         }
     }
 }
@@ -231,42 +292,45 @@ fn collect_expr_subquery_references(
     path: &Path,
     line: usize,
     expr: &Expr,
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
     match expr {
         Expr::Aggregate { filter, .. } => {
             if let Some(conditions) = filter {
-                collect_conditions_subquery_references(path, line, conditions, refs);
+                collect_conditions_subquery_references(path, line, conditions, cte_aliases, refs);
             }
         }
         Expr::Cast { expr, .. }
         | Expr::Mod { col: expr, .. }
         | Expr::Collate { expr, .. }
         | Expr::FieldAccess { expr, .. } => {
-            collect_expr_subquery_references(path, line, expr, refs)
+            collect_expr_subquery_references(path, line, expr, cte_aliases, refs)
         }
         Expr::Subscript { expr, index, .. } => {
-            collect_expr_subquery_references(path, line, expr, refs);
-            collect_expr_subquery_references(path, line, index, refs);
+            collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
+            collect_expr_subquery_references(path, line, index, cte_aliases, refs);
         }
         Expr::FunctionCall { args, .. } | Expr::ArrayConstructor { elements: args, .. } => {
             for arg in args {
-                collect_expr_subquery_references(path, line, arg, refs);
+                collect_expr_subquery_references(path, line, arg, cte_aliases, refs);
             }
         }
         Expr::SpecialFunction { args, .. } => {
             for (_, arg) in args {
-                collect_expr_subquery_references(path, line, arg, refs);
+                collect_expr_subquery_references(path, line, arg, cte_aliases, refs);
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_expr_subquery_references(path, line, left, refs);
-            collect_expr_subquery_references(path, line, right, refs);
+            collect_expr_subquery_references(path, line, left, cte_aliases, refs);
+            collect_expr_subquery_references(path, line, right, cte_aliases, refs);
         }
-        Expr::Literal(value) => collect_value_subquery_references(path, line, value, refs),
+        Expr::Literal(value) => {
+            collect_value_subquery_references(path, line, value, cte_aliases, refs)
+        }
         Expr::RowConstructor { elements, .. } => {
             for expr in elements {
-                collect_expr_subquery_references(path, line, expr, refs);
+                collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
             }
         }
         Expr::Case {
@@ -275,23 +339,28 @@ fn collect_expr_subquery_references(
             ..
         } => {
             for (condition, value) in when_clauses {
-                collect_condition_subquery_references(path, line, condition, refs);
-                collect_expr_subquery_references(path, line, value, refs);
+                collect_condition_subquery_references(path, line, condition, cte_aliases, refs);
+                collect_expr_subquery_references(path, line, value, cte_aliases, refs);
             }
             if let Some(value) = else_value {
-                collect_expr_subquery_references(path, line, value, refs);
+                collect_expr_subquery_references(path, line, value, cte_aliases, refs);
             }
         }
         Expr::Window { params, order, .. } => {
             for param in params {
-                collect_expr_subquery_references(path, line, param, refs);
+                collect_expr_subquery_references(path, line, param, cte_aliases, refs);
             }
             for cage in order {
-                collect_cage_subquery_references(path, line, cage, refs);
+                collect_cage_subquery_references(path, line, cage, cte_aliases, refs);
             }
         }
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
-            refs.extend(command_to_references(path, line, query));
+            refs.extend(command_to_references_with_cte_aliases(
+                path,
+                line,
+                query,
+                cte_aliases,
+            ));
         }
         Expr::Star
         | Expr::Named(_)
@@ -305,19 +374,21 @@ fn collect_cage_subquery_references(
     path: &Path,
     line: usize,
     cage: &Cage,
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
-    collect_conditions_subquery_references(path, line, &cage.conditions, refs);
+    collect_conditions_subquery_references(path, line, &cage.conditions, cte_aliases, refs);
 }
 
 fn collect_conditions_subquery_references(
     path: &Path,
     line: usize,
     conditions: &[Condition],
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
     for condition in conditions {
-        collect_condition_subquery_references(path, line, condition, refs);
+        collect_condition_subquery_references(path, line, condition, cte_aliases, refs);
     }
 }
 
@@ -325,28 +396,39 @@ fn collect_condition_subquery_references(
     path: &Path,
     line: usize,
     condition: &Condition,
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
-    collect_expr_subquery_references(path, line, &condition.left, refs);
-    collect_value_subquery_references(path, line, &condition.value, refs);
+    collect_expr_subquery_references(path, line, &condition.left, cte_aliases, refs);
+    collect_value_subquery_references(path, line, &condition.value, cte_aliases, refs);
 }
 
 fn collect_value_subquery_references(
     path: &Path,
     line: usize,
     value: &Value,
+    cte_aliases: &[String],
     refs: &mut Vec<CodeReference>,
 ) {
     match value {
         Value::Array(values) => {
             for value in values {
-                collect_value_subquery_references(path, line, value, refs);
+                collect_value_subquery_references(path, line, value, cte_aliases, refs);
             }
         }
-        Value::Subquery(query) => refs.extend(command_to_references(path, line, query)),
-        Value::Expr(expr) => collect_expr_subquery_references(path, line, expr, refs),
+        Value::Subquery(query) => refs.extend(command_to_references_with_cte_aliases(
+            path,
+            line,
+            query,
+            cte_aliases,
+        )),
+        Value::Expr(expr) => collect_expr_subquery_references(path, line, expr, cte_aliases, refs),
         _ => {}
     }
+}
+
+fn is_cte_alias(table: &str, cte_aliases: &[String]) -> bool {
+    cte_aliases.iter().any(|alias| ident_eq(alias, table))
 }
 
 fn collect_reference_columns(cmd: &crate::Qail) -> Vec<String> {
@@ -462,7 +544,9 @@ fn collect_expr_columns(
         Expr::Star => push_column_ref("*", scope, cols, seen),
         Expr::Named(name) | Expr::Aliased { name, .. } => push_column_ref(name, scope, cols, seen),
         Expr::Aggregate { col, filter, .. } => {
-            push_column_ref(col, scope, cols, seen);
+            if is_column_like_aggregate_arg(col) {
+                push_column_ref(col, scope, cols, seen);
+            }
             if let Some(conditions) = filter {
                 collect_conditions_columns(conditions, scope, cols, seen);
             }
@@ -578,6 +662,16 @@ fn ident_eq(left: &str, right: &str) -> bool {
         .eq_ignore_ascii_case(right.trim_matches('"'))
 }
 
+fn is_column_like_aggregate_arg(arg: &str) -> bool {
+    let arg = arg.trim();
+    !arg.is_empty()
+        && arg != "*"
+        && !arg.chars().all(|ch| ch.is_ascii_digit())
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '"'))
+}
+
 fn bare_ident(name: &str) -> &str {
     name.trim_matches('"')
         .rsplit_once('.')
@@ -608,6 +702,7 @@ fn extract_payload_columns(cmd: &crate::Qail) -> Vec<String> {
 mod tests {
     use std::path::Path;
 
+    use crate::ast::{Action, AggregateFunc, CTEDef, Join, JoinKind, Qail};
     use crate::parse;
 
     use super::*;
@@ -699,5 +794,101 @@ mod tests {
             .find(|reference| reference.table == "staging_users")
             .expect("staging users reference");
         assert_eq!(staging_users.columns, vec!["id", "name", "email"]);
+    }
+
+    #[test]
+    fn test_command_references_skip_native_qail_cte_aliases() {
+        let cmd = Qail {
+            table: "summary".to_string(),
+            columns: vec![Expr::Named("id".to_string())],
+            ctes: vec![CTEDef {
+                name: "summary".to_string(),
+                recursive: false,
+                columns: vec![],
+                base_query: Box::new(Qail {
+                    table: "orders".to_string(),
+                    columns: vec![
+                        Expr::Named("id".to_string()),
+                        Expr::Named("total".to_string()),
+                    ],
+                    ..Default::default()
+                }),
+                recursive_query: None,
+                source_table: None,
+            }],
+            ..Default::default()
+        };
+
+        let refs = command_to_references(Path::new("src/reporting.ts"), 1, &cmd);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(refs[0].table, "orders");
+        assert_eq!(refs[0].columns, vec!["id", "total"]);
+    }
+
+    #[test]
+    fn test_command_references_skip_recursive_cte_self_join_alias() {
+        let cmd = Qail {
+            table: "tree".to_string(),
+            ctes: vec![CTEDef {
+                name: "tree".to_string(),
+                recursive: true,
+                columns: vec![],
+                base_query: Box::new(Qail {
+                    table: "nodes".to_string(),
+                    columns: vec![Expr::Named("id".to_string())],
+                    ..Default::default()
+                }),
+                recursive_query: Some(Box::new(Qail {
+                    table: "nodes".to_string(),
+                    columns: vec![Expr::Named("id".to_string())],
+                    joins: vec![Join {
+                        table: "tree".to_string(),
+                        kind: JoinKind::Left,
+                        on: None,
+                        on_true: true,
+                    }],
+                    ..Default::default()
+                })),
+                source_table: None,
+            }],
+            ..Default::default()
+        };
+
+        let refs = command_to_references(Path::new("src/tree.ts"), 1, &cmd);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert!(refs.iter().all(|reference| reference.table == "nodes"));
+    }
+
+    #[test]
+    fn test_command_reference_skips_aggregate_constant_columns() {
+        let cmd = Qail {
+            action: Action::Get,
+            table: "users".to_string(),
+            columns: vec![
+                Expr::Aggregate {
+                    col: "*".to_string(),
+                    func: AggregateFunc::Count,
+                    distinct: false,
+                    filter: None,
+                    alias: Some("total".to_string()),
+                },
+                Expr::Aggregate {
+                    col: "1".to_string(),
+                    func: AggregateFunc::Count,
+                    distinct: false,
+                    filter: None,
+                    alias: Some("total_one".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let reference =
+            command_to_reference(Path::new("src/users.ts"), 1, &cmd).expect("reference");
+
+        assert_eq!(reference.table, "users");
+        assert!(reference.columns.is_empty(), "{reference:?}");
     }
 }

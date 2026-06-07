@@ -10,6 +10,9 @@ pub(crate) enum SqlStmtKind {
     Update,
     Delete,
     Merge,
+    Truncate,
+    Copy,
+    Lock,
 }
 
 impl SqlStmtKind {
@@ -20,6 +23,9 @@ impl SqlStmtKind {
             Self::Update => "UPDATE",
             Self::Delete => "DELETE",
             Self::Merge => "MERGE",
+            Self::Truncate => "TRUNCATE",
+            Self::Copy => "COPY",
+            Self::Lock => "LOCK",
         }
     }
 }
@@ -35,7 +41,10 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
         || statement_starts_with_keyword(&normalized, "INSERT")
         || statement_starts_with_keyword(&normalized, "UPDATE")
         || statement_starts_with_keyword(&normalized, "DELETE")
-        || statement_starts_with_keyword(&normalized, "MERGE");
+        || statement_starts_with_keyword(&normalized, "MERGE")
+        || statement_starts_with_keyword(&normalized, "TRUNCATE")
+        || statement_starts_with_keyword(&normalized, "COPY")
+        || statement_starts_with_keyword(&normalized, "LOCK");
     let starts_with_wrapper = statement_starts_with_keyword(&normalized, "WITH")
         || statement_starts_with_keyword(&normalized, "EXPLAIN");
     if !starts_with_dml && !starts_with_wrapper {
@@ -57,6 +66,15 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
     }
     if let Some(pos) = find_keyword_top_level_from(&normalized, "MERGE", 0) {
         candidates.push((pos, SqlStmtKind::Merge));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "TRUNCATE", 0) {
+        candidates.push((pos, SqlStmtKind::Truncate));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "COPY", 0) {
+        candidates.push((pos, SqlStmtKind::Copy));
+    }
+    if let Some(pos) = find_keyword_top_level_from(&normalized, "LOCK", 0) {
+        candidates.push((pos, SqlStmtKind::Lock));
     }
 
     let (_, kind) = candidates.into_iter().min_by_key(|(pos, _)| *pos)?;
@@ -89,6 +107,14 @@ pub(crate) fn classify_sql_kind(sql: &str) -> Option<SqlStmtKind> {
             find_keyword_top_level_from(&normalized, "USING", into_pos + "INTO".len())
                 .is_some()
                 .then_some(SqlStmtKind::Merge)
+        }
+        SqlStmtKind::Truncate => Some(SqlStmtKind::Truncate),
+        SqlStmtKind::Copy => Some(SqlStmtKind::Copy),
+        SqlStmtKind::Lock => {
+            let lock_pos = find_keyword_top_level_from(&normalized, "LOCK", 0)?;
+            find_keyword_top_level_from(&normalized, "TABLE", lock_pos + "LOCK".len())
+                .is_some()
+                .then_some(SqlStmtKind::Lock)
         }
     }
 }
@@ -233,6 +259,22 @@ mod tests {
         assert_eq!(
             classify_sql_kind(sql).map(|kind| kind.as_str()),
             Some("MERGE")
+        );
+    }
+
+    #[test]
+    fn classifies_table_touching_utility_statements() {
+        assert_eq!(
+            classify_sql_kind("TRUNCATE TABLE users"),
+            Some(SqlStmtKind::Truncate)
+        );
+        assert_eq!(
+            classify_sql_kind("COPY users (email) FROM STDIN"),
+            Some(SqlStmtKind::Copy)
+        );
+        assert_eq!(
+            classify_sql_kind("LOCK TABLE users IN ACCESS EXCLUSIVE MODE"),
+            Some(SqlStmtKind::Lock)
         );
     }
 }

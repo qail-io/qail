@@ -653,7 +653,9 @@ fn classify_sql_type(sql: &str) -> SqlType {
         Some(SqlStmtKind::Insert) => SqlType::Insert,
         Some(SqlStmtKind::Update) => SqlType::Update,
         Some(SqlStmtKind::Delete) => SqlType::Delete,
-        Some(SqlStmtKind::Merge) => SqlType::Unknown,
+        Some(
+            SqlStmtKind::Merge | SqlStmtKind::Truncate | SqlStmtKind::Copy | SqlStmtKind::Lock,
+        ) => SqlType::Unknown,
         None => SqlType::Unknown,
     }
 }
