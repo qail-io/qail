@@ -1097,7 +1097,7 @@ fn parse_sql_create_index_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec
     if let Some(open_idx) = find_sql_top_level_byte(sql, table_end, b'(')
         && let Some((segment, _)) = balanced_paren_segment(sql, open_idx)
     {
-        collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+        collect_sql_index_key_columns(segment, &mut cols, &mut seen);
     }
     if let Some(include_idx) = find_keyword_top_level_from(sql, "INCLUDE", table_end) {
         let after = skip_sql_ws(sql.as_bytes(), include_idx + "INCLUDE".len());
@@ -1112,6 +1112,74 @@ fn parse_sql_create_index_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec
     }
 
     vec![(SqlStmtKind::Create, table, cols)]
+}
+
+fn collect_sql_index_key_columns(
+    segment: &str,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for item in split_sql_top_level(segment, ',') {
+        let expression = sql_index_key_expression(item);
+        collect_sql_identifier_columns(expression, cols, seen);
+    }
+}
+
+fn sql_index_key_expression(item: &str) -> &str {
+    let item = item.trim();
+    if item.is_empty() {
+        return item;
+    }
+
+    let bytes = item.as_bytes();
+    let start = skip_sql_ws(bytes, 0);
+    if bytes.get(start).copied() == Some(b'(')
+        && let Some((segment, _)) = balanced_paren_segment(item, start)
+    {
+        return segment.trim();
+    }
+
+    let mut i = start;
+    let mut depth = 0i32;
+    let mut in_quote: Option<u8> = None;
+    let mut saw_expression = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if let Some(next) = advance_sql_quoted_index(bytes, i, q) {
+                i = next;
+                continue;
+            }
+            in_quote = None;
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => {
+                in_quote = Some(b);
+                saw_expression = true;
+            }
+            b'(' => {
+                depth += 1;
+                saw_expression = true;
+            }
+            b')' => {
+                depth -= 1;
+                saw_expression = true;
+            }
+            _ if b.is_ascii_whitespace() && depth == 0 && saw_expression => {
+                return item.get(start..i).unwrap_or(item).trim();
+            }
+            _ if !b.is_ascii_whitespace() => saw_expression = true,
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    item.get(start..).unwrap_or(item).trim()
 }
 
 fn parse_sql_create_policy_references(sql: &str) -> Vec<(SqlStmtKind, String, Vec<String>)> {
@@ -4231,6 +4299,22 @@ mod tests {
         assert_eq!(
             ref_columns(&refs, "users"),
             vec!["email", "created_at", "active", "deleted_at"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_references_create_index_skips_operator_class_names() {
+        let opclass_refs = parse_sql_references(
+            "CREATE INDEX users_payload_idx ON users USING gin (payload jsonb_path_ops)",
+        );
+        let expression_refs = parse_sql_references(
+            "CREATE INDEX users_email_idx ON users (lower(email) text_pattern_ops, created_at DESC NULLS LAST)",
+        );
+
+        assert_eq!(ref_columns(&opclass_refs, "users"), vec!["payload"]);
+        assert_eq!(
+            ref_columns(&expression_refs, "users"),
+            vec!["email", "created_at"]
         );
     }
 

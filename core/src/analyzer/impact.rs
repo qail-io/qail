@@ -2113,6 +2113,27 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_raw_sql_create_index_operator_class_name_is_not_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("jsonb_path_ops".to_string())],
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_create_index_operator_class_not_column",
+            "const sql = `CREATE INDEX users_payload_idx ON users USING gin (payload jsonb_path_ops)`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_create_view_source_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
