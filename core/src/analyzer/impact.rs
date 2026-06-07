@@ -801,6 +801,49 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_target_column_does_not_match_qualified_update_from_source_column() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("state".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_update_from_source_false_target_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                UPDATE orders o
+                SET status = p.status
+                FROM payments p
+                WHERE o.payment_id = p.id
+                  AND p.state = $1
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_update_from_unqualified_source_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -882,6 +925,48 @@ mod tests {
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_target_column_does_not_match_qualified_delete_using_source_column() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "sessions".to_string(),
+            columns: vec![crate::ast::Expr::Named("disabled".to_string())],
+            ..Default::default()
+        };
+
+        let tmp_name = format!(
+            "qail_impact_raw_sql_delete_using_source_false_target_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+        std::fs::write(
+            &path,
+            r#"
+            const sql = `
+                DELETE FROM sessions s
+                USING users u
+                WHERE s.user_id = u.id
+                  AND u.disabled = true
+            `;
+            "#,
+        )
+        .expect("write temp source");
+        let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
     }
 
     #[test]

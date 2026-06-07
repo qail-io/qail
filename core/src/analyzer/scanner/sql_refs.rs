@@ -10,6 +10,132 @@ pub(super) fn normalize_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+pub(super) fn sanitize_sql_for_reference_scan(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"--") {
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b == b'\n' {
+                    out.push('\n');
+                    i += 1;
+                    break;
+                }
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b"/*") {
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            while i < bytes.len() {
+                if starts_with_bytes(bytes, i, b"*/") {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    break;
+                }
+                push_sql_sanitized_byte(bytes[i], &mut out);
+                i += 1;
+            }
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            out.push(' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    out.push(' ');
+                    i += 1;
+                    if bytes.get(i).copied() == Some(b'\'') {
+                        out.push(' ');
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                push_sql_sanitized_byte(bytes[i], &mut out);
+                i += 1;
+            }
+            continue;
+        }
+
+        if let Some((tag, end)) = sql_dollar_quote_tag(input, i) {
+            for b in &bytes[i..end] {
+                push_sql_sanitized_byte(*b, &mut out);
+            }
+            i = end;
+            while i < bytes.len() {
+                if input
+                    .get(i..)
+                    .is_some_and(|tail| tail.starts_with(tag.as_str()))
+                {
+                    for b in &bytes[i..i + tag.len()] {
+                        push_sql_sanitized_byte(*b, &mut out);
+                    }
+                    i += tag.len();
+                    break;
+                }
+                push_sql_sanitized_byte(bytes[i], &mut out);
+                i += 1;
+            }
+            continue;
+        }
+
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+
+    out
+}
+
+fn push_sql_sanitized_byte(byte: u8, out: &mut String) {
+    if byte == b'\n' {
+        out.push('\n');
+    } else {
+        out.push(' ');
+    }
+}
+
+fn sql_dollar_quote_tag(input: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    if bytes.get(start).copied() != Some(b'$') {
+        return None;
+    }
+    if bytes.get(start + 1).copied() == Some(b'$') {
+        return Some(("$$".to_string(), start + 2));
+    }
+
+    let mut cursor = start + 1;
+    let first = bytes.get(cursor).copied()?;
+    if first.is_ascii_digit() || !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    cursor += 1;
+
+    while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_') {
+        cursor += 1;
+    }
+    if bytes.get(cursor).copied() != Some(b'$') {
+        return None;
+    }
+
+    Some((input.get(start..=cursor)?.to_string(), cursor + 1))
+}
+
+fn starts_with_bytes(haystack: &[u8], idx: usize, needle: &[u8]) -> bool {
+    haystack
+        .get(idx..idx.saturating_add(needle.len()))
+        .is_some_and(|slice| slice == needle)
+}
+
 fn advance_sql_quoted_index(bytes: &[u8], idx: usize, quote: u8) -> Option<usize> {
     let b = *bytes.get(idx)?;
     if b == quote {
@@ -39,7 +165,8 @@ fn parse_sql_references_with_cte_aliases(
     sql: &str,
     inherited_cte_aliases: &[String],
 ) -> Vec<(SqlStmtKind, String, Vec<String>)> {
-    let normalized = normalize_whitespace(sql);
+    let sanitized = sanitize_sql_for_reference_scan(sql);
+    let normalized = normalize_whitespace(&sanitized);
     let cte_parts = parse_sql_cte_parts(&normalized, inherited_cte_aliases);
     let mut refs = cte_parts
         .as_ref()
@@ -686,14 +813,20 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
             let (table, table_end) =
                 parse_sql_object_name_with_end(&normalized, into_idx + "INTO".len())?;
             let cursor = skip_sql_optional_insert_alias(&normalized, table_end);
-            let columns = collect_sql_insert_columns(&normalized, cursor);
+            let columns = collect_sql_insert_columns(&normalized, &table, cursor);
             Some((kind, table, columns))
         }
         SqlStmtKind::Update => {
             let update_idx = find_keyword_top_level_from(&normalized, "UPDATE", 0)?;
             let (table, table_end) =
                 parse_sql_write_object_name_with_end(&normalized, update_idx + "UPDATE".len())?;
-            let columns = collect_sql_update_columns(&normalized, table_end);
+            let (alias, alias_end) = parse_sql_optional_table_alias(&normalized, table_end);
+            let columns = collect_sql_update_columns(
+                &normalized,
+                &table,
+                alias.as_deref().unwrap_or(&table),
+                alias_end,
+            );
             Some((kind, table, columns))
         }
         SqlStmtKind::Delete => {
@@ -702,7 +835,13 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
                 find_keyword_top_level_from(&normalized, "FROM", delete_idx + "DELETE".len())?;
             let (table, table_end) =
                 parse_sql_write_object_name_with_end(&normalized, from_idx + "FROM".len())?;
-            let columns = collect_sql_delete_columns(&normalized, table_end);
+            let (alias, alias_end) = parse_sql_optional_table_alias(&normalized, table_end);
+            let columns = collect_sql_delete_columns(
+                &normalized,
+                &table,
+                alias.as_deref().unwrap_or(&table),
+                alias_end,
+            );
             Some((kind, table, columns))
         }
         SqlStmtKind::Merge => {
@@ -749,22 +888,7 @@ fn parse_sql_object_name_with_end(sql: &str, start: usize) -> Option<(String, us
         }
 
         let (segment, next) = if matches!(bytes[cursor], b'"' | b'`') {
-            let quote = bytes[cursor];
-            let start_seg = cursor + 1;
-            cursor += 1;
-            while cursor < bytes.len() {
-                if bytes[cursor] == quote {
-                    break;
-                }
-                cursor += 1;
-            }
-            let seg = sql.get(start_seg..cursor)?.to_string();
-            let next = if cursor < bytes.len() {
-                cursor + 1
-            } else {
-                cursor
-            };
-            (seg, next)
+            parse_sql_quoted_identifier(sql, cursor)?
         } else {
             let start_seg = cursor;
             while cursor < bytes.len()
@@ -811,6 +935,9 @@ fn collect_sql_select_columns(sql: &str, columns_raw: &str, from_idx: usize) -> 
             collect_sql_identifier_columns(segment, &mut cols, &mut seen);
         }
     }
+    if let Some(segment) = top_level_sql_clause_segment(sql, "WINDOW", clause_min) {
+        collect_sql_window_columns(segment, &mut cols, &mut seen);
+    }
 
     cols
 }
@@ -832,6 +959,9 @@ fn collect_sql_select_columns_by_source(
         if let Some(segment) = top_level_sql_clause_segment(sql, clause, clause_min) {
             collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
         }
+    }
+    if let Some(segment) = top_level_sql_clause_segment(sql, "WINDOW", clause_min) {
+        collect_sql_window_column_refs(segment, &mut qualified, &mut unqualified);
     }
 
     let mut columns = vec![Vec::new(); sources.len()];
@@ -871,6 +1001,37 @@ fn collect_sql_projection_column_refs(
         base = strip_sql_distinct_prefix(base);
 
         collect_sql_column_refs(base, qualified, unqualified);
+    }
+}
+
+fn collect_sql_window_columns(segment: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let mut qualified = Vec::new();
+    let mut unqualified = Vec::new();
+    collect_sql_window_column_refs(segment, &mut qualified, &mut unqualified);
+    for (_, column) in qualified {
+        push_column_ref(&column, cols, seen);
+    }
+    for column in unqualified {
+        push_column_ref(&column, cols, seen);
+    }
+}
+
+fn collect_sql_window_column_refs(
+    segment: &str,
+    qualified: &mut Vec<(String, String)>,
+    unqualified: &mut Vec<String>,
+) {
+    let mut cursor = 0usize;
+    while let Some(as_idx) = find_keyword_top_level_from(segment, "AS", cursor) {
+        let after_as = skip_sql_ws(segment.as_bytes(), as_idx + "AS".len());
+        if segment.as_bytes().get(after_as).copied() == Some(b'(')
+            && let Some((body, end)) = balanced_paren_segment(segment, after_as)
+        {
+            collect_sql_column_refs(body, qualified, unqualified);
+            cursor = end;
+            continue;
+        }
+        cursor = as_idx + "AS".len();
     }
 }
 
@@ -1217,6 +1378,10 @@ fn collect_sql_column_refs(
             i = next;
             continue;
         }
+        if parts.len() == 1 && previous_sql_keyword_is(segment, i, "OVER") {
+            i = next;
+            continue;
+        }
 
         if let Some(column) = parts.last()
             && !is_sql_reference_keyword(column)
@@ -1342,7 +1507,7 @@ fn sql_table_source_clause_end(sql: &str, start: usize) -> usize {
     .unwrap_or(sql.len())
 }
 
-fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
+fn collect_sql_insert_columns(sql: &str, target_table: &str, table_end: usize) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
     let cursor = skip_sql_ws(sql.as_bytes(), table_end);
@@ -1351,11 +1516,16 @@ fn collect_sql_insert_columns(sql: &str, table_end: usize) -> Vec<String> {
     {
         collect_sql_column_list(segment, &mut cols, &mut seen);
     }
-    if let Some(conflict) = top_level_sql_clause_segment(sql, "ON CONFLICT", table_end) {
-        collect_sql_identifier_columns(conflict, &mut cols, &mut seen);
-    }
+    collect_sql_insert_conflict_columns(sql, target_table, table_end, &mut cols, &mut seen);
     if let Some(returning) = top_level_sql_clause_segment(sql, "RETURNING", table_end) {
-        collect_sql_identifier_columns(returning, &mut cols, &mut seen);
+        collect_sql_target_columns_from_segment(
+            returning,
+            target_table,
+            target_table,
+            true,
+            &mut cols,
+            &mut seen,
+        );
     }
     cols
 }
@@ -1377,29 +1547,195 @@ fn skip_sql_optional_insert_alias(sql: &str, table_end: usize) -> usize {
     table_end
 }
 
-fn collect_sql_update_columns(sql: &str, table_end: usize) -> Vec<String> {
+fn collect_sql_update_columns(
+    sql: &str,
+    target_table: &str,
+    target_alias: &str,
+    table_end: usize,
+) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
     if let Some(set_segment) = top_level_sql_clause_segment(sql, "SET", table_end) {
-        collect_sql_identifier_columns(set_segment, &mut cols, &mut seen);
+        collect_sql_assignment_target_columns(set_segment, &mut cols, &mut seen);
+        for assignment in split_sql_top_level(set_segment, ',') {
+            let Some((_, right)) = assignment.split_once('=') else {
+                continue;
+            };
+            collect_sql_target_columns_from_segment(
+                right,
+                target_table,
+                target_alias,
+                true,
+                &mut cols,
+                &mut seen,
+            );
+        }
     }
-    for clause in ["FROM", "WHERE", "RETURNING"] {
+    for clause in ["WHERE", "RETURNING"] {
         if let Some(segment) = top_level_sql_clause_segment(sql, clause, table_end) {
-            collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+            collect_sql_target_columns_from_segment(
+                segment,
+                target_table,
+                target_alias,
+                true,
+                &mut cols,
+                &mut seen,
+            );
         }
     }
     cols
 }
 
-fn collect_sql_delete_columns(sql: &str, table_end: usize) -> Vec<String> {
+fn collect_sql_delete_columns(
+    sql: &str,
+    target_table: &str,
+    target_alias: &str,
+    table_end: usize,
+) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
-    for clause in ["USING", "WHERE", "RETURNING"] {
+    for clause in ["WHERE", "RETURNING"] {
         if let Some(segment) = top_level_sql_clause_segment(sql, clause, table_end) {
-            collect_sql_identifier_columns(segment, &mut cols, &mut seen);
+            collect_sql_target_columns_from_segment(
+                segment,
+                target_table,
+                target_alias,
+                true,
+                &mut cols,
+                &mut seen,
+            );
         }
     }
     cols
+}
+
+fn collect_sql_insert_conflict_columns(
+    sql: &str,
+    target_table: &str,
+    min_idx: usize,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let Some(conflict_idx) = find_keyword_top_level_from(sql, "ON CONFLICT", min_idx) else {
+        return;
+    };
+    let after_conflict = skip_sql_ws(sql.as_bytes(), conflict_idx + "ON CONFLICT".len());
+    if sql.as_bytes().get(after_conflict).copied() == Some(b'(')
+        && let Some((segment, _)) = balanced_paren_segment(sql, after_conflict)
+    {
+        collect_sql_column_list(segment, cols, seen);
+    }
+
+    let do_update_idx = find_keyword_top_level_from(sql, "DO UPDATE SET", after_conflict);
+    let conflict_end = do_update_idx.unwrap_or_else(|| {
+        top_level_sql_clause_start(sql, after_conflict, &["RETURNING"]).unwrap_or(sql.len())
+    });
+    collect_sql_conflict_where_columns(sql, target_table, after_conflict, conflict_end, cols, seen);
+
+    if let Some(do_update_idx) = do_update_idx {
+        let set_start = do_update_idx + "DO UPDATE SET".len();
+        let set_end = top_level_sql_clause_start(sql, set_start, &["WHERE", "RETURNING"])
+            .unwrap_or(sql.len());
+        if let Some(segment) = sql.get(set_start..set_end) {
+            collect_sql_assignment_target_columns(segment, cols, seen);
+            for assignment in split_sql_top_level(segment, ',') {
+                let Some((_, right)) = assignment.split_once('=') else {
+                    continue;
+                };
+                collect_sql_target_columns_from_segment(
+                    right,
+                    target_table,
+                    target_table,
+                    true,
+                    cols,
+                    seen,
+                );
+            }
+        }
+
+        let update_end =
+            top_level_sql_clause_start(sql, set_end, &["RETURNING"]).unwrap_or(sql.len());
+        collect_sql_conflict_where_columns(sql, target_table, set_end, update_end, cols, seen);
+    }
+}
+
+fn collect_sql_conflict_where_columns(
+    sql: &str,
+    target_table: &str,
+    start: usize,
+    end: usize,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut cursor = start;
+    while let Some(where_idx) = find_keyword_top_level_from(sql, "WHERE", cursor) {
+        if where_idx >= end {
+            break;
+        }
+        let segment_start = where_idx + "WHERE".len();
+        let segment_end =
+            top_level_sql_clause_start(sql, segment_start, &["DO UPDATE SET", "RETURNING"])
+                .filter(|idx| *idx <= end)
+                .unwrap_or(end);
+        if let Some(segment) = sql.get(segment_start..segment_end) {
+            collect_sql_target_columns_from_segment(
+                segment,
+                target_table,
+                target_table,
+                true,
+                cols,
+                seen,
+            );
+        }
+        cursor = segment_end;
+    }
+}
+
+fn collect_sql_assignment_target_columns(
+    segment: &str,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for assignment in split_sql_top_level(segment, ',') {
+        let left = assignment
+            .split_once('=')
+            .map_or(assignment, |(left, _)| left);
+        if let Some((column, _, _)) = parse_sql_identifier_path(left.trim(), 0) {
+            push_column_ref(&column, cols, seen);
+        } else if left.trim_start().starts_with('(')
+            && let Some((columns, _)) = balanced_paren_segment(left.trim_start(), 0)
+        {
+            collect_sql_column_list(columns, cols, seen);
+        }
+    }
+}
+
+fn collect_sql_target_columns_from_segment(
+    segment: &str,
+    target_table: &str,
+    target_alias: &str,
+    include_unqualified: bool,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut qualified = Vec::new();
+    let mut unqualified = Vec::new();
+    collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
+
+    let sources = [SqlTableSource {
+        table: target_table.to_string(),
+        alias: target_alias.to_string(),
+    }];
+    for column_set in columns_for_qualified_refs(&sources, qualified) {
+        for column in column_set {
+            push_column_ref(&column, cols, seen);
+        }
+    }
+    if include_unqualified {
+        for column in unqualified {
+            push_column_ref(&column, cols, seen);
+        }
+    }
 }
 
 fn collect_sql_column_list(segment: &str, cols: &mut Vec<String>, seen: &mut HashSet<String>) {
@@ -1524,6 +1860,10 @@ fn collect_sql_identifier_columns(
             i = next;
             continue;
         }
+        if segment_count == 1 && previous_sql_keyword_is(segment, i, "OVER") {
+            i = next;
+            continue;
+        }
         if !is_sql_reference_keyword(&column) {
             push_column_ref(&column, cols, seen);
         }
@@ -1584,16 +1924,7 @@ fn parse_sql_identifier_segment(input: &str, start: usize) -> Option<(String, us
     }
 
     if matches!(bytes[cursor], b'"' | b'`') {
-        let quote = bytes[cursor];
-        let mut i = cursor + 1;
-        let start_seg = i;
-        while i < bytes.len() {
-            if bytes[i] == quote {
-                return Some((input.get(start_seg..i)?.to_string(), i + 1));
-            }
-            i += 1;
-        }
-        return None;
+        return parse_sql_quoted_identifier(input, cursor);
     }
 
     if !matches!(bytes[cursor], b'a'..=b'z' | b'A'..=b'Z' | b'_') {
@@ -1606,6 +1937,40 @@ fn parse_sql_identifier_segment(input: &str, start: usize) -> Option<(String, us
     }
 
     Some((input.get(cursor..i)?.to_string(), i))
+}
+
+fn previous_sql_keyword_is(input: &str, idx: usize, keyword: &str) -> bool {
+    let before = input.get(..idx).unwrap_or_default().trim_end();
+    let Some(start) = before.rfind(|ch: char| !is_ident_char(ch)) else {
+        return before.eq_ignore_ascii_case(keyword);
+    };
+    before
+        .get(start + 1..)
+        .is_some_and(|word| word.eq_ignore_ascii_case(keyword))
+}
+
+fn parse_sql_quoted_identifier(input: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let quote = *bytes.get(start)?;
+    if !matches!(quote, b'"' | b'`') {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == quote {
+            if bytes.get(i + 1).copied() == Some(quote) {
+                out.push(quote as char);
+                i += 2;
+                continue;
+            }
+            return Some((out, i + 1));
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    None
 }
 
 fn skip_sql_single_quote(bytes: &[u8], mut idx: usize) -> usize {
@@ -1634,18 +1999,25 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "BY"
             | "CASE"
             | "COLLATE"
+            | "CONFLICT"
+            | "CONSTRAINT"
             | "CROSS"
             | "DESC"
             | "DISTINCT"
+            | "DO"
             | "ELSE"
             | "END"
+            | "EXCLUDED"
             | "FALSE"
             | "FIRST"
             | "FROM"
+            | "FOLLOWING"
             | "GROUP"
+            | "GROUPS"
             | "HAVING"
             | "IN"
             | "INNER"
+            | "INSERT"
             | "IS"
             | "JOIN"
             | "LAST"
@@ -1654,6 +2026,7 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "LIMIT"
             | "NATURAL"
             | "NOT"
+            | "NOTHING"
             | "NULL"
             | "NULLS"
             | "OFFSET"
@@ -1661,13 +2034,25 @@ fn is_sql_reference_keyword(ident: &str) -> bool {
             | "OR"
             | "ORDER"
             | "OUTER"
+            | "OVER"
+            | "PARTITION"
+            | "PRECEDING"
+            | "RANGE"
             | "RIGHT"
+            | "ROW"
+            | "ROWS"
             | "SELECT"
+            | "SET"
             | "THEN"
+            | "TIES"
             | "TRUE"
+            | "UNBOUNDED"
+            | "UPDATE"
             | "USING"
+            | "VALUES"
             | "WHEN"
             | "WHERE"
+            | "WINDOW"
     )
 }
 
@@ -1835,6 +2220,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_escaped_quoted_identifier() {
+        let sql = r#"SELECT "weird""column" FROM "weird""users" WHERE "weird""column" = $1"#;
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "weird\"users");
+        assert_eq!(cols, vec!["weird\"column"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_tracks_predicate_and_order_columns() {
         let sql = "SELECT id FROM users WHERE email = $1 ORDER BY created_at DESC";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
@@ -1854,12 +2248,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_tracks_window_clause_columns() {
+        let sql = "SELECT row_number() OVER w FROM users WINDOW w AS (PARTITION BY tenant_id ORDER BY created_at)";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Select);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["tenant_id", "created_at"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_skips_params_strings_and_keywords() {
         let sql = "SELECT id FROM users WHERE lower(users.email) = lower(:email) AND status = 'active' ORDER BY users.created_at DESC NULLS LAST";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind, SqlStmtKind::Select);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["id", "email", "status", "created_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_skips_comments_and_dollar_quoted_text() {
+        let sql = r#"
+            -- SELECT id FROM ghosts
+            SELECT id
+            FROM users
+            WHERE note = $$SELECT secret FROM ghosts;$$
+              AND status = 'active'
+              /* AND deleted_at FROM block_users */
+        "#;
+        let refs = parse_sql_references(sql);
+
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(refs[0].1, "users");
+        assert_eq!(refs[0].2, vec!["id", "note", "status"]);
     }
 
     #[test]
@@ -1887,6 +2307,25 @@ mod tests {
         assert_eq!(kind, SqlStmtKind::Insert);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["email", "status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_insert_conflict_columns_without_keywords() {
+        let sql = "INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO UPDATE SET last_seen = EXCLUDED.last_seen WHERE users.active RETURNING id";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "last_seen", "active", "id"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_insert_conflict_constraint_is_not_column() {
+        let sql =
+            "INSERT INTO users DEFAULT VALUES ON CONFLICT ON CONSTRAINT users_email_key DO NOTHING";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert!(cols.is_empty(), "{cols:?}");
     }
 
     #[test]
@@ -1924,6 +2363,12 @@ mod tests {
     fn test_parse_sql_references_tracks_update_from_source_table() {
         let sql = "UPDATE orders o SET status = p.status FROM payments p WHERE o.payment_id = p.id AND p.state = $1";
         let refs = parse_sql_references(sql);
+
+        let orders = refs
+            .iter()
+            .find(|(_, table, _)| table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.2, vec!["status", "payment_id"]);
 
         let payments = refs
             .iter()
@@ -1968,6 +2413,12 @@ mod tests {
         let sql =
             "DELETE FROM sessions s USING users u WHERE s.user_id = u.id AND u.disabled = true";
         let refs = parse_sql_references(sql);
+
+        let sessions = refs
+            .iter()
+            .find(|(_, table, _)| table == "sessions")
+            .expect("sessions reference");
+        assert_eq!(sessions.2, vec!["user_id"]);
 
         let users = refs
             .iter()

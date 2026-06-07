@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::parse;
 
 use self::command_refs::command_to_references;
-use self::sql_refs::{normalize_whitespace, parse_sql_references};
+use self::sql_refs::{normalize_whitespace, parse_sql_references, sanitize_sql_for_reference_scan};
 use super::rust_ast::RustAnalyzer;
 use super::rust_ast::detect_raw_sql_in_file;
 #[cfg(test)]
@@ -184,9 +184,19 @@ impl CodebaseScanner {
     }
 
     fn scan_sql_document(&self, path: &Path, content: &str) -> Vec<CodeReference> {
-        let mut refs = Vec::new();
+        self.scan_sql_fragment(path, 1, content)
+    }
 
-        for (line_number, statement) in split_sql_document_statements(content) {
+    fn scan_sql_fragment(
+        &self,
+        path: &Path,
+        base_line: usize,
+        content: &str,
+    ) -> Vec<CodeReference> {
+        let mut refs = Vec::new();
+        let sanitized = sanitize_sql_for_reference_scan(content);
+
+        for (line_number, statement) in split_sql_document_statements(&sanitized) {
             let Some((start, end)) = trim_query_bounds(&statement) else {
                 continue;
             };
@@ -197,8 +207,8 @@ impl CodebaseScanner {
             if normalized.is_empty() {
                 continue;
             }
-            let statement_line =
-                line_number + statement[..start].bytes().filter(|b| *b == b'\n').count();
+            let statement_line = base_line + line_number - 1
+                + statement[..start].bytes().filter(|b| *b == b'\n').count();
 
             for (_kind, table, columns) in parse_sql_references(&normalized) {
                 refs.push(CodeReference {
@@ -237,16 +247,7 @@ impl CodebaseScanner {
         }
 
         let normalized = normalize_whitespace(candidate);
-        for (_kind, table, columns) in parse_sql_references(&normalized) {
-            refs.push(CodeReference {
-                file: path.to_path_buf(),
-                line: line_number,
-                table,
-                columns,
-                query_type: QueryType::RawSql,
-                snippet: normalized.chars().take(60).collect(),
-            });
-        }
+        refs.extend(self.scan_sql_fragment(path, line_number, &normalized));
 
         refs
     }
@@ -260,16 +261,7 @@ impl CodebaseScanner {
                 continue;
             }
 
-            for (_kind, table, columns) in parse_sql_references(&normalized) {
-                refs.push(CodeReference {
-                    file: path.to_path_buf(),
-                    line: sql_match.line,
-                    table,
-                    columns,
-                    query_type: QueryType::RawSql,
-                    snippet: normalized.chars().take(60).collect(),
-                });
-            }
+            refs.extend(self.scan_sql_fragment(path, sql_match.line, &normalized));
         }
 
         refs
@@ -477,6 +469,74 @@ UPDATE orders SET status = $1 WHERE id = $2;
             .expect("orders reference");
         assert_eq!(orders.line, 3);
         assert_eq!(orders.columns, vec!["status", "id"]);
+    }
+
+    #[test]
+    fn test_sql_file_scan_ignores_comments_and_dollar_quoted_semicolons() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_sql_comments_dollar_{}_{}.sql",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"
+-- SELECT id FROM ghosts;
+SELECT id FROM users WHERE note = $$fake; sql;$$;
+/* SELECT id FROM block_users; */
+SELECT total FROM orders WHERE status = 'paid';
+"#;
+
+        std::fs::write(&path, source).expect("write temp sql file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+
+        let users = refs
+            .iter()
+            .find(|reference| reference.table == "users")
+            .expect("users reference");
+        assert_eq!(users.columns, vec!["id", "note"]);
+
+        let orders = refs
+            .iter()
+            .find(|reference| reference.table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.columns, vec!["total", "status"]);
+    }
+
+    #[test]
+    fn test_non_rust_scan_tracks_multiple_sql_statements_in_one_literal() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_text_multi_sql_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"
+            const sql = `
+                SELECT id FROM users WHERE active = true;
+                UPDATE orders SET status = $1 WHERE id = $2;
+            `;
+        "#;
+
+        std::fs::write(&path, source).expect("write temp text file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert!(refs.iter().any(|reference| reference.table == "users"));
+        assert!(refs.iter().any(|reference| reference.table == "orders"));
     }
 
     #[test]
