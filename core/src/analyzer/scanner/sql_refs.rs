@@ -2908,14 +2908,35 @@ fn collect_sql_target_columns_from_segment(
     cols: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
+    collect_sql_target_columns_from_segment_with_aliases(
+        segment,
+        target_table,
+        &[target_alias],
+        include_unqualified,
+        cols,
+        seen,
+    );
+}
+
+fn collect_sql_target_columns_from_segment_with_aliases(
+    segment: &str,
+    target_table: &str,
+    target_aliases: &[&str],
+    include_unqualified: bool,
+    cols: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
     let mut qualified = Vec::new();
     let mut unqualified = Vec::new();
     collect_sql_column_refs(segment, &mut qualified, &mut unqualified);
 
-    let sources = [SqlTableSource {
-        table: target_table.to_string(),
-        alias: target_alias.to_string(),
-    }];
+    let sources = target_aliases
+        .iter()
+        .map(|alias| SqlTableSource {
+            table: target_table.to_string(),
+            alias: (*alias).to_string(),
+        })
+        .collect::<Vec<_>>();
     for column_set in columns_for_qualified_refs(&sources, qualified) {
         for column in column_set {
             push_column_ref(&column, cols, seen);
@@ -2935,10 +2956,58 @@ fn collect_sql_target_projection_columns_from_segment(
     cols: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
+    let (segment, returning_aliases) = strip_sql_returning_with_aliases(segment);
+    let mut target_aliases = vec![target_alias, "old", "new"];
+    target_aliases.extend(returning_aliases.iter().map(String::as_str));
+
     for projection in split_sql_top_level(segment, ',') {
         let base = strip_sql_projection_alias(projection);
-        collect_sql_target_columns_from_segment(base, target_table, target_alias, true, cols, seen);
+        collect_sql_target_columns_from_segment_with_aliases(
+            base,
+            target_table,
+            &target_aliases,
+            true,
+            cols,
+            seen,
+        );
     }
+}
+
+fn strip_sql_returning_with_aliases(segment: &str) -> (&str, Vec<String>) {
+    let trimmed = segment.trim_start();
+    if !starts_with_keyword_at(trimmed, 0, "WITH") {
+        return (segment, Vec::new());
+    }
+
+    let after_with = skip_sql_ws(trimmed.as_bytes(), "WITH".len());
+    if trimmed.as_bytes().get(after_with).copied() != Some(b'(') {
+        return (segment, Vec::new());
+    }
+
+    let Some((alias_segment, end)) = balanced_paren_segment(trimmed, after_with) else {
+        return (segment, Vec::new());
+    };
+    let aliases = parse_sql_returning_with_aliases(alias_segment);
+    let rest = trimmed.get(end..).unwrap_or_default().trim_start();
+    (rest, aliases)
+}
+
+fn parse_sql_returning_with_aliases(segment: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for item in split_sql_top_level(segment, ',') {
+        let item = item.trim();
+        let Some(as_idx) = find_keyword_top_level_from(item, "AS", 0) else {
+            continue;
+        };
+        let kind = item.get(..as_idx).unwrap_or_default().trim();
+        if !starts_with_keyword_at(kind, 0, "OLD") && !starts_with_keyword_at(kind, 0, "NEW") {
+            continue;
+        }
+        if let Some((alias, _)) = parse_sql_identifier_segment(item, as_idx + "AS".len()) {
+            aliases.push(alias);
+        }
+    }
+    aliases
 }
 
 fn strip_sql_projection_alias(projection: &str) -> &str {
@@ -4061,6 +4130,19 @@ mod tests {
         assert_eq!(kind, SqlStmtKind::Update);
         assert_eq!(table, "users");
         assert_eq!(cols, vec!["email", "id", "updated_at"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_update_returning_old_new_aliases_are_target_columns() {
+        let default_alias_sql =
+            "UPDATE users SET status = $1 WHERE id = $2 RETURNING old.email, new.updated_at";
+        let explicit_alias_sql = "UPDATE users SET status = $1 WHERE id = $2 RETURNING WITH (OLD AS o, NEW AS n) o.email AS old_email, n.updated_at AS new_updated_at";
+
+        let (_, _, default_cols) = parse_sql_reference(default_alias_sql).expect("sql parse");
+        let (_, _, explicit_cols) = parse_sql_reference(explicit_alias_sql).expect("sql parse");
+
+        assert_eq!(default_cols, vec!["status", "id", "email", "updated_at"]);
+        assert_eq!(explicit_cols, vec!["status", "id", "email", "updated_at"]);
     }
 
     #[test]

@@ -1818,6 +1818,36 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_raw_sql_returning_old_new_alias_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_returning_old_new_alias_column",
+            r#"
+            const sql = `
+                UPDATE users
+                SET status = $1
+                WHERE id = $2
+                RETURNING WITH (OLD AS o, NEW AS n) o.email AS old_email, n.updated_at AS changed_at
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_merge_source_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
