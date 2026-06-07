@@ -1365,7 +1365,9 @@ fn parse_sql_privilege_references(
     let Some(on_idx) = find_keyword_top_level_from(sql, "ON", 0) else {
         return Vec::new();
     };
-    let cursor = skip_optional_sql_keyword(sql, on_idx + "ON".len(), "TABLE");
+    let Some(cursor) = sql_privilege_table_target_start(sql, on_idx + "ON".len()) else {
+        return Vec::new();
+    };
     let Some((table, _)) = parse_sql_write_object_name_with_end(sql, cursor) else {
         return Vec::new();
     };
@@ -1385,6 +1387,39 @@ fn parse_sql_privilege_references(
     }
 
     vec![(kind, table, cols)]
+}
+
+fn sql_privilege_table_target_start(sql: &str, start: usize) -> Option<usize> {
+    let cursor = skip_sql_ws(sql.as_bytes(), start);
+    if starts_with_keyword_at(sql, cursor, "ALL") {
+        return None;
+    }
+    if starts_with_keyword_at(sql, cursor, "FOREIGN TABLE") {
+        return Some(skip_sql_ws(sql.as_bytes(), cursor + "FOREIGN TABLE".len()));
+    }
+    if starts_with_keyword_at(sql, cursor, "TABLE") {
+        return Some(skip_sql_ws(sql.as_bytes(), cursor + "TABLE".len()));
+    }
+    for keyword in [
+        "SCHEMA",
+        "SEQUENCE",
+        "DATABASE",
+        "FUNCTION",
+        "PROCEDURE",
+        "ROUTINE",
+        "TYPE",
+        "LANGUAGE",
+        "TABLESPACE",
+        "FOREIGN DATA WRAPPER",
+        "SERVER",
+        "LARGE OBJECT",
+        "PARAMETER",
+    ] {
+        if starts_with_keyword_at(sql, cursor, keyword) {
+            return None;
+        }
+    }
+    Some(cursor)
 }
 
 fn parse_sql_table_maintenance_reference(
@@ -4603,6 +4638,19 @@ mod tests {
 
         assert_eq!(ref_columns(&grant_refs, "users"), vec!["email", "status"]);
         assert_eq!(ref_columns(&revoke_refs, "users"), vec!["status"]);
+    }
+
+    #[test]
+    fn test_parse_sql_references_skip_non_table_privilege_targets() {
+        let schema_refs = parse_sql_references("GRANT USAGE ON SCHEMA public TO app_role");
+        let all_tables_refs =
+            parse_sql_references("GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_role");
+        let sequence_refs =
+            parse_sql_references("REVOKE USAGE ON SEQUENCE users_id_seq FROM app_role");
+
+        assert!(schema_refs.is_empty(), "{schema_refs:?}");
+        assert!(all_tables_refs.is_empty(), "{all_tables_refs:?}");
+        assert!(sequence_refs.is_empty(), "{sequence_refs:?}");
     }
 
     #[test]

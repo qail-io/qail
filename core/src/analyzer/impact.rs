@@ -2247,6 +2247,26 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_raw_sql_non_table_privilege_target_is_not_breaking() {
+        let cmd = Qail {
+            action: Action::Drop,
+            table: "schema".to_string(),
+            ..Default::default()
+        };
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_non_table_privilege_target",
+            "const sql = `GRANT USAGE ON SCHEMA public TO app_role`;",
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_copy_where_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
