@@ -722,6 +722,64 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_column_named_like_schema_function_is_not_blocked() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("lower".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_schema_function_not_column",
+            r#"
+            const sql = `
+                SELECT pg_catalog.lower(email)
+                FROM users
+                WHERE pg_catalog.lower(status) = $1
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
+    fn test_dropped_column_named_like_cast_type_is_not_blocked() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email_text".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_cast_type_not_column",
+            r#"
+            const sql = `
+                SELECT CAST(email AS public.email_text)
+                FROM users
+                WHERE status::public.status_name = $1
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_cte_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -1674,6 +1732,35 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_raw_sql_returning_alias_is_not_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("user_id".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_returning_alias_not_column",
+            r#"
+            const sql = `
+                INSERT INTO users (email)
+                VALUES ($1)
+                RETURNING id AS user_id
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 0);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_merge_source_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -1747,6 +1834,37 @@ mod tests {
         .expect("write temp source");
         let code_refs = super::super::scanner::CodebaseScanner::new().scan(&path);
         let _ = std::fs::remove_file(&path);
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_merge_returning_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "orders".to_string(),
+            columns: vec![crate::ast::Expr::Named("created_at".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_merge_returning_column",
+            r#"
+            const sql = `
+                MERGE INTO orders o
+                USING staging_orders s
+                ON o.id = s.id
+                WHEN MATCHED THEN UPDATE SET status = s.status
+                RETURNING created_at AS merged_at
+            `;
+            "#,
+        );
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
