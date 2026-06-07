@@ -582,6 +582,7 @@ fn is_sql_table_source_boundary(ident: &str) -> bool {
     matches!(
         ident.to_ascii_uppercase().as_str(),
         "CROSS"
+            | "DEFAULT"
             | "FULL"
             | "GROUP"
             | "HAVING"
@@ -596,12 +597,14 @@ fn is_sql_table_source_boundary(ident: &str) -> bool {
             | "ORDER"
             | "ORDINALITY"
             | "OUTER"
+            | "OVERRIDING"
             | "RIGHT"
             | "RETURNING"
             | "SET"
             | "TABLESAMPLE"
             | "UNION"
             | "USING"
+            | "VALUES"
             | "WHERE"
             | "WITH"
     )
@@ -1780,8 +1783,13 @@ fn parse_sql_reference(sql: &str) -> Option<(SqlStmtKind, String, Vec<String>)> 
                 find_keyword_top_level_from(&normalized, "INTO", insert_idx + "INSERT".len())?;
             let (table, table_end) =
                 parse_sql_object_name_with_end(&normalized, into_idx + "INTO".len())?;
-            let cursor = skip_sql_optional_insert_alias(&normalized, table_end);
-            let columns = collect_sql_insert_columns(&normalized, &table, cursor);
+            let (alias, cursor) = parse_sql_optional_insert_alias(&normalized, table_end);
+            let columns = collect_sql_insert_columns(
+                &normalized,
+                &table,
+                alias.as_deref().unwrap_or(&table),
+                cursor,
+            );
             Some((kind, table, columns))
         }
         SqlStmtKind::Update => {
@@ -2572,7 +2580,12 @@ fn sql_table_source_clause_end(sql: &str, start: usize) -> usize {
     .unwrap_or(sql.len())
 }
 
-fn collect_sql_insert_columns(sql: &str, target_table: &str, table_end: usize) -> Vec<String> {
+fn collect_sql_insert_columns(
+    sql: &str,
+    target_table: &str,
+    target_alias: &str,
+    table_end: usize,
+) -> Vec<String> {
     let mut cols = Vec::new();
     let mut seen = HashSet::new();
     let cursor = skip_sql_ws(sql.as_bytes(), table_end);
@@ -2581,12 +2594,19 @@ fn collect_sql_insert_columns(sql: &str, target_table: &str, table_end: usize) -
     {
         collect_sql_column_list(segment, &mut cols, &mut seen);
     }
-    collect_sql_insert_conflict_columns(sql, target_table, table_end, &mut cols, &mut seen);
+    collect_sql_insert_conflict_columns(
+        sql,
+        target_table,
+        target_alias,
+        table_end,
+        &mut cols,
+        &mut seen,
+    );
     if let Some(returning) = top_level_sql_clause_segment(sql, "RETURNING", table_end) {
         collect_sql_target_columns_from_segment(
             returning,
             target_table,
-            target_table,
+            target_alias,
             true,
             &mut cols,
             &mut seen,
@@ -2595,21 +2615,21 @@ fn collect_sql_insert_columns(sql: &str, target_table: &str, table_end: usize) -
     cols
 }
 
-fn skip_sql_optional_insert_alias(sql: &str, table_end: usize) -> usize {
+fn parse_sql_optional_insert_alias(sql: &str, table_end: usize) -> (Option<String>, usize) {
     let bytes = sql.as_bytes();
     let mut cursor = skip_sql_ws(bytes, table_end);
     if starts_with_keyword_at(sql, cursor, "AS") {
         cursor = skip_sql_ws(bytes, cursor + "AS".len());
         return parse_sql_identifier_segment(sql, cursor)
-            .map(|(_, end)| end)
-            .unwrap_or(cursor);
+            .map(|(alias, end)| (Some(alias), end))
+            .unwrap_or((None, cursor));
     }
     if let Some((alias, end)) = parse_sql_identifier_segment(sql, cursor)
         && !is_sql_table_source_boundary(&alias)
     {
-        return end;
+        return (Some(alias), end);
     }
-    table_end
+    (None, table_end)
 }
 
 fn collect_sql_update_columns(
@@ -2677,6 +2697,7 @@ fn collect_sql_delete_columns(
 fn collect_sql_insert_conflict_columns(
     sql: &str,
     target_table: &str,
+    target_alias: &str,
     min_idx: usize,
     cols: &mut Vec<String>,
     seen: &mut HashSet<String>,
@@ -2695,7 +2716,15 @@ fn collect_sql_insert_conflict_columns(
     let conflict_end = do_update_idx.unwrap_or_else(|| {
         top_level_sql_clause_start(sql, after_conflict, &["RETURNING"]).unwrap_or(sql.len())
     });
-    collect_sql_conflict_where_columns(sql, target_table, after_conflict, conflict_end, cols, seen);
+    collect_sql_conflict_where_columns(
+        sql,
+        target_table,
+        target_alias,
+        after_conflict,
+        conflict_end,
+        cols,
+        seen,
+    );
 
     if let Some(do_update_idx) = do_update_idx {
         let set_start = do_update_idx + "DO UPDATE SET".len();
@@ -2710,7 +2739,7 @@ fn collect_sql_insert_conflict_columns(
                 collect_sql_target_columns_from_segment(
                     right,
                     target_table,
-                    target_table,
+                    target_alias,
                     true,
                     cols,
                     seen,
@@ -2720,13 +2749,22 @@ fn collect_sql_insert_conflict_columns(
 
         let update_end =
             top_level_sql_clause_start(sql, set_end, &["RETURNING"]).unwrap_or(sql.len());
-        collect_sql_conflict_where_columns(sql, target_table, set_end, update_end, cols, seen);
+        collect_sql_conflict_where_columns(
+            sql,
+            target_table,
+            target_alias,
+            set_end,
+            update_end,
+            cols,
+            seen,
+        );
     }
 }
 
 fn collect_sql_conflict_where_columns(
     sql: &str,
     target_table: &str,
+    target_alias: &str,
     start: usize,
     end: usize,
     cols: &mut Vec<String>,
@@ -2746,7 +2784,7 @@ fn collect_sql_conflict_where_columns(
             collect_sql_target_columns_from_segment(
                 segment,
                 target_table,
-                target_table,
+                target_alias,
                 true,
                 cols,
                 seen,
@@ -3608,8 +3646,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sql_reference_insert_alias_returning_columns() {
+        let sql = "INSERT INTO users AS u (email) VALUES ($1) RETURNING u.id, u.created_at";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "id", "created_at"]);
+    }
+
+    #[test]
     fn test_parse_sql_reference_insert_conflict_columns_without_keywords() {
         let sql = "INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO UPDATE SET last_seen = EXCLUDED.last_seen WHERE users.active RETURNING id";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["email", "last_seen", "active", "id"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_insert_alias_conflict_columns() {
+        let sql = "INSERT INTO users AS u (email) VALUES ($1) ON CONFLICT (email) DO UPDATE SET last_seen = EXCLUDED.last_seen WHERE u.active RETURNING u.id";
         let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
         assert_eq!(kind, SqlStmtKind::Insert);
         assert_eq!(table, "users");
@@ -3624,6 +3680,24 @@ mod tests {
         assert_eq!(kind, SqlStmtKind::Insert);
         assert_eq!(table, "users");
         assert!(cols.is_empty(), "{cols:?}");
+    }
+
+    #[test]
+    fn test_parse_sql_reference_insert_values_is_not_alias() {
+        let sql = "INSERT INTO users VALUES ($1, $2) RETURNING id";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["id"]);
+    }
+
+    #[test]
+    fn test_parse_sql_reference_insert_overriding_is_not_alias() {
+        let sql = "INSERT INTO users OVERRIDING SYSTEM VALUE VALUES ($1, $2) RETURNING id";
+        let (kind, table, cols) = parse_sql_reference(sql).expect("sql parse");
+        assert_eq!(kind, SqlStmtKind::Insert);
+        assert_eq!(table, "users");
+        assert_eq!(cols, vec!["id"]);
     }
 
     #[test]

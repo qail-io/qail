@@ -1491,6 +1491,67 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_raw_sql_insert_alias_returning_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("created_at".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_insert_alias_returning_column",
+            r#"
+            const sql = `
+                INSERT INTO users AS u (email)
+                VALUES ($1)
+                RETURNING u.id, u.created_at
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_raw_sql_insert_alias_conflict_column_is_breaking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("active".to_string())],
+            ..Default::default()
+        };
+
+        let code_refs = scan_temp_source(
+            "qail_impact_raw_sql_insert_alias_conflict_column",
+            r#"
+            const sql = `
+                INSERT INTO users AS u (email)
+                VALUES ($1)
+                ON CONFLICT (email)
+                DO UPDATE SET last_seen = EXCLUDED.last_seen
+                WHERE u.active
+                RETURNING u.id
+            `;
+            "#,
+        );
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+
+        assert!(!impact.safe_to_run, "{code_refs:?}");
+        assert_eq!(impact.breaking_changes.len(), 1);
+    }
+
+    #[test]
     fn test_dropped_raw_sql_update_only_column_is_breaking() {
         let cmd = Qail {
             action: Action::AlterDrop,
