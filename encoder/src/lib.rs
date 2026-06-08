@@ -1237,6 +1237,17 @@ mod tests {
     }
 
     #[test]
+    fn c_header_covers_exported_ffi_symbols() {
+        let header = include_str!("../include/qail_encoder.h");
+        for symbol in exported_symbol_names_from_source() {
+            assert!(
+                header.contains(&format!("{symbol}(")),
+                "missing C header declaration for exported symbol `{symbol}`"
+            );
+        }
+    }
+
+    #[test]
     fn test_version() {
         let v = qail_version();
         let s = unsafe { CStr::from_ptr(v) }.to_str().unwrap();

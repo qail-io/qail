@@ -30,6 +30,22 @@ Enterprise database authentication belongs in the Rust PostgreSQL driver layer
 (`qail-pg`) through `ConnectOptions` and token-provider callbacks, not in this
 encoder ABI.
 
+## C Header
+
+The public C ABI is declared in [`include/qail_encoder.h`](include/qail_encoder.h).
+Keep the header, Rust exports, and ABI tests in sync when adding or removing
+symbols.
+
+Ownership rules:
+
+- Strings returned by `qail_transpile` must be freed with `qail_free`.
+- Byte buffers returned by `qail_encode_*` must be freed with `qail_free_bytes`
+  using the exact pointer and length returned by the call.
+- Response handles returned by `qail_decode_response` must be freed with
+  `qail_response_free`.
+- `qail_response_get_string` returns a borrowed pointer valid only until the
+  response handle is freed.
+
 ## License
 
 Apache-2.0
