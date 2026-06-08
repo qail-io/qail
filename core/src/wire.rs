@@ -113,6 +113,9 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
 
 /// Encode one command into compact binary wire format (QWB2 AST binary).
 pub fn encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
+    validate_binary_ast_limits(cmd)?;
+    crate::sanitize::validate_ast(cmd).map_err(|e| e.to_string())?;
+
     let payload = serde_json::to_vec(cmd).map_err(|e| format!("binary AST encode failed: {e}"))?;
     if payload.len() > MAX_CMD_BINARY_PAYLOAD_BYTES {
         return Err(format!(
@@ -967,6 +970,15 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn encode_cmd_binary_unchecked_for_test(cmd: &Qail) -> Vec<u8> {
+        let payload = serde_json::to_vec(cmd).expect("test binary AST encode");
+        let mut out = Vec::with_capacity(8 + payload.len());
+        out.extend_from_slice(&CMD_BIN_MAGIC);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(&payload);
+        out
+    }
+
     #[test]
     fn cmd_text_roundtrip() {
         let cmd = crate::ast::Qail::get("users")
@@ -1062,7 +1074,7 @@ mod tests {
     #[test]
     fn cmd_binary_decode_rejects_unsafe_identifiers() {
         let cmd = crate::ast::Qail::get("users; DROP TABLE users; --").limit(1);
-        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
+        let encoded = encode_cmd_binary_unchecked_for_test(&cmd);
 
         let err = decode_cmd_binary(&encoded).unwrap_err();
 
@@ -1071,11 +1083,31 @@ mod tests {
     }
 
     #[test]
+    fn cmd_binary_encode_rejects_unsafe_identifiers() {
+        let cmd = crate::ast::Qail::get("users; DROP TABLE users; --").limit(1);
+
+        let err = encode_cmd_binary(&cmd).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("table"));
+    }
+
+    #[test]
     fn cmd_binary_decode_rejects_procedural_actions() {
         let cmd = crate::ast::Qail::call("refresh_materialized_views()");
-        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
+        let encoded = encode_cmd_binary_unchecked_for_test(&cmd);
 
         let err = decode_cmd_binary(&encoded).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("procedural/session actions"));
+    }
+
+    #[test]
+    fn cmd_binary_encode_rejects_procedural_actions() {
+        let cmd = crate::ast::Qail::call("refresh_materialized_views()");
+
+        let err = encode_cmd_binary(&cmd).unwrap_err();
 
         assert!(err.contains("AST validation failed"));
         assert!(err.contains("procedural/session actions"));
@@ -1096,7 +1128,7 @@ mod tests {
             };
         }
 
-        let encoded = encode_cmd_binary(&nested).expect("binary encode");
+        let encoded = encode_cmd_binary_unchecked_for_test(&nested);
         let err = decode_cmd_binary(&encoded).unwrap_err();
         assert!(
             err.contains("AST depth limit exceeded")
