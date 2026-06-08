@@ -3,9 +3,10 @@
 use crate::colors::*;
 use crate::migrations::types::{MigrationClass, classify_migration};
 use anyhow::Result;
-use qail_core::migrate::{diff_schemas_checked, parse_qail, parse_qail_file};
+use qail_core::migrate::{Schema, diff_schemas_checked, parse_qail, parse_qail_file};
 use qail_core::prelude::*;
 use qail_core::transpiler::Dialect;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Output format for schema operations.
@@ -29,6 +30,33 @@ fn cmds_wire_json(cmds: &[Qail], dialect: Dialect) -> serde_json::Value {
         })
         .collect();
     serde_json::Value::Array(rows)
+}
+
+fn schema_for_live_table_index_diff(
+    mut schema: Schema,
+    skipped: &mut BTreeSet<&'static str>,
+) -> Schema {
+    macro_rules! clear_family {
+        ($field:ident, $label:literal) => {
+            if !schema.$field.is_empty() {
+                skipped.insert($label);
+                schema.$field.clear();
+            }
+        };
+    }
+
+    clear_family!(comments, "comments");
+    clear_family!(enums, "enums");
+    clear_family!(extensions, "extensions");
+    clear_family!(functions, "functions");
+    clear_family!(grants, "grants");
+    clear_family!(policies, "policies");
+    clear_family!(resources, "resources");
+    clear_family!(sequences, "sequences");
+    clear_family!(triggers, "triggers");
+    clear_family!(views, "views");
+
+    schema
 }
 
 fn merge_migrations_for_source_audit(
@@ -511,22 +539,42 @@ pub async fn diff_live(
     let new_schema =
         parse_qail_file(new_path).map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
 
-    // Step 3: Diff live → target
+    // Step 3: Diff live → target. Live state diff is intentionally scoped to
+    // tables/indexes/hints; richer object families are handled by strict migrations.
+    let mut skipped_families = BTreeSet::new();
+    let live_schema = schema_for_live_table_index_diff(live_schema, &mut skipped_families);
+    let new_schema = schema_for_live_table_index_diff(new_schema, &mut skipped_families);
+    if !skipped_families.is_empty() {
+        println!(
+            "    {} live diff scoped to tables/indexes; strict migrations cover other object families",
+            "↷".yellow()
+        );
+    }
+
     let cmds = diff_schemas_checked(&live_schema, &new_schema)
         .map_err(|e| anyhow::anyhow!("State-based diff unsupported for this schema pair: {}", e))?;
 
     if cmds.is_empty() {
-        println!(
-            "\n{}",
-            "✅ No drift detected — live DB matches schema file."
-                .green()
-                .bold()
-        );
+        if skipped_families.is_empty() {
+            println!(
+                "\n{}",
+                "✅ No drift detected — live DB matches schema file."
+                    .green()
+                    .bold()
+            );
+        } else {
+            println!(
+                "\n{}",
+                "✅ No table/index drift detected — non-table families skipped."
+                    .green()
+                    .bold()
+            );
+        }
         return Ok(());
     }
 
     println!(
-        "\n{} {} drift(s) detected:\n",
+        "\n{} {} table/index drift(s) detected:\n",
         "⚠️".yellow(),
         cmds.len().to_string().red().bold()
     );
@@ -595,6 +643,76 @@ mod tests {
             .expect("clock should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("qail_schema_{name}_{nanos}"))
+    }
+
+    #[test]
+    fn live_table_index_diff_scope_prunes_non_table_families() {
+        use qail_core::migrate::{
+            Comment, EnumType, Extension, Grant, Index, Privilege, RlsPolicy, SchemaFunctionDef,
+            SchemaTriggerDef, Sequence, Table, ViewDef, schema::ResourceDef,
+        };
+
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users"));
+        schema.add_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+        schema.add_comment(Comment::on_table("users", "profile rows"));
+        schema.add_enum(EnumType::new("user_status", vec!["active".to_string()]));
+        schema.add_extension(Extension::new("pgcrypto"));
+        schema.add_function(SchemaFunctionDef::new(
+            "touch_users",
+            "trigger",
+            "BEGIN RETURN NEW; END",
+        ));
+        schema.add_grant(Grant::new(vec![Privilege::Select], "users", "app_user"));
+        schema.add_policy(RlsPolicy::create("users_tenant", "users"));
+        schema.add_resource(ResourceDef {
+            name: "avatars".to_string(),
+            kind: qail_core::migrate::schema::ResourceKind::Bucket,
+            provider: Some("s3".to_string()),
+            properties: std::collections::HashMap::new(),
+        });
+        schema.add_sequence(Sequence::new("user_number_seq"));
+        schema.add_trigger(SchemaTriggerDef::new(
+            "touch_users_trigger",
+            "users",
+            "touch_users()",
+        ));
+        schema.add_view(ViewDef::new("active_users", "SELECT 1"));
+
+        let mut skipped = std::collections::BTreeSet::new();
+        let scoped = schema_for_live_table_index_diff(schema, &mut skipped);
+
+        assert!(scoped.tables.contains_key("users"));
+        assert_eq!(scoped.indexes.len(), 1);
+        assert!(scoped.comments.is_empty());
+        assert!(scoped.enums.is_empty());
+        assert!(scoped.extensions.is_empty());
+        assert!(scoped.functions.is_empty());
+        assert!(scoped.grants.is_empty());
+        assert!(scoped.policies.is_empty());
+        assert!(scoped.resources.is_empty());
+        assert!(scoped.sequences.is_empty());
+        assert!(scoped.triggers.is_empty());
+        assert!(scoped.views.is_empty());
+        assert_eq!(
+            skipped.into_iter().collect::<Vec<_>>(),
+            vec![
+                "comments",
+                "enums",
+                "extensions",
+                "functions",
+                "grants",
+                "policies",
+                "resources",
+                "sequences",
+                "triggers",
+                "views",
+            ]
+        );
     }
 
     #[test]

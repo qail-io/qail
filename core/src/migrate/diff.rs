@@ -298,14 +298,214 @@ fn index_signature(idx: &super::schema::Index) -> String {
     format!(
         "table={:?};columns={:?};expressions={:?};unique={};method={};where={:?};include={:?};concurrently={}",
         idx.table,
-        idx.columns,
-        idx.expressions,
+        normalized_index_fragments(&idx.columns),
+        normalized_index_fragments(&idx.expressions),
         idx.unique,
         index_method_str(&idx.method),
-        idx.where_clause.as_ref().map(check_expr_to_sql),
-        idx.include,
+        idx.where_clause
+            .as_ref()
+            .map(check_expr_to_sql)
+            .map(|fragment| normalize_index_sql_fragment(&fragment)),
+        normalized_index_fragments(&idx.include),
         idx.concurrently
     )
+}
+
+fn normalized_index_fragments(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| normalize_index_sql_fragment(value))
+        .collect()
+}
+
+fn normalize_index_sql_fragment(input: &str) -> String {
+    let mut normalized = compact_sql_for_index_compare(input);
+    normalized = normalized.replace("!=", "<>");
+    normalized = normalized.replace("::charactervarying", "");
+    normalized = normalized.replace("::varchar", "");
+    normalized = normalized.replace("::text", "");
+
+    loop {
+        let stripped = strip_redundant_outer_parens(&normalized);
+        let simplified = simplify_parenthesized_identifiers(&stripped);
+        if simplified == normalized {
+            normalized = simplified;
+            break;
+        }
+        normalized = simplified;
+    }
+
+    normalize_any_array_predicate(&normalized)
+}
+
+fn compact_sql_for_index_compare(input: &str) -> String {
+    let mut out = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.trim().chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                out.push(ch);
+                if in_single && chars.peek().is_some_and(|next| *next == '\'') {
+                    out.push('\'');
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                out.push(ch);
+                if in_double && chars.peek().is_some_and(|next| *next == '"') {
+                    out.push('"');
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            _ if !in_single && !in_double && ch.is_whitespace() => {}
+            _ if !in_single && !in_double => out.extend(ch.to_lowercase()),
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
+fn strip_redundant_outer_parens(input: &str) -> String {
+    let mut s = input;
+    while s.starts_with('(') && s.ends_with(')') && outer_parens_wrap_entire_fragment(s) {
+        s = &s[1..s.len() - 1];
+    }
+    s.to_string()
+}
+
+fn outer_parens_wrap_entire_fragment(input: &str) -> bool {
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    chars.next();
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 && idx != input.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    depth == 0 && !in_single && !in_double
+}
+
+fn simplify_parenthesized_identifiers(input: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut idx = 0;
+
+    while idx < chars.len() {
+        if chars[idx] != '(' {
+            out.push(chars[idx]);
+            idx += 1;
+            continue;
+        }
+
+        let Some(end) = matching_paren_chars(&chars, idx) else {
+            out.push(chars[idx]);
+            idx += 1;
+            continue;
+        };
+        let inner: String = chars[idx + 1..end].iter().collect();
+        let preceded_by_identifier = idx > 0 && is_compact_identifier_char(chars[idx - 1]);
+        if !preceded_by_identifier && is_compact_identifier_path(&inner) {
+            out.push_str(&inner);
+            idx = end + 1;
+        } else {
+            out.push(chars[idx]);
+            idx += 1;
+        }
+    }
+
+    out
+}
+
+fn matching_paren_chars(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = start;
+
+    while idx < chars.len() {
+        match chars[idx] {
+            '\'' if !in_double => {
+                if in_single && chars.get(idx + 1).is_some_and(|next| *next == '\'') {
+                    idx += 1;
+                } else {
+                    in_single = !in_single;
+                }
+            }
+            '"' if !in_single => {
+                if in_double && chars.get(idx + 1).is_some_and(|next| *next == '"') {
+                    idx += 1;
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn is_compact_identifier_path(input: &str) -> bool {
+    !input.is_empty() && input.chars().all(is_compact_identifier_char)
+}
+
+fn is_compact_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'
+}
+
+fn normalize_any_array_predicate(input: &str) -> String {
+    const ANY_ARRAY: &str = "=any(array[";
+
+    let Some(pos) = input.find(ANY_ARRAY) else {
+        return input.to_string();
+    };
+    if !input.ends_with("])") {
+        return input.to_string();
+    }
+
+    let left = &input[..pos];
+    let values = &input[pos + ANY_ARRAY.len()..input.len() - 2];
+    format!("{left}in({values})")
 }
 
 fn table_references_table(table: &super::schema::Table, target: &str) -> bool {
@@ -1052,6 +1252,122 @@ mod tests {
             .expect_err("same-name index column change should fail closed");
         assert!(err.contains("replace existing indexes"));
         assert!(err.contains("idx_users_email"));
+    }
+
+    #[test]
+    fn state_diff_index_compare_ignores_postgres_predicate_parentheses() {
+        let old = schema_with_users_index(
+            Index::new(
+                "audit_log_session",
+                "audit_log",
+                vec!["impersonation_session_id".to_string()],
+            )
+            .partial(CheckExpr::Sql(
+                "(impersonation_session_id IS NOT NULL)".to_string(),
+            )),
+        );
+        let new = schema_with_users_index(
+            Index::new(
+                "audit_log_session",
+                "audit_log",
+                vec!["impersonation_session_id".to_string()],
+            )
+            .partial(CheckExpr::Sql(
+                "impersonation_session_id IS NOT NULL".to_string(),
+            )),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("equivalent partial index predicates should not fail closed");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn state_diff_index_compare_ignores_postgres_text_casts() {
+        let old = schema_with_users_index(
+            Index::expression(
+                "users_email_unique_ci",
+                "users",
+                vec!["lower((email)::text)".to_string()],
+            )
+            .unique(),
+        );
+        let new = schema_with_users_index(
+            Index::expression(
+                "users_email_unique_ci",
+                "users",
+                vec!["lower(email)".to_string()],
+            )
+            .unique(),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("equivalent expression index casts should not fail closed");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn state_diff_index_compare_ignores_in_any_array_canonicalization() {
+        let old = schema_with_users_index(
+            Index::new(
+                "idx_outbox_due",
+                "whatsapp_outbox",
+                vec!["next_attempt_at".to_string()],
+            )
+            .partial(CheckExpr::Sql(
+                "status = ANY (ARRAY['pending'::text, 'failed'::text])".to_string(),
+            )),
+        );
+        let new = schema_with_users_index(
+            Index::new(
+                "idx_outbox_due",
+                "whatsapp_outbox",
+                vec!["next_attempt_at".to_string()],
+            )
+            .partial(CheckExpr::Sql(
+                "status IN ('pending', 'failed')".to_string(),
+            )),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("equivalent IN predicate forms should not fail closed");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn state_diff_index_compare_ignores_not_equal_canonicalization() {
+        let old = schema_with_users_index(
+            Index::new(
+                "idx_car_availability_overlap",
+                "car_availability",
+                vec![
+                    "vehicle_id".to_string(),
+                    "service_date".to_string(),
+                    "start_time".to_string(),
+                    "end_time".to_string(),
+                ],
+            )
+            .partial(CheckExpr::Sql(
+                "((status)::text <> 'completed'::text)".to_string(),
+            )),
+        );
+        let new = schema_with_users_index(
+            Index::new(
+                "idx_car_availability_overlap",
+                "car_availability",
+                vec![
+                    "vehicle_id".to_string(),
+                    "service_date".to_string(),
+                    "start_time".to_string(),
+                    "end_time".to_string(),
+                ],
+            )
+            .partial(CheckExpr::Sql("status != 'completed'".to_string())),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("equivalent not-equal predicates should not fail closed");
+        assert!(cmds.is_empty());
     }
 
     #[test]
