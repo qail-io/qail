@@ -225,7 +225,10 @@ pub unsafe extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qail_validate(qail: *const c_char) -> i32 {
     ffi_catch!(0, {
+        clear_error();
+
         if qail.is_null() {
+            set_error("NULL input".to_string());
             return 0;
         }
 
@@ -237,10 +240,14 @@ pub unsafe extern "C" fn qail_validate(qail: *const c_char) -> i32 {
                 if qail_core::parse(s).is_ok() {
                     1
                 } else {
+                    set_error("Invalid QAIL syntax".to_string());
                     0
                 }
             }
-            Err(_) => 0,
+            Err(e) => {
+                set_error(format!("Invalid UTF-8: {}", e));
+                0
+            }
         }
     })
 }
@@ -596,25 +603,30 @@ pub unsafe extern "C" fn qail_encode_parse(
 /// `out_ptr` and `out_len` must be valid writable pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -> i32 {
-    if out_ptr.is_null() || out_len.is_null() {
-        return -1;
-    }
+    ffi_catch!(-99, {
+        clear_error();
 
-    let wire_bytes = vec![b'S', 0, 0, 0, 4];
-    let len = wire_bytes.len();
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
 
-    let mut boxed = wire_bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
+        let wire_bytes = vec![b'S', 0, 0, 0, 4];
+        let len = wire_bytes.len();
 
-    // SAFETY: `out_ptr` and `out_len` are checked non-null above and the
-    // caller contract requires them to be writable.
-    unsafe {
-        *out_ptr = ptr;
-        *out_len = len;
-    }
+        let mut boxed = wire_bytes.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
 
-    0
+        // SAFETY: `out_ptr` and `out_len` are checked non-null above and the
+        // caller contract requires them to be writable.
+        unsafe {
+            *out_ptr = ptr;
+            *out_len = len;
+        }
+
+        0
+    })
 }
 
 /// Encode a batch of Bind + Execute pairs for pipeline mode.
@@ -1276,6 +1288,13 @@ mod tests {
             .into_owned()
     }
 
+    fn assert_last_error_clear() {
+        assert!(
+            qail_last_error().is_null(),
+            "expected qail_last_error to be clear"
+        );
+    }
+
     fn bind_param_values(bytes: &[u8]) -> Vec<Option<Vec<u8>>> {
         let mut values = Vec::new();
         let mut offset = 0usize;
@@ -1579,5 +1598,43 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Invalid UTF-8 in statement name"));
+    }
+
+    #[test]
+    fn test_validate_clears_stale_error_on_success() {
+        let invalid = CString::new("definitely not valid qail").unwrap();
+        assert_eq!(unsafe { qail_validate(invalid.as_ptr()) }, 0);
+        assert!(last_error_string().contains("Invalid QAIL syntax"));
+
+        let valid = CString::new("get users fields id").unwrap();
+        assert_eq!(unsafe { qail_validate(valid.as_ptr()) }, 1);
+        assert_last_error_clear();
+    }
+
+    #[test]
+    fn test_encode_sync_clears_stale_error_on_success() {
+        assert_eq!(unsafe { qail_validate(std::ptr::null()) }, 0);
+        assert!(last_error_string().contains("NULL input"));
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+        let rc = unsafe { qail_encode_sync(&mut out_ptr, &mut out_len) };
+
+        assert_eq!(rc, 0);
+        assert!(!out_ptr.is_null());
+        assert_eq!(out_len, 5);
+        assert_last_error_clear();
+
+        unsafe {
+            qail_free_bytes(out_ptr, out_len);
+        }
+    }
+
+    #[test]
+    fn test_encode_sync_sets_error_on_null_outputs() {
+        let rc = unsafe { qail_encode_sync(std::ptr::null_mut(), std::ptr::null_mut()) };
+
+        assert_eq!(rc, -1);
+        assert!(last_error_string().contains("NULL pointer argument"));
     }
 }
