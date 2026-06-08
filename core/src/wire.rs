@@ -143,6 +143,7 @@ pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
         .end()
         .map_err(|_| "trailing bytes after AST payload".to_string())?;
     validate_binary_ast_limits(&cmd)?;
+    crate::sanitize::validate_ast(&cmd).map_err(|e| e.to_string())?;
     Ok(cmd)
 }
 
@@ -1056,6 +1057,28 @@ mod tests {
         encoded.extend_from_slice(&[0xAA, 0xBB]);
         let err = decode_cmd_binary(&encoded).unwrap_err();
         assert!(err.contains("invalid payload length"));
+    }
+
+    #[test]
+    fn cmd_binary_decode_rejects_unsafe_identifiers() {
+        let cmd = crate::ast::Qail::get("users; DROP TABLE users; --").limit(1);
+        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
+
+        let err = decode_cmd_binary(&encoded).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("table"));
+    }
+
+    #[test]
+    fn cmd_binary_decode_rejects_procedural_actions() {
+        let cmd = crate::ast::Qail::call("refresh_materialized_views()");
+        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
+
+        let err = decode_cmd_binary(&encoded).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("procedural/session actions"));
     }
 
     #[test]
