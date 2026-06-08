@@ -557,7 +557,22 @@ fn condition_value_sql_with_context(
             format!("({values})")
         }
         Value::Expr(expr) => condition_left_sql(expr, generator, context),
+        Value::Function(function) => render_raw_function_value(function),
         v => v.to_string(),
+    }
+}
+
+fn render_raw_function_value(value: &str) -> String {
+    if value.len() > 1024
+        || value.contains('\0')
+        || value.contains(';')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        "/* ERROR: Invalid function expression */".to_string()
+    } else {
+        value.to_string()
     }
 }
 

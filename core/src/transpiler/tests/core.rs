@@ -248,6 +248,40 @@ fn test_fuzzy_fallback_escapes_rendered_value() {
     );
 }
 
+#[test]
+fn test_where_accepts_safe_raw_function_condition_value() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let cmd = Qail::get("users").filter(
+        "updated_at",
+        Operator::Lt,
+        Value::Function("NOW()".to_string()),
+    );
+
+    assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE updated_at < NOW()");
+}
+
+#[test]
+fn test_where_rejects_unsafe_raw_function_condition_value() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let cmd = Qail::get("users").filter(
+        "updated_at",
+        Operator::Lt,
+        Value::Function("NOW(); DROP TABLE users; --".to_string()),
+    );
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("updated_at < /* ERROR: Invalid function expression */"),
+        "unsafe raw function value should fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe raw function value leaked into WHERE SQL: {sql}"
+    );
+}
+
 // OR conditions - using manual Qail construction
 #[test]
 fn test_or_conditions() {
