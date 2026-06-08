@@ -34,6 +34,7 @@ impl std::error::Error for SanitizeError {}
 
 /// Maximum identifier length (PostgreSQL NAMEDATALEN - 1).
 const MAX_IDENT_LEN: usize = 63;
+const MAX_RAW_FUNCTION_LEN: usize = 1024;
 
 /// Validate that an identifier matches the parser grammar: `[a-zA-Z0-9_.]`.
 ///
@@ -56,6 +57,48 @@ fn check_ident(field: &str, value: &str) -> Result<(), SanitizeError> {
             field: field.to_string(),
             value: value.chars().take(40).collect(),
             reason: "identifier parts must match [a-zA-Z0-9_] and be ≤63 chars".to_string(),
+        })
+    }
+}
+
+fn check_named_param(field: &str, value: &str) -> Result<(), SanitizeError> {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(SanitizeError {
+            field: field.to_string(),
+            value: String::new(),
+            reason: "named parameter cannot be empty".to_string(),
+        });
+    };
+
+    if (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        Ok(())
+    } else {
+        Err(SanitizeError {
+            field: field.to_string(),
+            value: value.chars().take(40).collect(),
+            reason: "named parameters must match [a-zA-Z_][a-zA-Z0-9_]*".to_string(),
+        })
+    }
+}
+
+fn check_raw_function_value(field: &str, value: &str) -> Result<(), SanitizeError> {
+    if value.len() <= MAX_RAW_FUNCTION_LEN
+        && !value.contains('\0')
+        && !value.contains(';')
+        && !value.contains("--")
+        && !value.contains("/*")
+        && !value.contains("*/")
+    {
+        Ok(())
+    } else {
+        Err(SanitizeError {
+            field: field.to_string(),
+            value: value.chars().take(40).collect(),
+            reason: "raw function values cannot contain NUL, statement separators, or comments"
+                .to_string(),
         })
     }
 }
@@ -338,6 +381,11 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
 /// Check a `Value` for embedded subqueries.
 fn check_value(field: &str, value: &Value) -> Result<(), SanitizeError> {
     match value {
+        Value::Column(column) => check_ident(&format!("{field}.column"), column),
+        Value::NamedParam(name) => check_named_param(&format!("{field}.named_param"), name),
+        Value::Function(function) => {
+            check_raw_function_value(&format!("{field}.function"), function)
+        }
         Value::Subquery(q) => validate_ast(q),
         Value::Array(vals) => {
             for v in vals {
@@ -715,6 +763,61 @@ mod tests {
         let cmd = Qail::get("users").columns(["id", "name; DROP TABLE x"]);
         let err = validate_ast(&cmd).unwrap_err();
         assert!(err.field.contains("columns"));
+    }
+
+    #[test]
+    fn unsafe_column_value_rejected() {
+        use crate::ast::Value;
+
+        let cmd = Qail::get("orders").filter(
+            "user_id",
+            Operator::Eq,
+            Value::Column("users.id; DROP TABLE users; --".to_string()),
+        );
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "cage.condition.value.column");
+    }
+
+    #[test]
+    fn unsafe_named_parameter_rejected() {
+        use crate::ast::Value;
+
+        let cmd = Qail::get("users").filter(
+            "id",
+            Operator::Eq,
+            Value::NamedParam("id); DROP TABLE users; --".to_string()),
+        );
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "cage.condition.value.named_param");
+    }
+
+    #[test]
+    fn unsafe_raw_function_value_rejected() {
+        use crate::ast::Value;
+
+        let cmd = Qail::get("users").filter(
+            "updated_at",
+            Operator::Lt,
+            Value::Function("NOW(); DROP TABLE users; --".to_string()),
+        );
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "cage.condition.value.function");
+    }
+
+    #[test]
+    fn safe_raw_function_value_passes_sanitizer() {
+        use crate::ast::Value;
+
+        let cmd = Qail::get("users").filter(
+            "updated_at",
+            Operator::Lt,
+            Value::Function("NOW()".to_string()),
+        );
+
+        assert!(validate_ast(&cmd).is_ok());
     }
 
     #[test]

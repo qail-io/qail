@@ -282,6 +282,48 @@ fn test_where_rejects_unsafe_raw_function_condition_value() {
     );
 }
 
+#[test]
+fn test_where_rejects_unsafe_named_parameter_value() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let cmd = Qail::get("users").filter(
+        "id",
+        Operator::Eq,
+        Value::NamedParam("id); DROP TABLE users; --".to_string()),
+    );
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("id = /* ERROR: Invalid parameter name */"),
+        "unsafe named parameter should fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe named parameter leaked into WHERE SQL: {sql}"
+    );
+}
+
+#[test]
+fn test_fuzzy_rejects_unsafe_named_parameter_value() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let cmd = Qail::get("users").filter(
+        "name",
+        Operator::Fuzzy,
+        Value::NamedParam("term); DROP TABLE users; --".to_string()),
+    );
+    let sql = cmd.to_sql();
+
+    assert!(
+        sql.contains("/* ERROR: Invalid parameter name */"),
+        "unsafe fuzzy named parameter should fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe fuzzy named parameter leaked into WHERE SQL: {sql}"
+    );
+}
+
 // OR conditions - using manual Qail construction
 #[test]
 fn test_or_conditions() {

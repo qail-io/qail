@@ -1114,6 +1114,35 @@ mod tests {
     }
 
     #[test]
+    fn cmd_binary_decode_rejects_unsafe_raw_function_values() {
+        let cmd = crate::ast::Qail::get("users").filter(
+            "updated_at",
+            crate::ast::Operator::Lt,
+            crate::ast::Value::Function("NOW(); DROP TABLE users; --".to_string()),
+        );
+        let encoded = encode_cmd_binary_unchecked_for_test(&cmd);
+
+        let err = decode_cmd_binary(&encoded).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("raw function values"));
+    }
+
+    #[test]
+    fn cmd_binary_encode_rejects_unsafe_raw_function_values() {
+        let cmd = crate::ast::Qail::get("users").filter(
+            "updated_at",
+            crate::ast::Operator::Lt,
+            crate::ast::Value::Function("NOW(); DROP TABLE users; --".to_string()),
+        );
+
+        let err = encode_cmd_binary(&cmd).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("raw function values"));
+    }
+
+    #[test]
     fn cmd_binary_decode_enforces_depth_limits() {
         let mut nested = crate::ast::Qail::get("users").limit(1);
         for _ in 0..(MAX_AST_DEPTH + 2) {

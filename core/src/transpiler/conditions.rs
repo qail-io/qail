@@ -511,7 +511,7 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
             generator.string_concat(&["'%'", &p, "'%'"])
         }
         Value::NamedParam(name) => {
-            let p = format!(":{}", name);
+            let p = render_named_param(name);
             generator.string_concat(&["'%'", &p, "'%'"])
         }
         v => format!("'%{}%'", escape_sql_string_literal(&v.to_string())),
@@ -522,7 +522,7 @@ fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String 
     match &condition.value {
         Value::String(path) => path.clone(),
         Value::Param(n) => generator.placeholder(*n),
-        Value::NamedParam(name) => format!(":{}", name),
+        Value::NamedParam(name) => render_named_param(name),
         _ => condition.to_value_sql(generator),
     }
 }
@@ -557,9 +557,23 @@ fn condition_value_sql_with_context(
             format!("({values})")
         }
         Value::Expr(expr) => condition_left_sql(expr, generator, context),
+        Value::NamedParam(name) => render_named_param(name),
         Value::Function(function) => render_raw_function_value(function),
         v => v.to_string(),
     }
+}
+
+fn render_named_param(name: &str) -> String {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return "/* ERROR: Invalid parameter name */".to_string();
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return "/* ERROR: Invalid parameter name */".to_string();
+    }
+    format!(":{}", name)
 }
 
 fn render_raw_function_value(value: &str) -> String {
