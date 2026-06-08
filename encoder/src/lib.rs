@@ -1273,7 +1273,14 @@ pub unsafe extern "C" fn qail_response_get_i32(
 ) -> i32 {
     ffi_catch!(-99, {
         clear_error();
-        if handle.is_null() || out_value.is_null() {
+        if out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        // SAFETY: `out_value` is checked non-null above and the caller
+        // contract requires it to be writable.
+        unsafe { *out_value = 0 };
+        if handle.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -1321,7 +1328,14 @@ pub unsafe extern "C" fn qail_response_get_i64(
 ) -> i32 {
     ffi_catch!(-99, {
         clear_error();
-        if handle.is_null() || out_value.is_null() {
+        if out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        // SAFETY: `out_value` is checked non-null above and the caller
+        // contract requires it to be writable.
+        unsafe { *out_value = 0 };
+        if handle.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -1369,7 +1383,14 @@ pub unsafe extern "C" fn qail_response_get_f64(
 ) -> i32 {
     ffi_catch!(-99, {
         clear_error();
-        if handle.is_null() || out_value.is_null() {
+        if out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        // SAFETY: `out_value` is checked non-null above and the caller
+        // contract requires it to be writable.
+        unsafe { *out_value = 0.0 };
+        if handle.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -1417,7 +1438,14 @@ pub unsafe extern "C" fn qail_response_get_bool(
 ) -> i32 {
     ffi_catch!(-99, {
         clear_error();
-        if handle.is_null() || out_value.is_null() {
+        if out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        // SAFETY: `out_value` is checked non-null above and the caller
+        // contract requires it to be writable.
+        unsafe { *out_value = 0 };
+        if handle.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -2209,6 +2237,58 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!(value, 42);
         assert_last_error_clear();
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_i32_error_clears_output_value() {
+        let response = sample_response();
+        let mut value = 123i32;
+
+        let rc = unsafe { qail_response_get_i32(&response, 9, 0, &mut value) };
+
+        assert_eq!(rc, -1);
+        assert_eq!(value, 0);
+        assert!(last_error_string().contains("Row index out of range"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_i64_error_clears_output_value() {
+        let response = sample_response();
+        let mut value = 123i64;
+
+        let rc = unsafe { qail_response_get_i64(&response, 9, 0, &mut value) };
+
+        assert_eq!(rc, -1);
+        assert_eq!(value, 0);
+        assert!(last_error_string().contains("Row index out of range"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_f64_error_clears_output_value() {
+        let response = sample_response();
+        let mut value = 123.0f64;
+
+        let rc = unsafe { qail_response_get_f64(&response, 9, 0, &mut value) };
+
+        assert_eq!(rc, -1);
+        assert_eq!(value, 0.0);
+        assert!(last_error_string().contains("Row index out of range"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_bool_error_clears_output_value() {
+        let response = sample_response();
+        let mut value = 1i32;
+
+        let rc = unsafe { qail_response_get_bool(&response, 9, 0, &mut value) };
+
+        assert_eq!(rc, -1);
+        assert_eq!(value, 0);
+        assert!(last_error_string().contains("Row index out of range"));
     }
 
     #[cfg(feature = "response")]
