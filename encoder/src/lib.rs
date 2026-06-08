@@ -775,6 +775,10 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
             set_error("NULL pointer or zero count".to_string());
             return -1;
         }
+        if params.is_null() && params_count != 0 {
+            set_error("NULL params with non-zero params_count".to_string());
+            return -1;
+        }
 
         // SAFETY: `statement` is checked non-null above and the caller
         // contract requires it to be a valid NUL-terminated C string.
@@ -2051,6 +2055,29 @@ mod tests {
         unsafe {
             qail_free_bytes(out_ptr, out_len);
         }
+    }
+
+    #[test]
+    fn test_bind_execute_batch_rejects_null_params_with_nonzero_count() {
+        let statement = CString::new("stmt").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_bind_execute_batch(
+                statement.as_ptr(),
+                std::ptr::null(),
+                1,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("NULL params with non-zero params_count"));
     }
 
     #[test]
