@@ -958,6 +958,10 @@ pub unsafe extern "C" fn qail_decode_response(
             set_error("Null pointer".to_string());
             return -1;
         }
+        if len == 0 {
+            set_error("Empty response buffer".to_string());
+            return -1;
+        }
 
         // SAFETY: `data` is checked non-null above and the caller contract
         // requires it to point to `len` readable bytes.
@@ -998,10 +1002,6 @@ pub unsafe extern "C" fn qail_decode_response(
                     }
                 }
                 Err(e) => {
-                    // Not enough data yet, or parse error
-                    if e.contains("not enough") || e.contains("Need") {
-                        break;
-                    }
                     set_error(e);
                     return -1;
                 }
@@ -2025,6 +2025,29 @@ mod tests {
     fn test_response_null_handle_sets_error() {
         assert_eq!(unsafe { qail_response_row_count(std::ptr::null()) }, 0);
         assert!(last_error_string().contains("NULL response handle"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_decode_response_rejects_empty_buffer() {
+        let mut handle = std::ptr::dangling_mut::<QailResponse>();
+        let rc = unsafe { qail_decode_response(std::ptr::dangling::<u8>(), 0, &mut handle) };
+
+        assert_eq!(rc, -1);
+        assert!(handle.is_null());
+        assert!(last_error_string().contains("Empty response buffer"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_decode_response_rejects_truncated_message() {
+        let truncated = [b'Z', 0, 0, 0, 5];
+        let mut handle = std::ptr::dangling_mut::<QailResponse>();
+        let rc = unsafe { qail_decode_response(truncated.as_ptr(), truncated.len(), &mut handle) };
+
+        assert_eq!(rc, -1);
+        assert!(handle.is_null());
+        assert!(last_error_string().contains("Incomplete message"));
     }
 
     #[cfg(feature = "response")]
