@@ -1923,7 +1923,7 @@ fn normalize_comment_text(s: &str) -> String {
         .join(" ")
 }
 
-fn is_trivial_not_null_check(check_clause: &str) -> bool {
+pub(crate) fn is_trivial_not_null_check(check_clause: &str) -> bool {
     let normalized = check_clause
         .replace(['(', ')'], " ")
         .split_whitespace()
@@ -2118,7 +2118,7 @@ fn same_key_column_table(cols: &[IntrospectedKeyColumn]) -> Option<&str> {
 ///   ((age >= 0) AND (age <= 200))  → Between
 ///   ((score >= 0))                 → GreaterOrEqual
 ///   ((col > 0))                    → GreaterThan
-fn parse_check_expr(
+pub(crate) fn parse_check_expr(
     clause: &str,
     _col_name: &str,
 ) -> Option<qail_core::migrate::schema::CheckExpr> {

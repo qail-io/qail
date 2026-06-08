@@ -16,10 +16,10 @@ use qail_pg::driver::PgDriver;
 use crate::introspection::{
     IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
     IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspected_column_generation,
-    is_simple_index_column, parse_index_parts, parse_pg_constraint_fk_action,
-    resolve_introspected_foreign_key, resolve_introspected_unique_constraint,
-    resolve_qualified_introspected_foreign_key, sort_introspected_key_columns,
-    sort_qualified_introspected_key_columns,
+    is_simple_index_column, is_trivial_not_null_check, parse_check_expr, parse_index_parts,
+    parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
+    resolve_introspected_unique_constraint, resolve_qualified_introspected_foreign_key,
+    sort_introspected_key_columns, sort_qualified_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -450,6 +450,97 @@ mod tests {
     }
 
     #[test]
+    fn shadow_check_introspection_preserves_single_column_checks() {
+        let mut schema = Schema::default();
+        schema.tables.insert(
+            "transfer_bookings".to_string(),
+            Table {
+                name: "transfer_bookings".to_string(),
+                columns: vec![
+                    Column::new("status", ColumnType::Varchar(Some(20))),
+                    Column::new("pax_count", ColumnType::Int),
+                ],
+                multi_column_fks: vec![],
+                enable_rls: false,
+                force_rls: false,
+            },
+        );
+
+        apply_shadow_column_check(
+            &mut schema,
+            "transfer_bookings",
+            "status",
+            "chk_booking_status",
+            "(status)::text = ANY (ARRAY[('requested'::character varying)::text, ('confirmed'::character varying)::text])",
+        );
+        apply_shadow_column_check(
+            &mut schema,
+            "transfer_bookings",
+            "pax_count",
+            "chk_pax_positive",
+            "pax_count > 0",
+        );
+
+        let table = &schema.tables["transfer_bookings"];
+        assert!(matches!(
+            table.columns[0].check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::In { column, values })
+                if column == "status"
+                    && values == &["requested".to_string(), "confirmed".to_string()]
+        ));
+        assert_eq!(
+            table.columns[0]
+                .check
+                .as_ref()
+                .and_then(|check| check.name.as_deref()),
+            Some("chk_booking_status")
+        );
+        assert!(matches!(
+            table.columns[1].check.as_ref().map(|check| &check.expr),
+            Some(CheckExpr::GreaterThan { column, value })
+                if column == "pax_count" && *value == 0
+        ));
+    }
+
+    #[test]
+    fn shadow_check_introspection_skips_multi_column_and_trivial_checks() {
+        let attnums = std::collections::HashMap::from([
+            (("bookings".to_string(), 1), "start_date".to_string()),
+            (("bookings".to_string(), 2), "end_date".to_string()),
+        ]);
+        assert_eq!(
+            single_column_check_target("bookings", &[1], &attnums),
+            Some("start_date".to_string())
+        );
+        assert_eq!(
+            single_column_check_target("bookings", &[1, 2], &attnums),
+            None
+        );
+
+        let mut schema = Schema::default();
+        schema.tables.insert(
+            "bookings".to_string(),
+            Table {
+                name: "bookings".to_string(),
+                columns: vec![Column::new("start_date", ColumnType::Text)],
+                multi_column_fks: vec![],
+                enable_rls: false,
+                force_rls: false,
+            },
+        );
+
+        apply_shadow_column_check(
+            &mut schema,
+            "bookings",
+            "start_date",
+            "bookings_start_date_check",
+            "start_date IS NOT NULL",
+        );
+
+        assert!(schema.tables["bookings"].columns[0].check.is_none());
+    }
+
+    #[test]
     fn resolves_all_columns_for_composite_primary_key() {
         let pk_constraints =
             std::collections::HashSet::from([("orders".to_string(), "orders_pkey".to_string())]);
@@ -667,7 +758,7 @@ pub async fn has_verified_shadow_receipt_with_driver(
 // Schema Introspection (Zero-Dep)
 // ─────────────────────────────────────────────────────────────────────────────
 
-use qail_core::migrate::{CheckExpr, Column, ColumnType, Index, Schema, Table};
+use qail_core::migrate::{CheckConstraint, CheckExpr, Column, ColumnType, Index, Schema, Table};
 
 /// Introspect the live database schema from information_schema.
 /// Returns a Schema struct that represents the current state of the database.
@@ -859,6 +950,68 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         let attnum = required_shadow_metadata_i32(&row, 1, "attnum")?;
         let column = required_shadow_metadata_string(&row, 2, "attname")?;
         attnum_columns.insert((table, attnum), column);
+    }
+
+    // 4. Query single-column CHECK constraints. Multi-column/table-level CHECKs
+    // do not have a safe column-level representation in the state diff model.
+    let check_catalog_cmd = Qail::get("pg_catalog.pg_constraint")
+        .table_alias("con")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
+        )
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_namespace ns",
+            "ns.oid",
+            "con.connamespace",
+        )
+        .columns_expr([
+            Expr::Named("con.conname".to_string()),
+            Expr::Named("src.relname".to_string()),
+            Expr::Named("con.conkey".to_string()),
+            Expr::FunctionCall {
+                name: "pg_catalog.pg_get_expr".to_string(),
+                args: vec![
+                    Expr::Named("con.conbin".to_string()),
+                    Expr::Named("con.conrelid".to_string()),
+                ],
+                alias: None,
+            },
+        ])
+        .filter("con.contype", Operator::Eq, "c")
+        .filter("ns.nspname", Operator::Eq, "public");
+
+    let check_catalog_rows = driver
+        .fetch_all(&check_catalog_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query CHECK constraint metadata: {}", e))?;
+
+    for row in check_catalog_rows {
+        let constraint_name = required_shadow_metadata_string(&row, 0, "constraint_name")?;
+        let table_name = required_shadow_metadata_string(&row, 1, "source_table")?;
+        if table_name.starts_with("_qail") {
+            continue;
+        }
+        let Some(raw_conkey) = row.get_string(2).filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        let source_attnums = parse_pg_attnum_array(&raw_conkey, "check conkey")?;
+        let Some(column_name) =
+            single_column_check_target(&table_name, &source_attnums, &attnum_columns)
+        else {
+            continue;
+        };
+        let check_clause = required_shadow_metadata_string(&row, 3, "check expression")?;
+        apply_shadow_column_check(
+            &mut schema,
+            &table_name,
+            &column_name,
+            &constraint_name,
+            &check_clause,
+        );
     }
 
     // 4. Query FK constraints (batch approach, not N+1)
@@ -1328,6 +1481,46 @@ fn index_from_pg_indexdef(idx_name: String, table_name: String, indexdef: String
     }
 
     index
+}
+
+fn single_column_check_target(
+    table_name: &str,
+    source_attnums: &[i32],
+    attnum_columns: &std::collections::HashMap<(String, i32), String>,
+) -> Option<String> {
+    let [attnum] = source_attnums else {
+        return None;
+    };
+    attnum_columns
+        .get(&(table_name.to_string(), *attnum))
+        .cloned()
+}
+
+fn apply_shadow_column_check(
+    schema: &mut Schema,
+    table_name: &str,
+    column_name: &str,
+    constraint_name: &str,
+    check_clause: &str,
+) {
+    if is_trivial_not_null_check(check_clause) {
+        return;
+    }
+
+    let Some(table) = schema.tables.get_mut(table_name) else {
+        return;
+    };
+    let Some(column) = table.columns.iter_mut().find(|col| col.name == column_name) else {
+        return;
+    };
+    let Some(expr) = parse_check_expr(check_clause, column_name) else {
+        return;
+    };
+
+    column.check = Some(CheckConstraint {
+        expr,
+        name: Some(constraint_name.to_string()),
+    });
 }
 
 /// Create a shadow database for blue-green migration
