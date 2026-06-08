@@ -2,6 +2,10 @@
 //!
 //! Pure encoding library: **no I/O, no TLS, no async**.
 //! Languages bring their own transport layer (Go, Swift, C, etc.)
+//! This crate intentionally does not expose authentication, SSO, Kerberos/GSS,
+//! TLS, socket, or connection-management ABI. Enterprise authentication stays
+//! in the Rust PostgreSQL driver/provider layer; this FFI surface only encodes
+//! and decodes protocol/query data.
 //!
 //! ## Features
 //!
@@ -1157,6 +1161,80 @@ pub unsafe extern "C" fn qail_response_free(handle: *mut QailResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exported_symbol_names_from_source() -> Vec<&'static str> {
+        let mut symbols = Vec::new();
+        let mut expect_export = false;
+
+        for line in include_str!("lib.rs").lines() {
+            let line = line.trim();
+            if line == "#[unsafe(no_mangle)]" {
+                expect_export = true;
+                continue;
+            }
+
+            if !expect_export {
+                continue;
+            }
+
+            if let Some(fn_pos) = line.find("fn ") {
+                let after_fn = &line[fn_pos + 3..];
+                let name_end = after_fn
+                    .find('(')
+                    .expect("exported function line must include argument list");
+                symbols.push(&after_fn[..name_end]);
+                expect_export = false;
+            }
+        }
+
+        symbols
+    }
+
+    #[test]
+    fn exported_ffi_symbols_stay_wire_only() {
+        let symbols = exported_symbol_names_from_source();
+        assert_eq!(
+            symbols,
+            vec![
+                "qail_version",
+                "qail_transpile",
+                "qail_validate",
+                "qail_encode_get",
+                "qail_encode_uniform_batch",
+                "qail_free",
+                "qail_free_bytes",
+                "qail_last_error",
+                "qail_encode_parse",
+                "qail_encode_sync",
+                "qail_encode_bind_execute_batch",
+                "qail_decode_response",
+                "qail_response_row_count",
+                "qail_response_column_count",
+                "qail_response_affected_rows",
+                "qail_response_is_null",
+                "qail_response_get_string",
+                "qail_response_get_i32",
+                "qail_response_get_i64",
+                "qail_response_get_f64",
+                "qail_response_get_bool",
+                "qail_response_free",
+            ]
+        );
+
+        let forbidden = [
+            "auth", "connect", "gss", "jwt", "kerberos", "krb", "login", "sso", "ssl", "tls",
+            "token",
+        ];
+        for symbol in symbols {
+            let lower = symbol.to_ascii_lowercase();
+            for needle in forbidden {
+                assert!(
+                    !lower.contains(needle),
+                    "qail-encoder FFI must stay wire/query-only; forbidden `{needle}` in symbol `{symbol}`"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_version() {

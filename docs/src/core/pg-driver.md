@@ -129,6 +129,13 @@ let driver = PgDriver::connect_with_options(
 
 ### Kerberos / GSSAPI Token Hook
 
+QAIL treats Kerberos/GSS/SSPI as an external identity concern. The driver
+consumes response tokens through Rust callbacks and enforces the configured
+authentication policy; it does not own SSO login, ticket acquisition, or a C
+ABI controller for enterprise auth. Use your OS ticket cache, keytab, sidecar,
+or enterprise identity stack to obtain credentials, then provide tokens through
+`ConnectOptions`.
+
 ```rust
 use qail_pg::{
     AuthSettings, ConnectOptions, EnterpriseAuthMechanism, PgDriver,
@@ -180,6 +187,10 @@ let _driver = PgDriver::connect_with_options(
 ```
 
 ### Built-in Linux Kerberos Provider (Feature-Gated)
+
+The built-in Linux provider is a thin adapter over the local Kerberos/GSS
+runtime. It validates common environment wiring and uses existing credentials;
+it is not an identity broker and does not replace enterprise SSO tooling.
 
 ```rust
 #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]

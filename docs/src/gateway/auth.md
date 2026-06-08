@@ -211,6 +211,10 @@ If `gss_provider=linux_krb5` is set, build the gateway with feature `enterprise-
 
 Startup runs Kerberos preflight checks and emits clear diagnostics for common misconfiguration
 (missing explicit credential cache/keytab paths, invalid `KRB5_CONFIG`, etc).
+The gateway does not perform enterprise SSO login or ticket acquisition. It
+uses the configured provider to consume Kerberos/GSS tokens from your existing
+OS credential cache, keytab, sidecar, or identity infrastructure, then applies
+the configured database auth policy fail-closed.
 
 Example:
 
