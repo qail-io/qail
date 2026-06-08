@@ -46,3 +46,43 @@ pub(crate) fn qualifier_for_column_reference<'a>(
         None
     }
 }
+
+pub(crate) fn qualifier_for_column_path<'a>(
+    reference: &'a str,
+    parts: &[&str],
+) -> Option<(&'a str, usize)> {
+    let (table, alias) = split_table_reference(reference)?;
+    if parts.is_empty() {
+        return None;
+    }
+
+    if let Some(alias) = alias
+        && ident_eq(alias, parts[0])
+    {
+        return Some((alias, 1));
+    }
+
+    let table_parts = table.split('.').collect::<Vec<_>>();
+    if parts.len() > table_parts.len()
+        && table_parts
+            .iter()
+            .zip(parts)
+            .all(|(expected, actual)| ident_eq(expected, actual))
+    {
+        return Some((alias.unwrap_or(table), table_parts.len()));
+    }
+
+    if let Some(bare_table) = table_parts.last()
+        && parts.len() > 1
+        && ident_eq(bare_table, parts[0])
+    {
+        return Some((alias.unwrap_or(bare_table), 1));
+    }
+
+    None
+}
+
+fn ident_eq(left: &str, right: &str) -> bool {
+    left.trim_matches('"')
+        .eq_ignore_ascii_case(right.trim_matches('"'))
+}

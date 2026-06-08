@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::identifier::render_table_reference;
 use crate::transpiler::{SqlGenerator, escape_sql_string_literal};
 
 /// Generate Window Function SQL (Pillar 8).
@@ -120,7 +121,7 @@ pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
 
     sql.push_str(&cols.join(", "));
     sql.push_str(" FROM ");
-    sql.push_str(&generator.quote_identifier(&cmd.table));
+    sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     let mut where_groups: Vec<String> = Vec::new();
     for cage in &cmd.cages {

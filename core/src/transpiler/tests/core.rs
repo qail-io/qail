@@ -378,6 +378,22 @@ fn test_window_with_or_filter_grouping() {
 }
 
 #[test]
+fn test_window_target_alias_renders_as_table_reference() {
+    use crate::ast::{Action, Expr, Operator, Qail};
+
+    let sql = Qail {
+        action: Action::Over,
+        table: "events e".to_string(),
+        columns: vec![Expr::Named("e.id".to_string())],
+        ..Default::default()
+    }
+    .filter("e.kind", Operator::Eq, "click")
+    .to_sql();
+
+    assert_eq!(sql, "SELECT e.id FROM events e WHERE e.kind = 'click'");
+}
+
+#[test]
 fn test_array_unnest() {
     use crate::ast::*;
     let mut cmd = Qail::get("users");

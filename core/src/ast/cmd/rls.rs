@@ -63,6 +63,15 @@ fn normalize_ident(raw: &str) -> String {
     unquoted.to_ascii_lowercase()
 }
 
+fn split_table_reference(table_ref: &str) -> (&str, Option<&str>) {
+    let parts = table_ref.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table, alias] => (table, Some(alias)),
+        [table, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => (table, Some(alias)),
+        _ => (table_ref.trim(), None),
+    }
+}
+
 fn expr_named_eq(expr: &Expr, name: &str) -> bool {
     matches!(expr, Expr::Named(existing) if normalize_ident(existing) == normalize_ident(name))
 }
@@ -217,7 +226,8 @@ impl Qail {
 
         let scoped = self.scope_nested_rls(ctx)?;
 
-        let Some(tenant_col) = lookup_tenant_column(&scoped.table) else {
+        let (tenant_table, _) = split_table_reference(&scoped.table);
+        let Some(tenant_col) = lookup_tenant_column(tenant_table) else {
             return Ok(scoped);
         };
 
@@ -230,7 +240,10 @@ impl Qail {
                 | Action::Gen
                 | Action::Export
                 | Action::Search
-                | Action::Scroll => Ok(scoped.scope_to_global(&tenant_col)),
+                | Action::Scroll => {
+                    let condition_col = scoped.primary_tenant_condition_col(&tenant_col);
+                    Ok(scoped.scope_to_global(&condition_col))
+                }
                 Action::Set => scoped.scope_update_global(&tenant_col),
                 Action::Add | Action::Upsert | Action::Put => {
                     scoped.scope_insert_global(&tenant_col)
@@ -249,7 +262,10 @@ impl Qail {
             | Action::Gen
             | Action::Export
             | Action::Search
-            | Action::Scroll => Ok(scoped.scope_to_tenant(&tenant_col, ctx)),
+            | Action::Scroll => {
+                let condition_col = scoped.primary_tenant_condition_col(&tenant_col);
+                Ok(scoped.scope_to_tenant(&condition_col, ctx))
+            }
             Action::Set => scoped.scope_update_tenant(&tenant_col, ctx),
             // Insert / Upsert → auto-set tenant column in payload
             Action::Add | Action::Upsert | Action::Put => {
@@ -445,12 +461,14 @@ impl Qail {
 
     fn scope_update_tenant(self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
         self.reject_tenant_payload_mutation(tenant_col)?;
-        Ok(self.scope_to_tenant(tenant_col, ctx))
+        let condition_col = self.primary_tenant_condition_col(tenant_col);
+        Ok(self.scope_to_tenant(&condition_col, ctx))
     }
 
     fn scope_update_global(self, tenant_col: &str) -> QailBuildResult<Self> {
         self.reject_tenant_payload_mutation(tenant_col)?;
-        Ok(self.scope_to_global(tenant_col))
+        let condition_col = self.primary_tenant_condition_col(tenant_col);
+        Ok(self.scope_to_global(&condition_col))
     }
 
     fn reject_tenant_payload_mutation(&self, tenant_col: &str) -> QailBuildResult<()> {
@@ -497,6 +515,13 @@ impl Qail {
         }
 
         self
+    }
+
+    fn primary_tenant_condition_col(&self, tenant_col: &str) -> String {
+        let (_, alias) = split_table_reference(&self.table);
+        alias
+            .map(|alias| format!("{alias}.{tenant_col}"))
+            .unwrap_or_else(|| tenant_col.to_string())
     }
 
     /// Inject a `WHERE tenant_col IS NULL` filter for global/platform reads.
@@ -698,12 +723,14 @@ impl Qail {
     }
 
     fn merge_target_tenant_col(&self, tenant_col: &str) -> String {
+        let (target_table, inline_alias) = split_table_reference(&self.table);
         let qualifier = self
             .merge
             .as_ref()
             .and_then(|merge| merge.target_alias.as_ref())
             .map(String::as_str)
-            .unwrap_or(&self.table);
+            .or(inline_alias)
+            .unwrap_or(target_table);
         format!("{qualifier}.{tenant_col}")
     }
 
@@ -711,8 +738,9 @@ impl Qail {
         let merge = self.merge.as_ref()?;
         match &merge.source {
             MergeSource::Table { name, alias } => {
-                let source_tenant_col = lookup_tenant_column(name)?;
-                let qualifier = alias.as_deref().unwrap_or(name);
+                let (source_table, inline_alias) = split_table_reference(name);
+                let source_tenant_col = lookup_tenant_column(source_table)?;
+                let qualifier = alias.as_deref().or(inline_alias).unwrap_or(source_table);
                 Some(format!("{qualifier}.{source_tenant_col}"))
             }
             MergeSource::Query { query, alias } => {
@@ -733,12 +761,13 @@ impl Qail {
             return None;
         };
 
-        if let Some(source_tenant_col) = lookup_tenant_column(&query.table) {
+        let (source_table, _) = split_table_reference(&query.table);
+        if let Some(source_tenant_col) = lookup_tenant_column(source_table) {
             return Some(source_tenant_col);
         }
 
         if query_projects_tenant_col(query, tenant_col)
-            || self.cte_exposes_tenant_col(&query.table, tenant_col)
+            || self.cte_exposes_tenant_col(source_table, tenant_col)
         {
             return Some(tenant_col.to_string());
         }
@@ -756,8 +785,9 @@ impl Qail {
                         .iter()
                         .any(|col| normalize_ident(col) == normalize_ident(tenant_col))
                 } else {
+                    let (base_table, _) = split_table_reference(&cte.base_query.table);
                     query_projects_tenant_col(&cte.base_query, tenant_col)
-                        || lookup_tenant_column(&cte.base_query.table)
+                        || lookup_tenant_column(base_table)
                             .is_some_and(|col| normalize_ident(&col) == normalize_ident(tenant_col))
                 }
             })
@@ -908,6 +938,27 @@ mod tests {
                     && matches!(&c.value, Value::String(v) if v == "t-123")
             }),
             "Expected tenant_id = 't-123' condition"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_resolves_primary_table_alias_on_get() {
+        register_tenant_table("_rls_alias_get_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-alias");
+        let query = Qail::get("_rls_alias_get_orders")
+            .table_alias("o")
+            .with_rls(&ctx)
+            .expect("rls should apply through primary table alias");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("FROM _rls_alias_get_orders o"),
+            "expected aliased FROM table: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE o.tenant_id = 'tenant-alias'"),
+            "RLS tenant filter should use the primary alias: {sql}"
         );
     }
 
@@ -1084,6 +1135,28 @@ mod tests {
                 .iter()
                 .any(|c| { matches!(&c.left, Expr::Named(n) if n == "tenant_id") }),
             "Expected tenant_id filter on SET"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_resolves_primary_table_alias_on_set() {
+        register_tenant_table("_rls_alias_set_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-set-alias");
+        let query = Qail::set("_rls_alias_set_orders")
+            .table_alias("o")
+            .set_value("status", "paid")
+            .with_rls(&ctx)
+            .expect("rls should apply through UPDATE alias");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("UPDATE _rls_alias_set_orders o SET status = 'paid'"),
+            "expected aliased UPDATE target: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE o.tenant_id = 'tenant-set-alias'"),
+            "RLS tenant filter should use the UPDATE alias: {sql}"
         );
     }
 
@@ -1322,6 +1395,44 @@ mod tests {
     }
 
     #[test]
+    fn test_with_rls_scopes_merge_inline_source_alias() {
+        register_tenant_table("_rls_merge_inline_target_orders", "tenant_id");
+        register_tenant_table("_rls_merge_inline_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-inline");
+        let query = Qail::merge_into("_rls_merge_inline_target_orders")
+            .target_alias("t")
+            .using_table("_rls_merge_inline_source_orders s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("status", Expr::Named("s.status".to_string()))])
+            .when_not_matched_insert(
+                &["id", "status"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.status".to_string()),
+                ],
+            )
+            .with_rls(&ctx)
+            .expect("merge rls should apply through inline source alias");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("USING _rls_merge_inline_source_orders s"),
+            "MERGE source should keep inline alias: {sql}"
+        );
+        assert!(
+            sql.contains("ON t.id = s.id AND t.tenant_id = s.tenant_id"),
+            "MERGE ON must scope inline source alias tenant equality: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "WHEN NOT MATCHED BY TARGET AND s.tenant_id = 'tenant-inline' THEN INSERT"
+            ),
+            "MERGE insert branch must scope inline source alias: {sql}"
+        );
+    }
+
+    #[test]
     fn test_with_rls_scopes_merge_query_source() {
         register_tenant_table("_rls_merge_query_target_orders", "tenant_id");
         register_tenant_table("_rls_merge_query_source_orders", "tenant_id");
@@ -1377,6 +1488,41 @@ mod tests {
         assert!(
             sql.contains("WHEN NOT MATCHED BY TARGET AND s.tenant_id = 'tenant-query' THEN INSERT"),
             "MERGE query source insert branch must be source-tenant scoped: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_aliased_merge_query_source_table() {
+        register_tenant_table("_rls_merge_query_alias_target_orders", "tenant_id");
+        register_tenant_table("_rls_merge_query_alias_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-query-alias");
+        let source = Qail::get("_rls_merge_query_alias_source_orders")
+            .table_alias("base")
+            .columns(["id", "status"]);
+        let query = Qail::merge_into("_rls_merge_query_alias_target_orders")
+            .target_alias("t")
+            .using_query_as(source, "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("status", Expr::Named("s.status".to_string()))])
+            .when_not_matched_insert(
+                &["id", "status"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.status".to_string()),
+                ],
+            )
+            .with_rls(&ctx)
+            .expect("merge rls should apply through aliased source query table");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("FROM _rls_merge_query_alias_source_orders base WHERE base.tenant_id = 'tenant-query-alias'"),
+            "MERGE source query should be scoped through its base-table alias: {sql}"
+        );
+        assert!(
+            sql.contains("ON t.id = s.id AND t.tenant_id = s.tenant_id"),
+            "MERGE query source ON must include outer source tenant equality: {sql}"
         );
     }
 

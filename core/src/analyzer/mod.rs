@@ -12,7 +12,9 @@ pub mod rust_ast; // Public for LSP access to query_extractor
 mod scanner;
 mod text_qail;
 
-pub use impact::{BreakingChange, MigrationImpact};
+pub use impact::{
+    BreakingChange, ImpactAnalysisOptions, MigrationImpact, RawSqlImpactMode, Warning,
+};
 pub use rust_ast::{FetchMethod, QueryCall, SqlType, detect_query_calls};
 pub use rust_ast::{RawSqlMatch, RustAnalyzer, detect_raw_sql, detect_raw_sql_in_file};
 pub use scanner::{

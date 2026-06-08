@@ -165,6 +165,8 @@ pub async fn migrate_up(
                 }
             }
 
+            print_impact_warnings(&impact);
+
             if !force {
                 println!();
                 println!(
@@ -184,7 +186,11 @@ pub async fn migrate_up(
                 );
             }
         } else {
-            println!("   {} No breaking changes detected", "✓".green());
+            println!(
+                "   {} No verified Qail AST breaking changes detected",
+                "✓".green()
+            );
+            print_impact_warnings(&impact);
         }
     }
 
@@ -414,6 +420,50 @@ pub async fn migrate_up(
     );
     println!("  Recorded as migration: {}", version.cyan());
     Ok(())
+}
+
+fn print_impact_warnings(impact: &qail_core::analyzer::MigrationImpact) {
+    if impact.warnings.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("{}", "⚠️  Manual review warnings".yellow().bold());
+    for warning in &impact.warnings {
+        match warning {
+            qail_core::analyzer::Warning::OrphanedReference { table, references } => {
+                println!(
+                    "   {} {} ({} refs)",
+                    "ORPHANED REFERENCE".yellow(),
+                    table.yellow(),
+                    references.len()
+                );
+                for r in references.iter().take(3) {
+                    println!(
+                        "     ⚠️  {}:{} → {}",
+                        r.file.display(),
+                        r.line,
+                        r.snippet.cyan()
+                    );
+                }
+            }
+            qail_core::analyzer::Warning::RawSqlUnverified { references } => {
+                println!(
+                    "   {} ({} refs): Qail cannot prove migration safety for raw SQL",
+                    "RAW SQL".yellow(),
+                    references.len()
+                );
+                for r in references.iter().take(3) {
+                    println!(
+                        "     ⚠️  {}:{} → {}",
+                        r.file.display(),
+                        r.line,
+                        r.snippet.cyan()
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

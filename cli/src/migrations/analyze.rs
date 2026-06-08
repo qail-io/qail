@@ -17,6 +17,7 @@ struct AnalyzeJsonReport {
     references_scanned: usize,
     scanned_files: Vec<AnalyzedFile>,
     breaking_changes: Vec<BreakingChangeJson>,
+    warnings: Vec<WarningJson>,
 }
 
 #[derive(Serialize)]
@@ -44,6 +45,13 @@ struct CodeRefJson {
     line: usize,
     query_type: String,
     snippet: String,
+}
+
+#[derive(Serialize)]
+struct WarningJson {
+    kind: String,
+    message: String,
+    references: Vec<CodeRefJson>,
 }
 
 /// Analyze migration impact. See [full docs](https://dev.qail.io/docs/features/analyzer.html).
@@ -100,6 +108,7 @@ pub fn migrate_analyze(
                 references_scanned: 0,
                 scanned_files: Vec::new(),
                 breaking_changes: Vec::new(),
+                warnings: Vec::new(),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
@@ -208,10 +217,20 @@ pub fn migrate_analyze(
 
     if impact.safe_to_run {
         if ci_mode {
-            println!("✅ No breaking changes detected");
+            println!("✅ No verified Qail AST breaking changes detected");
+            print_ci_warnings(&impact, code_path);
         } else {
-            println!("{}", "✓ Migration is safe to run".green().bold());
-            println!("  No breaking changes detected in codebase\n");
+            println!(
+                "{}",
+                "✓ No verified Qail AST breaking changes detected"
+                    .green()
+                    .bold()
+            );
+            if impact.warnings.is_empty() {
+                println!("  Native Qail references are compatible with this migration\n");
+            } else {
+                print_human_warnings(&impact);
+            }
 
             println!("{}", "Migration preview:".cyan());
             for cmd in &cmds {
@@ -221,9 +240,11 @@ pub fn migrate_analyze(
         }
     } else if ci_mode {
         print_ci_breaking_changes(&impact, code_path);
+        print_ci_warnings(&impact, code_path);
         std::process::exit(1);
     } else {
         print_human_breaking_changes(&impact);
+        print_human_warnings(&impact);
     }
 
     Ok(())
@@ -328,7 +349,29 @@ fn build_json_report(
         references_scanned: scan_result.refs.len(),
         scanned_files,
         breaking_changes,
+        warnings: warnings_to_json(&impact.warnings, code_path),
     }
+}
+
+fn warnings_to_json(
+    warnings: &[qail_core::analyzer::Warning],
+    code_path: &std::path::Path,
+) -> Vec<WarningJson> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            qail_core::analyzer::Warning::OrphanedReference { table, references } => WarningJson {
+                kind: "orphaned_reference".to_string(),
+                message: format!("Reference to table '{table}' no longer exists in schema"),
+                references: refs_to_json(references, code_path),
+            },
+            qail_core::analyzer::Warning::RawSqlUnverified { references } => WarningJson {
+                kind: "raw_sql_unverified".to_string(),
+                message: "Qail cannot prove migration safety for raw SQL; review manually or convert to native Qail AST for verified checks.".to_string(),
+                references: refs_to_json(references, code_path),
+            },
+        })
+        .collect()
 }
 
 fn refs_to_json(
@@ -428,6 +471,109 @@ fn print_ci_breaking_changes(
         impact.affected_files
     );
     println!("::endgroup::");
+}
+
+fn print_ci_warnings(impact: &qail_core::analyzer::MigrationImpact, code_path: &std::path::Path) {
+    if impact.warnings.is_empty() {
+        return;
+    }
+
+    let repo_root = {
+        let mut current = code_path.to_path_buf();
+        loop {
+            if current.join(".git").exists() || current.join("Cargo.toml").exists() {
+                break current;
+            }
+            if !current.pop() {
+                break code_path.to_path_buf();
+            }
+        }
+    };
+
+    for warning in &impact.warnings {
+        match warning {
+            qail_core::analyzer::Warning::OrphanedReference { table, references } => {
+                for r in references {
+                    let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
+                    println!(
+                        "::warning file={},line={},title=Orphaned Qail Reference::Reference to table '{}' no longer exists in schema",
+                        file_path.display(),
+                        r.line,
+                        table
+                    );
+                }
+            }
+            qail_core::analyzer::Warning::RawSqlUnverified { references } => {
+                for r in references {
+                    let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
+                    println!(
+                        "::warning file={},line={},title=Raw SQL Manual Review::Qail cannot prove migration safety for raw SQL; convert to native Qail AST for verified checks",
+                        file_path.display(),
+                        r.line
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn print_human_warnings(impact: &qail_core::analyzer::MigrationImpact) {
+    if impact.warnings.is_empty() {
+        return;
+    }
+
+    println!("{}", "⚠️  WARNINGS".yellow().bold());
+    println!();
+
+    for warning in &impact.warnings {
+        match warning {
+            qail_core::analyzer::Warning::OrphanedReference { table, references } => {
+                println!(
+                    "┌─ {} {} ({} references) ─────────────────────┐",
+                    "ORPHANED REFERENCE".yellow(),
+                    table.yellow(),
+                    references.len()
+                );
+                for r in references.iter().take(5) {
+                    println!(
+                        "│ {} {}:{} → {}",
+                        "⚠️ ".yellow(),
+                        r.file.display(),
+                        r.line,
+                        r.snippet.cyan()
+                    );
+                }
+                if references.len() > 5 {
+                    println!("│ ... and {} more", references.len() - 5);
+                }
+                println!("└──────────────────────────────────────────────────────┘");
+                println!();
+            }
+            qail_core::analyzer::Warning::RawSqlUnverified { references } => {
+                println!(
+                    "┌─ {} ({} references) ─────────────────────────┐",
+                    "RAW SQL MANUAL REVIEW".yellow(),
+                    references.len()
+                );
+                println!("│ Qail cannot prove migration safety for raw SQL; review manually");
+                println!("│ or convert it to native Qail AST for verified checks.");
+                for r in references.iter().take(5) {
+                    println!(
+                        "│ {} {}:{} → {}",
+                        "⚠️ ".yellow(),
+                        r.file.display(),
+                        r.line,
+                        r.snippet.cyan()
+                    );
+                }
+                if references.len() > 5 {
+                    println!("│ ... and {} more", references.len() - 5);
+                }
+                println!("└──────────────────────────────────────────────────────┘");
+                println!();
+            }
+        }
+    }
 }
 
 fn print_human_breaking_changes(impact: &qail_core::analyzer::MigrationImpact) {

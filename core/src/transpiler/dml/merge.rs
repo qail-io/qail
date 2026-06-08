@@ -4,9 +4,10 @@ use crate::ast::{
     Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
 use crate::transpiler::conditions::{
-    ConditionToSql, read_only_subquery_sql, validate_read_only_subquery,
+    ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax, validate_read_only_subquery,
 };
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::identifier::render_table_reference;
 use crate::transpiler::traits::escape_sql_string_literal;
 use crate::transpiler::{SqlGenerator, ToSql};
 
@@ -30,6 +31,7 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     let generator = dialect.generator();
+    let reference_context = merge_reference_context(cmd, merge);
     let mut sql = String::new();
     push_cte_prefix(&mut sql, cmd, dialect);
     sql.push_str("MERGE INTO ");
@@ -47,7 +49,11 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
     ));
 
     sql.push_str(" ON ");
-    sql.push_str(&conditions_sql(&merge.on, generator.as_ref()));
+    sql.push_str(&conditions_sql(
+        &merge.on,
+        generator.as_ref(),
+        &reference_context,
+    ));
 
     for clause in &merge.clauses {
         sql.push_str(" WHEN ");
@@ -58,10 +64,18 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
         });
         if !clause.condition.is_empty() {
             sql.push_str(" AND ");
-            sql.push_str(&conditions_sql(&clause.condition, generator.as_ref()));
+            sql.push_str(&conditions_sql(
+                &clause.condition,
+                generator.as_ref(),
+                &reference_context,
+            ));
         }
         sql.push_str(" THEN ");
-        sql.push_str(&merge_action_sql(&clause.action, generator.as_ref()));
+        sql.push_str(&merge_action_sql(
+            &clause.action,
+            generator.as_ref(),
+            &reference_context,
+        ));
     }
 
     if let Some(returning) = &cmd.returning
@@ -70,7 +84,7 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
         sql.push_str(" RETURNING ");
         let returning_sql: Vec<String> = returning
             .iter()
-            .map(|expr| expr_sql(expr, generator.as_ref()))
+            .map(|expr| expr_sql(expr, generator.as_ref(), &reference_context))
             .collect();
         sql.push_str(&returning_sql.join(", "));
     }
@@ -98,6 +112,31 @@ fn push_cte_prefix(sql: &mut String, cmd: &Qail, dialect: Dialect) {
     sql.push(' ');
 }
 
+fn merge_reference_context(cmd: &Qail, merge: &Merge) -> Qail {
+    let mut context = Qail::get(&cmd.table);
+    if let Some(alias) = &merge.target_alias {
+        context.table = format!("{} {}", cmd.table, alias);
+    }
+
+    match &merge.source {
+        MergeSource::Table { name, alias } => {
+            let source_ref = if let Some(alias) = alias {
+                format!("{} {}", name, alias)
+            } else {
+                name.clone()
+            };
+            context.from_tables.push(source_ref);
+        }
+        MergeSource::Query { alias, .. } => {
+            if let Some(alias) = alias {
+                context.from_tables.push(alias.clone());
+            }
+        }
+    }
+
+    context
+}
+
 fn merge_source_sql(
     source: &MergeSource,
     dialect: Dialect,
@@ -105,7 +144,11 @@ fn merge_source_sql(
 ) -> String {
     match source {
         MergeSource::Table { name, alias } => {
-            let mut sql = generator.quote_identifier(name);
+            let mut sql = if alias.is_some() {
+                generator.quote_identifier(name)
+            } else {
+                render_table_reference(name, generator)
+            };
             if let Some(alias) = alias {
                 sql.push_str(" AS ");
                 sql.push_str(&generator.quote_identifier(alias));
@@ -123,44 +166,48 @@ fn merge_source_sql(
     }
 }
 
-fn conditions_sql(conditions: &[Condition], generator: &dyn SqlGenerator) -> String {
+fn conditions_sql(
+    conditions: &[Condition],
+    generator: &dyn SqlGenerator,
+    context: &Qail,
+) -> String {
     conditions
         .iter()
-        .map(|condition| condition_sql(condition, generator))
+        .map(|condition| condition_sql(condition, generator, context))
         .collect::<Vec<_>>()
         .join(" AND ")
 }
 
-fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String {
+fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator, context: &Qail) -> String {
     if condition.is_array_unnest {
-        return condition.to_sql(generator, None);
+        return condition.to_sql(generator, Some(context));
     }
 
-    let left = expr_sql(&condition.left, generator);
+    let left = expr_sql(&condition.left, generator, context);
     match condition.op {
         Operator::Fuzzy => {
-            let value = fuzzy_pattern_sql(&condition.value, generator);
+            let value = fuzzy_pattern_sql(&condition.value, generator, context);
             format!("{left} {} {value}", generator.fuzzy_operator())
         }
         Operator::IsNull => format!("{left} IS NULL"),
         Operator::IsNotNull => format!("{left} IS NOT NULL"),
-        Operator::In | Operator::NotIn => in_condition_sql(condition, &left, generator),
+        Operator::In | Operator::NotIn => in_condition_sql(condition, &left, generator, context),
         Operator::Contains => {
-            generator.json_contains(&left, &value_sql(&condition.value, generator))
+            generator.json_contains(&left, &value_sql(&condition.value, generator, context))
         }
         Operator::KeyExists => {
-            generator.json_key_exists(&left, &value_sql(&condition.value, generator))
+            generator.json_key_exists(&left, &value_sql(&condition.value, generator, context))
         }
         Operator::JsonExists => {
-            let path = json_path_arg(condition, generator);
+            let path = json_path_arg(condition, generator, context);
             generator.json_exists(&left, &path)
         }
         Operator::JsonQuery => {
-            let path = json_path_arg(condition, generator);
+            let path = json_path_arg(condition, generator, context);
             format!("{} IS NOT NULL", generator.json_query(&left, &path))
         }
         Operator::JsonValue => {
-            let path = json_path_arg(condition, generator);
+            let path = json_path_arg(condition, generator, context);
             format!("{} IS NOT NULL", generator.json_value(&left, &path))
         }
         Operator::Between | Operator::NotBetween => {
@@ -170,8 +217,8 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
                 return format!(
                     "{left} {} {} AND {}",
                     condition.op.sql_symbol(),
-                    value_sql(&values[0], generator),
-                    value_sql(&values[1], generator)
+                    value_sql(&values[0], generator, context),
+                    value_sql(&values[1], generator, context)
                 );
             }
             invalid_between_condition_sql()
@@ -186,7 +233,7 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator) -> String 
         _ => format!(
             "{left} {} {}",
             condition.op.sql_symbol(),
-            value_sql(&condition.value, generator)
+            value_sql(&condition.value, generator, context)
         ),
     }
 }
@@ -204,17 +251,17 @@ fn invalid_between_condition_sql() -> String {
     "FALSE /* ERROR: BETWEEN condition requires exactly two array values */".to_string()
 }
 
-fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
+fn value_sql(value: &Value, generator: &dyn SqlGenerator, context: &Qail) -> String {
     match value {
-        Value::Column(column) => render_named_expr(column, generator),
-        Value::Expr(expr) => expr_sql(expr, generator),
+        Value::Column(column) => render_named_expr(column, generator, context),
+        Value::Expr(expr) => expr_sql(expr, generator, context),
         Value::Subquery(query) => format!("({})", read_only_subquery_sql(query)),
         Value::Function(function) => render_raw_function_value(function),
         Value::NamedParam(name) => render_named_param(name),
         Value::Array(values) => {
             let values = values
                 .iter()
-                .map(|value| value_sql(value, generator))
+                .map(|value| value_sql(value, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("({values})")
@@ -223,21 +270,26 @@ fn value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
     }
 }
 
-fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String {
+fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator, context: &Qail) -> String {
     match &condition.value {
         Value::String(path) => path.clone(),
         Value::Param(index) => generator.placeholder(*index),
         Value::NamedParam(name) => format!(":{}", name),
-        _ => value_sql(&condition.value, generator),
+        _ => value_sql(&condition.value, generator, context),
     }
 }
 
-fn in_condition_sql(condition: &Condition, left: &str, generator: &dyn SqlGenerator) -> String {
+fn in_condition_sql(
+    condition: &Condition,
+    left: &str,
+    generator: &dyn SqlGenerator,
+    context: &Qail,
+) -> String {
     match &condition.value {
         Value::Array(values) if !values.is_empty() => {
             let values = values
                 .iter()
-                .map(|value| value_sql(value, generator))
+                .map(|value| value_sql(value, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{left} {} ({values})", condition.op.sql_symbol())
@@ -246,21 +298,21 @@ fn in_condition_sql(condition: &Condition, left: &str, generator: &dyn SqlGenera
             format!(
                 "{left} {} {}",
                 condition.op.sql_symbol(),
-                value_sql(&condition.value, generator)
+                value_sql(&condition.value, generator, context)
             )
         }
         Value::Param(_) | Value::NamedParam(_) if condition.op == Operator::In => {
-            generator.in_array(left, &value_sql(&condition.value, generator))
+            generator.in_array(left, &value_sql(&condition.value, generator, context))
         }
         Value::Param(_) | Value::NamedParam(_) => {
-            generator.not_in_array(left, &value_sql(&condition.value, generator))
+            generator.not_in_array(left, &value_sql(&condition.value, generator, context))
         }
         _ if condition.op == Operator::In => invalid_in_condition_sql(),
         _ => invalid_in_condition_sql(),
     }
 }
 
-fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
+fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator, context: &Qail) -> String {
     match value {
         Value::String(value) => format!("'%{}%'", escape_sql_string_literal(value)),
         Value::Function(value) => format!("'%{}%'", escape_sql_string_literal(value)),
@@ -274,12 +326,12 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
         }
         value => format!(
             "'%{}%'",
-            escape_sql_string_literal(&value_sql(value, generator))
+            escape_sql_string_literal(&value_sql(value, generator, context))
         ),
     }
 }
 
-fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator) -> String {
+fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator, context: &Qail) -> String {
     match action {
         MergeAction::Update { assignments } => {
             let assignments = assignments
@@ -288,7 +340,7 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator) -> Strin
                     format!(
                         "{} = {}",
                         generator.quote_identifier(col),
-                        expr_sql(expr, generator)
+                        expr_sql(expr, generator, context)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -309,7 +361,7 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator) -> Strin
             }
             let values = values
                 .iter()
-                .map(|expr| expr_sql(expr, generator))
+                .map(|expr| expr_sql(expr, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             sql.push_str(" VALUES (");
@@ -322,13 +374,13 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator) -> Strin
     }
 }
 
-fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
+fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String {
     match expr {
         Expr::Star => "*".to_string(),
-        Expr::Named(name) => render_named_expr(name, generator),
+        Expr::Named(name) => render_named_expr(name, generator, context),
         Expr::Aliased { name, alias } => format!(
             "{} AS {}",
-            render_named_expr(name, generator),
+            render_named_expr(name, generator, context),
             render_identifier_or_error(alias, generator)
         ),
         Expr::Aggregate {
@@ -339,20 +391,24 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             ..
         } => {
             let mut sql = if *distinct {
-                format!("{}(DISTINCT {})", func, render_named_expr(col, generator))
+                format!(
+                    "{}(DISTINCT {})",
+                    func,
+                    render_named_expr(col, generator, context)
+                )
             } else {
-                format!("{}({})", func, render_named_expr(col, generator))
+                format!("{}({})", func, render_named_expr(col, generator, context))
             };
             if let Some(conditions) = filter
                 && !conditions.is_empty()
             {
                 sql.push_str(" FILTER (WHERE ");
-                sql.push_str(&conditions_sql(conditions, generator));
+                sql.push_str(&conditions_sql(conditions, generator, context));
                 sql.push(')');
             }
             sql
         }
-        Expr::Literal(value) => value_sql(value, generator),
+        Expr::Literal(value) => value_sql(value, generator, context),
         Expr::Case {
             when_clauses,
             else_value,
@@ -361,13 +417,13 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             let mut sql = String::from("CASE");
             for (condition, value) in when_clauses {
                 sql.push_str(" WHEN ");
-                sql.push_str(&condition_sql(condition, generator));
+                sql.push_str(&condition_sql(condition, generator, context));
                 sql.push_str(" THEN ");
-                sql.push_str(&expr_sql(value, generator));
+                sql.push_str(&expr_sql(value, generator, context));
             }
             if let Some(value) = else_value {
                 sql.push_str(" ELSE ");
-                sql.push_str(&expr_sql(value, generator));
+                sql.push_str(&expr_sql(value, generator, context));
             }
             sql.push_str(" END");
             sql
@@ -376,16 +432,16 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             left, op, right, ..
         } => match op {
             crate::ast::BinaryOp::IsNull => {
-                format!("({} IS NULL)", expr_sql(left, generator))
+                format!("({} IS NULL)", expr_sql(left, generator, context))
             }
             crate::ast::BinaryOp::IsNotNull => {
-                format!("({} IS NOT NULL)", expr_sql(left, generator))
+                format!("({} IS NOT NULL)", expr_sql(left, generator, context))
             }
             _ => format!(
                 "({} {} {})",
-                expr_sql(left, generator),
+                expr_sql(left, generator, context),
                 op,
-                expr_sql(right, generator)
+                expr_sql(right, generator, context)
             ),
         },
         Expr::FunctionCall { name, args, .. } => {
@@ -394,7 +450,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             };
             let args = args
                 .iter()
-                .map(|arg| expr_sql(arg, generator))
+                .map(|arg| expr_sql(arg, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{function}({args})")
@@ -405,7 +461,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             };
             let mut parts = Vec::new();
             for (keyword, expr) in args {
-                let expr = expr_sql(expr, generator);
+                let expr = expr_sql(expr, generator, context);
                 if let Some(keyword) = keyword {
                     let Some(keyword) = render_sql_keyword(keyword) else {
                         return "/* ERROR: Invalid function keyword */".to_string();
@@ -423,7 +479,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             let Some(target_type) = checked_sql_type_fragment(target_type) else {
                 return "/* ERROR: Invalid cast target type */".to_string();
             };
-            let inner = expr_sql(expr, generator);
+            let inner = expr_sql(expr, generator, context);
             if matches!(expr.as_ref(), Expr::JsonAccess { .. } | Expr::Case { .. }) {
                 format!("({inner})::{target_type}")
             } else {
@@ -435,7 +491,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             path_segments,
             ..
         } => {
-            let mut sql = generator.quote_identifier(column);
+            let mut sql = render_named_expr(column, generator, context);
             for (path, as_text) in path_segments {
                 let op = if *as_text { "->>" } else { "->" };
                 if path.parse::<i64>().is_ok() {
@@ -450,18 +506,18 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
             expr, collation, ..
         } => format!(
             "{} COLLATE {}",
-            expr_sql(expr, generator),
+            expr_sql(expr, generator, context),
             render_identifier_or_error(collation, generator)
         ),
         Expr::FieldAccess { expr, field, .. } => format!(
             "({}).{}",
-            expr_sql(expr, generator),
+            expr_sql(expr, generator, context),
             render_identifier_or_error(field, generator)
         ),
         Expr::ArrayConstructor { elements, .. } => {
             let elements = elements
                 .iter()
-                .map(|element| expr_sql(element, generator))
+                .map(|element| expr_sql(element, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("ARRAY[{elements}]")
@@ -469,7 +525,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
         Expr::RowConstructor { elements, .. } => {
             let elements = elements
                 .iter()
-                .map(|element| expr_sql(element, generator))
+                .map(|element| expr_sql(element, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("ROW({elements})")
@@ -477,8 +533,8 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
         Expr::Subscript { expr, index, .. } => {
             format!(
                 "{}[{}]",
-                expr_sql(expr, generator),
-                expr_sql(index, generator)
+                expr_sql(expr, generator, context),
+                expr_sql(index, generator, context)
             )
         }
         Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
@@ -557,7 +613,7 @@ fn render_identifier_or_error(value: &str, generator: &dyn SqlGenerator) -> Stri
     }
 }
 
-fn render_named_expr(name: &str, generator: &dyn SqlGenerator) -> String {
+fn render_named_expr(name: &str, generator: &dyn SqlGenerator, context: &Qail) -> String {
     if contains_unquoted_statement_delimiter(name) {
         return generator.quote_identifier(name);
     }
@@ -575,7 +631,8 @@ fn render_named_expr(name: &str, generator: &dyn SqlGenerator) -> String {
     {
         name.to_string()
     } else {
-        generator.quote_identifier(name)
+        resolve_known_col_syntax(name, context, generator)
+            .unwrap_or_else(|| generator.quote_identifier(name))
     }
 }
 

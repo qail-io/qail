@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::identifier::render_table_reference;
 
 /// Generate UPDATE SQL with SET, FROM, and WHERE clauses.
 pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
@@ -12,7 +13,7 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
     } else {
         String::from("UPDATE ")
     };
-    sql.push_str(&generator.quote_identifier(&cmd.table));
+    sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     let mut set_clauses: Vec<String> = Vec::new();
     let mut where_groups: Vec<String> = Vec::new();
@@ -66,7 +67,7 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
         sql.push_str(
             &cmd.from_tables
                 .iter()
-                .map(|t| generator.quote_identifier(t))
+                .map(|t| render_table_reference(t, generator.as_ref()))
                 .collect::<Vec<_>>()
                 .join(", "),
         );

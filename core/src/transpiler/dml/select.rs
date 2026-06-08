@@ -1,7 +1,9 @@
 //! SELECT SQL generation.
 
 use crate::ast::*;
-use crate::transpiler::conditions::{ConditionToSql, read_only_subquery_sql};
+use crate::transpiler::conditions::{
+    ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax,
+};
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::{
     render_table_reference, table_reference_base, table_reference_sql_qualifier,
@@ -51,10 +53,10 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             .map(|c| {
                 match c {
                     Expr::Star => "*".to_string(),
-                    Expr::Named(name) => generator.quote_identifier(name),
+                    Expr::Named(name) => render_named_reference(name, generator.as_ref(), cmd),
                     Expr::Aliased { name, alias } => format!(
                         "{} AS {}",
-                        generator.quote_identifier(name),
+                        render_named_reference(name, generator.as_ref(), cmd),
                         generator.quote_identifier(alias)
                     ),
                     Expr::Case {
@@ -164,19 +166,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                                         match a {
                                             Expr::Named(n) => {
                                                 // Don't quote if already quoted, is a param, or is numeric
-                                                if n.starts_with('\'')
-                                                    || n.starts_with('"')
-                                                    || n.starts_with(':')
-                                                    || n.starts_with('$')
-                                                    || n.parse::<f64>().is_ok()
-                                                    || n.eq_ignore_ascii_case("NULL")
-                                                    || n.eq_ignore_ascii_case("TRUE")
-                                                    || n.eq_ignore_ascii_case("FALSE")
-                                                {
-                                                    n.clone()
-                                                } else {
-                                                    generator.quote_identifier(n)
-                                                }
+                                                render_named_expression(n, generator.as_ref(), cmd)
                                             }
                                             Expr::Star => "*".to_string(),
                                             _ => {
@@ -205,7 +195,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         let col_expr = if col == "*" {
                             "*".to_string()
                         } else {
-                            generator.quote_identifier(col)
+                            render_named_reference(col, generator.as_ref(), cmd)
                         };
                         let mut expr = if *distinct {
                             format!("{}(DISTINCT {})", func, col_expr)
@@ -333,7 +323,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                             over_clause.push_str("PARTITION BY ");
                             let quoted_partition: Vec<String> = partition
                                 .iter()
-                                .map(|p| generator.quote_identifier(p))
+                                .map(|p| render_named_reference(p, generator.as_ref(), cmd))
                                 .collect();
                             over_clause.push_str(&quoted_partition.join(", "));
                             if !order.is_empty() {
@@ -347,7 +337,9 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                                 .map(|cage| {
                                     let col_str = if let Some(cond) = cage.conditions.first() {
                                         match &cond.left {
-                                            Expr::Named(n) => generator.quote_identifier(n),
+                                            Expr::Named(n) => {
+                                                render_named_reference(n, generator.as_ref(), cmd)
+                                            }
                                             expr => render_expr_for_orderby(
                                                 expr,
                                                 generator.as_ref(),
@@ -514,11 +506,11 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
         for col in &cmd.columns {
             match col {
                 Expr::Named(name) => {
-                    non_aggregated_cols.push(generator.quote_identifier(name));
+                    non_aggregated_cols.push(render_named_reference(name, generator.as_ref(), cmd));
                 }
                 Expr::Aliased { name, .. } => {
                     // Use the base column name for GROUP BY (before AS alias)
-                    non_aggregated_cols.push(generator.quote_identifier(name));
+                    non_aggregated_cols.push(render_named_reference(name, generator.as_ref(), cmd));
                 }
                 Expr::JsonAccess {
                     column,
@@ -754,10 +746,10 @@ fn render_expr_for_orderby(
             {
                 name.clone()
             } else {
-                generator.quote_identifier(name)
+                render_named_reference(name, generator, cmd)
             }
         }
-        Expr::Aliased { name, .. } => generator.quote_identifier(name),
+        Expr::Aliased { name, .. } => render_named_reference(name, generator, cmd),
         Expr::Literal(value) => render_value_for_expression(value, generator, cmd),
         Expr::Aggregate {
             col,
@@ -769,7 +761,7 @@ fn render_expr_for_orderby(
             let col_expr = if col == "*" {
                 "*".to_string()
             } else {
-                generator.quote_identifier(col)
+                render_named_reference(col, generator, cmd)
             };
             let mut expr = if *distinct {
                 format!("{}(DISTINCT {})", func, col_expr)
@@ -925,13 +917,42 @@ fn append_alias(
     }
 }
 
+fn render_named_expression(
+    name: &str,
+    generator: &dyn crate::transpiler::SqlGenerator,
+    cmd: &Qail,
+) -> String {
+    if name.starts_with('\'')
+        || name.starts_with('"')
+        || name.starts_with(':')
+        || name.starts_with('$')
+        || name.parse::<f64>().is_ok()
+        || name.eq_ignore_ascii_case("NULL")
+        || name.eq_ignore_ascii_case("TRUE")
+        || name.eq_ignore_ascii_case("FALSE")
+    {
+        name.to_string()
+    } else {
+        render_named_reference(name, generator, cmd)
+    }
+}
+
+fn render_named_reference(
+    name: &str,
+    generator: &dyn crate::transpiler::SqlGenerator,
+    cmd: &Qail,
+) -> String {
+    resolve_known_col_syntax(name, cmd, generator)
+        .unwrap_or_else(|| generator.quote_identifier(name))
+}
+
 fn render_value_for_expression(
     value: &Value,
     generator: &dyn crate::transpiler::SqlGenerator,
     cmd: &Qail,
 ) -> String {
     match value {
-        Value::Column(column) => generator.quote_identifier(column),
+        Value::Column(column) => render_named_reference(column, generator, cmd),
         Value::Expr(expr) => render_expr_for_orderby(expr, generator, cmd),
         Value::Subquery(query) => format!("({})", read_only_subquery_sql(query)),
         Value::Function(function) => render_raw_function_value(function),

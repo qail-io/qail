@@ -3,7 +3,9 @@
 use crate::ast::*;
 use crate::migrate::policy::RlsPolicy;
 use crate::parser::parse;
-use crate::transpiler::{Dialect, ToSql};
+use crate::transpiler::conditions::ParamContext;
+use crate::transpiler::sql::postgres::PostgresGenerator;
+use crate::transpiler::{ConditionToSql, Dialect, ToSql};
 
 // ============= DDL Tests =============
 
@@ -1103,6 +1105,22 @@ fn test_merge_postgres_parser_to_sql() {
 }
 
 #[test]
+fn test_merge_postgres_using_table_inline_alias_renders_as_reference() {
+    let cmd = Qail::merge_into("orders")
+        .target_alias("o")
+        .using_table("stage_orders s")
+        .merge_on_column("o.id", Operator::Eq, "s.order_id")
+        .when_matched_update(&[("status", Expr::Named("s.status".to_string()))]);
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "MERGE INTO orders AS o USING stage_orders s ON o.id = s.order_id \
+         WHEN MATCHED THEN UPDATE SET status = s.status"
+    );
+}
+
+#[test]
 fn test_merge_postgres_with_cte() {
     let source = Qail::get("staging_users").columns(["id", "name"]);
     let cmd = Qail::merge_into("users")
@@ -1342,6 +1360,72 @@ fn test_merge_postgres_renders_complex_action_expressions() {
          THEN UPDATE SET name = COALESCE(s.name, u.name), score = (s.score + 1), tier = s.profile->>'tier', status = CASE WHEN (s.profile->>'active')::integer > 0 THEN 'active' ELSE 'archived' END \
          WHEN NOT MATCHED BY TARGET AND s.external_id::integer > 0 \
          THEN INSERT (id, name, score, tier, status) VALUES (s.external_id::integer, COALESCE(s.name, 'unknown'), (s.score + 1), s.profile->>'tier', 'new')"
+    );
+}
+
+#[test]
+fn test_merge_postgres_schema_qualified_alias_refs_prefer_alias() {
+    let cmd = Qail::merge_into("public.orders")
+        .target_alias("o")
+        .using_table_as("staging.orders", "s")
+        .merge_on_column("public.orders.id", Operator::Eq, "staging.orders.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("staging.orders.updated_at".to_string()),
+                op: Operator::Gt,
+                value: Value::Column("public.orders.updated_at".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("status", Expr::Named("staging.orders.status".to_string()))],
+        )
+        .when_not_matched_insert(
+            &["id", "status"],
+            &[
+                Expr::Named("staging.orders.id".to_string()),
+                Expr::Named("staging.orders.status".to_string()),
+            ],
+        )
+        .returning(["public.orders.id"]);
+
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "MERGE INTO public.orders AS o USING staging.orders AS s ON o.id = s.id \
+         WHEN MATCHED AND s.updated_at > o.updated_at THEN UPDATE SET status = s.status \
+         WHEN NOT MATCHED BY TARGET THEN INSERT (id, status) VALUES (s.id, s.status) \
+         RETURNING o.id"
+    );
+}
+
+#[test]
+fn test_merge_postgres_inline_source_alias_json_refs_prefer_alias() {
+    let cmd = Qail::merge_into("public.orders")
+        .using_table("staging.orders s")
+        .merge_on_column("public.orders.id", Operator::Eq, "staging.orders.order_id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::JsonAccess {
+                    column: "staging.orders.payload".to_string(),
+                    path_segments: vec![("tier".to_string(), true)],
+                    alias: None,
+                },
+                op: Operator::Eq,
+                value: Value::String("gold".to_string()),
+                is_array_unnest: false,
+            }],
+            &[(
+                "status",
+                Expr::JsonAccess {
+                    column: "staging.orders.payload".to_string(),
+                    path_segments: vec![("status".to_string(), true)],
+                    alias: None,
+                },
+            )],
+        );
+
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "MERGE INTO public.orders USING staging.orders s ON public.orders.id = s.order_id \
+         WHEN MATCHED AND s.payload->>'tier' = 'gold' THEN UPDATE SET status = s.payload->>'status'"
     );
 }
 
@@ -2568,4 +2652,185 @@ fn test_join_alias_renders_as_reference_and_qualifies_filters() {
         cmd.to_sql(),
         "SELECT * FROM orders o LEFT JOIN inventory inv ON inv.order_id = o.id WHERE inv.capacity = 10"
     );
+}
+
+#[test]
+fn test_schema_qualified_table_condition_renders_as_column_reference() {
+    let cmd = Qail::get("public.users").eq("public.users.id", 42);
+    let sql = cmd.to_sql();
+
+    assert_eq!(sql, "SELECT * FROM public.users WHERE public.users.id = 42");
+    assert!(
+        !sql.contains("->"),
+        "schema-qualified table reference was rendered as JSON access: {sql}"
+    );
+}
+
+#[test]
+fn test_schema_qualified_table_alias_condition_prefers_alias() {
+    let cmd = Qail::get("public.users")
+        .table_alias("u")
+        .eq("public.users.id", 42);
+
+    assert_eq!(cmd.to_sql(), "SELECT * FROM public.users u WHERE u.id = 42");
+}
+
+#[test]
+fn test_schema_qualified_join_conditions_resolve_both_sides() {
+    let cmd = Qail::get("public.orders").table_alias("o").left_join_conds(
+        "crm.users u",
+        vec![Condition {
+            left: Expr::Named("crm.users.id".to_string()),
+            op: Operator::Eq,
+            value: Value::Column("public.orders.user_id".to_string()),
+            is_array_unnest: false,
+        }],
+    );
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM public.orders o LEFT JOIN crm.users u ON u.id = o.user_id"
+    );
+}
+
+#[test]
+fn test_schema_qualified_alias_projection_prefers_alias() {
+    let cmd = Qail::get("public.orders")
+        .table_alias("o")
+        .columns(["public.orders.id", "public.orders.status"]);
+
+    assert_eq!(cmd.to_sql(), "SELECT o.id, o.status FROM public.orders o");
+}
+
+#[test]
+fn test_schema_qualified_alias_aggregate_group_by_prefers_alias() {
+    let cmd = Qail::get("public.orders").table_alias("o").columns_expr([
+        Expr::Named("public.orders.customer_id".to_string()),
+        Expr::Aggregate {
+            col: "public.orders.total".to_string(),
+            func: AggregateFunc::Sum,
+            distinct: false,
+            filter: None,
+            alias: Some("total".to_string()),
+        },
+    ]);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT o.customer_id, SUM(o.total) AS total FROM public.orders o GROUP BY o.customer_id"
+    );
+}
+
+#[test]
+fn test_schema_qualified_alias_distinct_and_order_by_prefer_alias() {
+    let cmd = Qail::get("public.orders")
+        .table_alias("o")
+        .columns(["public.orders.id"])
+        .distinct_on(["public.orders.id"])
+        .order_by("public.orders.created_at", SortOrder::Desc);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT DISTINCT ON (o.id) o.id FROM public.orders o ORDER BY o.created_at DESC"
+    );
+}
+
+#[test]
+fn test_schema_qualified_alias_window_partition_order_prefer_alias() {
+    let cmd = Qail::get("public.orders")
+        .table_alias("o")
+        .columns_expr([Expr::Window {
+            name: "rn".to_string(),
+            func: "row_number".to_string(),
+            params: vec![],
+            partition: vec!["public.orders.customer_id".to_string()],
+            order: vec![Cage {
+                kind: CageKind::Sort(SortOrder::Desc),
+                conditions: vec![Condition {
+                    left: Expr::Named("public.orders.created_at".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Null,
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            }],
+            frame: None,
+        }]);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT ROW_NUMBER() OVER (PARTITION BY o.customer_id ORDER BY o.created_at DESC) AS rn FROM public.orders o"
+    );
+}
+
+#[test]
+fn test_update_from_alias_renders_as_table_reference() {
+    let cmd = Qail::set("orders")
+        .set_value("status", Value::Column("p.status".to_string()))
+        .update_from(["payments p"])
+        .filter(
+            "orders.payment_id",
+            Operator::Eq,
+            Value::Column("p.id".to_string()),
+        );
+
+    assert_eq!(
+        cmd.to_sql(),
+        "UPDATE orders SET status = p.status FROM payments p WHERE orders.payment_id = p.id"
+    );
+}
+
+#[test]
+fn test_update_target_alias_renders_as_table_reference() {
+    let cmd = Qail::set("orders")
+        .table_alias("o")
+        .set_value("status", "paid")
+        .filter("o.id", Operator::Eq, 7);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "UPDATE orders o SET status = 'paid' WHERE o.id = 7"
+    );
+}
+
+#[test]
+fn test_delete_using_alias_renders_as_table_reference() {
+    let cmd = Qail::del("sessions").delete_using(["users u"]).filter(
+        "sessions.user_id",
+        Operator::Eq,
+        Value::Column("u.id".to_string()),
+    );
+
+    assert_eq!(
+        cmd.to_sql(),
+        "DELETE FROM sessions USING users u WHERE sessions.user_id = u.id"
+    );
+}
+
+#[test]
+fn test_delete_target_alias_renders_as_table_reference() {
+    let cmd = Qail::del("sessions")
+        .table_alias("s")
+        .filter("s.id", Operator::Eq, 7);
+
+    assert_eq!(cmd.to_sql(), "DELETE FROM sessions s WHERE s.id = 7");
+}
+
+#[test]
+fn test_condition_parameterized_preserves_column_rhs() {
+    let generator = PostgresGenerator::new();
+    let cmd = Qail::get("public.orders").table_alias("o");
+    let condition = Condition {
+        left: Expr::Named("public.orders.user_id".to_string()),
+        op: Operator::Eq,
+        value: Value::Column("public.orders.account_id".to_string()),
+        is_array_unnest: false,
+    };
+    let mut params = ParamContext::new();
+
+    let sql = condition.to_sql_parameterized(&generator, Some(&cmd), &mut params);
+
+    assert_eq!(sql, "o.user_id = o.account_id");
+    assert!(params.params.is_empty());
+    assert!(params.named_params.is_empty());
 }

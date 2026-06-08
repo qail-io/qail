@@ -1,7 +1,7 @@
 use super::ToSql;
 use super::traits::{SqlGenerator, escape_sql_string_literal};
 use crate::ast::*;
-use crate::transpiler::identifier::qualifier_for_column_reference;
+use crate::transpiler::identifier::{qualifier_for_column_path, qualifier_for_column_reference};
 
 /// Context for parameterized query building.
 #[derive(Debug, Default)]
@@ -45,6 +45,58 @@ impl ParamContext {
 /// 3. If multiple parts:
 ///    - If first part matches table name or any join alias -> Treat as "Table"."Col".
 ///    - Else -> Treat as "Col"->"Field" (JSON).
+pub(crate) fn resolve_known_col_syntax(
+    col: &str,
+    cmd: &Qail,
+    generator: &dyn SqlGenerator,
+) -> Option<String> {
+    let parts: Vec<&str> = col.split('.').collect();
+    if parts.len() <= 1 {
+        return None;
+    }
+
+    let first = parts[0];
+
+    if let Some((sql_qualifier, consumed)) = qualifier_for_column_path(&cmd.table, &parts)
+        && consumed < parts.len()
+    {
+        return Some(render_qualified_column(
+            sql_qualifier,
+            &parts[consumed..],
+            generator,
+        ));
+    }
+
+    let auxiliary_tables = cmd
+        .joins
+        .iter()
+        .map(|join| join.table.as_str())
+        .chain(cmd.from_tables.iter().map(String::as_str))
+        .chain(cmd.using_tables.iter().map(String::as_str));
+
+    for table_ref in auxiliary_tables {
+        if let Some((sql_qualifier, consumed)) = qualifier_for_column_path(table_ref, &parts)
+            && consumed < parts.len()
+        {
+            return Some(render_qualified_column(
+                sql_qualifier,
+                &parts[consumed..],
+                generator,
+            ));
+        }
+
+        if let Some(sql_qualifier) = qualifier_for_column_reference(table_ref, first) {
+            return Some(render_qualified_column(
+                sql_qualifier,
+                &parts[1..],
+                generator,
+            ));
+        }
+    }
+
+    None
+}
+
 fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> String {
     if col.starts_with('{') && col.ends_with('}') {
         return col[1..col.len() - 1].to_string();
@@ -55,30 +107,26 @@ fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> St
         return generator.quote_identifier(col);
     }
 
-    let first = parts[0];
-
-    if let Some(sql_qualifier) = qualifier_for_column_reference(&cmd.table, first) {
-        return format!(
-            "{}.{}",
-            generator.quote_identifier(sql_qualifier),
-            generator.quote_identifier(&parts[1..].join("."))
-        );
-    }
-
-    for join in &cmd.joins {
-        if let Some(sql_qualifier) = qualifier_for_column_reference(&join.table, first) {
-            return format!(
-                "{}.{}",
-                generator.quote_identifier(sql_qualifier),
-                generator.quote_identifier(&parts[1..].join("."))
-            );
-        }
+    if let Some(sql) = resolve_known_col_syntax(col, cmd, generator) {
+        return sql;
     }
 
     // Default: treated as JSON access on the first part
     let col_name = parts[0];
     let path = &parts[1..];
     generator.json_access(col_name, path)
+}
+
+fn render_qualified_column(
+    qualifier: &str,
+    column_parts: &[&str],
+    generator: &dyn SqlGenerator,
+) -> String {
+    format!(
+        "{}.{}",
+        generator.quote_identifier(qualifier),
+        generator.quote_identifier(&column_parts.join("."))
+    )
 }
 
 fn resolve_text_search_vector(
@@ -127,7 +175,7 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             path_segments,
             ..
         } => render_json_access(column, path_segments, generator),
-        Expr::Literal(value) => condition_value_sql(value, generator),
+        Expr::Literal(value) => condition_value_sql_with_context(value, generator, context),
         Expr::Case {
             when_clauses,
             else_value,
@@ -480,17 +528,22 @@ fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator) -> String 
 }
 
 fn condition_value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
+    condition_value_sql_with_context(value, generator, None)
+}
+
+fn condition_value_sql_with_context(
+    value: &Value,
+    generator: &dyn SqlGenerator,
+    context: Option<&Qail>,
+) -> String {
     match value {
         Value::Param(n) => generator.placeholder(*n),
         Value::String(s) => format!("'{}'", escape_sql_string_literal(s)),
         Value::Bool(b) => generator.bool_literal(*b),
         Value::Subquery(cmd) => format!("({})", read_only_subquery_sql(cmd)),
         Value::Column(col) => {
-            if col.contains('.') {
-                col.split('.')
-                    .map(|part| generator.quote_identifier(part))
-                    .collect::<Vec<_>>()
-                    .join(".")
+            if let Some(cmd) = context {
+                resolve_col_syntax(col, cmd, generator)
             } else {
                 generator.quote_identifier(col)
             }
@@ -498,12 +551,12 @@ fn condition_value_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
         Value::Array(values) => {
             let values = values
                 .iter()
-                .map(|value| condition_value_sql(value, generator))
+                .map(|value| condition_value_sql_with_context(value, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("({values})")
         }
-        Value::Expr(expr) => condition_left_sql(expr, generator, None),
+        Value::Expr(expr) => condition_left_sql(expr, generator, context),
         v => v.to_string(),
     }
 }
@@ -513,12 +566,13 @@ fn in_condition_sql(
     op: Operator,
     value: &Value,
     generator: &dyn SqlGenerator,
+    context: Option<&Qail>,
 ) -> String {
     match value {
         Value::Array(values) if !values.is_empty() => {
             let values = values
                 .iter()
-                .map(|value| condition_value_sql(value, generator))
+                .map(|value| condition_value_sql_with_context(value, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{col} {} ({values})", op.sql_symbol())
@@ -527,7 +581,7 @@ fn in_condition_sql(
             format!(
                 "{col} {} {}",
                 op.sql_symbol(),
-                condition_value_sql(value, generator)
+                condition_value_sql_with_context(value, generator, context)
             )
         }
         Value::Param(_) | Value::NamedParam(_) if op == Operator::In => {
@@ -573,24 +627,24 @@ impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
     fn to_sql(&self, generator: &dyn SqlGenerator, context: Option<&Qail>) -> String {
         let col = condition_left_sql(&self.left, generator, context);
+        let value_sql = || condition_value_sql_with_context(&self.value, generator, context);
 
         if self.is_array_unnest {
             let inner_condition = match self.op {
-                Operator::Eq => format!("_el = {}", self.to_value_sql(generator)),
-                Operator::Ne => format!("_el != {}", self.to_value_sql(generator)),
-                Operator::Gt => format!("_el > {}", self.to_value_sql(generator)),
-                Operator::Gte => format!("_el >= {}", self.to_value_sql(generator)),
-                Operator::Lt => format!("_el < {}", self.to_value_sql(generator)),
-                Operator::Lte => format!("_el <= {}", self.to_value_sql(generator)),
+                Operator::Eq => format!("_el = {}", value_sql()),
+                Operator::Ne => format!("_el != {}", value_sql()),
+                Operator::Gt => format!("_el > {}", value_sql()),
+                Operator::Gte => format!("_el >= {}", value_sql()),
+                Operator::Lt => format!("_el < {}", value_sql()),
+                Operator::Lte => format!("_el <= {}", value_sql()),
                 Operator::Fuzzy => {
                     let val = fuzzy_pattern_sql(&self.value, generator);
                     format!("_el {} {}", generator.fuzzy_operator(), val)
                 }
-                Operator::ArrayElemContainedInText => format!(
-                    "LOWER({}) LIKE '%' || LOWER(_el) || '%'",
-                    self.to_value_sql(generator)
-                ),
-                _ => format!("_el = {}", self.to_value_sql(generator)),
+                Operator::ArrayElemContainedInText => {
+                    format!("LOWER({}) LIKE '%' || LOWER(_el) || '%'", value_sql())
+                }
+                _ => format!("_el = {}", value_sql()),
             };
             return format!(
                 "EXISTS (SELECT 1 FROM unnest({}) _el WHERE {})",
@@ -601,12 +655,7 @@ impl ConditionToSql for Condition {
         // Normal conditions
         // Simple binary operators use sql_symbol() for unified handling
         if self.op.is_simple_binary() {
-            return format!(
-                "{} {} {}",
-                col,
-                self.op.sql_symbol(),
-                self.to_value_sql(generator)
-            );
+            return format!("{} {} {}", col, self.op.sql_symbol(), value_sql());
         }
 
         // Special operators that need custom handling
@@ -621,16 +670,16 @@ impl ConditionToSql for Condition {
                 format!(
                     "to_tsvector('english', {}) @@ websearch_to_tsquery('english', {})",
                     vector,
-                    self.to_value_sql(generator)
+                    value_sql()
                 )
             }
             Operator::In | Operator::NotIn => {
-                in_condition_sql(&col, self.op, &self.value, generator)
+                in_condition_sql(&col, self.op, &self.value, generator, context)
             }
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),
-            Operator::Contains => generator.json_contains(&col, &self.to_value_sql(generator)),
-            Operator::KeyExists => generator.json_key_exists(&col, &self.to_value_sql(generator)),
+            Operator::Contains => generator.json_contains(&col, &value_sql()),
+            Operator::KeyExists => generator.json_key_exists(&col, &value_sql()),
             // Postgres 17+ SQL/JSON standard functions
             Operator::JsonExists => {
                 let path = json_path_arg(self, generator);
@@ -652,8 +701,8 @@ impl ConditionToSql for Condition {
                     return format!(
                         "{} BETWEEN {} AND {}",
                         col,
-                        condition_value_sql(&vals[0], generator),
-                        condition_value_sql(&vals[1], generator)
+                        condition_value_sql_with_context(&vals[0], generator, context),
+                        condition_value_sql_with_context(&vals[1], generator, context)
                     );
                 }
                 invalid_between_condition_sql()
@@ -665,8 +714,8 @@ impl ConditionToSql for Condition {
                     return format!(
                         "{} NOT BETWEEN {} AND {}",
                         col,
-                        condition_value_sql(&vals[0], generator),
-                        condition_value_sql(&vals[1], generator)
+                        condition_value_sql_with_context(&vals[0], generator, context),
+                        condition_value_sql_with_context(&vals[1], generator, context)
                     );
                 }
                 invalid_between_condition_sql()
@@ -689,12 +738,7 @@ impl ConditionToSql for Condition {
                 }
             }
             // Simple binary operators are handled above by is_simple_binary()
-            _ => format!(
-                "{} {} {}",
-                col,
-                self.op.sql_symbol(),
-                self.to_value_sql(generator)
-            ),
+            _ => format!("{} {} {}", col, self.op.sql_symbol(), value_sql()),
         }
     }
 
@@ -715,6 +759,9 @@ impl ConditionToSql for Condition {
             match v {
                 Value::Param(n) => generator.placeholder(*n), // Already a placeholder
                 Value::NamedParam(name) => p.add_named_param(name.clone(), generator),
+                Value::Column(_) => condition_value_sql_with_context(v, generator, context),
+                Value::Expr(expr) => condition_left_sql(expr, generator, context),
+                Value::Subquery(cmd) => format!("({})", read_only_subquery_sql(cmd)),
                 Value::Null => "NULL".to_string(),
                 other => p.add_param(other.clone(), generator),
             }

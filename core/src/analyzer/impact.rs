@@ -1,6 +1,6 @@
 //! Migration impact analysis.
 
-use super::scanner::CodeReference;
+use super::scanner::{CodeReference, QueryType};
 use crate::ast::{Action, Qail};
 use crate::migrate::Schema;
 use std::collections::HashMap;
@@ -15,6 +15,22 @@ pub struct MigrationImpact {
     pub safe_to_run: bool,
     /// Total number of affected files
     pub affected_files: usize,
+}
+
+/// How raw SQL references participate in migration impact analysis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RawSqlImpactMode {
+    /// Raw SQL is reported as unverified manual-review surface only.
+    #[default]
+    WarnOnly,
+    /// Raw SQL references are included in best-effort impact matching.
+    ExperimentalImpact,
+}
+
+/// Options for migration impact analysis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImpactAnalysisOptions {
+    pub raw_sql: RawSqlImpactMode,
 }
 
 /// A breaking change detected in the migration.
@@ -55,6 +71,9 @@ pub enum Warning {
         table: String,
         references: Vec<CodeReference>,
     },
+    RawSqlUnverified {
+        references: Vec<CodeReference>,
+    },
 }
 
 impl MigrationImpact {
@@ -65,12 +84,37 @@ impl MigrationImpact {
         _old_schema: &Schema,
         _new_schema: &Schema,
     ) -> Self {
+        Self::analyze_with_options(
+            commands,
+            code_refs,
+            _old_schema,
+            _new_schema,
+            ImpactAnalysisOptions::default(),
+        )
+    }
+
+    /// Analyze migration commands against codebase references with explicit options.
+    pub fn analyze_with_options(
+        commands: &[Qail],
+        code_refs: &[CodeReference],
+        _old_schema: &Schema,
+        _new_schema: &Schema,
+        options: ImpactAnalysisOptions,
+    ) -> Self {
         let mut impact = MigrationImpact::default();
 
         let mut table_refs: HashMap<String, Vec<&CodeReference>> = HashMap::new();
         let mut column_refs: HashMap<(String, String), Vec<&CodeReference>> = HashMap::new();
+        let mut raw_sql_refs = Vec::new();
 
         for code_ref in code_refs {
+            if matches!(code_ref.query_type, QueryType::RawSql) {
+                raw_sql_refs.push(code_ref.clone());
+                if matches!(options.raw_sql, RawSqlImpactMode::WarnOnly) {
+                    continue;
+                }
+            }
+
             table_refs
                 .entry(code_ref.table.clone())
                 .or_default()
@@ -82,6 +126,12 @@ impl MigrationImpact {
                     .or_default()
                     .push(code_ref);
             }
+        }
+
+        if !raw_sql_refs.is_empty() {
+            impact.warnings.push(Warning::RawSqlUnverified {
+                references: raw_sql_refs,
+            });
         }
 
         // Analyze each migration command
@@ -154,7 +204,8 @@ impl MigrationImpact {
         let mut output = String::new();
 
         if self.safe_to_run {
-            output.push_str("✓ Migration is safe to run\n");
+            output.push_str("✓ No verified Qail AST breaking changes detected\n");
+            append_warning_report(&mut output, &self.warnings);
             return output;
         }
 
@@ -256,7 +307,47 @@ impl MigrationImpact {
             }
         }
 
+        append_warning_report(&mut output, &self.warnings);
+
         output
+    }
+}
+
+fn append_warning_report(output: &mut String, warnings: &[Warning]) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    output.push('\n');
+    output.push_str("WARNINGS\n\n");
+    for warning in warnings {
+        match warning {
+            Warning::OrphanedReference { table, references } => {
+                output.push_str(&format!(
+                    "Orphaned reference to {} ({} references)\n",
+                    table,
+                    references.len()
+                ));
+            }
+            Warning::RawSqlUnverified { references } => {
+                output.push_str(&format!(
+                    "Raw SQL detected ({} references). Qail cannot prove migration safety for raw SQL; review manually or convert to native Qail AST for verified checks.\n",
+                    references.len()
+                ));
+                for r in references.iter().take(5) {
+                    output.push_str(&format!(
+                        "  ⚠ {}:{} → {}\n",
+                        r.file.display(),
+                        r.line,
+                        r.snippet
+                    ));
+                }
+                if references.len() > 5 {
+                    output.push_str(&format!("  ... and {} more\n", references.len() - 5));
+                }
+            }
+        }
+        output.push('\n');
     }
 }
 
@@ -351,6 +442,23 @@ mod tests {
         code_refs
     }
 
+    fn analyze_with_raw_sql_diagnostics(
+        commands: &[Qail],
+        code_refs: &[CodeReference],
+        old_schema: &Schema,
+        new_schema: &Schema,
+    ) -> MigrationImpact {
+        MigrationImpact::analyze_with_options(
+            commands,
+            code_refs,
+            old_schema,
+            new_schema,
+            ImpactAnalysisOptions {
+                raw_sql: RawSqlImpactMode::ExperimentalImpact,
+            },
+        )
+    }
+
     #[test]
     fn test_detect_dropped_table() {
         let cmd = Qail {
@@ -378,6 +486,47 @@ mod tests {
     }
 
     #[test]
+    fn test_default_raw_sql_reference_warns_without_blocking() {
+        let cmd = Qail {
+            action: Action::AlterDrop,
+            table: "users".to_string(),
+            columns: vec![crate::ast::Expr::Named("email".to_string())],
+            ..Default::default()
+        };
+
+        let code_ref = CodeReference {
+            file: PathBuf::from("src/reporting.ts"),
+            line: 17,
+            table: "users".to_string(),
+            columns: vec!["email".to_string()],
+            query_type: super::super::scanner::QueryType::RawSql,
+            snippet: "SELECT email FROM users".to_string(),
+        };
+
+        let old_schema = Schema::new();
+        let new_schema = Schema::new();
+
+        let impact = MigrationImpact::analyze(&[cmd], &[code_ref], &old_schema, &new_schema);
+
+        assert!(impact.safe_to_run);
+        assert_eq!(impact.breaking_changes.len(), 0);
+        assert_eq!(impact.warnings.len(), 1);
+        assert!(
+            matches!(
+                &impact.warnings[0],
+                Warning::RawSqlUnverified { references } if references.len() == 1
+            ),
+            "{:?}",
+            impact.warnings
+        );
+        assert!(
+            impact
+                .report()
+                .contains("Qail cannot prove migration safety for raw SQL")
+        );
+    }
+
+    #[test]
     fn test_schema_qualified_drop_matches_bare_raw_sql_reference() {
         let cmd = Qail {
             action: Action::AlterDrop,
@@ -398,7 +547,8 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &[code_ref], &old_schema, &new_schema);
+        let impact =
+            analyze_with_raw_sql_diagnostics(&[cmd], &[code_ref], &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run);
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -424,7 +574,8 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &[code_ref], &old_schema, &new_schema);
+        let impact =
+            analyze_with_raw_sql_diagnostics(&[cmd], &[code_ref], &old_schema, &new_schema);
 
         assert!(impact.safe_to_run);
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -684,7 +835,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run);
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -715,7 +866,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -744,7 +895,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -772,7 +923,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -801,7 +952,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -843,7 +994,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -885,7 +1036,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -914,7 +1065,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -943,7 +1094,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -972,7 +1123,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1002,7 +1153,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1032,7 +1183,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1061,7 +1212,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1090,7 +1241,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1119,7 +1270,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1148,7 +1299,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1178,7 +1329,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1207,7 +1358,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1237,7 +1388,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1280,7 +1431,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1323,7 +1474,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -1365,7 +1516,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1407,7 +1558,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1449,7 +1600,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -1489,7 +1640,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1530,7 +1681,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1570,7 +1721,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1599,7 +1750,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1631,7 +1782,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1672,7 +1823,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1712,7 +1863,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1753,7 +1904,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1782,7 +1933,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -1811,7 +1962,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -1841,7 +1992,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1883,7 +2034,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1925,7 +2076,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -1956,7 +2107,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2034,7 +2185,7 @@ mod tests {
         let old_schema = Schema::new();
         let new_schema = Schema::new();
 
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2054,7 +2205,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2074,7 +2225,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2095,7 +2246,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2115,7 +2266,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2136,7 +2287,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2157,7 +2308,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -2178,7 +2329,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2198,7 +2349,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2219,7 +2370,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2240,7 +2391,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2260,7 +2411,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2280,7 +2431,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 0);
@@ -2301,7 +2452,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2321,7 +2472,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2341,7 +2492,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2361,7 +2512,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2382,7 +2533,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2403,7 +2554,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2423,7 +2574,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);
@@ -2444,7 +2595,7 @@ mod tests {
 
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        let impact = MigrationImpact::analyze(&[cmd], &code_refs, &old_schema, &new_schema);
+        let impact = analyze_with_raw_sql_diagnostics(&[cmd], &code_refs, &old_schema, &new_schema);
 
         assert!(!impact.safe_to_run, "{code_refs:?}");
         assert_eq!(impact.breaking_changes.len(), 1);

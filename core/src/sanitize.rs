@@ -40,9 +40,11 @@ const MAX_IDENT_LEN: usize = 63;
 /// Also rejects empty identifiers and those exceeding PostgreSQL's 63-char limit.
 fn is_safe_identifier(s: &str) -> bool {
     !s.is_empty()
-        && s.len() <= MAX_IDENT_LEN
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+        && s.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= MAX_IDENT_LEN
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
 }
 
 /// Validate an identifier, returning a `SanitizeError` if invalid.
@@ -53,9 +55,47 @@ fn check_ident(field: &str, value: &str) -> Result<(), SanitizeError> {
         Err(SanitizeError {
             field: field.to_string(),
             value: value.chars().take(40).collect(),
-            reason: "identifiers must match [a-zA-Z0-9_.] and be ≤63 chars".to_string(),
+            reason: "identifier parts must match [a-zA-Z0-9_] and be ≤63 chars".to_string(),
         })
     }
+}
+
+fn table_ref_error(field: &str, value: &str) -> SanitizeError {
+    SanitizeError {
+        field: field.to_string(),
+        value: value.chars().take(40).collect(),
+        reason: "table references must be identifier or identifier [AS] alias".to_string(),
+    }
+}
+
+fn check_table_ref(field: &str, value: &str) -> Result<(), SanitizeError> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table] => check_ident(field, table),
+        [table, alias] => {
+            check_ident(field, table)?;
+            check_ident(field, alias)
+        }
+        [table, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => {
+            check_ident(field, table)?;
+            check_ident(field, alias)
+        }
+        _ => Err(table_ref_error(field, value)),
+    }
+}
+
+fn action_allows_table_alias(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Get
+            | Action::Cnt
+            | Action::Set
+            | Action::Del
+            | Action::Export
+            | Action::Explain
+            | Action::ExplainAnalyze
+            | Action::Over
+    )
 }
 
 fn check_fk_action(field: &str, value: &str) -> Result<(), SanitizeError> {
@@ -333,7 +373,11 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
 
     // ── Table name ───────────────────────────────────────────────────
     if !cmd.table.is_empty() {
-        check_ident("table", &cmd.table)?;
+        if action_allows_table_alias(cmd.action) {
+            check_table_ref("table", &cmd.table)?;
+        } else {
+            check_ident("table", &cmd.table)?;
+        }
     }
 
     // ── Columns ──────────────────────────────────────────────────────
@@ -383,11 +427,7 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
 
     // ── Joins ────────────────────────────────────────────────────────
     for (i, join) in cmd.joins.iter().enumerate() {
-        // Join table may include alias: "users u"
-        // Validate each space-separated token
-        for token in join.table.split_whitespace() {
-            check_ident(&format!("joins[{i}].table"), token)?;
-        }
+        check_table_ref(&format!("joins[{i}].table"), &join.table)?;
         if let Some(ref conditions) = join.on {
             for cond in conditions {
                 check_expr(&format!("joins[{i}].on"), &cond.left)?;
@@ -448,9 +488,11 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
         }
         match &merge.source {
             MergeSource::Table { name, alias } => {
-                check_ident("merge.source.table", name)?;
                 if let Some(alias) = alias {
+                    check_ident("merge.source.table", name)?;
                     check_ident("merge.source.alias", alias)?;
+                } else {
+                    check_table_ref("merge.source.table", name)?;
                 }
             }
             MergeSource::Query { query, alias } => {
@@ -491,10 +533,10 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
 
     // ── FROM / USING tables ──────────────────────────────────────────
     for t in &cmd.from_tables {
-        check_ident("from_tables", t)?;
+        check_table_ref("from_tables", t)?;
     }
     for t in &cmd.using_tables {
-        check_ident("using_tables", t)?;
+        check_table_ref("using_tables", t)?;
     }
 
     // ── SET ops ──────────────────────────────────────────────────────
@@ -524,7 +566,7 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Qail;
+    use crate::ast::{Operator, Qail};
 
     #[test]
     fn valid_simple_query_passes() {
@@ -568,6 +610,35 @@ mod tests {
     }
 
     #[test]
+    fn valid_long_qualified_identifier_parts_pass() {
+        let schema = "s".repeat(MAX_IDENT_LEN);
+        let table = "t".repeat(MAX_IDENT_LEN);
+        let cmd = Qail::get(format!("{schema}.{table}")).columns(["id"]);
+
+        assert!(validate_ast(&cmd).is_ok());
+    }
+
+    #[test]
+    fn empty_qualified_identifier_part_is_rejected() {
+        let err = validate_ast(&Qail::get("public..users")).unwrap_err();
+
+        assert_eq!(err.field, "table");
+    }
+
+    #[test]
+    fn query_and_mutation_table_aliases_pass_sanitizer() {
+        assert!(validate_ast(&Qail::get("public.users u")).is_ok());
+        assert!(validate_ast(&Qail::set("public.users AS u").set_value("active", true)).is_ok());
+        assert!(validate_ast(&Qail::del("public.users u")).is_ok());
+    }
+
+    #[test]
+    fn ddl_table_alias_shape_is_rejected() {
+        let err = validate_ast(&Qail::make("public.users u")).unwrap_err();
+        assert_eq!(err.field, "table");
+    }
+
+    #[test]
     fn injection_in_join_table_rejected() {
         use crate::ast::JoinKind;
         let cmd = Qail::get("users").join(
@@ -578,6 +649,65 @@ mod tests {
         );
         let err = validate_ast(&cmd).unwrap_err();
         assert!(err.field.contains("joins"));
+    }
+
+    #[test]
+    fn malformed_join_table_reference_rejected() {
+        use crate::ast::JoinKind;
+        let cmd = Qail::get("users").join(
+            JoinKind::Left,
+            "orders DROP TABLE x",
+            "users.id",
+            "orders.user_id",
+        );
+        let err = validate_ast(&cmd).unwrap_err();
+        assert!(err.field.contains("joins"));
+    }
+
+    #[test]
+    fn update_from_and_delete_using_aliases_pass_sanitizer() {
+        let update = Qail::set("orders")
+            .set_value("status", "paid")
+            .update_from(["accounts a"]);
+        assert!(validate_ast(&update).is_ok());
+
+        let delete = Qail::del("orders").delete_using(["accounts a"]);
+        assert!(validate_ast(&delete).is_ok());
+    }
+
+    #[test]
+    fn merge_inline_source_alias_passes_sanitizer() {
+        let cmd = Qail::merge_into("orders")
+            .target_alias("o")
+            .using_table("stage_orders s")
+            .merge_on_column("o.id", Operator::Eq, "s.order_id")
+            .when_matched_do_nothing();
+
+        assert!(validate_ast(&cmd).is_ok());
+    }
+
+    #[test]
+    fn malformed_merge_source_table_reference_rejected() {
+        let cmd = Qail::merge_into("orders")
+            .using_table("stage_orders DROP TABLE x")
+            .merge_on_column("orders.id", Operator::Eq, "stage_orders.order_id")
+            .when_matched_do_nothing();
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "merge.source.table");
+    }
+
+    #[test]
+    fn injection_in_update_from_and_delete_using_rejected() {
+        let update = Qail::set("orders")
+            .set_value("status", "paid")
+            .update_from(["accounts; DROP TABLE accounts"]);
+        let err = validate_ast(&update).unwrap_err();
+        assert_eq!(err.field, "from_tables");
+
+        let delete = Qail::del("orders").delete_using(["accounts; DROP TABLE accounts"]);
+        let err = validate_ast(&delete).unwrap_err();
+        assert_eq!(err.field, "using_tables");
     }
 
     #[test]

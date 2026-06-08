@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::identifier::render_table_reference;
 
 /// Generate DELETE FROM SQL with optional USING and WHERE clauses.
 pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
@@ -12,7 +13,7 @@ pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
     } else {
         String::from("DELETE FROM ")
     };
-    sql.push_str(&generator.quote_identifier(&cmd.table));
+    sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     // USING clause (multi-table delete)
     if !cmd.using_tables.is_empty() {
@@ -20,7 +21,7 @@ pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
         sql.push_str(
             &cmd.using_tables
                 .iter()
-                .map(|t| generator.quote_identifier(t))
+                .map(|t| render_table_reference(t, generator.as_ref()))
                 .collect::<Vec<_>>()
                 .join(", "),
         );

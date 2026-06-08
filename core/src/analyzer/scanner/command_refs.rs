@@ -51,12 +51,19 @@ fn command_to_reference(path: &Path, line: usize, cmd: &crate::Qail) -> Option<C
         Action::Merge => format!("merge {} ...", cmd.table),
         _ => return None,
     };
-    let columns = collect_reference_columns(cmd);
+    let (table, table_alias) = split_table_reference(&cmd.table);
+    let target_alias = cmd
+        .merge
+        .as_ref()
+        .and_then(|merge| merge.target_alias.as_deref())
+        .or(table_alias);
+    let columns =
+        collect_reference_columns_for_scope(cmd, ColumnScope::target(table, target_alias));
 
     Some(CodeReference {
         file: path.to_path_buf(),
         line,
-        table: cmd.table.clone(),
+        table: table.to_string(),
         columns,
         query_type: QueryType::Qail,
         snippet,
@@ -169,11 +176,13 @@ fn push_scoped_reference(
         return;
     }
 
-    let scope = ColumnScope::related(table, alias);
+    let (table_name, parsed_alias) = split_table_reference(table);
+    let alias = alias.or(parsed_alias);
+    let scope = ColumnScope::related(table_name, alias);
     refs.push(CodeReference {
         file: path.to_path_buf(),
         line,
-        table: table.to_string(),
+        table: table_name.to_string(),
         columns: collect_reference_columns_for_scope(cmd, scope),
         query_type: QueryType::Qail,
         snippet,
@@ -428,15 +437,8 @@ fn collect_value_subquery_references(
 }
 
 fn is_cte_alias(table: &str, cte_aliases: &[String]) -> bool {
+    let (table, _) = split_table_reference(table);
     cte_aliases.iter().any(|alias| ident_eq(alias, table))
-}
-
-fn collect_reference_columns(cmd: &crate::Qail) -> Vec<String> {
-    let target_alias = cmd
-        .merge
-        .as_ref()
-        .and_then(|merge| merge.target_alias.as_deref());
-    collect_reference_columns_for_scope(cmd, ColumnScope::target(&cmd.table, target_alias))
 }
 
 fn collect_reference_columns_for_scope(cmd: &crate::Qail, scope: ColumnScope<'_>) -> Vec<String> {
@@ -651,10 +653,29 @@ fn push_plain_column_ref(name: &str, cols: &mut Vec<String>, seen: &mut HashSet<
 }
 
 fn split_column_ref(name: &str) -> (Option<&str>, &str) {
-    let mut parts = name.rsplitn(3, '.');
-    let column = parts.next().unwrap_or(name).trim();
-    let qualifier = parts.next().map(str::trim).filter(|part| !part.is_empty());
-    (qualifier, column)
+    name.rsplit_once('.')
+        .map(|(qualifier, column)| {
+            let qualifier = qualifier.trim();
+            let column = column.trim();
+            (
+                if qualifier.is_empty() {
+                    None
+                } else {
+                    Some(qualifier)
+                },
+                column,
+            )
+        })
+        .unwrap_or((None, name.trim()))
+}
+
+fn split_table_reference(table_ref: &str) -> (&str, Option<&str>) {
+    let parts = table_ref.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table, alias] => (table, Some(alias)),
+        [table, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => (table, Some(alias)),
+        _ => (table_ref.trim(), None),
+    }
 }
 
 fn ident_eq(left: &str, right: &str) -> bool {
@@ -702,7 +723,7 @@ fn extract_payload_columns(cmd: &crate::Qail) -> Vec<String> {
 mod tests {
     use std::path::Path;
 
-    use crate::ast::{Action, AggregateFunc, CTEDef, Join, JoinKind, Qail};
+    use crate::ast::{Action, AggregateFunc, CTEDef, Join, JoinKind, Operator, Qail};
     use crate::parse;
 
     use super::*;
@@ -724,6 +745,19 @@ mod tests {
 
         assert_eq!(reference.table, "users");
         assert_eq!(reference.columns, vec!["id", "email", "created_at"]);
+    }
+
+    #[test]
+    fn test_command_reference_normalizes_primary_table_alias() {
+        let cmd =
+            Qail::get("users u")
+                .columns(["u.id"])
+                .filter("u.email", Operator::Eq, Value::Param(1));
+        let reference =
+            command_to_reference(Path::new("src/users.ts"), 1, &cmd).expect("reference");
+
+        assert_eq!(reference.table, "users");
+        assert_eq!(reference.columns, vec!["id", "email"]);
     }
 
     #[test]
@@ -772,6 +806,32 @@ mod tests {
     }
 
     #[test]
+    fn test_command_references_normalize_related_table_aliases() {
+        let cmd = Qail::get("users u").left_join_conds(
+            "posts p",
+            vec![Condition {
+                left: Expr::Named("u.id".to_string()),
+                op: Operator::Eq,
+                value: Value::Column("p.user_id".to_string()),
+                is_array_unnest: false,
+            }],
+        );
+        let refs = command_to_references(Path::new("src/users.ts"), 1, &cmd);
+
+        let users = refs
+            .iter()
+            .find(|reference| reference.table == "users")
+            .expect("users reference");
+        assert_eq!(users.columns, vec!["id"]);
+
+        let posts = refs
+            .iter()
+            .find(|reference| reference.table == "posts")
+            .expect("posts reference");
+        assert_eq!(posts.columns, vec!["user_id"]);
+    }
+
+    #[test]
     fn test_command_references_track_merge_target_and_source_by_scope() {
         let cmd = parse(
             "merge users as u using staging_users as s on u.id = s.id \
@@ -794,6 +854,64 @@ mod tests {
             .find(|reference| reference.table == "staging_users")
             .expect("staging users reference");
         assert_eq!(staging_users.columns, vec!["id", "name", "email"]);
+    }
+
+    #[test]
+    fn test_command_references_normalize_merge_inline_source_alias() {
+        let cmd = Qail::merge_into("orders")
+            .target_alias("o")
+            .using_table("stage_orders s")
+            .merge_on_column("o.id", Operator::Eq, "s.order_id")
+            .when_matched_update(&[("status", Expr::Named("s.status".to_string()))]);
+        let refs = command_to_references(Path::new("src/orders.ts"), 1, &cmd);
+
+        let orders = refs
+            .iter()
+            .find(|reference| reference.table == "orders")
+            .expect("orders reference");
+        assert_eq!(orders.columns, vec!["id", "status"]);
+
+        let stage_orders = refs
+            .iter()
+            .find(|reference| reference.table == "stage_orders")
+            .expect("stage orders reference");
+        assert_eq!(stage_orders.columns, vec!["order_id", "status"]);
+    }
+
+    #[test]
+    fn test_command_references_keep_schema_qualified_table_scopes_distinct() {
+        let cmd = Qail::merge_into("public.orders")
+            .target_alias("o")
+            .using_table_as("staging.orders", "s")
+            .merge_on_column("public.orders.id", Operator::Eq, "staging.orders.source_id")
+            .when_matched_update_if(
+                vec![Condition {
+                    left: Expr::Named("staging.orders.source_updated_at".to_string()),
+                    op: Operator::Gt,
+                    value: Value::Column("public.orders.target_updated_at".to_string()),
+                    is_array_unnest: false,
+                }],
+                &[(
+                    "status",
+                    Expr::Named("staging.orders.source_status".to_string()),
+                )],
+            );
+        let refs = command_to_references(Path::new("src/orders.ts"), 1, &cmd);
+
+        let orders = refs
+            .iter()
+            .find(|reference| reference.table == "public.orders")
+            .expect("orders reference");
+        assert_eq!(orders.columns, vec!["id", "target_updated_at", "status"]);
+
+        let staging_orders = refs
+            .iter()
+            .find(|reference| reference.table == "staging.orders")
+            .expect("staging orders reference");
+        assert_eq!(
+            staging_orders.columns,
+            vec!["source_id", "source_updated_at", "source_status"]
+        );
     }
 
     #[test]
