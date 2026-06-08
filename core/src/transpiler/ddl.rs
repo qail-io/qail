@@ -961,6 +961,54 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
     }
 }
 
+/// Generate ALTER TABLE ADD CHECK CONSTRAINT SQL.
+pub fn build_alter_add_check_constraint(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let table = generator.quote_identifier(&cmd.table);
+    let Some(name) = cmd
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return "/* ERROR: ALTER ADD CONSTRAINT requires a constraint name */".to_string();
+    };
+    let Some(expr) = cmd.payload.as_deref() else {
+        return "/* ERROR: ALTER ADD CONSTRAINT requires a check expression */".to_string();
+    };
+    let expr = match checked_sql_expr_fragment(expr, "check constraint expression") {
+        Ok(expr) => expr,
+        Err(err) => return err,
+    };
+
+    format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+        table,
+        generator.quote_identifier(name),
+        expr
+    )
+}
+
+/// Generate ALTER TABLE DROP CONSTRAINT SQL.
+pub fn build_alter_drop_constraint(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let table = generator.quote_identifier(&cmd.table);
+    let Some(name) = cmd
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return "/* ERROR: ALTER DROP CONSTRAINT requires a constraint name */".to_string();
+    };
+
+    format!(
+        "ALTER TABLE {} DROP CONSTRAINT {}",
+        table,
+        generator.quote_identifier(name)
+    )
+}
+
 /// Generate ALTER TABLE DROP COLUMN SQL (for migrations).
 pub fn build_alter_drop_column(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();

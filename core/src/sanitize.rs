@@ -103,6 +103,69 @@ fn check_raw_function_value(field: &str, value: &str) -> Result<(), SanitizeErro
     }
 }
 
+fn contains_unquoted_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn check_sql_expr_fragment(field: &str, value: &str) -> Result<(), SanitizeError> {
+    let expr = value.trim();
+    if !expr.is_empty() && !contains_unquoted_statement_delimiter(expr) {
+        Ok(())
+    } else {
+        Err(SanitizeError {
+            field: field.to_string(),
+            value: value.chars().take(40).collect(),
+            reason: "SQL expression fragments cannot be empty or contain unquoted NUL, statement separators, or comments".to_string(),
+        })
+    }
+}
+
 fn table_ref_error(field: &str, value: &str) -> SanitizeError {
     SanitizeError {
         field: field.to_string(),
@@ -604,6 +667,31 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
     }
 
     // ── Channel (LISTEN/NOTIFY) ──────────────────────────────────────
+    match cmd.action {
+        Action::AlterAddConstraint | Action::AlterDropConstraint => {
+            let Some(ref name) = cmd.channel else {
+                return Err(SanitizeError {
+                    field: "channel".to_string(),
+                    value: String::new(),
+                    reason: "constraint actions require a constraint name".to_string(),
+                });
+            };
+            check_ident("channel", name)?;
+
+            if matches!(cmd.action, Action::AlterAddConstraint) {
+                let Some(ref expr) = cmd.payload else {
+                    return Err(SanitizeError {
+                        field: "payload".to_string(),
+                        value: String::new(),
+                        reason: "add constraint requires a check expression".to_string(),
+                    });
+                };
+                check_sql_expr_fragment("payload", expr)?;
+            }
+        }
+        _ => {}
+    }
+
     if let Some(ref ch) = cmd.channel {
         check_ident("channel", ch)?;
     }
@@ -684,6 +772,33 @@ mod tests {
     fn ddl_table_alias_shape_is_rejected() {
         let err = validate_ast(&Qail::make("public.users u")).unwrap_err();
         assert_eq!(err.field, "table");
+    }
+
+    #[test]
+    fn alter_add_constraint_rejects_unsafe_payload() {
+        let cmd = Qail {
+            action: crate::ast::Action::AlterAddConstraint,
+            table: "users".to_string(),
+            channel: Some("users_active_check".to_string()),
+            payload: Some("active); DROP TABLE users; --".to_string()),
+            ..Default::default()
+        };
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "payload");
+    }
+
+    #[test]
+    fn alter_add_constraint_allows_quoted_delimiter_payload() {
+        let cmd = Qail {
+            action: crate::ast::Action::AlterAddConstraint,
+            table: "events".to_string(),
+            channel: Some("events_kind_check".to_string()),
+            payload: Some("kind <> 'semi;inside'".to_string()),
+            ..Default::default()
+        };
+
+        assert!(validate_ast(&cmd).is_ok());
     }
 
     #[test]

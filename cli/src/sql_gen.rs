@@ -136,6 +136,18 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
             }
             format!("ALTER TABLE {} DROP COLUMN ...", cmd.table)
         }
+        Action::AlterAddConstraint => {
+            let name = cmd.channel.as_deref().unwrap_or("...");
+            let expr = cmd.payload.as_deref().unwrap_or("...");
+            format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+                cmd.table, name, expr
+            )
+        }
+        Action::AlterDropConstraint => {
+            let name = cmd.channel.as_deref().unwrap_or("...");
+            format!("ALTER TABLE {} DROP CONSTRAINT {}", cmd.table, name)
+        }
         Action::Index => {
             if let Some(ref idx) = cmd.index_def {
                 let unique = if idx.unique { "UNIQUE " } else { "" };

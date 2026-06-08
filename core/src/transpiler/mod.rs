@@ -112,6 +112,8 @@ impl ToSql for Qail {
             Action::Index => ddl::build_create_index(self, dialect),
             Action::DropIndex => format!("DROP INDEX IF EXISTS {}", escape_identifier(&self.table)),
             Action::Alter => ddl::build_alter_add_column(self, dialect),
+            Action::AlterAddConstraint => ddl::build_alter_add_check_constraint(self, dialect),
+            Action::AlterDropConstraint => ddl::build_alter_drop_constraint(self, dialect),
             Action::AlterDrop => ddl::build_alter_drop_column(self, dialect),
             Action::AlterType => ddl::build_alter_column_type(self, dialect),
             // Stubs

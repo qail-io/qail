@@ -369,9 +369,13 @@ pub fn check_migration(old_path: &str, new_path: &str) -> Result<()> {
 
     for cmd in &cmds {
         match cmd.action {
-            Action::Make | Action::Alter | Action::Index => safe_ops += 1,
+            Action::Make | Action::Alter | Action::AlterAddConstraint | Action::Index => {
+                safe_ops += 1
+            }
             Action::Set | Action::Mod => reversible_ops += 1,
-            Action::Drop | Action::AlterDrop | Action::DropIndex => destructive_ops += 1,
+            Action::Drop | Action::AlterDrop | Action::AlterDropConstraint | Action::DropIndex => {
+                destructive_ops += 1
+            }
             _ => {}
         }
     }

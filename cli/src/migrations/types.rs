@@ -35,6 +35,7 @@ pub fn classify_migration(cmd: &Qail) -> MigrationClass {
         // DROP operations lose data
         Action::Drop => MigrationClass::DataLosing,
         Action::AlterDrop => MigrationClass::DataLosing,
+        Action::AlterDropConstraint => MigrationClass::Irreversible,
         Action::DropIndex => MigrationClass::Reversible, // Indexes can be recreated
 
         // Type changes depend on direction
@@ -53,6 +54,7 @@ pub fn classify_migration(cmd: &Qail) -> MigrationClass {
 
         // ADD COLUMN is generally reversible
         Action::Alter => MigrationClass::Reversible,
+        Action::AlterAddConstraint => MigrationClass::Reversible,
 
         // RENAME is reversible
         Action::Mod => MigrationClass::Reversible,

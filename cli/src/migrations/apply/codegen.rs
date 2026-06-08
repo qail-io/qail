@@ -1164,7 +1164,11 @@ fn parse_explicit_apply_commands(content: &str) -> Result<Option<Vec<Qail>>> {
         last_line_no = line_no;
         let line = raw_line.trim();
 
-        if line.starts_with("alter ") {
+        if line
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("alter"))
+        {
             let compiled_segment = compile_non_explicit_apply_segment(&passthrough_segment)
                 .map_err(|err| anyhow!("Lines {}-{}: {}", segment_start_line, line_no - 1, err))?;
             cmds.extend(compiled_segment);
@@ -1172,7 +1176,7 @@ fn parse_explicit_apply_commands(content: &str) -> Result<Option<Vec<Qail>>> {
 
             saw_explicit_command = true;
             cmds.push(
-                parse_explicit_alter_add_column_line(line)
+                parse_explicit_alter_line(line)
                     .map_err(|err| anyhow!("Line {}: {}", line_no, err))?,
             );
             segment_start_line = line_no + 1;
@@ -1192,6 +1196,33 @@ fn parse_explicit_apply_commands(content: &str) -> Result<Option<Vec<Qail>>> {
     cmds.extend(trailing_segment);
 
     Ok(Some(cmds))
+}
+
+fn parse_explicit_alter_line(line: &str) -> Result<Qail> {
+    let rest = strip_keyword(line, "alter")
+        .ok_or_else(|| {
+            anyhow!(
+                "expected 'alter <table> add <column:type[:constraints]>' or constraint operation"
+            )
+        })?
+        .trim();
+
+    let (table, remainder) =
+        split_first_word(rest).ok_or_else(|| anyhow!("expected table name after 'alter'"))?;
+
+    if let Some(drop_tail) = strip_keyword(remainder, "drop")
+        && let Some(constraint_tail) = strip_keyword(drop_tail, "constraint")
+    {
+        return parse_explicit_alter_drop_constraint_line(table, constraint_tail);
+    }
+
+    if let Some(add_tail) = strip_keyword(remainder, "add")
+        && let Some(constraint_tail) = strip_keyword(add_tail, "constraint")
+    {
+        return parse_explicit_alter_add_check_constraint_line(table, constraint_tail);
+    }
+
+    parse_explicit_alter_add_column_line(line)
 }
 
 fn compile_non_explicit_apply_segment(segment: &str) -> Result<Vec<Qail>> {
@@ -1221,24 +1252,214 @@ fn compile_non_explicit_apply_segment(segment: &str) -> Result<Vec<Qail>> {
     )
 }
 
-fn parse_explicit_alter_add_column_line(line: &str) -> Result<Qail> {
-    let rest = line
-        .strip_prefix("alter ")
-        .ok_or_else(|| anyhow!("expected 'alter <table> add <column:type[:constraints]>'"))?
-        .trim();
+fn strip_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = input.trim_start();
+    if trimmed.len() < keyword.len() {
+        return None;
+    }
 
-    let mut parts = rest.splitn(2, char::is_whitespace);
-    let table = parts
+    let (head, tail) = trimmed.split_at(keyword.len());
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if tail.chars().next().is_some_and(|ch| !ch.is_whitespace()) {
+        return None;
+    }
+    Some(tail.trim_start())
+}
+
+fn strip_keyword_or_open_paren<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = input.trim_start();
+    if trimmed.len() < keyword.len() {
+        return None;
+    }
+
+    let (head, tail) = trimmed.split_at(keyword.len());
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if tail
+        .chars()
         .next()
-        .map(str::trim)
-        .filter(|table| !table.is_empty())
-        .ok_or_else(|| anyhow!("expected table name after 'alter'"))?;
-    let remainder = parts
-        .next()
-        .map(str::trim)
-        .ok_or_else(|| anyhow!("expected 'add <column:type[:constraints]>' after table name"))?;
-    let column_def = remainder
-        .strip_prefix("add ")
+        .is_some_and(|ch| !ch.is_whitespace() && ch != '(')
+    {
+        return None;
+    }
+    Some(tail.trim_start())
+}
+
+fn split_first_word(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    let mut parts = input.splitn(2, char::is_whitespace);
+    let word = parts.next()?.trim();
+    if word.is_empty() {
+        return None;
+    }
+    Some((word, parts.next().unwrap_or("").trim_start()))
+}
+
+fn parse_explicit_alter_drop_constraint_line(table: &str, tail: &str) -> Result<Qail> {
+    let name = tail.trim();
+    if name.is_empty() {
+        bail!("expected constraint name after 'drop constraint'");
+    }
+    if name.split_whitespace().count() != 1 {
+        bail!(
+            "unexpected trailing content after constraint name: '{}'",
+            name
+        );
+    }
+
+    Ok(Qail {
+        action: Action::AlterDropConstraint,
+        table: table.to_string(),
+        channel: Some(name.to_string()),
+        ..Default::default()
+    })
+}
+
+fn parse_explicit_alter_add_check_constraint_line(table: &str, tail: &str) -> Result<Qail> {
+    let (name, remainder) = split_first_word(tail)
+        .ok_or_else(|| anyhow!("expected constraint name after 'add constraint'"))?;
+    let check_tail = strip_keyword_or_open_paren(remainder, "check")
+        .ok_or_else(|| anyhow!("expected 'check(<expr>)' after constraint name"))?;
+    let (expr, trailing) = parse_parenthesized_fragment(check_tail)
+        .ok_or_else(|| anyhow!("expected parenthesized check expression"))?;
+    if !trailing.trim().is_empty() {
+        bail!(
+            "unexpected trailing content after check expression: '{}'",
+            trailing.trim()
+        );
+    }
+    if expr.trim().is_empty() {
+        bail!("check expression cannot be empty");
+    }
+    if contains_statement_delimiter(expr) {
+        bail!("check expression cannot contain NUL, statement separators, or comments");
+    }
+
+    Ok(Qail {
+        action: Action::AlterAddConstraint,
+        table: table.to_string(),
+        channel: Some(name.to_string()),
+        payload: Some(expr.trim().to_string()),
+        ..Default::default()
+    })
+}
+
+fn contains_statement_delimiter(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            return true;
+        }
+
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b';' => return true,
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => return true,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn parse_parenthesized_fragment(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    if !input.starts_with('(') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if b == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((&input[1..i], &input[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn parse_explicit_alter_add_column_line(line: &str) -> Result<Qail> {
+    let rest = strip_keyword(line, "alter")
+        .ok_or_else(|| anyhow!("expected 'alter <table> add <column:type[:constraints]>'"))?;
+    let (table, remainder) =
+        split_first_word(rest).ok_or_else(|| anyhow!("expected table name after 'alter'"))?;
+    let column_def = strip_keyword(remainder, "add")
         .ok_or_else(|| anyhow!("expected 'add <column:type[:constraints]>' after table name"))?
         .trim();
 

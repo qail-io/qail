@@ -148,6 +148,8 @@ fn lock_level_for_action(action: Action) -> LockLevel {
         | Action::AlterDropNotNull
         | Action::AlterSetDefault
         | Action::AlterDropDefault
+        | Action::AlterAddConstraint
+        | Action::AlterDropConstraint
         | Action::Alter
         | Action::Mod
         | Action::DropCol

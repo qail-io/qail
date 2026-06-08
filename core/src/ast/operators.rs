@@ -29,6 +29,10 @@ pub enum Action {
     DropIndex,
     /// ALTER TABLE (generic).
     Alter,
+    /// ALTER TABLE … ADD CONSTRAINT … CHECK.
+    AlterAddConstraint,
+    /// ALTER TABLE … DROP CONSTRAINT.
+    AlterDropConstraint,
     /// ALTER TABLE … DROP COLUMN.
     AlterDrop,
     /// ALTER TABLE … ALTER COLUMN TYPE.
@@ -173,6 +177,8 @@ impl std::fmt::Display for Action {
             Action::Index => write!(f, "INDEX"),
             Action::DropIndex => write!(f, "DROP_INDEX"),
             Action::Alter => write!(f, "ALTER"),
+            Action::AlterAddConstraint => write!(f, "ALTER_ADD_CONSTRAINT"),
+            Action::AlterDropConstraint => write!(f, "ALTER_DROP_CONSTRAINT"),
             Action::AlterDrop => write!(f, "ALTER_DROP"),
             Action::AlterType => write!(f, "ALTER_TYPE"),
             Action::TxnStart => write!(f, "TXN_START"),

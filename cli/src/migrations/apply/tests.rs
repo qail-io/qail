@@ -150,11 +150,12 @@ index idx_users_name on users (name)
         let input = r#"
 alter whatsapp_phone_configs add automation_reply_enabled:boolean:default=true
 alter whatsapp_phone_configs add ai_reply_enabled:boolean:default=true
+ALTER whatsapp_phone_configs ADD fallback_reply_enabled:boolean:default=false
 "#;
 
         let cmds =
             parse_qail_to_commands_strict(input).expect("explicit alter lines should compile");
-        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds.len(), 3);
         assert!(
             cmds.iter()
                 .all(|cmd| matches!(cmd.action, qail_core::ast::Action::Alter)),
@@ -179,6 +180,101 @@ alter whatsapp_phone_configs add ai_reply_enabled:boolean:default=true
                 .iter()
                 .any(|constraint| matches!(constraint, qail_core::ast::Constraint::Default(val) if val == "true")),
             "first alter command should preserve DEFAULT true"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_explicit_check_constraint_replacement() {
+        let input = r#"
+alter transfer_bookings drop constraint chk_booking_status
+alter transfer_bookings add constraint chk_booking_status check(status IN ('requested', 'confirmed', 'acknowledged'))
+"#;
+
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("explicit constraint lines should compile");
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(
+            cmds[0].action,
+            qail_core::ast::Action::AlterDropConstraint
+        ));
+        assert_eq!(cmds[0].channel.as_deref(), Some("chk_booking_status"));
+        assert!(matches!(
+            cmds[1].action,
+            qail_core::ast::Action::AlterAddConstraint
+        ));
+        assert_eq!(cmds[1].channel.as_deref(), Some("chk_booking_status"));
+        assert_eq!(
+            cmds[1].payload.as_deref(),
+            Some("status IN ('requested', 'confirmed', 'acknowledged')")
+        );
+
+        let sql = commands_to_sql(&cmds);
+        assert!(
+            sql.contains("ALTER TABLE transfer_bookings DROP CONSTRAINT chk_booking_status"),
+            "drop constraint SQL should render, got: {sql}"
+        );
+        assert!(
+            sql.contains("ALTER TABLE transfer_bookings ADD CONSTRAINT chk_booking_status CHECK (status IN ('requested', 'confirmed', 'acknowledged'))"),
+            "add check constraint SQL should render, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_allows_quoted_check_delimiters() {
+        let input = r#"
+alter events add constraint events_kind_check check(kind <> 'semi;inside')
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("quoted delimiter in check expression should compile");
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            cmds[0].action,
+            qail_core::ast::Action::AlterAddConstraint
+        ));
+        assert_eq!(cmds[0].payload.as_deref(), Some("kind <> 'semi;inside'"));
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_constraint_replacement_with_comment() {
+        let input = r#"
+alter transfer_bookings drop constraint chk_booking_status
+alter transfer_bookings add constraint chk_booking_status check(status IN ('requested', 'confirmed', 'acknowledged', 'assigned', 'dispatched', 'en_route', 'completed', 'cancelled', 'no_show'))
+alter transfer_bookings drop constraint chk_booking_type
+alter transfer_bookings add constraint chk_booking_type check(booking_type IN ('port_transfer', 'airport', 'point_to_point', 'charter', 'transfer', 'full_day'))
+
+comment on transfer_bookings.status "Lifecycle: requested -> confirmed -> acknowledged/assigned -> dispatched -> en_route -> completed"
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("constraint replacement with trailing comment should compile");
+        assert_eq!(cmds.len(), 5);
+        assert!(matches!(cmds[4].action, qail_core::ast::Action::CommentOn));
+
+        let sql = commands_to_sql(&cmds);
+        assert!(
+            sql.contains("ALTER TABLE transfer_bookings ADD CONSTRAINT chk_booking_type CHECK (booking_type IN ('port_transfer', 'airport', 'point_to_point', 'charter', 'transfer', 'full_day'))"),
+            "booking type check should render, got: {sql}"
+        );
+        assert!(
+            sql.contains("COMMENT ON COLUMN transfer_bookings.status IS 'Lifecycle: requested -> confirmed -> acknowledged/assigned -> dispatched -> en_route -> completed'"),
+            "comment should render, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_rejects_unsafe_check_constraint_expression() {
+        let input = r#"
+alter transfer_bookings add constraint chk_booking_status check(status = 'requested'; DROP TABLE users)
+"#;
+
+        let err = parse_qail_to_commands_strict(input)
+            .expect_err("explicit check constraint must reject statement separators");
+        assert!(
+            err.to_string()
+                .contains("check expression cannot contain NUL, statement separators, or comments"),
+            "unexpected error: {err}"
         );
     }
 

@@ -573,6 +573,44 @@ fn test_alter_columns_reject_invalid_shapes() {
 }
 
 #[test]
+fn test_alter_check_constraint_actions() {
+    let safe_add = Qail {
+        action: Action::AlterAddConstraint,
+        table: "events".to_string(),
+        channel: Some("events_kind_check".to_string()),
+        payload: Some("kind <> 'semi;inside'".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        safe_add.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE events ADD CONSTRAINT events_kind_check CHECK (kind <> 'semi;inside')"
+    );
+
+    let unsafe_add = Qail {
+        action: Action::AlterAddConstraint,
+        table: "events".to_string(),
+        channel: Some("events_kind_check".to_string()),
+        payload: Some("kind <> 'ok'); DROP TABLE events; --".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe_add.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid check constraint expression */"
+    );
+
+    let drop = Qail {
+        action: Action::AlterDropConstraint,
+        table: "events".to_string(),
+        channel: Some("events_kind_check".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        drop.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE events DROP CONSTRAINT events_kind_check"
+    );
+}
+
+#[test]
 fn test_alter_set_default_rejects_invalid_fragments() {
     let safe = Qail {
         action: Action::AlterSetDefault,

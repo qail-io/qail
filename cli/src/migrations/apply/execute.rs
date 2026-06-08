@@ -69,7 +69,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
         ensure_up_down_pairing(&discovered, &discovered_down)?;
     }
     let all_discovered = discovered.clone();
-    let migrations: Vec<MigrationFile> = discovered
+    let mut migrations: Vec<MigrationFile> = discovered
         .into_iter()
         .filter(|m| {
             if matches!(direction, MigrateDirection::Down) {
@@ -198,6 +198,29 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
             policy.receipt_validation,
             backfill_chunk_size,
         )?;
+
+        if let Some(baseline_group) = active_contract_baseline_group(&applied_migrations) {
+            let before = migrations.len();
+            migrations.retain(|m| m.group_key > baseline_group);
+            let skipped = before.saturating_sub(migrations.len());
+            if skipped > 0 {
+                println!(
+                    "  {} Baseline '{}' marks {} pre-baseline migration file(s) historical",
+                    "✓".green(),
+                    baseline_group.cyan(),
+                    skipped
+                );
+            }
+        }
+
+        if migrations.is_empty() {
+            println!(
+                "{} No pending migrations found for phase '{}'",
+                "✓".green(),
+                phase_filter
+            );
+            return Ok(());
+        }
     }
 
     // For down-direction apply, reconcile history by deleting matching applied up versions.
@@ -654,6 +677,10 @@ fn obvious_destructive_ops(cmds: &[Qail]) -> Vec<String> {
                     ops.push(format!("DROP COLUMN {}", cmd.table));
                 }
             }
+            Action::AlterDropConstraint => {
+                let name = cmd.channel.as_deref().unwrap_or("<unknown>");
+                ops.push(format!("DROP CONSTRAINT {}.{}", cmd.table, name));
+            }
             Action::DropIndex => {
                 let name = cmd
                     .index_def
@@ -814,6 +841,7 @@ fn is_adoptable_create_action(action: Action) -> bool {
             | Action::CreateSequence
             | Action::CreateEnum
             | Action::CreatePolicy
+            | Action::AlterAddConstraint
             | Action::AlterEnableRls
             | Action::AlterForceRls
     )
@@ -864,6 +892,15 @@ async fn verify_applied_commands_effects(
                 }
                 verify_table_constraints(pg, cmd, &mut failures).await?;
             }
+            Action::AlterAddConstraint => {
+                let name = cmd.channel.as_deref().unwrap_or("");
+                if name.is_empty() || !table_constraint_exists(pg, &cmd.table, name).await? {
+                    failures.push(format!(
+                        "expected constraint '{}.{}' to exist",
+                        cmd.table, name
+                    ));
+                }
+            }
             Action::Drop if table_exists(pg, &cmd.table).await? => {
                 failures.push(format!("expected table '{}' to be dropped", cmd.table));
             }
@@ -893,6 +930,15 @@ async fn verify_applied_commands_effects(
                             cmd.table, column
                         ));
                     }
+                }
+            }
+            Action::AlterDropConstraint => {
+                let name = cmd.channel.as_deref().unwrap_or("");
+                if !name.is_empty() && table_constraint_exists(pg, &cmd.table, name).await? {
+                    failures.push(format!(
+                        "expected constraint '{}.{}' to be dropped",
+                        cmd.table, name
+                    ));
                 }
             }
             Action::Mod => {
@@ -1394,6 +1440,27 @@ async fn column_has_constraint_type(
         format!(
             "Failed {} constraint check for '{}.{}'",
             constraint_type, table_name, column
+        )
+    })?;
+    Ok(!rows.is_empty())
+}
+
+async fn table_constraint_exists(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    constraint_name: &str,
+) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.table_constraints")
+        .column_expr(crate::util::qail_exists_projection())
+        .where_eq("table_schema", schema)
+        .where_eq("table_name", table_name)
+        .where_eq("constraint_name", constraint_name)
+        .limit(1);
+    let rows = pg.fetch_all(&cmd).await.with_context(|| {
+        format!(
+            "Failed constraint existence check for '{}.{}'",
+            table, constraint_name
         )
     })?;
     Ok(!rows.is_empty())

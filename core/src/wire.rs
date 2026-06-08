@@ -1143,6 +1143,22 @@ mod tests {
     }
 
     #[test]
+    fn cmd_binary_encode_rejects_unsafe_check_constraint_payload() {
+        let cmd = crate::ast::Qail {
+            action: crate::ast::Action::AlterAddConstraint,
+            table: "users".to_string(),
+            channel: Some("users_active_check".to_string()),
+            payload: Some("active); DROP TABLE users; --".to_string()),
+            ..Default::default()
+        };
+
+        let err = encode_cmd_binary(&cmd).unwrap_err();
+
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("SQL expression fragments"));
+    }
+
+    #[test]
     fn cmd_binary_decode_enforces_depth_limits() {
         let mut nested = crate::ast::Qail::get("users").limit(1);
         for _ in 0..(MAX_AST_DEPTH + 2) {
