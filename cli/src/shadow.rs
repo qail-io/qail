@@ -16,9 +16,10 @@ use qail_pg::driver::PgDriver;
 use crate::introspection::{
     IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
     IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspected_column_generation,
-    parse_index_parts, parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
-    resolve_introspected_unique_constraint, resolve_qualified_introspected_foreign_key,
-    sort_introspected_key_columns, sort_qualified_introspected_key_columns,
+    is_simple_index_column, parse_index_parts, parse_pg_constraint_fk_action,
+    resolve_introspected_foreign_key, resolve_introspected_unique_constraint,
+    resolve_qualified_introspected_foreign_key, sort_introspected_key_columns,
+    sort_qualified_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -369,12 +370,83 @@ mod tests {
         let def = "CREATE INDEX idx_docs_expr ON documents USING btree (regexp_replace(title, ')', '', 'g'), lower(slug)) WHERE (notes <> 'keep WHERE literal')";
 
         assert_eq!(
-            extract_index_columns(def),
+            parse_index_parts(def).0,
             vec![
                 "regexp_replace(title, ')', '', 'g')".to_string(),
                 "lower(slug)".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn pg_indexdef_preserves_expression_method_and_partial_predicate() {
+        let index = index_from_pg_indexdef(
+            "idx_ai_knowledge_base_keywords".to_string(),
+            "ai_knowledge_base".to_string(),
+            "CREATE INDEX idx_ai_knowledge_base_keywords ON ai_knowledge_base USING gin (keywords)"
+                .to_string(),
+        );
+
+        assert_eq!(index.columns, vec!["keywords".to_string()]);
+        assert!(index.expressions.is_empty());
+        assert_eq!(index.method, qail_core::migrate::IndexMethod::Gin);
+        assert!(index.where_clause.is_none());
+
+        let expression_index = index_from_pg_indexdef(
+            "users_email_unique_ci".to_string(),
+            "users".to_string(),
+            "CREATE UNIQUE INDEX users_email_unique_ci ON users USING btree (lower((email)::text))"
+                .to_string(),
+        );
+
+        assert!(expression_index.columns.is_empty());
+        assert_eq!(
+            expression_index.expressions,
+            vec!["lower((email)::text)".to_string()]
+        );
+        assert!(expression_index.unique);
+
+        let partial_index = index_from_pg_indexdef(
+            "audit_log_session".to_string(),
+            "audit_log".to_string(),
+            "CREATE INDEX audit_log_session ON audit_log USING btree (impersonation_session_id) WHERE (impersonation_session_id IS NOT NULL)"
+                .to_string(),
+        );
+
+        assert!(
+            matches!(
+                partial_index.where_clause.as_ref(),
+                Some(CheckExpr::Sql(sql)) if sql == "(impersonation_session_id IS NOT NULL)"
+            ),
+            "unexpected predicate: {:?}",
+            partial_index.where_clause
+        );
+
+        let ordered_index = index_from_pg_indexdef(
+            "audit_log_tenant_ts".to_string(),
+            "audit_log".to_string(),
+            "CREATE INDEX audit_log_tenant_ts ON audit_log USING btree (tenant_id, recorded_at DESC)"
+                .to_string(),
+        );
+
+        assert_eq!(
+            ordered_index.columns,
+            vec!["tenant_id".to_string(), "recorded_at DESC".to_string()]
+        );
+        assert!(ordered_index.expressions.is_empty());
+
+        let quoted_index = index_from_pg_indexdef(
+            "idx_popular_tickets_active_position".to_string(),
+            "popular_tickets".to_string(),
+            "CREATE INDEX idx_popular_tickets_active_position ON popular_tickets USING btree (is_active, \"position\")"
+                .to_string(),
+        );
+
+        assert_eq!(
+            quoted_index.columns,
+            vec!["is_active".to_string(), "\"position\"".to_string()]
+        );
+        assert!(quoted_index.expressions.is_empty());
     }
 
     #[test]
@@ -595,7 +667,7 @@ pub async fn has_verified_shadow_receipt_with_driver(
 // Schema Introspection (Zero-Dep)
 // ─────────────────────────────────────────────────────────────────────────────
 
-use qail_core::migrate::{Column, ColumnType, Index, IndexMethod, Schema, Table};
+use qail_core::migrate::{CheckExpr, Column, ColumnType, Index, Schema, Table};
 
 /// Introspect the live database schema from information_schema.
 /// Returns a Schema struct that represents the current state of the database.
@@ -756,21 +828,9 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             continue;
         }
 
-        // Parse columns from indexdef (simple extraction)
-        let cols = extract_index_columns(&indexdef);
-        let is_unique = indexdef.contains("UNIQUE");
-
-        schema.indexes.push(Index {
-            name: idx_name,
-            table: table_name,
-            columns: cols,
-            unique: is_unique,
-            method: IndexMethod::BTree,
-            where_clause: None,
-            include: vec![],
-            concurrently: false,
-            expressions: vec![],
-        });
+        schema
+            .indexes
+            .push(index_from_pg_indexdef(idx_name, table_name, indexdef));
     }
 
     let attnum_cmd = Qail::get("pg_catalog.pg_attribute")
@@ -1251,9 +1311,23 @@ fn parse_column_type(data_type: &str, udt_name: Option<&str>) -> ColumnType {
     }
 }
 
-/// Extract column names from CREATE INDEX definition
-fn extract_index_columns(indexdef: &str) -> Vec<String> {
-    parse_index_parts(indexdef).0
+fn index_from_pg_indexdef(idx_name: String, table_name: String, indexdef: String) -> Index {
+    let (cols, where_clause, method) = parse_index_parts(&indexdef);
+    let is_unique = indexdef.contains("UNIQUE");
+    let has_expressions = cols.iter().any(|c| !is_simple_index_column(c));
+
+    let mut index = if has_expressions {
+        Index::expression(idx_name, table_name, cols)
+    } else {
+        Index::new(idx_name, table_name, cols)
+    };
+    index.unique = is_unique;
+    index.method = method;
+    if let Some(predicate) = where_clause {
+        index.where_clause = Some(CheckExpr::Sql(predicate));
+    }
+
+    index
 }
 
 /// Create a shadow database for blue-green migration

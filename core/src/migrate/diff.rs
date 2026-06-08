@@ -244,8 +244,9 @@ fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
             continue;
         };
 
-        if index_signature(old_idx) != index_signature(new_idx) {
-            changes.push(new_idx.name.clone());
+        let reasons = index_difference_reasons(old_idx, new_idx);
+        if !reasons.is_empty() {
+            changes.push(format!("{} ({})", new_idx.name, reasons.join("; ")));
         }
     }
 
@@ -294,21 +295,72 @@ fn generated_to_constraint(generated: &Generated) -> Constraint {
     }
 }
 
-fn index_signature(idx: &super::schema::Index) -> String {
-    format!(
-        "table={:?};columns={:?};expressions={:?};unique={};method={};where={:?};include={:?};concurrently={}",
-        idx.table,
-        normalized_index_fragments(&idx.columns),
-        normalized_index_fragments(&idx.expressions),
-        idx.unique,
-        index_method_str(&idx.method),
-        idx.where_clause
+#[derive(Debug, PartialEq, Eq)]
+struct ComparableIndex {
+    table: String,
+    columns: Vec<String>,
+    expressions: Vec<String>,
+    unique: bool,
+    method: &'static str,
+    where_clause: Option<String>,
+    include: Vec<String>,
+    concurrently: bool,
+}
+
+fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
+    ComparableIndex {
+        table: idx.table.clone(),
+        columns: normalized_index_fragments(&idx.columns),
+        expressions: normalized_index_fragments(&idx.expressions),
+        unique: idx.unique,
+        method: index_method_str(&idx.method),
+        where_clause: idx
+            .where_clause
             .as_ref()
             .map(check_expr_to_sql)
             .map(|fragment| normalize_index_sql_fragment(&fragment)),
-        normalized_index_fragments(&idx.include),
-        idx.concurrently
-    )
+        include: normalized_index_fragments(&idx.include),
+        concurrently: idx.concurrently,
+    }
+}
+
+fn index_difference_reasons(
+    old_idx: &super::schema::Index,
+    new_idx: &super::schema::Index,
+) -> Vec<String> {
+    let old = comparable_index(old_idx);
+    let new = comparable_index(new_idx);
+    let mut reasons = Vec::new();
+
+    push_index_diff(&mut reasons, "table", &old.table, &new.table);
+    push_index_diff(&mut reasons, "columns", &old.columns, &new.columns);
+    push_index_diff(
+        &mut reasons,
+        "expressions",
+        &old.expressions,
+        &new.expressions,
+    );
+    push_index_diff(&mut reasons, "unique", &old.unique, &new.unique);
+    push_index_diff(&mut reasons, "method", &old.method, &new.method);
+    push_index_diff(&mut reasons, "where", &old.where_clause, &new.where_clause);
+    push_index_diff(&mut reasons, "include", &old.include, &new.include);
+    push_index_diff(
+        &mut reasons,
+        "concurrently",
+        &old.concurrently,
+        &new.concurrently,
+    );
+
+    reasons
+}
+
+fn push_index_diff<T>(reasons: &mut Vec<String>, label: &str, old: &T, new: &T)
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if old != new {
+        reasons.push(format!("{label}: {old:?} -> {new:?}"));
+    }
 }
 
 fn normalized_index_fragments(values: &[String]) -> Vec<String> {
@@ -1215,6 +1267,7 @@ mod tests {
             .expect_err("same-name index predicate change should fail closed");
         assert!(err.contains("replace existing indexes"));
         assert!(err.contains("idx_users_email"));
+        assert!(err.contains("where:"));
     }
 
     #[test]

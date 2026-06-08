@@ -1809,11 +1809,107 @@ fn is_ident_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
-fn is_simple_index_column(s: &str) -> bool {
+pub(crate) fn is_simple_index_column(s: &str) -> bool {
     let t = s.trim();
-    !t.is_empty()
-        && t.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    let parts = split_index_column_tokens(t);
+    if parts.is_empty() {
+        return false;
+    }
+
+    let mut end = parts.len();
+    if end >= 2
+        && parts[end - 2].eq_ignore_ascii_case("NULLS")
+        && matches!(
+            parts[end - 1].to_ascii_uppercase().as_str(),
+            "FIRST" | "LAST"
+        )
+    {
+        end -= 2;
+    }
+    if end >= 1 && matches!(parts[end - 1].to_ascii_uppercase().as_str(), "ASC" | "DESC") {
+        end -= 1;
+    }
+
+    end == 1 && is_simple_index_identifier(&parts[0])
+}
+
+fn split_index_column_tokens(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_double = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                cur.push(ch);
+                if in_double && chars.peek().is_some_and(|next| *next == '"') {
+                    cur.push('"');
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            _ if !in_double && ch.is_whitespace() => {
+                let token = cur.trim();
+                if !token.is_empty() {
+                    out.push(token.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+
+    let token = cur.trim();
+    if !token.is_empty() {
+        out.push(token.to_string());
+    }
+    out
+}
+
+fn is_simple_index_identifier(input: &str) -> bool {
+    let mut segment = String::new();
+    let mut in_double = false;
+    let mut chars = input.chars().peekable();
+    let mut saw_segment = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                segment.push(ch);
+                if in_double && chars.peek().is_some_and(|next| *next == '"') {
+                    segment.push('"');
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            '.' if !in_double => {
+                if !is_identifier_segment(&segment) {
+                    return false;
+                }
+                saw_segment = true;
+                segment.clear();
+            }
+            _ => segment.push(ch),
+        }
+    }
+
+    !in_double && is_identifier_segment(&segment) && (saw_segment || !segment.is_empty())
+}
+
+fn is_identifier_segment(segment: &str) -> bool {
+    let segment = segment.trim();
+    if segment.is_empty() {
+        return false;
+    }
+    if segment.starts_with('"') && segment.ends_with('"') && segment.len() >= 2 {
+        return true;
+    }
+    segment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn is_internal_qail_relation(name: &str) -> bool {
@@ -2537,6 +2633,17 @@ mod tests {
             Some("notes <> 'keep WHERE literal'".to_string())
         );
         assert_eq!(method, qail_core::migrate::schema::IndexMethod::BTree);
+    }
+
+    #[test]
+    fn simple_index_column_allows_sort_modifiers_and_quoted_identifiers() {
+        assert!(is_simple_index_column("recorded_at DESC"));
+        assert!(is_simple_index_column("created_at DESC NULLS LAST"));
+        assert!(is_simple_index_column("\"position\""));
+        assert!(is_simple_index_column("public.\"position\" ASC"));
+        assert!(!is_simple_index_column("lower(email)"));
+        assert!(!is_simple_index_column("contact_info->>'email'"));
+        assert!(!is_simple_index_column("embedding vector_l2_ops"));
     }
 
     #[test]
