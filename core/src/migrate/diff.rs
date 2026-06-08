@@ -213,6 +213,33 @@ fn existing_column_primary_key_diffs(old: &Schema, new: &Schema) -> Vec<String> 
     changes
 }
 
+fn existing_column_set_not_null_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+
+            if old_col.nullable && !new_col.nullable && !new_col.primary_key {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn existing_column_generated_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -332,6 +359,60 @@ fn new_column_primary_key_additions(old: &Schema, new: &Schema) -> Vec<String> {
 
     changes.sort();
     changes
+}
+
+fn new_serial_pseudo_type_column_additions(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            if is_serial_pseudo_type(&new_col.data_type)
+                && !old_table
+                    .columns
+                    .iter()
+                    .any(|old_col| old_col.name == new_col.name)
+            {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn new_required_column_additions_without_value(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            if !new_col.nullable
+                && !new_col.primary_key
+                && !column_has_value_source(new_col)
+                && !old_table
+                    .columns
+                    .iter()
+                    .any(|old_col| old_col.name == new_col.name)
+            {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn column_has_value_source(column: &super::schema::Column) -> bool {
+    column.default.is_some() || column.generated.is_some()
 }
 
 fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
@@ -718,6 +799,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
         ));
     }
 
+    let set_not_null_diffs = existing_column_set_not_null_diffs(old, new);
+    if !set_not_null_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely set NOT NULL on existing columns: {}. \
+             Use an explicit migration to backfill/validate data before SET NOT NULL.",
+            set_not_null_diffs.join(", ")
+        ));
+    }
+
     let type_diffs = unsupported_existing_column_type_diffs(old, new);
     if !type_diffs.is_empty() {
         return Err(format!(
@@ -733,6 +823,24 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely add PRIMARY KEY columns to existing tables: {}. \
              Use an explicit migration to backfill data and add the PRIMARY KEY constraint.",
             new_pk_columns.join(", ")
+        ));
+    }
+
+    let new_serial_columns = new_serial_pseudo_type_column_additions(old, new);
+    if !new_serial_columns.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add SERIAL/BIGSERIAL columns to existing tables: {}. \
+             Use an explicit migration to create the sequence/default or use an identity column plan.",
+            new_serial_columns.join(", ")
+        ));
+    }
+
+    let new_required_columns = new_required_column_additions_without_value(old, new);
+    if !new_required_columns.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add required columns without a default/generated value to existing tables: {}. \
+             Use an explicit migration to add the column nullable, backfill, then set NOT NULL.",
+            new_required_columns.join(", ")
         ));
     }
 
@@ -1663,6 +1771,22 @@ mod tests {
     }
 
     #[test]
+    fn state_diff_checked_rejects_existing_column_set_not_null() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("users").column(Column::new("email", ColumnType::Text).not_null()),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("SET NOT NULL should require explicit backfill/validation");
+        assert!(err.contains("set NOT NULL"));
+        assert!(err.contains("users.email"));
+    }
+
+    #[test]
     fn state_diff_checked_rejects_new_primary_key_column_on_existing_table() {
         let mut old = Schema::default();
         old.add_table(Table::new("api_keys").column(Column::new("label", ColumnType::Text)));
@@ -1678,6 +1802,74 @@ mod tests {
             .expect_err("new PRIMARY KEY column on existing table should fail closed");
         assert!(err.contains("add PRIMARY KEY columns"));
         assert!(err.contains("api_keys.key"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_required_column_without_value_source() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("users")
+            .expect("users table should exist")
+            .columns
+            .push(Column::new("email", ColumnType::Text).not_null());
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("required column without default should require explicit migration");
+        assert!(err.contains("required columns"));
+        assert!(err.contains("users.email"));
+    }
+
+    #[test]
+    fn state_diff_checked_allows_new_required_column_with_default() {
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("users")
+            .expect("users table should exist")
+            .columns
+            .push(
+                Column::new("status", ColumnType::Text)
+                    .not_null()
+                    .default("'active'"),
+            );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("required column with default should be auto-planned");
+        let add_col = cmds
+            .iter()
+            .find(|cmd| cmd.action == Action::Alter && cmd.table == "users")
+            .expect("add-column command should be present");
+
+        let sql = add_col.to_sql();
+        assert!(
+            sql.contains("ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"),
+            "add-column SQL should preserve default-backed NOT NULL, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_serial_pseudo_type_column_on_existing_table() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("events").column(Column::new("name", ColumnType::Text)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("events")
+            .expect("events table should exist")
+            .columns
+            .push(Column::new("id", ColumnType::Serial));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("SERIAL add-column cannot be represented by ALTER ADD COLUMN INTEGER");
+        assert!(err.contains("SERIAL/BIGSERIAL"));
+        assert!(err.contains("events.id"));
     }
 
     #[test]
