@@ -818,6 +818,20 @@ pub struct QailResponse {
 }
 
 #[cfg(feature = "response")]
+fn response_cell_bytes(response: &QailResponse, row: usize, col: usize) -> Result<&[u8], String> {
+    let row_values = response
+        .rows
+        .get(row)
+        .ok_or_else(|| format!("Row index out of range: {row}"))?;
+    let value = row_values
+        .get(col)
+        .ok_or_else(|| format!("Column index out of range: {col}"))?;
+    value
+        .as_deref()
+        .ok_or_else(|| format!("Response value is NULL at row {row}, column {col}"))
+}
+
+#[cfg(feature = "response")]
 /// Decode PostgreSQL response bytes.
 /// Returns a handle that must be freed with qail_response_free.
 ///
@@ -905,12 +919,16 @@ pub unsafe extern "C" fn qail_decode_response(
 /// `qail_decode_response`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qail_response_row_count(handle: *const QailResponse) -> usize {
-    if handle.is_null() {
-        return 0;
-    }
-    // SAFETY: `handle` is checked non-null above and the caller contract
-    // requires it to point to a live `QailResponse`.
-    unsafe { (&*handle).rows.len() }
+    ffi_catch!(0, {
+        clear_error();
+        if handle.is_null() {
+            set_error("NULL response handle".to_string());
+            return 0;
+        }
+        // SAFETY: `handle` is checked non-null above and the caller contract
+        // requires it to point to a live `QailResponse`.
+        unsafe { (&*handle).rows.len() }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -925,12 +943,25 @@ pub unsafe extern "C" fn qail_response_column_count(
     handle: *const QailResponse,
     row: usize,
 ) -> usize {
-    if handle.is_null() {
-        return 0;
-    }
-    // SAFETY: `handle` is checked non-null above and the caller contract
-    // requires it to point to a live `QailResponse`.
-    unsafe { (&*handle).rows.get(row).map(|r| r.len()).unwrap_or(0) }
+    ffi_catch!(0, {
+        clear_error();
+        if handle.is_null() {
+            set_error("NULL response handle".to_string());
+            return 0;
+        }
+        // SAFETY: `handle` is checked non-null above and the caller contract
+        // requires it to point to a live `QailResponse`.
+        unsafe {
+            let resp = &*handle;
+            match resp.rows.get(row) {
+                Some(row) => row.len(),
+                None => {
+                    set_error(format!("Row index out of range: {row}"));
+                    0
+                }
+            }
+        }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -942,12 +973,16 @@ pub unsafe extern "C" fn qail_response_column_count(
 /// `qail_decode_response`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qail_response_affected_rows(handle: *const QailResponse) -> u64 {
-    if handle.is_null() {
-        return 0;
-    }
-    // SAFETY: `handle` is checked non-null above and the caller contract
-    // requires it to point to a live `QailResponse`.
-    unsafe { (&*handle).affected_rows }
+    ffi_catch!(0, {
+        clear_error();
+        if handle.is_null() {
+            set_error("NULL response handle".to_string());
+            return 0;
+        }
+        // SAFETY: `handle` is checked non-null above and the caller contract
+        // requires it to point to a live `QailResponse`.
+        unsafe { (&*handle).affected_rows }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -963,19 +998,27 @@ pub unsafe extern "C" fn qail_response_is_null(
     row: usize,
     col: usize,
 ) -> i32 {
-    if handle.is_null() {
-        return 1;
-    }
-    // SAFETY: `handle` is checked non-null above and the caller contract
-    // requires it to point to a live `QailResponse`.
-    unsafe {
-        let resp = &*handle;
-        resp.rows
-            .get(row)
-            .and_then(|r| r.get(col))
-            .map(|c| if c.is_none() { 1 } else { 0 })
-            .unwrap_or(1)
-    }
+    ffi_catch!(1, {
+        clear_error();
+        if handle.is_null() {
+            set_error("NULL response handle".to_string());
+            return 1;
+        }
+        // SAFETY: `handle` is checked non-null above and the caller contract
+        // requires it to point to a live `QailResponse`.
+        unsafe {
+            let resp = &*handle;
+            let Some(row_values) = resp.rows.get(row) else {
+                set_error(format!("Row index out of range: {row}"));
+                return 1;
+            };
+            let Some(value) = row_values.get(col) else {
+                set_error(format!("Column index out of range: {col}"));
+                return 1;
+            };
+            if value.is_none() { 1 } else { 0 }
+        }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -997,24 +1040,36 @@ pub unsafe extern "C" fn qail_response_get_string(
     out_ptr: *mut *const u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
-        return -1;
-    }
-
-    // SAFETY: Pointers are checked non-null above. `handle` must point to a
-    // live response and `out_ptr`/`out_len` must be writable per caller contract.
-    unsafe {
-        let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
-            *out_ptr = bytes.as_ptr();
-            *out_len = bytes.len();
-            0
-        } else {
-            *out_ptr = std::ptr::null();
-            *out_len = 0;
-            0 // NULL is not an error
+    ffi_catch!(-99, {
+        clear_error();
+        if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
         }
-    }
+
+        // SAFETY: Pointers are checked non-null above. `handle` must point to a
+        // live response and `out_ptr`/`out_len` must be writable per caller contract.
+        unsafe {
+            let resp = &*handle;
+            let Some(row_values) = resp.rows.get(row) else {
+                set_error(format!("Row index out of range: {row}"));
+                return -1;
+            };
+            let Some(value) = row_values.get(col) else {
+                set_error(format!("Column index out of range: {col}"));
+                return -1;
+            };
+
+            if let Some(bytes) = value {
+                *out_ptr = bytes.as_ptr();
+                *out_len = bytes.len();
+            } else {
+                *out_ptr = std::ptr::null();
+                *out_len = 0;
+            }
+            0
+        }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -1031,23 +1086,38 @@ pub unsafe extern "C" fn qail_response_get_i32(
     col: usize,
     out_value: *mut i32,
 ) -> i32 {
-    if handle.is_null() || out_value.is_null() {
-        return -1;
-    }
-
-    // SAFETY: Pointers are checked non-null above. `handle` must point to a
-    // live response and `out_value` must be writable per caller contract.
-    unsafe {
-        let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
-            && let Ok(s) = std::str::from_utf8(bytes)
-            && let Ok(v) = s.parse::<i32>()
-        {
-            *out_value = v;
-            return 0;
+    ffi_catch!(-99, {
+        clear_error();
+        if handle.is_null() || out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
         }
-        -1
-    }
+
+        // SAFETY: Pointers are checked non-null above. `handle` must point to a
+        // live response and `out_value` must be writable per caller contract.
+        unsafe {
+            let bytes = match response_cell_bytes(&*handle, row, col) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    set_error(e);
+                    return -1;
+                }
+            };
+            match std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                Some(v) => {
+                    *out_value = v;
+                    0
+                }
+                None => {
+                    set_error("Response value is not a valid i32".to_string());
+                    -1
+                }
+            }
+        }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -1064,23 +1134,38 @@ pub unsafe extern "C" fn qail_response_get_i64(
     col: usize,
     out_value: *mut i64,
 ) -> i32 {
-    if handle.is_null() || out_value.is_null() {
-        return -1;
-    }
-
-    // SAFETY: Pointers are checked non-null above. `handle` must point to a
-    // live response and `out_value` must be writable per caller contract.
-    unsafe {
-        let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
-            && let Ok(s) = std::str::from_utf8(bytes)
-            && let Ok(v) = s.parse::<i64>()
-        {
-            *out_value = v;
-            return 0;
+    ffi_catch!(-99, {
+        clear_error();
+        if handle.is_null() || out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
         }
-        -1
-    }
+
+        // SAFETY: Pointers are checked non-null above. `handle` must point to a
+        // live response and `out_value` must be writable per caller contract.
+        unsafe {
+            let bytes = match response_cell_bytes(&*handle, row, col) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    set_error(e);
+                    return -1;
+                }
+            };
+            match std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                Some(v) => {
+                    *out_value = v;
+                    0
+                }
+                None => {
+                    set_error("Response value is not a valid i64".to_string());
+                    -1
+                }
+            }
+        }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -1097,23 +1182,38 @@ pub unsafe extern "C" fn qail_response_get_f64(
     col: usize,
     out_value: *mut f64,
 ) -> i32 {
-    if handle.is_null() || out_value.is_null() {
-        return -1;
-    }
-
-    // SAFETY: Pointers are checked non-null above. `handle` must point to a
-    // live response and `out_value` must be writable per caller contract.
-    unsafe {
-        let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
-            && let Ok(s) = std::str::from_utf8(bytes)
-            && let Ok(v) = s.parse::<f64>()
-        {
-            *out_value = v;
-            return 0;
+    ffi_catch!(-99, {
+        clear_error();
+        if handle.is_null() || out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
         }
-        -1
-    }
+
+        // SAFETY: Pointers are checked non-null above. `handle` must point to a
+        // live response and `out_value` must be writable per caller contract.
+        unsafe {
+            let bytes = match response_cell_bytes(&*handle, row, col) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    set_error(e);
+                    return -1;
+                }
+            };
+            match std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                Some(v) => {
+                    *out_value = v;
+                    0
+                }
+                None => {
+                    set_error("Response value is not a valid f64".to_string());
+                    -1
+                }
+            }
+        }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -1130,26 +1230,38 @@ pub unsafe extern "C" fn qail_response_get_bool(
     col: usize,
     out_value: *mut i32,
 ) -> i32 {
-    if handle.is_null() || out_value.is_null() {
-        return -1;
-    }
+    ffi_catch!(-99, {
+        clear_error();
+        if handle.is_null() || out_value.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
 
-    // SAFETY: Pointers are checked non-null above. `handle` must point to a
-    // live response and `out_value` must be writable per caller contract.
-    unsafe {
-        let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
-            && let Ok(s) = std::str::from_utf8(bytes)
-        {
+        // SAFETY: Pointers are checked non-null above. `handle` must point to a
+        // live response and `out_value` must be writable per caller contract.
+        unsafe {
+            let bytes = match response_cell_bytes(&*handle, row, col) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    set_error(e);
+                    return -1;
+                }
+            };
+            let Ok(s) = std::str::from_utf8(bytes) else {
+                set_error("Response value is not valid UTF-8".to_string());
+                return -1;
+            };
             *out_value = match s {
                 "t" | "true" | "1" => 1,
                 "f" | "false" | "0" => 0,
-                _ => return -1,
+                _ => {
+                    set_error("Response value is not a valid bool".to_string());
+                    return -1;
+                }
             };
-            return 0;
+            0
         }
-        -1
-    }
+    })
 }
 
 #[cfg(feature = "response")]
@@ -1636,5 +1748,65 @@ mod tests {
 
         assert_eq!(rc, -1);
         assert!(last_error_string().contains("NULL pointer argument"));
+    }
+
+    #[cfg(feature = "response")]
+    fn sample_response() -> QailResponse {
+        QailResponse {
+            rows: vec![vec![Some(b"42".to_vec()), None]],
+            affected_rows: 7,
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_i32_clears_stale_error_on_success() {
+        let _ = unsafe { qail_encode_sync(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(last_error_string().contains("NULL pointer argument"));
+
+        let response = sample_response();
+        let mut value = 0i32;
+        let rc = unsafe { qail_response_get_i32(&response, 0, 0, &mut value) };
+
+        assert_eq!(rc, 0);
+        assert_eq!(value, 42);
+        assert_last_error_clear();
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_string_keeps_sql_null_distinct_from_error() {
+        let _ = unsafe { qail_encode_sync(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(last_error_string().contains("NULL pointer argument"));
+
+        let response = sample_response();
+        let mut out_ptr: *const u8 = std::ptr::null();
+        let mut out_len = usize::MAX;
+        let rc = unsafe { qail_response_get_string(&response, 0, 1, &mut out_ptr, &mut out_len) };
+
+        assert_eq!(rc, 0);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert_last_error_clear();
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_get_string_rejects_out_of_range_access() {
+        let response = sample_response();
+        let mut out_ptr: *const u8 = std::ptr::null();
+        let mut out_len = 0usize;
+        let rc = unsafe { qail_response_get_string(&response, 9, 0, &mut out_ptr, &mut out_len) };
+
+        assert_eq!(rc, -1);
+        assert!(last_error_string().contains("Row index out of range"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_null_handle_sets_error() {
+        assert_eq!(unsafe { qail_response_row_count(std::ptr::null()) }, 0);
+        assert!(last_error_string().contains("NULL response handle"));
     }
 }
