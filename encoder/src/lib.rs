@@ -988,6 +988,7 @@ pub unsafe extern "C" fn qail_decode_response(
         };
 
         let mut offset = 0;
+        let mut saw_ready = false;
         while offset < bytes.len() {
             match BackendMessage::decode(&bytes[offset..]) {
                 Ok((msg, consumed)) => {
@@ -1011,6 +1012,14 @@ pub unsafe extern "C" fn qail_decode_response(
                             });
                         }
                         BackendMessage::ReadyForQuery(_) => {
+                            saw_ready = true;
+                            if offset != bytes.len() {
+                                set_error(format!(
+                                    "Trailing bytes after ReadyForQuery: {} bytes",
+                                    bytes.len() - offset
+                                ));
+                                return -1;
+                            }
                             break; // Done
                         }
                         _ => {} // Skip other messages
@@ -1021,6 +1030,11 @@ pub unsafe extern "C" fn qail_decode_response(
                     return -1;
                 }
             }
+        }
+
+        if !saw_ready {
+            set_error("Response ended before ReadyForQuery".to_string());
+            return -1;
         }
 
         let boxed = Box::new(response);
@@ -2114,12 +2128,72 @@ mod tests {
     }
 
     #[cfg(feature = "response")]
+    fn backend_msg(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let len = (payload.len() + 4) as u32;
+        let mut bytes = Vec::with_capacity(payload.len() + 5);
+        bytes.push(kind);
+        bytes.extend_from_slice(&len.to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[cfg(feature = "response")]
     fn sample_response() -> QailResponse {
         QailResponse {
             rows: vec![vec![Some(b"42".to_vec()), None]],
             affected_rows: 7,
             error: None,
         }
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_decode_response_accepts_ready_for_query_terminal() {
+        let ready = backend_msg(b'Z', b"I");
+        let mut handle: *mut QailResponse = std::ptr::null_mut();
+
+        let rc = unsafe { qail_decode_response(ready.as_ptr(), ready.len(), &mut handle) };
+
+        assert_eq!(rc, 0);
+        assert!(!handle.is_null());
+        assert_last_error_clear();
+
+        unsafe {
+            qail_response_free(handle);
+        }
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_decode_response_rejects_missing_ready_for_query() {
+        let command_complete = backend_msg(b'C', b"SELECT 1\0");
+        let mut handle = std::ptr::dangling_mut::<QailResponse>();
+
+        let rc = unsafe {
+            qail_decode_response(
+                command_complete.as_ptr(),
+                command_complete.len(),
+                &mut handle,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert!(handle.is_null());
+        assert!(last_error_string().contains("before ReadyForQuery"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_decode_response_rejects_trailing_bytes_after_ready_for_query() {
+        let mut bytes = backend_msg(b'Z', b"I");
+        bytes.extend_from_slice(&backend_msg(b'Z', b"I"));
+        let mut handle = std::ptr::dangling_mut::<QailResponse>();
+
+        let rc = unsafe { qail_decode_response(bytes.as_ptr(), bytes.len(), &mut handle) };
+
+        assert_eq!(rc, -1);
+        assert!(handle.is_null());
+        assert!(last_error_string().contains("Trailing bytes after ReadyForQuery"));
     }
 
     #[cfg(feature = "response")]
