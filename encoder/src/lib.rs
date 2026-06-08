@@ -124,6 +124,10 @@ fn checked_frontend_message_len(content_len: usize, label: &str) -> Result<i32, 
     Ok(len_field as i32)
 }
 
+fn validate_ffi_ast(cmd: &qail_core::ast::Qail) -> Result<(), String> {
+    qail_core::sanitize::validate_ast(cmd).map_err(|e| e.to_string())
+}
+
 fn checked_bind_execute_pair_len(
     statement_len: usize,
     param_len: Option<usize>,
@@ -381,6 +385,11 @@ pub unsafe extern "C" fn qail_encode_get(
             cmd = cmd.limit(limit);
         }
 
+        if let Err(e) = validate_ffi_ast(&cmd) {
+            set_error(e);
+            return -5;
+        }
+
         // Encode to Simple Query wire bytes
         let sql = cmd.to_sql();
         let wire_bytes = match encode_simple_query(&sql) {
@@ -476,6 +485,11 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
 
         if limit >= 0 {
             base_cmd = base_cmd.limit(limit);
+        }
+
+        if let Err(e) = validate_ffi_ast(&base_cmd) {
+            set_error(e);
+            return -5;
         }
 
         // Encode SQL once, repeat count times
@@ -1745,6 +1759,106 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Invalid UTF-8 in columns"));
+    }
+
+    #[test]
+    fn test_encode_get_rejects_unsafe_table_identifier() {
+        let table = CString::new("users; DROP TABLE users; --").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_get(
+                table.as_ptr(),
+                std::ptr::null(),
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -5);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        let err = last_error_string();
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("table"));
+    }
+
+    #[test]
+    fn test_encode_get_rejects_unsafe_column_identifier() {
+        let table = CString::new("users").unwrap();
+        let columns = CString::new("id,name; DROP TABLE users").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_get(
+                table.as_ptr(),
+                columns.as_ptr(),
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -5);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        let err = last_error_string();
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("columns[1]"));
+    }
+
+    #[test]
+    fn test_uniform_batch_rejects_unsafe_table_identifier() {
+        let table = CString::new("users; DROP TABLE users; --").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_uniform_batch(
+                table.as_ptr(),
+                std::ptr::null(),
+                1,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -5);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        let err = last_error_string();
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("table"));
+    }
+
+    #[test]
+    fn test_uniform_batch_rejects_unsafe_column_identifier() {
+        let table = CString::new("users").unwrap();
+        let columns = CString::new("id,name; DROP TABLE users").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_uniform_batch(
+                table.as_ptr(),
+                columns.as_ptr(),
+                1,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -5);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        let err = last_error_string();
+        assert!(err.contains("AST validation failed"));
+        assert!(err.contains("columns[1]"));
     }
 
     #[test]
