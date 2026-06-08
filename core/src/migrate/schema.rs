@@ -2011,6 +2011,21 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
             columns,
             ..Default::default()
         });
+
+        if table.enable_rls {
+            cmds.push(Qail {
+                action: Action::AlterEnableRls,
+                table: table.name.clone(),
+                ..Default::default()
+            });
+        }
+        if table.force_rls {
+            cmds.push(Qail {
+                action: Action::AlterForceRls,
+                table: table.name.clone(),
+                ..Default::default()
+            });
+        }
     }
 
     // Add indexes using IndexDef like diff.rs
@@ -2451,6 +2466,33 @@ mod tests {
                 .any(|c| matches!(c, crate::ast::Constraint::Check(vals) if vals.len() == 1)),
             "check expressions should be preserved"
         );
+    }
+
+    #[test]
+    fn schema_to_commands_preserves_table_rls_flags() {
+        let mut docs = Table::new("docs").column(Column::new("id", ColumnType::Uuid).primary_key());
+        docs.enable_rls = true;
+        docs.force_rls = true;
+
+        let mut schema = Schema::new();
+        schema.add_table(docs);
+
+        let cmds = schema_to_commands(&schema);
+        let make_idx = cmds
+            .iter()
+            .position(|cmd| cmd.action == crate::ast::Action::Make && cmd.table == "docs")
+            .expect("table create command should exist");
+        let enable_idx = cmds
+            .iter()
+            .position(|cmd| cmd.action == crate::ast::Action::AlterEnableRls && cmd.table == "docs")
+            .expect("enable RLS command should exist");
+        let force_idx = cmds
+            .iter()
+            .position(|cmd| cmd.action == crate::ast::Action::AlterForceRls && cmd.table == "docs")
+            .expect("force RLS command should exist");
+
+        assert!(make_idx < enable_idx);
+        assert!(enable_idx < force_idx);
     }
 
     #[test]

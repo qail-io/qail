@@ -146,6 +146,32 @@ index idx_users_name on users (name)
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_preserves_migrate_schema_rls_once() {
+        let input = r#"
+table docs {
+    id uuid primary_key
+    tenant_id uuid not_null
+
+    enable_rls
+    force_rls
+}
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input).expect("strict compile should succeed");
+        let enable_count = cmds
+            .iter()
+            .filter(|c| matches!(c.action, qail_core::ast::Action::AlterEnableRls))
+            .count();
+        let force_count = cmds
+            .iter()
+            .filter(|c| matches!(c.action, qail_core::ast::Action::AlterForceRls))
+            .count();
+
+        assert_eq!(enable_count, 1, "ENABLE RLS should be emitted once");
+        assert_eq!(force_count, 1, "FORCE RLS should be emitted once");
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_explicit_alter_add_column_lines() {
         let input = r#"
 alter whatsapp_phone_configs add automation_reply_enabled:boolean:default=true

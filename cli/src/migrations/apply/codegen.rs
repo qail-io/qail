@@ -153,28 +153,6 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     cmds.extend(compile_functions_strict(&early_functions)?);
     cmds.extend(qail_core::migrate::schema::schema_to_commands(schema));
 
-    // Preserve schema-level RLS toggles for CREATE TABLE blocks.
-    let mut table_names: Vec<&String> = schema.tables.keys().collect();
-    table_names.sort();
-    for table_name in table_names {
-        if let Some(table) = schema.tables.get(table_name) {
-            if table.enable_rls {
-                cmds.push(Qail {
-                    action: Action::AlterEnableRls,
-                    table: table_name.clone(),
-                    ..Default::default()
-                });
-            }
-            if table.force_rls {
-                cmds.push(Qail {
-                    action: Action::AlterForceRls,
-                    table: table_name.clone(),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-
     cmds.extend(compile_views_strict(&schema.views)?);
     cmds.extend(compile_functions_strict(&late_functions)?);
     cmds.extend(compile_triggers_strict(&schema.triggers)?);
