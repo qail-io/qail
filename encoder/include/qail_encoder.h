@@ -57,7 +57,7 @@ int32_t qail_encode_sync(uint8_t **out_ptr, size_t *out_len);
 
 /*
  * params must either be NULL/0, or point to an array with at least
- * params_count entries. Null entries encode SQL NULL values.
+ * min(params_count, count) entries. Null entries encode SQL NULL values.
  */
 int32_t qail_encode_bind_execute_batch(
     const char *statement,

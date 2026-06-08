@@ -748,11 +748,11 @@ pub unsafe extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut u
 /// # Safety
 ///
 /// The caller **MUST** ensure that `params` points to a valid array of at least
-/// `params_count` elements when `params_count > 0`. Providing a smaller array
-/// is **undefined behavior** (the function iterates `0..params_count` via
-/// `params.add(i)`). When `params` is null or `params_count == 0`, each Bind
-/// has zero parameters. Individual null elements within a non-empty array are
-/// encoded as SQL NULL parameters and preserve their position in the batch
+/// `min(params_count, count)` elements when both values are non-zero. Providing
+/// a smaller array is **undefined behavior** (the function reads those entries
+/// via `params.add(i)`). When `params` is null or `params_count == 0`, each
+/// Bind has zero parameters. Individual null elements within a non-empty array
+/// are encoded as SQL NULL parameters and preserve their position in the batch
 /// cycle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qail_encode_bind_execute_batch(
@@ -787,13 +787,14 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
         };
 
         // Collect params
-        let param_strs: Vec<Option<&str>> = if params.is_null() || params_count == 0 {
+        let used_params_count = params_count.min(count);
+        let param_strs: Vec<Option<&str>> = if params.is_null() || used_params_count == 0 {
             vec![]
         } else {
-            let mut out = Vec::new();
-            for i in 0..params_count {
+            let mut out = Vec::with_capacity(used_params_count);
+            for i in 0..used_params_count {
                 // SAFETY: The caller contract requires `params` to point
-                // to an array containing at least `params_count` entries.
+                // to an array containing at least `used_params_count` entries.
                 let p = unsafe { *params.add(i) };
                 if p.is_null() {
                     out.push(None);
@@ -1907,6 +1908,39 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Invalid UTF-8 in param 0"));
+    }
+
+    #[test]
+    fn test_bind_execute_batch_ignores_unused_param_slots() {
+        let statement = CString::new("stmt").unwrap();
+        let value = CString::new("alice").unwrap();
+        let invalid = b"\xff\0";
+        let params = [value.as_ptr(), invalid.as_ptr() as *const c_char];
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_bind_execute_batch(
+                statement.as_ptr(),
+                params.as_ptr(),
+                params.len(),
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, 0);
+        assert!(!out_ptr.is_null());
+        assert!(out_len > 0);
+        assert_last_error_clear();
+
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+        assert_eq!(bind_param_values(bytes), vec![Some(b"alice".to_vec())]);
+
+        unsafe {
+            qail_free_bytes(out_ptr, out_len);
+        }
     }
 
     #[test]
