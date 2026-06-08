@@ -201,6 +201,24 @@ fn push_index_column(buf: &mut BytesMut, column: &str) -> Result<(), crate::prot
     Ok(())
 }
 
+fn push_index_include_column(
+    buf: &mut BytesMut,
+    column: &str,
+) -> Result<(), crate::protocol::EncodeError> {
+    let column = column.trim();
+    if column.is_empty()
+        || column.contains('\0')
+        || contains_unquoted_statement_delimiter(column)
+        || !is_simple_identifier(column)
+    {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid index include column: {column:?}"
+        )));
+    }
+    push_identifier(buf, column);
+    Ok(())
+}
+
 fn is_simple_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
@@ -902,6 +920,9 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
     } else {
         buf.extend_from_slice(b"CREATE INDEX ");
     }
+    if idx.concurrently {
+        buf.extend_from_slice(b"CONCURRENTLY ");
+    }
     push_identifier(buf, &idx.name);
     buf.extend_from_slice(b" ON ");
     push_identifier(buf, &idx.table);
@@ -924,6 +945,16 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
         push_index_column(buf, col)?;
     }
     buf.extend_from_slice(b")");
+    if !idx.include.is_empty() {
+        buf.extend_from_slice(b" INCLUDE (");
+        for (i, col) in idx.include.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            push_index_include_column(buf, col)?;
+        }
+        buf.extend_from_slice(b")");
+    }
     if let Some(where_clause) = &idx.where_clause {
         if where_clause.trim().is_empty()
             || where_clause.contains('\0')

@@ -558,13 +558,19 @@ fn parse_column_type_prefix(
 
 /// Parse an index definition.
 fn parse_index(line: &str) -> Result<Index, String> {
-    let is_unique = line.starts_with("unique ");
-    let rest = if is_unique {
-        line.strip_prefix("unique index ")
-            .ok_or("Expected 'unique index' prefix")?
+    let (is_unique, rest) = if let Some(rest) = line.strip_prefix("unique index ") {
+        (true, rest)
     } else {
-        line.strip_prefix("index ")
-            .ok_or("Expected 'index' prefix")?
+        (
+            false,
+            line.strip_prefix("index ")
+                .ok_or("Expected 'index' prefix")?,
+        )
+    };
+    let (concurrently, rest) = if let Some(rest) = rest.strip_prefix("concurrently ") {
+        (true, rest)
+    } else {
+        (false, rest)
     };
 
     let parts: Vec<&str> = rest.splitn(2, " on ").collect();
@@ -621,8 +627,26 @@ fn parse_index(line: &str) -> Result<Index, String> {
     if let Some(method) = method {
         index.method = method;
     }
+    if concurrently {
+        index.concurrently = true;
+    }
 
-    let trailing = rest[paren_end + 1..].trim();
+    let mut trailing = rest[paren_end + 1..].trim();
+    if let Some(include_rest) = trailing.strip_prefix("include ") {
+        let include_rest = include_rest.trim_start();
+        if !include_rest.starts_with('(') {
+            return Err("index include clause requires column list".to_string());
+        }
+        let include_end =
+            find_matching_paren(include_rest, 0).ok_or("Missing ) in index include")?;
+        let include_cols = split_top_level_csv(&include_rest[1..include_end])?;
+        if include_cols.is_empty() {
+            return Err("index include columns are required".to_string());
+        }
+        index.include = include_cols;
+        trailing = include_rest[include_end + 1..].trim();
+    }
+
     if let Some(pred) = trailing.strip_prefix("where ") {
         let pred = pred.trim();
         if pred.is_empty() {
@@ -3390,6 +3414,27 @@ index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_co
             schema.indexes[1].columns,
             vec!["embedding vector_cosine_ops".to_string()]
         );
+    }
+
+    #[test]
+    fn test_parse_covering_concurrent_partial_index() {
+        let input = "unique index concurrently idx_users_email_cover on users using btree (email) include (name, created_at) where deleted_at IS NULL";
+        let schema = parse_qail(input).unwrap();
+
+        assert_eq!(schema.indexes.len(), 1);
+        let idx = &schema.indexes[0];
+        assert!(idx.unique);
+        assert!(idx.concurrently);
+        assert_eq!(idx.method, IndexMethod::BTree);
+        assert_eq!(idx.columns, vec!["email".to_string()]);
+        assert_eq!(
+            idx.include,
+            vec!["name".to_string(), "created_at".to_string()]
+        );
+        assert!(matches!(
+            idx.where_clause.as_ref(),
+            Some(CheckExpr::Sql(sql)) if sql == "deleted_at IS NULL"
+        ));
     }
 
     #[test]

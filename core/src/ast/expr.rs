@@ -595,6 +595,12 @@ pub struct IndexDef {
     pub unique: bool,
     /// Index type (e.g., "keyword", "integer", "float", "geo", "text")
     pub index_type: Option<String>,
+    /// INCLUDE columns for covering indexes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Whether to create the index concurrently.
+    #[serde(default)]
+    pub concurrently: bool,
     /// Optional partial-index predicate (`WHERE ...` body without the keyword).
     pub where_clause: Option<String>,
 }

@@ -312,6 +312,8 @@ mod tests {
                 columns: vec!["email".to_string()],
                 unique: false,
                 index_type: None,
+                include: vec![],
+                concurrently: false,
                 where_clause: None,
             }),
             ..Default::default()
@@ -325,6 +327,8 @@ mod tests {
                 columns: vec!["email".to_string()],
                 unique: false,
                 index_type: None,
+                include: vec![],
+                concurrently: false,
                 where_clause: None,
             }),
             ..Default::default()

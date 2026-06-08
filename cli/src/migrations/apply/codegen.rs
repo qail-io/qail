@@ -1138,6 +1138,8 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
                 columns: idx.columns.clone(),
                 unique: idx.unique,
                 index_type: None,
+                include: vec![],
+                concurrently: false,
                 where_clause: None,
             }),
             ..Default::default()

@@ -34,6 +34,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["lower(email)".to_string()],
             unique: false,
             index_type: Some("btree".to_string()),
+            include: vec![],
+            concurrently: false,
             where_clause: Some("active = true".to_string()),
         }),
         ..Default::default()
@@ -51,6 +53,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["embedding vector_l2_ops".to_string()],
             unique: false,
             index_type: Some("hnsw".to_string()),
+            include: vec![],
+            concurrently: false,
             where_clause: None,
         }),
         ..Default::default()
@@ -68,6 +72,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["embedding vector_cosine_ops".to_string()],
             unique: false,
             index_type: Some("ivf-flat".to_string()),
+            include: vec![],
+            concurrently: false,
             where_clause: None,
         }),
         ..Default::default()
@@ -85,6 +91,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["lower(email); DROP TABLE users; --".to_string()],
             unique: false,
             index_type: None,
+            include: vec![],
+            concurrently: false,
             where_clause: None,
         }),
         ..Default::default()
@@ -102,6 +110,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["lower(email)\0".to_string()],
             unique: false,
             index_type: None,
+            include: vec![],
+            concurrently: false,
             where_clause: None,
         }),
         ..Default::default()
@@ -119,6 +129,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["email".to_string()],
             unique: false,
             index_type: Some("btree; DROP TABLE users".to_string()),
+            include: vec![],
+            concurrently: false,
             where_clause: None,
         }),
         ..Default::default()
@@ -136,6 +148,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["email".to_string()],
             unique: false,
             index_type: Some("btree".to_string()),
+            include: vec![],
+            concurrently: false,
             where_clause: Some("active = true; DROP TABLE users; --".to_string()),
         }),
         ..Default::default()
@@ -153,6 +167,8 @@ fn test_index_fragments_validate_method_and_predicate() {
             columns: vec!["email".to_string()],
             unique: false,
             index_type: Some("btree".to_string()),
+            include: vec![],
+            concurrently: false,
             where_clause: Some("active = true\0".to_string()),
         }),
         ..Default::default()
@@ -160,6 +176,44 @@ fn test_index_fragments_validate_method_and_predicate() {
     assert_eq!(
         invalid_nul_predicate.to_sql_with_dialect(Dialect::Postgres),
         "/* ERROR: Invalid index predicate */"
+    );
+
+    let covering_concurrent = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_users_email_cover".to_string(),
+            table: "users".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            index_type: Some("btree".to_string()),
+            include: vec!["name".to_string(), "created_at".to_string()],
+            concurrently: true,
+            where_clause: Some("deleted_at IS NULL".to_string()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        covering_concurrent.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE UNIQUE INDEX CONCURRENTLY idx_users_email_cover ON users USING btree (email) INCLUDE (name, created_at) WHERE deleted_at IS NULL"
+    );
+
+    let invalid_include = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_bad".to_string(),
+            table: "users".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            index_type: None,
+            include: vec!["lower(name)".to_string()],
+            concurrently: false,
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        invalid_include.to_sql_with_dialect(Dialect::Postgres),
+        "/* ERROR: Invalid index include column */"
     );
 }
 

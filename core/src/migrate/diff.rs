@@ -1148,6 +1148,8 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     },
                     unique: new_idx.unique,
                     index_type: Some(index_method_str(&new_idx.method).to_string()),
+                    include: new_idx.include.clone(),
+                    concurrently: new_idx.concurrently,
                     where_clause: new_idx.where_clause.as_ref().map(check_expr_to_sql),
                 }),
                 ..Default::default()
@@ -2029,6 +2031,54 @@ mod tests {
         assert!(
             sql.contains("WHERE deleted_at IS NULL"),
             "index SQL should preserve partial predicate, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn diff_new_covering_concurrent_index_preserves_options() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("users")
+                .column(Column::new("email", ColumnType::Text))
+                .column(Column::new("name", ColumnType::Text))
+                .column(Column::new("created_at", ColumnType::Timestamp)),
+        );
+
+        let mut new = old.clone();
+        new.add_index(
+            Index::new("idx_users_email_cover", "users", vec!["email".to_string()])
+                .include(vec!["name".to_string(), "created_at".to_string()])
+                .concurrently(),
+        );
+
+        let cmds =
+            diff_schemas_checked(&old, &new).expect("new covering concurrent index should diff");
+        let index_cmd = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Index))
+            .expect("index command should be present");
+        let index_def = index_cmd
+            .index_def
+            .as_ref()
+            .expect("index command should carry index definition");
+
+        assert!(index_def.concurrently);
+        assert_eq!(
+            index_def.include,
+            vec!["name".to_string(), "created_at".to_string()]
+        );
+
+        let sql = index_cmd.to_sql();
+        assert!(
+            sql.contains("CREATE INDEX CONCURRENTLY idx_users_email_cover"),
+            "index SQL should preserve CONCURRENTLY, got: {sql}"
+        );
+        assert!(
+            sql.contains("INCLUDE (name, created_at)"),
+            "index SQL should preserve INCLUDE columns, got: {sql}"
         );
     }
 

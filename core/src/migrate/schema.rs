@@ -1689,12 +1689,20 @@ pub fn to_qail_string(schema: &Schema) -> String {
 
     for idx in &schema.indexes {
         let unique = if idx.unique { "unique " } else { "" };
+        let concurrently = if idx.concurrently {
+            "concurrently "
+        } else {
+            ""
+        };
         let cols = if !idx.expressions.is_empty() {
             idx.expressions.join(", ")
         } else {
             idx.columns.join(", ")
         };
-        let mut line = format!("{}index {} on {}", unique, idx.name, idx.table);
+        let mut line = format!(
+            "{}index {}{} on {}",
+            unique, concurrently, idx.name, idx.table
+        );
         if idx.method != IndexMethod::BTree {
             line.push_str(" using ");
             line.push_str(index_method_str(&idx.method));
@@ -1702,6 +1710,11 @@ pub fn to_qail_string(schema: &Schema) -> String {
         line.push_str(" (");
         line.push_str(&cols);
         line.push(')');
+        if !idx.include.is_empty() {
+            line.push_str(" include (");
+            line.push_str(&idx.include.join(", "));
+            line.push(')');
+        }
         if let Some(where_clause) = &idx.where_clause {
             line.push_str(" where ");
             line.push_str(&check_expr_str(where_clause));
@@ -2015,6 +2028,8 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 },
                 unique: idx.unique,
                 index_type: Some(index_method_str(&idx.method).to_string()),
+                include: idx.include.clone(),
+                concurrently: idx.concurrently,
                 where_clause: idx.where_clause.as_ref().map(check_expr_to_sql),
             }),
             ..Default::default()
@@ -2231,6 +2246,24 @@ mod tests {
         ));
         assert!(output.contains(
             "index idx_docs_embedding_ivfflat on documents using ivfflat (embedding vector_cosine_ops)"
+        ));
+    }
+
+    #[test]
+    fn test_to_qail_string_preserves_covering_concurrent_index_options() {
+        let mut schema = Schema::new();
+        schema.add_index(
+            Index::new("idx_users_email_cover", "users", vec!["email".into()])
+                .unique()
+                .include(vec!["name".into(), "created_at".into()])
+                .concurrently()
+                .partial(CheckExpr::Sql("deleted_at IS NULL".to_string())),
+        );
+
+        let output = to_qail_string(&schema);
+
+        assert!(output.contains(
+            "unique index concurrently idx_users_email_cover on users (email) include (name, created_at) where deleted_at IS NULL"
         ));
     }
 

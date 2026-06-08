@@ -422,6 +422,8 @@ mod tests {
                 columns: vec!["email".to_string()],
                 unique: false,
                 index_type: None,
+                include: vec![],
+                concurrently: false,
                 where_clause: None,
             }),
             ..Default::default()
@@ -446,6 +448,8 @@ mod tests {
                 columns: vec!["email".to_string()],
                 unique: true,
                 index_type: Some("gin".to_string()),
+                include: vec![],
+                concurrently: false,
                 where_clause: Some("deleted_at IS NULL".to_string()),
             }),
             ..Default::default()

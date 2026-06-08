@@ -704,6 +704,11 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
                 return "/* ERROR: CREATE INDEX requires at least one column */".to_string();
             }
             let unique = if idx.unique { "UNIQUE " } else { "" };
+            let concurrently = if idx.concurrently {
+                "CONCURRENTLY "
+            } else {
+                ""
+            };
             let mut cols = Vec::with_capacity(idx.columns.len());
             for column in &idx.columns {
                 let Ok(column) = index_column_to_sql(column, generator.as_ref()) else {
@@ -713,8 +718,9 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
             }
             let cols = cols.join(", ");
             let mut sql = format!(
-                "CREATE {}INDEX {} ON {}",
+                "CREATE {}INDEX {}{} ON {}",
                 unique,
+                concurrently,
                 generator.quote_identifier(&idx.name),
                 generator.quote_identifier(&idx.table)
             );
@@ -730,6 +736,18 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
             sql.push_str(" (");
             sql.push_str(&cols);
             sql.push(')');
+            if !idx.include.is_empty() {
+                let mut include_cols = Vec::with_capacity(idx.include.len());
+                for column in &idx.include {
+                    let Ok(column) = index_include_column_to_sql(column, generator.as_ref()) else {
+                        return "/* ERROR: Invalid index include column */".to_string();
+                    };
+                    include_cols.push(column);
+                }
+                sql.push_str(" INCLUDE (");
+                sql.push_str(&include_cols.join(", "));
+                sql.push(')');
+            }
             if let Some(where_clause) = &idx.where_clause {
                 if where_clause.trim().is_empty()
                     || where_clause.contains('\0')
@@ -744,6 +762,21 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
         }
         None => "/* ERROR: CREATE INDEX requires an index definition */".to_string(),
     }
+}
+
+fn index_include_column_to_sql(
+    column: &str,
+    generator: &dyn SqlGenerator,
+) -> Result<String, String> {
+    let column = column.trim();
+    if column.is_empty()
+        || column.contains('\0')
+        || contains_unquoted_statement_delimiter(column)
+        || !is_simple_identifier(column)
+    {
+        return Err("/* ERROR: Invalid index include column */".to_string());
+    }
+    Ok(generator.quote_identifier(column))
 }
 
 fn map_type(t: &str) -> &str {

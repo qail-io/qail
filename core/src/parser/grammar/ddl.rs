@@ -202,6 +202,8 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
                 columns: columns.iter().map(|s| s.to_string()).collect(),
                 unique: unique.is_some(),
                 index_type: None,
+                include: vec![],
+                concurrently: false,
                 where_clause: None,
             }),
             table_constraints: vec![],
