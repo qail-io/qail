@@ -370,7 +370,7 @@ pub unsafe extern "C" fn qail_encode_get(
                 }
             };
 
-            if cols_str == "*" {
+            if cols_str.trim() == "*" {
                 cmd = cmd.select_all();
             } else {
                 for col in cols_str.split(',') {
@@ -477,7 +477,7 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
                     return -3;
                 }
             };
-            if cols_str == "*" {
+            if cols_str.trim() == "*" {
                 base_cmd = base_cmd.select_all();
             } else {
                 for col in cols_str.split(',') {
@@ -1911,6 +1911,33 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_get_accepts_trimmed_wildcard_columns() {
+        let table = CString::new("users").unwrap();
+        let columns = CString::new(" * ").unwrap();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_get(
+                table.as_ptr(),
+                columns.as_ptr(),
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, 0);
+        assert!(!out_ptr.is_null());
+        assert!(out_len > 0);
+        assert_last_error_clear();
+
+        unsafe {
+            qail_free_bytes(out_ptr, out_len);
+        }
+    }
+
+    #[test]
     fn test_uniform_batch_rejects_unsafe_table_identifier() {
         let table = CString::new("users; DROP TABLE users; --").unwrap();
         let mut out_ptr = std::ptr::dangling_mut::<u8>();
@@ -1959,6 +1986,34 @@ mod tests {
         let err = last_error_string();
         assert!(err.contains("AST validation failed"));
         assert!(err.contains("columns[1]"));
+    }
+
+    #[test]
+    fn test_uniform_batch_accepts_trimmed_wildcard_columns() {
+        let table = CString::new("users").unwrap();
+        let columns = CString::new(" * ").unwrap();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len = 0usize;
+
+        let rc = unsafe {
+            qail_encode_uniform_batch(
+                table.as_ptr(),
+                columns.as_ptr(),
+                1,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, 0);
+        assert!(!out_ptr.is_null());
+        assert!(out_len > 0);
+        assert_last_error_clear();
+
+        unsafe {
+            qail_free_bytes(out_ptr, out_len);
+        }
     }
 
     #[test]
