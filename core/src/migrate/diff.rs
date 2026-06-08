@@ -335,7 +335,6 @@ struct ComparableIndex {
     method: &'static str,
     where_clause: Option<String>,
     include: Vec<String>,
-    concurrently: bool,
 }
 
 fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
@@ -351,7 +350,6 @@ fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
             .map(check_expr_to_sql)
             .map(|fragment| normalize_index_sql_fragment(&fragment)),
         include: normalized_index_fragments(&idx.include),
-        concurrently: idx.concurrently,
     }
 }
 
@@ -375,12 +373,6 @@ fn index_difference_reasons(
     push_index_diff(&mut reasons, "method", &old.method, &new.method);
     push_index_diff(&mut reasons, "where", &old.where_clause, &new.where_clause);
     push_index_diff(&mut reasons, "include", &old.include, &new.include);
-    push_index_diff(
-        &mut reasons,
-        "concurrently",
-        &old.concurrently,
-        &new.concurrently,
-    );
 
     reasons
 }
@@ -1338,6 +1330,22 @@ mod tests {
             .expect_err("same-name index column change should fail closed");
         assert!(err.contains("replace existing indexes"));
         assert!(err.contains("idx_users_email"));
+    }
+
+    #[test]
+    fn state_diff_index_compare_ignores_concurrently_execution_option() {
+        let old = schema_with_users_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+        let new = schema_with_users_index(
+            Index::new("idx_users_email", "users", vec!["email".to_string()]).concurrently(),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("CONCURRENTLY is an execution option, not index definition drift");
+        assert!(cmds.is_empty());
     }
 
     #[test]
