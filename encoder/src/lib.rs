@@ -1022,8 +1022,48 @@ pub unsafe extern "C" fn qail_response_is_null(
 }
 
 #[cfg(feature = "response")]
+/// Get PostgreSQL error message captured during response decoding.
+///
+/// Returns 0 on success. If no server error is present, `*out_ptr` is set to
+/// NULL and `*out_len` is set to 0.
+///
+/// # Safety
+///
+/// The returned `*out_ptr` borrows memory from the `QailResponse` handle.
+/// It is **only valid** until `qail_response_free(handle)` is called.
+/// `out_ptr` and `out_len` must be valid writable pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_error_message(
+    handle: *const QailResponse,
+    out_ptr: *mut *const u8,
+    out_len: *mut usize,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+
+        // SAFETY: Pointers are checked non-null above. `handle` must point to a
+        // live response and `out_ptr`/`out_len` must be writable per caller contract.
+        unsafe {
+            let resp = &*handle;
+            if let Some(message) = resp.error.as_ref() {
+                *out_ptr = message.as_ptr();
+                *out_len = message.len();
+            } else {
+                *out_ptr = std::ptr::null();
+                *out_len = 0;
+            }
+            0
+        }
+    })
+}
+
+#[cfg(feature = "response")]
 /// Get column value as string.
-/// Returns pointer to null-terminated string, or NULL if value is NULL.
+/// Returns a borrowed pointer/length pair, or NULL/0 if value is SQL NULL.
 ///
 /// # Safety
 ///
@@ -1336,6 +1376,7 @@ mod tests {
                 "qail_response_column_count",
                 "qail_response_affected_rows",
                 "qail_response_is_null",
+                "qail_response_error_message",
                 "qail_response_get_string",
                 "qail_response_get_i32",
                 "qail_response_get_i64",
@@ -1808,5 +1849,43 @@ mod tests {
     fn test_response_null_handle_sets_error() {
         assert_eq!(unsafe { qail_response_row_count(std::ptr::null()) }, 0);
         assert!(last_error_string().contains("NULL response handle"));
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_error_message_returns_borrowed_message() {
+        let response = QailResponse {
+            rows: Vec::new(),
+            affected_rows: 0,
+            error: Some("permission denied".to_string()),
+        };
+        let mut out_ptr: *const u8 = std::ptr::null();
+        let mut out_len = 0usize;
+
+        let rc = unsafe { qail_response_error_message(&response, &mut out_ptr, &mut out_len) };
+
+        assert_eq!(rc, 0);
+        assert!(!out_ptr.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
+        assert_eq!(bytes, b"permission denied");
+        assert_last_error_clear();
+    }
+
+    #[cfg(feature = "response")]
+    #[test]
+    fn test_response_error_message_returns_null_when_absent() {
+        let _ = unsafe { qail_encode_sync(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(last_error_string().contains("NULL pointer argument"));
+
+        let response = sample_response();
+        let mut out_ptr: *const u8 = std::ptr::dangling();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe { qail_response_error_message(&response, &mut out_ptr, &mut out_len) };
+
+        assert_eq!(rc, 0);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert_last_error_clear();
     }
 }

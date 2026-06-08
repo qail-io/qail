@@ -84,6 +84,17 @@ uint64_t qail_response_affected_rows(const QailResponse *handle);
 int32_t qail_response_is_null(const QailResponse *handle, size_t row, size_t col);
 
 /*
+ * qail_response_error_message returns a borrowed pointer owned by the response
+ * handle. Copy it before calling qail_response_free if it must outlive the
+ * handle. If no server error is present, *out_ptr is NULL and *out_len is 0.
+ */
+int32_t qail_response_error_message(
+    const QailResponse *handle,
+    const uint8_t **out_ptr,
+    size_t *out_len
+);
+
+/*
  * qail_response_get_string returns a borrowed pointer owned by the response
  * handle. Copy it before calling qail_response_free if it must outlive the
  * handle.

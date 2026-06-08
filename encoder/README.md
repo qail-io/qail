@@ -43,8 +43,8 @@ Ownership rules:
   using the exact pointer and length returned by the call.
 - Response handles returned by `qail_decode_response` must be freed with
   `qail_response_free`.
-- `qail_response_get_string` returns a borrowed pointer valid only until the
-  response handle is freed.
+- `qail_response_get_string` and `qail_response_error_message` return borrowed
+  pointers valid only until the response handle is freed.
 
 ## License
 
