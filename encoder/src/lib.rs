@@ -29,6 +29,7 @@ use std::os::raw::c_char;
 use std::panic;
 
 const MAX_FFI_BATCH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FFI_MESSAGE_BYTES: usize = MAX_FFI_BATCH_BYTES;
 
 /// Helper: wrap an FFI body in catch_unwind and return a default on panic.
 /// Also sets the thread-local error so callers can inspect via qail_last_error().
@@ -98,6 +99,29 @@ fn checked_batch_capacity(unit_len: usize, count: usize, label: &str) -> Result<
         ));
     }
     Ok(total)
+}
+
+fn checked_frontend_message_len(content_len: usize, label: &str) -> Result<i32, String> {
+    let len_field = content_len
+        .checked_add(4)
+        .ok_or_else(|| format!("{label} message size overflow"))?;
+    let total = len_field
+        .checked_add(1)
+        .ok_or_else(|| format!("{label} message size overflow"))?;
+
+    if total > MAX_FFI_MESSAGE_BYTES {
+        return Err(format!(
+            "{label} message too large: {total} bytes (max {MAX_FFI_MESSAGE_BYTES})"
+        ));
+    }
+
+    if len_field > i32::MAX as usize {
+        return Err(format!(
+            "{label} message length field too large: {len_field} bytes"
+        ));
+    }
+
+    Ok(len_field as i32)
 }
 
 fn checked_bind_execute_pair_len(
@@ -359,7 +383,13 @@ pub unsafe extern "C" fn qail_encode_get(
 
         // Encode to Simple Query wire bytes
         let sql = cmd.to_sql();
-        let wire_bytes = encode_simple_query(&sql);
+        let wire_bytes = match encode_simple_query(&sql) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                set_error(e);
+                return -4;
+            }
+        };
         let len = wire_bytes.len();
 
         // Transfer ownership to caller
@@ -450,7 +480,13 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
 
         // Encode SQL once, repeat count times
         let sql = base_cmd.to_sql();
-        let single_query = encode_simple_query(&sql);
+        let single_query = match encode_simple_query(&sql) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                set_error(e);
+                return -4;
+            }
+        };
 
         // Batch: repeat the query `count` times
         let batch_len = match checked_batch_capacity(single_query.len(), count, "uniform query") {
@@ -546,17 +582,21 @@ pub extern "C" fn qail_last_error() -> *const c_char {
 
 /// Encode a SQL string as PostgreSQL Simple Query message.
 /// Format: 'Q' + int32 length + query string + '\0'
-fn encode_simple_query(sql: &str) -> Vec<u8> {
+fn encode_simple_query(sql: &str) -> Result<Vec<u8>, String> {
     let sql_bytes = sql.as_bytes();
-    let msg_len = 4 + sql_bytes.len() + 1; // 4 byte length + query + null
+    let content_len = sql_bytes
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| "Simple query message size overflow".to_string())?;
+    let msg_len = checked_frontend_message_len(content_len, "Simple query")?;
 
-    let mut buf = Vec::with_capacity(1 + msg_len);
+    let mut buf = Vec::with_capacity(1 + msg_len as usize);
     buf.push(b'Q'); // Message type
-    buf.extend_from_slice(&(msg_len as i32).to_be_bytes()); // Length (big-endian)
+    buf.extend_from_slice(&msg_len.to_be_bytes()); // Length (big-endian)
     buf.extend_from_slice(sql_bytes); // Query
     buf.push(0); // Null terminator
 
-    buf
+    Ok(buf)
 }
 
 // ============================================================================
@@ -620,7 +660,13 @@ pub unsafe extern "C" fn qail_encode_parse(
             }
         };
 
-        let wire_bytes = encode_parse_message(name_str, sql_str);
+        let wire_bytes = match encode_parse_message(name_str, sql_str) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                set_error(e);
+                return -4;
+            }
+        };
         let len = wire_bytes.len();
 
         let mut boxed = wire_bytes.into_boxed_slice();
@@ -802,20 +848,26 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
 
 /// Encode Parse message.
 /// Format: 'P' + len + name + sql + param_count
-fn encode_parse_message(name: &str, sql: &str) -> Vec<u8> {
-    let content_len = name.len() + 1 + sql.len() + 1 + 2; // name\0 + sql\0 + param_count
-    let total_len = 1 + 4 + content_len;
+fn encode_parse_message(name: &str, sql: &str) -> Result<Vec<u8>, String> {
+    let content_len = name
+        .len()
+        .checked_add(1)
+        .and_then(|v| v.checked_add(sql.len()))
+        .and_then(|v| v.checked_add(1))
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| "Parse message size overflow".to_string())?; // name\0 + sql\0 + param_count
+    let msg_len = checked_frontend_message_len(content_len, "Parse")?;
 
-    let mut buf = Vec::with_capacity(total_len);
+    let mut buf = Vec::with_capacity(1 + msg_len as usize);
     buf.push(b'P');
-    buf.extend_from_slice(&((content_len + 4) as i32).to_be_bytes());
+    buf.extend_from_slice(&msg_len.to_be_bytes());
     buf.extend_from_slice(name.as_bytes());
     buf.push(0);
     buf.extend_from_slice(sql.as_bytes());
     buf.push(0);
     buf.extend_from_slice(&0i16.to_be_bytes()); // No param types (infer)
 
-    buf
+    Ok(buf)
 }
 
 /// Encode Bind message directly into buffer.
@@ -1485,16 +1537,32 @@ mod tests {
 
     #[test]
     fn test_encode_simple_query() {
-        let bytes = encode_simple_query("SELECT 1");
+        let bytes = encode_simple_query("SELECT 1").unwrap();
         assert_eq!(bytes[0], b'Q');
         assert!(bytes.len() > 5);
     }
 
     #[test]
     fn test_encode_parse_message() {
-        let bytes = encode_parse_message("stmt1", "SELECT $1");
+        let bytes = encode_parse_message("stmt1", "SELECT $1").unwrap();
         assert_eq!(bytes[0], b'P');
         assert!(bytes.len() > 10);
+    }
+
+    #[test]
+    fn test_encode_simple_query_rejects_oversized_wire_message() {
+        let sql = "x".repeat(MAX_FFI_MESSAGE_BYTES);
+        let err = encode_simple_query(&sql).expect_err("oversized simple query must fail");
+
+        assert!(err.contains("Simple query message too large"));
+    }
+
+    #[test]
+    fn test_encode_parse_message_rejects_oversized_wire_message() {
+        let sql = "x".repeat(MAX_FFI_MESSAGE_BYTES);
+        let err = encode_parse_message("stmt", &sql).expect_err("oversized Parse must fail");
+
+        assert!(err.contains("Parse message too large"));
     }
 
     fn last_error_string() -> String {
