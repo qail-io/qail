@@ -463,11 +463,11 @@ fn collect_let_statement_bindings(
                 bindings.arrays.insert(var.clone(), values);
             }
             if let Some(items) = extract_typed_column_binding_items(rhs, visible_bindings) {
-                bindings.typed_arrays.insert(var.clone(), items);
+                bindings.typed_arrays.insert(var, items);
             } else if direct_typed_column_expr_has_column(rhs) {
                 bindings
                     .typed_scalars
-                    .entry(var.clone())
+                    .entry(var)
                     .or_default()
                     .push(rhs.to_string());
             } else if let Some(key) = binding_lookup_key(rhs) {
@@ -477,7 +477,7 @@ fn collect_let_statement_bindings(
                 if let Some(items) = visible_bindings.typed_scalars.get(&key) {
                     bindings
                         .typed_scalars
-                        .entry(var.clone())
+                        .entry(var)
                         .or_default()
                         .extend(items.iter().cloned());
                 }
@@ -521,11 +521,11 @@ fn collect_const_statement_bindings(
         }
 
         if let Some(items) = extract_typed_column_binding_items(rhs, visible_bindings) {
-            bindings.typed_arrays.insert(name.clone(), items);
+            bindings.typed_arrays.insert(name, items);
         } else if direct_typed_column_expr_has_column(rhs) {
             bindings
                 .typed_scalars
-                .entry(name.clone())
+                .entry(name)
                 .or_default()
                 .push(rhs.to_string());
         } else if let Some(key) = binding_lookup_key(rhs) {
@@ -535,7 +535,7 @@ fn collect_const_statement_bindings(
             if let Some(items) = visible_bindings.typed_scalars.get(&key) {
                 bindings
                     .typed_scalars
-                    .entry(name.clone())
+                    .entry(name)
                     .or_default()
                     .extend(items.iter().cloned());
             }

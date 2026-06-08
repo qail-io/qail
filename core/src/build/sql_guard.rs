@@ -216,7 +216,6 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_sql_in_file;
     use super::semantic_impl::detect_in_source;
 
     #[test]
@@ -292,7 +291,7 @@ fn x() {
 "#,
         );
 
-        let hits = detect_sql_in_file(&path);
+        let hits = super::detect_sql_in_file(&path);
         let _ = std::fs::remove_file(&path);
 
         assert!(hits.is_empty(), "{hits:?}");
@@ -311,7 +310,7 @@ fn x() {
 "#,
         );
 
-        let hits = detect_sql_in_file(&path);
+        let hits = super::detect_sql_in_file(&path);
         let _ = std::fs::remove_file(&path);
 
         assert!(
@@ -332,7 +331,7 @@ fn x() {
 "#,
         );
 
-        let hits = detect_sql_in_file(&path);
+        let hits = super::detect_sql_in_file(&path);
         let _ = std::fs::remove_file(&path);
 
         assert!(
