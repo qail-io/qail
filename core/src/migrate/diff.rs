@@ -7,6 +7,7 @@ use super::schema::{
     Generated, MigrationHint, Schema, check_expr_to_sql, foreign_key_to_sql, index_method_str,
     multi_column_fk_to_alter_command,
 };
+use super::types::ColumnType;
 use crate::ast::{Action, ColumnGeneration, Constraint, Expr, IndexDef, Qail};
 use std::collections::BTreeSet;
 
@@ -237,6 +238,76 @@ fn existing_column_generated_diffs(old: &Schema, new: &Schema) -> Vec<String> {
 
     changes.sort();
     changes
+}
+
+fn unsupported_existing_column_type_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+
+            if old_col.data_type != new_col.data_type
+                && !is_safe_existing_column_type_change(&old_col.data_type, &new_col.data_type)
+            {
+                changes.push(format!(
+                    "{}.{} ({} -> {})",
+                    table_name,
+                    new_col.name,
+                    old_col.data_type.to_pg_type(),
+                    new_col.data_type.to_pg_type()
+                ));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn is_safe_existing_column_type_change(old: &ColumnType, new: &ColumnType) -> bool {
+    if old == new {
+        return true;
+    }
+
+    if is_serial_pseudo_type(old) || is_serial_pseudo_type(new) {
+        return false;
+    }
+
+    match (old, new) {
+        (ColumnType::Int, ColumnType::BigInt) => true,
+        (old, ColumnType::Text) if is_unbounded_character_type(old) => true,
+        (ColumnType::Text, ColumnType::Varchar(None)) => true,
+        (ColumnType::Varchar(None), ColumnType::Text) => true,
+        (ColumnType::Varchar(Some(old_len)), ColumnType::Varchar(Some(new_len))) => {
+            new_len >= old_len
+        }
+        (ColumnType::Varchar(Some(_)), ColumnType::Varchar(None)) => true,
+        (old, ColumnType::Int | ColumnType::BigInt) if is_smallint_type(old) => true,
+        _ => false,
+    }
+}
+
+fn is_serial_pseudo_type(ty: &ColumnType) -> bool {
+    matches!(ty, ColumnType::Serial | ColumnType::BigSerial)
+}
+
+fn is_unbounded_character_type(ty: &ColumnType) -> bool {
+    matches!(ty, ColumnType::Varchar(_) | ColumnType::Text)
+}
+
+fn is_smallint_type(ty: &ColumnType) -> bool {
+    matches!(ty, ColumnType::Range(name) if name.eq_ignore_ascii_case("SMALLINT"))
 }
 
 fn new_column_primary_key_additions(old: &Schema, new: &Schema) -> Vec<String> {
@@ -644,6 +715,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely alter PRIMARY KEY constraints on existing columns: {}. \
              Use an explicit migration for ADD/DROP/replace PRIMARY KEY constraints.",
             pk_diffs.join(", ")
+        ));
+    }
+
+    let type_diffs = unsupported_existing_column_type_diffs(old, new);
+    if !type_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely alter existing column types without an explicit cast plan: {}. \
+             Use an explicit migration with USING/backfill steps for narrowing casts, pseudo-type changes, or data-validating conversions.",
+            type_diffs.join(", ")
         ));
     }
 
@@ -1201,6 +1281,7 @@ mod tests {
     use super::super::schema::{
         CheckExpr, Column, FkAction, Index, IndexMethod, MultiColumnForeignKey, Table, ViewDef,
     };
+    use super::super::types::ColumnType;
     use super::*;
 
     #[test]
@@ -1583,8 +1664,6 @@ mod tests {
 
     #[test]
     fn state_diff_checked_rejects_new_primary_key_column_on_existing_table() {
-        use super::super::types::ColumnType;
-
         let mut old = Schema::default();
         old.add_table(Table::new("api_keys").column(Column::new("label", ColumnType::Text)));
 
@@ -1602,9 +1681,77 @@ mod tests {
     }
 
     #[test]
-    fn state_diff_checked_rejects_existing_column_foreign_key_addition() {
-        use super::super::types::ColumnType;
+    fn state_diff_checked_rejects_unsafe_existing_column_type_change() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("events").column(Column::new("external_id", ColumnType::Text)));
 
+        let mut new = Schema::default();
+        new.add_table(Table::new("events").column(Column::new("external_id", ColumnType::Uuid)));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("TEXT -> UUID should require an explicit cast plan");
+        assert!(err.contains("existing column types"));
+        assert!(err.contains("events.external_id"));
+        assert!(err.contains("TEXT -> UUID"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_column_serial_pseudo_type_change() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("events").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("events").column(Column::new("id", ColumnType::Serial)));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("INT -> SERIAL cannot be represented by ALTER COLUMN TYPE");
+        assert!(err.contains("existing column types"));
+        assert!(err.contains("events.id"));
+        assert!(err.contains("INT -> SERIAL"));
+    }
+
+    #[test]
+    fn state_diff_checked_allows_safe_existing_column_type_widening() {
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("events").column(Column::new("counter", ColumnType::Int)));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("events").column(Column::new("counter", ColumnType::BigInt)));
+
+        let cmds = diff_schemas_checked(&old, &new).expect("INT -> BIGINT should be auto-planned");
+        let type_cmd = cmds
+            .iter()
+            .find(|cmd| cmd.action == Action::AlterType && cmd.table == "events")
+            .expect("ALTER TYPE command should be present");
+
+        assert_eq!(
+            type_cmd.to_sql(),
+            "ALTER TABLE events ALTER COLUMN counter TYPE BIGINT"
+        );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_varchar_length_narrowing() {
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("users").column(Column::new("display_name", ColumnType::Varchar(Some(255)))),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("users").column(Column::new("display_name", ColumnType::Varchar(Some(64)))),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("VARCHAR length shrink should require explicit validation");
+        assert!(err.contains("existing column types"));
+        assert!(err.contains("users.display_name"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_column_foreign_key_addition() {
         let mut old = Schema::default();
         old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
         old.add_table(Table::new("orders").column(Column::new("tenant_id", ColumnType::Int)));
