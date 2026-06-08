@@ -358,6 +358,7 @@ pub(crate) fn discover_migrations(
                     ("backfill.qail", MigrationPhase::Backfill),
                     ("contract.qail", MigrationPhase::Contract),
                 ];
+                let mut found_phased = false;
 
                 for (filename, phase) in phased {
                     let qail_file = path.join(filename);
@@ -370,6 +371,7 @@ pub(crate) fn discover_migrations(
                         ));
                     }
                     if qail_file.exists() {
+                        found_phased = true;
                         migrations.push(MigrationFile {
                             group_key: name_str.clone(),
                             sort_key: format!("{}/{}", name_str, filename),
@@ -378,6 +380,28 @@ pub(crate) fn discover_migrations(
                             phase,
                         });
                     }
+                }
+
+                // Legacy subdirectory layout:
+                //   <dir>/up.qail + <dir>/down.qail
+                //
+                // If a group has phased files, those are authoritative and
+                // legacy up.qail is ignored. This keeps historical receipts
+                // visible without double-discovering migrated phased groups.
+                let qail_file = path.join("up.qail");
+                let sql_file = path.join("up.sql");
+                if sql_file.exists() && !qail_file.exists() {
+                    unsupported_sql.push(format!("{}/up.sql", name_str));
+                    continue;
+                }
+                if !found_phased && qail_file.exists() {
+                    migrations.push(MigrationFile {
+                        group_key: name_str.clone(),
+                        sort_key: format!("{}/up.qail", name_str),
+                        display_name: format!("{}/up.qail", name_str),
+                        path: qail_file,
+                        phase: detect_phase(&name_str),
+                    });
                 }
             } else {
                 // Down direction: keep single rollback file

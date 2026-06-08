@@ -1098,6 +1098,90 @@ ALTER TABLE users ADD COLUMN name_ci text;
     }
 
     #[test]
+    fn test_discover_migrations_up_keeps_legacy_subdir_history() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "qail_apply_discovery_legacy_up_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+
+        let legacy = root.join("001_legacy_core");
+        let phased = root.join("002_phased_core");
+        fs::create_dir_all(&legacy).expect("create legacy migration dir");
+        fs::create_dir_all(&phased).expect("create phased migration dir");
+
+        fs::write(
+            legacy.join("up.qail"),
+            "table legacy_items {\n  id UUID primary_key\n}\n",
+        )
+        .expect("write legacy up");
+        fs::write(
+            phased.join("expand.qail"),
+            "table phased_items {\n  id UUID primary_key\n}\n",
+        )
+        .expect("write phased expand");
+        fs::write(
+            phased.join("up.qail"),
+            "table stale_legacy_copy {\n  id UUID primary_key\n}\n",
+        )
+        .expect("write stale legacy up");
+
+        let discovered = discover_migrations(&root, MigrateDirection::Up).expect("discover up");
+        let names: Vec<String> = discovered.iter().map(|m| m.display_name.clone()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "001_legacy_core/up.qail".to_string(),
+                "002_phased_core/expand.qail".to_string()
+            ]
+        );
+        assert!(discovered.iter().all(|m| m.phase == MigrationPhase::Expand));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_discover_migrations_rejects_legacy_sql_in_phased_subdir() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "qail_apply_discovery_phased_legacy_sql_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+
+        let phased = root.join("001_phased_core");
+        fs::create_dir_all(&phased).expect("create phased migration dir");
+        fs::write(
+            phased.join("expand.qail"),
+            "table phased_items {\n  id UUID primary_key\n}\n",
+        )
+        .expect("write phased expand");
+        fs::write(phased.join("up.sql"), "CREATE TABLE raw_items(id uuid);\n")
+            .expect("write stale legacy sql");
+
+        let err = match discover_migrations(&root, MigrateDirection::Up) {
+            Ok(found) => panic!(
+                "expected unsupported SQL error, got {} migration(s)",
+                found.len()
+            ),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("001_phased_core/up.sql"),
+            "error should mention stale legacy SQL path: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_discover_migrations_rejects_unsupported_sql_files() {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

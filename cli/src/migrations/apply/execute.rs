@@ -201,7 +201,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
 
         if let Some(baseline_group) = active_contract_baseline_group(&applied_migrations) {
             let before = migrations.len();
-            migrations.retain(|m| m.group_key > baseline_group);
+            migrations.retain(|m| m.group_key.as_str() > baseline_group.as_str());
             let skipped = before.saturating_sub(migrations.len());
             if skipped > 0 {
                 println!(
@@ -2026,6 +2026,15 @@ pub(crate) fn compute_expected_migration_checksums(
     Ok(expected_checksums_for_commands(&cmds, &sql))
 }
 
+fn active_contract_baseline_group(applied_migrations: &HashMap<String, String>) -> Option<String> {
+    applied_migrations
+        .keys()
+        .filter_map(|version| version.strip_suffix("/expand.qail"))
+        .filter(|group| group.ends_with("_contract_baseline"))
+        .max()
+        .map(str::to_string)
+}
+
 fn validate_receipts_against_local(
     discovered_up: &[MigrationFile],
     applied_migrations: &HashMap<String, String>,
@@ -2231,14 +2240,14 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 mod tests {
     use super::{
         ApplyDownContext, ApplyReceiptContext, LiveColumnDefinition,
-        apply_commands_and_record_receipt_atomic, apply_down_commands_and_reconcile_history_atomic,
-        collect_policy_final_expectations, column_type_matches, constraint_columns_match,
-        deferrable_matches, enforce_apply_destructive_policy,
-        enforce_apply_down_destructive_policy, ensure_applied_checksum_matches,
-        ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches,
-        normalize_column_type, parse_qail_to_commands_strict, parse_rename_expr,
-        should_adopt_existing_error, should_run_apply_lock_risk_preflight, split_schema_ident,
-        strip_optional_if_exists_prefix, validate_receipts_against_local,
+        active_contract_baseline_group, apply_commands_and_record_receipt_atomic,
+        apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
+        column_type_matches, constraint_columns_match, deferrable_matches,
+        enforce_apply_destructive_policy, enforce_apply_down_destructive_policy,
+        ensure_applied_checksum_matches, ensure_up_down_pairing, fk_rule_matches,
+        foreign_key_constraint_matches, normalize_column_type, parse_qail_to_commands_strict,
+        parse_rename_expr, should_adopt_existing_error, should_run_apply_lock_risk_preflight,
+        split_schema_ident, strip_optional_if_exists_prefix, validate_receipts_against_local,
         verify_applied_commands_effects,
     };
     use super::{ExpectedForeignKeyConstraint, LiveForeignKeyConstraint};
@@ -2286,6 +2295,28 @@ mod tests {
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    #[test]
+    fn active_contract_baseline_group_uses_latest_applied_baseline() {
+        let mut applied = HashMap::<String, String>::new();
+        applied.insert(
+            "202606010000_contract_baseline/expand.qail".to_string(),
+            "old".to_string(),
+        );
+        applied.insert(
+            "202606090000_contract_baseline/expand.qail".to_string(),
+            "new".to_string(),
+        );
+        applied.insert(
+            "202606090001_future_contract/contract.qail".to_string(),
+            "future".to_string(),
+        );
+
+        assert_eq!(
+            active_contract_baseline_group(&applied).as_deref(),
+            Some("202606090000_contract_baseline")
         );
     }
 
