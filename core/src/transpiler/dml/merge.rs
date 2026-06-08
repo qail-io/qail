@@ -274,7 +274,7 @@ fn json_path_arg(condition: &Condition, generator: &dyn SqlGenerator, context: &
     match &condition.value {
         Value::String(path) => path.clone(),
         Value::Param(index) => generator.placeholder(*index),
-        Value::NamedParam(name) => format!(":{}", name),
+        Value::NamedParam(name) => render_named_param(name),
         _ => value_sql(&condition.value, generator, context),
     }
 }
@@ -321,7 +321,7 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator, context: &Qail
             generator.string_concat(&["'%'", &placeholder, "'%'"])
         }
         Value::NamedParam(name) => {
-            let placeholder = format!(":{}", name);
+            let placeholder = render_named_param(name);
             generator.string_concat(&["'%'", &placeholder, "'%'"])
         }
         value => format!(

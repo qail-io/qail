@@ -1772,6 +1772,33 @@ fn test_merge_postgres_parameterized_fuzzy_binds_named_param() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_unsafe_named_param_fuzzy_condition() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.name".to_string()),
+                op: Operator::Fuzzy,
+                value: Value::NamedParam("term); DROP TABLE users; --".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("name", Expr::Named("s.name".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains("/* ERROR: Invalid parameter name */"),
+        "unsafe MERGE fuzzy named param should fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe MERGE fuzzy named param leaked into SQL: {sql}"
+    );
+}
+
+#[test]
 fn test_merge_postgres_json_path_escapes_literal() {
     let cmd = Qail::merge_into("users")
         .using_table_as("staging_users", "s")
@@ -1792,6 +1819,35 @@ fn test_merge_postgres_json_path_escapes_literal() {
         "MERGE INTO users USING staging_users AS s ON users.id = s.id \
          WHEN MATCHED AND JSON_EXISTS(users.profile, '$.flag'' OR true --') \
          THEN UPDATE SET profile = s.profile"
+    );
+}
+
+#[test]
+fn test_merge_postgres_rejects_unsafe_named_param_json_path() {
+    let cmd = Qail::merge_into("users")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update_if(
+            vec![Condition {
+                left: Expr::Named("users.profile".to_string()),
+                op: Operator::JsonValue,
+                value: Value::NamedParam("json_path); DROP TABLE users; --".to_string()),
+                is_array_unnest: false,
+            }],
+            &[("profile", Expr::Named("s.profile".to_string()))],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains(
+            "JSON_VALUE(users.profile, '/* ERROR: Invalid parameter name */') IS NOT NULL"
+        ),
+        "unsafe MERGE JSON path named param should fail closed: {sql}"
+    );
+    assert!(
+        !sql.contains("DROP TABLE"),
+        "unsafe MERGE JSON path named param leaked into SQL: {sql}"
     );
 }
 
