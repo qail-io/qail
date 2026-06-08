@@ -508,13 +508,10 @@ mod tests {
             (("bookings".to_string(), 1), "start_date".to_string()),
             (("bookings".to_string(), 2), "end_date".to_string()),
         ]);
+        let single_expr = parse_check_expr("start_date <= end_date", "").unwrap();
         assert_eq!(
-            single_column_check_target("bookings", &[1], &attnums),
+            check_constraint_anchor_column("bookings", &[1], &attnums, &single_expr),
             Some("start_date".to_string())
-        );
-        assert_eq!(
-            single_column_check_target("bookings", &[1, 2], &attnums),
-            None
         );
 
         let mut schema = Schema::default();
@@ -538,6 +535,55 @@ mod tests {
         );
 
         assert!(schema.tables["bookings"].columns[0].check.is_none());
+    }
+
+    #[test]
+    fn shadow_check_introspection_preserves_multi_column_checks_on_participating_column() {
+        let attnums = std::collections::HashMap::from([
+            (("pricing_plans".to_string(), 1), "segment_id".to_string()),
+            (
+                ("pricing_plans".to_string(), 2),
+                "virtual_segment_id".to_string(),
+            ),
+        ]);
+        let raw_expr = "((segment_id IS NOT NULL) AND (virtual_segment_id IS NULL)) OR ((segment_id IS NULL) AND (virtual_segment_id IS NOT NULL))";
+        let expr = parse_check_expr(raw_expr, "").unwrap();
+
+        assert_eq!(
+            check_constraint_anchor_column("pricing_plans", &[1, 2], &attnums, &expr),
+            Some("segment_id".to_string())
+        );
+
+        let mut schema = Schema::default();
+        schema.tables.insert(
+            "pricing_plans".to_string(),
+            Table {
+                name: "pricing_plans".to_string(),
+                columns: vec![
+                    Column::new("segment_id", ColumnType::Uuid),
+                    Column::new("virtual_segment_id", ColumnType::Uuid),
+                ],
+                multi_column_fks: vec![],
+                enable_rls: false,
+                force_rls: false,
+            },
+        );
+
+        apply_shadow_column_check_expr(
+            &mut schema,
+            "pricing_plans",
+            "segment_id",
+            "pricing_plans_single_source_of_truth",
+            expr,
+        );
+
+        assert_eq!(
+            schema.tables["pricing_plans"].columns[0]
+                .check
+                .as_ref()
+                .and_then(|check| check.name.as_deref()),
+            Some("pricing_plans_single_source_of_truth")
+        );
     }
 
     #[test]
@@ -952,8 +998,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         attnum_columns.insert((table, attnum), column);
     }
 
-    // 4. Query single-column CHECK constraints. Multi-column/table-level CHECKs
-    // do not have a safe column-level representation in the state diff model.
+    // 4. Query CHECK constraints. PostgreSQL stores CHECKs as table
+    // constraints; QAIL's schema format may render them inline on a column.
+    // Keep the live constraint expression and anchor it to a participating
+    // column only so state diff can compare table-level CHECK identity.
     let check_catalog_cmd = Qail::get("pg_catalog.pg_constraint")
         .table_alias("con")
         .join(
@@ -998,19 +1046,25 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         let Some(raw_conkey) = row.get_string(2).filter(|value| !value.trim().is_empty()) else {
             continue;
         };
+        let check_clause = required_shadow_metadata_string(&row, 3, "check expression")?;
+        if is_trivial_not_null_check(&check_clause) {
+            continue;
+        };
+        let Some(expr) = parse_check_expr(&check_clause, "") else {
+            continue;
+        };
         let source_attnums = parse_pg_attnum_array(&raw_conkey, "check conkey")?;
         let Some(column_name) =
-            single_column_check_target(&table_name, &source_attnums, &attnum_columns)
+            check_constraint_anchor_column(&table_name, &source_attnums, &attnum_columns, &expr)
         else {
             continue;
         };
-        let check_clause = required_shadow_metadata_string(&row, 3, "check expression")?;
-        apply_shadow_column_check(
+        apply_shadow_column_check_expr(
             &mut schema,
             &table_name,
             &column_name,
             &constraint_name,
-            &check_clause,
+            expr,
         );
     }
 
@@ -1483,19 +1537,39 @@ fn index_from_pg_indexdef(idx_name: String, table_name: String, indexdef: String
     index
 }
 
-fn single_column_check_target(
+fn check_constraint_anchor_column(
     table_name: &str,
     source_attnums: &[i32],
     attnum_columns: &std::collections::HashMap<(String, i32), String>,
+    expr: &CheckExpr,
 ) -> Option<String> {
-    let [attnum] = source_attnums else {
+    if source_attnums.is_empty() {
         return None;
-    };
-    attnum_columns
-        .get(&(table_name.to_string(), *attnum))
-        .cloned()
+    }
+
+    let participating = source_attnums
+        .iter()
+        .filter_map(|attnum| {
+            attnum_columns
+                .get(&(table_name.to_string(), *attnum))
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+
+    if participating.is_empty() {
+        return None;
+    }
+
+    if let Some(anchor) = check_expr_anchor_column(expr)
+        && participating.iter().any(|column| column == anchor)
+    {
+        return Some(anchor.to_string());
+    }
+
+    participating.first().cloned()
 }
 
+#[cfg(test)]
 fn apply_shadow_column_check(
     schema: &mut Schema,
     table_name: &str,
@@ -1507,13 +1581,24 @@ fn apply_shadow_column_check(
         return;
     }
 
+    let Some(expr) = parse_check_expr(check_clause, column_name) else {
+        return;
+    };
+
+    apply_shadow_column_check_expr(schema, table_name, column_name, constraint_name, expr);
+}
+
+fn apply_shadow_column_check_expr(
+    schema: &mut Schema,
+    table_name: &str,
+    column_name: &str,
+    constraint_name: &str,
+    expr: CheckExpr,
+) {
     let Some(table) = schema.tables.get_mut(table_name) else {
         return;
     };
     let Some(column) = table.columns.iter_mut().find(|col| col.name == column_name) else {
-        return;
-    };
-    let Some(expr) = parse_check_expr(check_clause, column_name) else {
         return;
     };
 
@@ -1521,6 +1606,29 @@ fn apply_shadow_column_check(
         expr,
         name: Some(constraint_name.to_string()),
     });
+}
+
+fn check_expr_anchor_column(expr: &CheckExpr) -> Option<&str> {
+    match expr {
+        CheckExpr::GreaterThan { column, .. }
+        | CheckExpr::GreaterOrEqual { column, .. }
+        | CheckExpr::LessThan { column, .. }
+        | CheckExpr::LessOrEqual { column, .. }
+        | CheckExpr::Between { column, .. }
+        | CheckExpr::In { column, .. }
+        | CheckExpr::InIntegers { column, .. }
+        | CheckExpr::TextCompare { column, .. }
+        | CheckExpr::LowerTrimEquals { column }
+        | CheckExpr::Regex { column, .. }
+        | CheckExpr::MaxLength { column, .. }
+        | CheckExpr::MinLength { column, .. }
+        | CheckExpr::NotNull { column } => Some(column),
+        CheckExpr::CompareColumns { left_column, .. }
+        | CheckExpr::CompareColumnToCoalesce { left_column, .. } => Some(left_column),
+        CheckExpr::And(left, _) | CheckExpr::Or(left, _) => check_expr_anchor_column(left),
+        CheckExpr::Not(inner) => check_expr_anchor_column(inner),
+        CheckExpr::Sql(_) => None,
+    }
 }
 
 /// Create a shadow database for blue-green migration

@@ -56,23 +56,54 @@ fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
             continue;
         };
 
-        for new_col in &new_table.columns {
-            let Some(old_col) = old_table
-                .columns
-                .iter()
-                .find(|old_col| old_col.name == new_col.name)
-            else {
-                continue;
-            };
+        let old_column_names = old_table
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let new_column_names = new_table
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let existing_column_names = old_column_names
+            .intersection(&new_column_names)
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
 
-            if check_signature(&old_col.check) != check_signature(&new_col.check) {
-                changes.push(format!("{}.{}", table_name, new_col.name));
+        let old_checks = table_check_signatures(old_table, &existing_column_names);
+        let new_checks = table_check_signatures(new_table, &existing_column_names);
+
+        for (signature, column) in &new_checks {
+            if !old_checks.contains_key(signature) {
+                changes.push(format!("{}.{}", table_name, column));
+            }
+        }
+
+        for (signature, column) in &old_checks {
+            if !new_checks.contains_key(signature) {
+                changes.push(format!("{}.{}", table_name, column));
             }
         }
     }
 
     changes.sort();
+    changes.dedup();
     changes
+}
+
+fn table_check_signatures(
+    table: &super::schema::Table,
+    existing_column_names: &std::collections::BTreeSet<&str>,
+) -> std::collections::BTreeMap<String, String> {
+    table
+        .columns
+        .iter()
+        .filter(|column| existing_column_names.contains(column.name.as_str()))
+        .filter_map(|column| {
+            check_signature(&column.check).map(|signature| (signature, column.name.clone()))
+        })
+        .collect()
 }
 
 fn existing_column_foreign_key_diffs(old: &Schema, new: &Schema) -> Vec<String> {
@@ -1448,6 +1479,40 @@ mod tests {
             .expect_err("existing-column CHECK change should fail closed");
         assert!(err.contains("CHECK constraints"));
         assert!(err.contains("inventory.quantity"));
+    }
+
+    #[test]
+    fn state_diff_check_compare_is_table_scoped_not_column_anchor_scoped() {
+        use super::super::types::ColumnType;
+
+        let check = CheckExpr::Sql(
+            "((segment_id IS NOT NULL) AND (virtual_segment_id IS NULL)) OR ((segment_id IS NULL) AND (virtual_segment_id IS NOT NULL))"
+                .to_string(),
+        );
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("pricing_plans")
+                .column(
+                    Column::new("segment_id", ColumnType::Uuid)
+                        .check_named("pricing_plans_single_source_of_truth", check.clone()),
+                )
+                .column(Column::new("virtual_segment_id", ColumnType::Uuid)),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("pricing_plans")
+                .column(Column::new("segment_id", ColumnType::Uuid))
+                .column(
+                    Column::new("virtual_segment_id", ColumnType::Uuid)
+                        .check_named("pricing_plans_single_source_of_truth", check),
+                ),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("same table-level CHECK should not depend on inline column anchor");
+        assert!(cmds.is_empty());
     }
 
     #[test]
