@@ -70,7 +70,6 @@ unsafe fn clear_byte_output(out_ptr: *mut *mut u8, out_len: *mut usize) {
     }
 }
 
-#[cfg(feature = "response")]
 unsafe fn clear_response_output(out_handle: *mut *mut QailResponse) {
     // SAFETY: Caller must only call this after `out_handle` is checked
     // non-null and writable by the FFI caller contract.
@@ -79,7 +78,6 @@ unsafe fn clear_response_output(out_handle: *mut *mut QailResponse) {
     }
 }
 
-#[cfg(feature = "response")]
 unsafe fn clear_borrowed_output(out_ptr: *mut *const u8, out_len: *mut usize) {
     // SAFETY: Caller must only call this after both out pointers are checked
     // non-null and writable by the FFI caller contract.
@@ -934,6 +932,13 @@ fn encode_bind_to_buf(buf: &mut Vec<u8>, statement: &str, param: Option<Option<&
 // Enabled only with the "response" feature to keep library size small
 // ============================================================================
 
+#[cfg(not(feature = "response"))]
+#[repr(C)]
+/// Opaque response handle used by the response ABI when the feature is disabled.
+pub struct QailResponse {
+    _private: [u8; 0],
+}
+
 #[cfg(feature = "response")]
 use qail_pg::protocol::wire::BackendMessage;
 
@@ -1507,6 +1512,269 @@ pub unsafe extern "C" fn qail_response_free(handle: *mut QailResponse) {
     }
 }
 
+#[cfg(not(feature = "response"))]
+const RESPONSE_FEATURE_DISABLED: &str = "qail-encoder was built without the response feature";
+
+#[cfg(not(feature = "response"))]
+fn set_response_feature_disabled_error() {
+    set_error(RESPONSE_FEATURE_DISABLED.to_string());
+}
+
+#[cfg(not(feature = "response"))]
+/// Decode PostgreSQL response bytes.
+///
+/// This symbol is exported in minimal builds to keep the C ABI stable. It
+/// returns an error until qail-encoder is built with the Cargo `response`
+/// feature.
+///
+/// # Safety
+///
+/// `out_handle` must be a valid writable pointer when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_decode_response(
+    _data: *const u8,
+    _len: usize,
+    out_handle: *mut *mut QailResponse,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_handle.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { clear_response_output(out_handle) };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get number of rows in response.
+///
+/// # Safety
+///
+/// This function is a feature-disabled stub in minimal builds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_row_count(_handle: *const QailResponse) -> usize {
+    ffi_catch!(0, {
+        clear_error();
+        set_response_feature_disabled_error();
+        0
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get number of columns in a row.
+///
+/// # Safety
+///
+/// This function is a feature-disabled stub in minimal builds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_column_count(
+    _handle: *const QailResponse,
+    _row: usize,
+) -> usize {
+    ffi_catch!(0, {
+        clear_error();
+        set_response_feature_disabled_error();
+        0
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get affected row count.
+///
+/// # Safety
+///
+/// This function is a feature-disabled stub in minimal builds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_affected_rows(_handle: *const QailResponse) -> u64 {
+    ffi_catch!(0, {
+        clear_error();
+        set_response_feature_disabled_error();
+        0
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Check if a column is NULL.
+///
+/// # Safety
+///
+/// This function is a feature-disabled stub in minimal builds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_is_null(
+    _handle: *const QailResponse,
+    _row: usize,
+    _col: usize,
+) -> i32 {
+    ffi_catch!(1, {
+        clear_error();
+        set_response_feature_disabled_error();
+        1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get PostgreSQL error message captured during response decoding.
+///
+/// # Safety
+///
+/// `out_ptr` and `out_len` must be valid writable pointers when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_error_message(
+    _handle: *const QailResponse,
+    out_ptr: *mut *const u8,
+    out_len: *mut usize,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_ptr.is_null() || out_len.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { clear_borrowed_output(out_ptr, out_len) };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get column value as string.
+///
+/// # Safety
+///
+/// `out_ptr` and `out_len` must be valid writable pointers when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_get_string(
+    _handle: *const QailResponse,
+    _row: usize,
+    _col: usize,
+    out_ptr: *mut *const u8,
+    out_len: *mut usize,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_ptr.is_null() || out_len.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { clear_borrowed_output(out_ptr, out_len) };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get column value as i32.
+///
+/// # Safety
+///
+/// `out_value` must be a valid writable pointer when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_get_i32(
+    _handle: *const QailResponse,
+    _row: usize,
+    _col: usize,
+    out_value: *mut i32,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_value.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { *out_value = 0 };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get column value as i64.
+///
+/// # Safety
+///
+/// `out_value` must be a valid writable pointer when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_get_i64(
+    _handle: *const QailResponse,
+    _row: usize,
+    _col: usize,
+    out_value: *mut i64,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_value.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { *out_value = 0 };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get column value as f64.
+///
+/// # Safety
+///
+/// `out_value` must be a valid writable pointer when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_get_f64(
+    _handle: *const QailResponse,
+    _row: usize,
+    _col: usize,
+    out_value: *mut f64,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_value.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { *out_value = 0.0 };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Get column value as bool.
+///
+/// # Safety
+///
+/// `out_value` must be a valid writable pointer when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_get_bool(
+    _handle: *const QailResponse,
+    _row: usize,
+    _col: usize,
+    out_value: *mut i32,
+) -> i32 {
+    ffi_catch!(-99, {
+        clear_error();
+        if out_value.is_null() {
+            set_response_feature_disabled_error();
+            return -1;
+        }
+        unsafe { *out_value = 0 };
+        set_response_feature_disabled_error();
+        -1
+    })
+}
+
+#[cfg(not(feature = "response"))]
+/// Free a response handle.
+///
+/// # Safety
+///
+/// This function is a no-op in minimal builds because no response handles can
+/// be created without the Cargo `response` feature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qail_response_free(_handle: *mut QailResponse) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1531,7 +1799,10 @@ mod tests {
                 let name_end = after_fn
                     .find('(')
                     .expect("exported function line must include argument list");
-                symbols.push(&after_fn[..name_end]);
+                let symbol = &after_fn[..name_end];
+                if !symbols.contains(&symbol) {
+                    symbols.push(symbol);
+                }
                 expect_export = false;
             }
         }
@@ -2288,6 +2559,36 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("NULL pointer argument"));
+    }
+
+    #[cfg(not(feature = "response"))]
+    #[test]
+    fn test_response_feature_disabled_stubs_clear_outputs() {
+        let mut handle = std::ptr::dangling_mut::<QailResponse>();
+        let data = [0u8; 1];
+
+        let rc = unsafe { qail_decode_response(data.as_ptr(), data.len(), &mut handle) };
+
+        assert_eq!(rc, -1);
+        assert!(handle.is_null());
+        assert!(last_error_string().contains("without the response feature"));
+
+        let mut out_ptr: *const u8 = std::ptr::dangling();
+        let mut out_len = usize::MAX;
+        let rc =
+            unsafe { qail_response_get_string(std::ptr::null(), 0, 0, &mut out_ptr, &mut out_len) };
+
+        assert_eq!(rc, -1);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("without the response feature"));
+
+        let mut value = 123i32;
+        let rc = unsafe { qail_response_get_i32(std::ptr::null(), 0, 0, &mut value) };
+
+        assert_eq!(rc, -1);
+        assert_eq!(value, 0);
+        assert!(last_error_string().contains("without the response feature"));
     }
 
     #[cfg(feature = "response")]
