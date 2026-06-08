@@ -60,6 +60,34 @@ fn clear_error() {
     });
 }
 
+unsafe fn clear_byte_output(out_ptr: *mut *mut u8, out_len: *mut usize) {
+    // SAFETY: Caller must only call this after both out pointers are checked
+    // non-null and writable by the FFI caller contract.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+}
+
+#[cfg(feature = "response")]
+unsafe fn clear_response_output(out_handle: *mut *mut QailResponse) {
+    // SAFETY: Caller must only call this after `out_handle` is checked
+    // non-null and writable by the FFI caller contract.
+    unsafe {
+        *out_handle = std::ptr::null_mut();
+    }
+}
+
+#[cfg(feature = "response")]
+unsafe fn clear_borrowed_output(out_ptr: *mut *const u8, out_len: *mut usize) {
+    // SAFETY: Caller must only call this after both out pointers are checked
+    // non-null and writable by the FFI caller contract.
+    unsafe {
+        *out_ptr = std::ptr::null();
+        *out_len = 0;
+    }
+}
+
 fn checked_batch_capacity(unit_len: usize, count: usize, label: &str) -> Result<usize, String> {
     let total = unit_len
         .checked_mul(count)
@@ -275,7 +303,12 @@ pub unsafe extern "C" fn qail_encode_get(
     ffi_catch!(-99, {
         clear_error();
 
-        if table.is_null() || out_ptr.is_null() || out_len.is_null() {
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        unsafe { clear_byte_output(out_ptr, out_len) };
+        if table.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -364,7 +397,12 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
     ffi_catch!(-99, {
         clear_error();
 
-        if table.is_null() || out_ptr.is_null() || out_len.is_null() || count == 0 {
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        unsafe { clear_byte_output(out_ptr, out_len) };
+        if table.is_null() || count == 0 {
             set_error("NULL pointer or zero count".to_string());
             return -1;
         }
@@ -548,7 +586,12 @@ pub unsafe extern "C" fn qail_encode_parse(
     ffi_catch!(-99, {
         clear_error();
 
-        if sql.is_null() || out_ptr.is_null() || out_len.is_null() {
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        unsafe { clear_byte_output(out_ptr, out_len) };
+        if sql.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -610,6 +653,7 @@ pub unsafe extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut u
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        unsafe { clear_byte_output(out_ptr, out_len) };
 
         let wire_bytes = vec![b'S', 0, 0, 0, 4];
         let len = wire_bytes.len();
@@ -662,7 +706,12 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
     ffi_catch!(-99, {
         clear_error();
 
-        if statement.is_null() || out_ptr.is_null() || out_len.is_null() || count == 0 {
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        unsafe { clear_byte_output(out_ptr, out_len) };
+        if statement.is_null() || count == 0 {
             set_error("NULL pointer or zero count".to_string());
             return -1;
         }
@@ -848,7 +897,12 @@ pub unsafe extern "C" fn qail_decode_response(
     ffi_catch!(-99, {
         clear_error();
 
-        if data.is_null() || out_handle.is_null() {
+        if out_handle.is_null() {
+            set_error("Null pointer".to_string());
+            return -1;
+        }
+        unsafe { clear_response_output(out_handle) };
+        if data.is_null() {
             set_error("Null pointer".to_string());
             return -1;
         }
@@ -1040,7 +1094,12 @@ pub unsafe extern "C" fn qail_response_error_message(
 ) -> i32 {
     ffi_catch!(-99, {
         clear_error();
-        if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        unsafe { clear_borrowed_output(out_ptr, out_len) };
+        if handle.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -1082,7 +1141,12 @@ pub unsafe extern "C" fn qail_response_get_string(
 ) -> i32 {
     ffi_catch!(-99, {
         clear_error();
-        if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
+        if out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
+        }
+        unsafe { clear_borrowed_output(out_ptr, out_len) };
+        if handle.is_null() {
             set_error("NULL pointer argument".to_string());
             return -1;
         }
@@ -1791,6 +1855,48 @@ mod tests {
         assert!(last_error_string().contains("NULL pointer argument"));
     }
 
+    #[test]
+    fn test_encode_get_error_clears_output_arguments() {
+        let table = b"\xff\0";
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_get(
+                table.as_ptr() as *const c_char,
+                std::ptr::null(),
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -2);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid UTF-8 in table"));
+    }
+
+    #[test]
+    fn test_encode_parse_null_sql_clears_output_arguments() {
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_parse(
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("NULL pointer argument"));
+    }
+
     #[cfg(feature = "response")]
     fn sample_response() -> QailResponse {
         QailResponse {
@@ -1836,11 +1942,13 @@ mod tests {
     #[test]
     fn test_response_get_string_rejects_out_of_range_access() {
         let response = sample_response();
-        let mut out_ptr: *const u8 = std::ptr::null();
-        let mut out_len = 0usize;
+        let mut out_ptr: *const u8 = std::ptr::dangling();
+        let mut out_len = usize::MAX;
         let rc = unsafe { qail_response_get_string(&response, 9, 0, &mut out_ptr, &mut out_len) };
 
         assert_eq!(rc, -1);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
         assert!(last_error_string().contains("Row index out of range"));
     }
 
