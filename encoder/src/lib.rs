@@ -340,6 +340,10 @@ pub unsafe extern "C" fn qail_encode_get(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        if limit < -1 {
+            set_error("Invalid limit: use -1 for no limit".to_string());
+            return -1;
+        }
 
         // SAFETY: `table` is checked non-null above and the caller contract
         // requires it to point to a valid NUL-terminated C string.
@@ -443,6 +447,10 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
         unsafe { clear_byte_output(out_ptr, out_len) };
         if table.is_null() || count == 0 {
             set_error("NULL pointer or zero count".to_string());
+            return -1;
+        }
+        if limit < -1 {
+            set_error("Invalid limit: use -1 for no limit".to_string());
             return -1;
         }
 
@@ -1759,6 +1767,51 @@ mod tests {
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(last_error_string().contains("uniform query batch"));
+    }
+
+    #[test]
+    fn test_encode_get_rejects_invalid_negative_limit() {
+        let table = CString::new("users").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_get(
+                table.as_ptr(),
+                std::ptr::null(),
+                -2,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid limit"));
+    }
+
+    #[test]
+    fn test_uniform_batch_rejects_invalid_negative_limit() {
+        let table = CString::new("users").unwrap();
+        let mut out_ptr = std::ptr::dangling_mut::<u8>();
+        let mut out_len = usize::MAX;
+
+        let rc = unsafe {
+            qail_encode_uniform_batch(
+                table.as_ptr(),
+                std::ptr::null(),
+                -2,
+                1,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+        assert!(last_error_string().contains("Invalid limit"));
     }
 
     #[test]
