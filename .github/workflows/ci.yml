@@ -119,6 +119,40 @@ jobs:
       - name: Clippy qail-core (semantic IR scanner)
         run: cargo clippy -p qail-core -- -D warnings
 
+  typescript-sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20.19.0'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Install SDK dependencies
+        working-directory: sdk/typescript
+        run: npm ci
+
+      - name: Lint SDK
+        working-directory: sdk/typescript
+        run: npm run lint
+
+      - name: Test SDK
+        working-directory: sdk/typescript
+        run: npm test
+
+      - name: Build SDK
+        working-directory: sdk/typescript
+        run: npm run build
+
+      - name: Audit SDK dependencies
+        working-directory: sdk/typescript
+        run: npm audit --audit-level=moderate
+
   wire-fuzz:
     name: qail-pg wire decode fuzz gate
     runs-on: ubuntu-latest

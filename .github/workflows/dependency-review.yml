@@ -5,6 +5,8 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - '**/package.json'
+      - '**/package-lock.json'
       - '.github/workflows/**'
 
 permissions:
