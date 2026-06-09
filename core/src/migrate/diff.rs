@@ -457,7 +457,7 @@ fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
 fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
     check
         .as_ref()
-        .map(|check| format!("{:?}:{:?}", check.name, check.expr))
+        .map(|check| normalize_index_sql_fragment(&check_expr_to_sql(&check.expr)))
 }
 
 fn foreign_key_signature(fk: &Option<super::schema::ForeignKey>) -> Option<String> {
@@ -1753,6 +1753,29 @@ mod tests {
 
         let cmds = diff_schemas_checked(&old, &new)
             .expect("same table-level CHECK should not depend on inline column anchor");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn state_diff_check_compare_normalizes_sql_and_ast_equivalent_checks() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("inventory").column(
+            Column::new("quantity", ColumnType::Int).check_named(
+                "inventory_quantity_check",
+                CheckExpr::Sql("((quantity >= 0))".to_string()),
+            ),
+        ));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("inventory").column(
+            Column::new("quantity", ColumnType::Int).check(CheckExpr::GreaterOrEqual {
+                column: "quantity".to_string(),
+                value: 0,
+            }),
+        ));
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("equivalent SQL and AST-native CHECK predicates should not fail closed");
         assert!(cmds.is_empty());
     }
 
