@@ -427,8 +427,95 @@ fn new_required_column_additions_without_value(old: &Schema, new: &Schema) -> Ve
     changes
 }
 
+fn new_unique_column_additions_with_value(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in new_columns(old_table, new_table) {
+            if new_col.unique && column_has_value_source(new_col) {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn new_foreign_key_column_additions_with_value(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in new_columns(old_table, new_table) {
+            if new_col.foreign_key.is_some() && column_has_value_source(new_col) {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn new_check_column_additions_requiring_validation(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in new_columns(old_table, new_table) {
+            let Some(check) = &new_col.check else {
+                continue;
+            };
+
+            if column_has_value_source(new_col)
+                || check_expr_requires_existing_row_validation(&check.expr)
+            {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
+fn new_columns<'a>(
+    old_table: &'a super::schema::Table,
+    new_table: &'a super::schema::Table,
+) -> impl Iterator<Item = &'a super::schema::Column> {
+    new_table.columns.iter().filter(|new_col| {
+        !old_table
+            .columns
+            .iter()
+            .any(|old_col| old_col.name == new_col.name)
+    })
+}
+
 fn column_has_value_source(column: &super::schema::Column) -> bool {
     column.default.is_some() || column.generated.is_some()
+}
+
+fn check_expr_requires_existing_row_validation(expr: &super::schema::CheckExpr) -> bool {
+    match expr {
+        super::schema::CheckExpr::NotNull { .. } | super::schema::CheckExpr::Sql(_) => true,
+        super::schema::CheckExpr::And(left, right) | super::schema::CheckExpr::Or(left, right) => {
+            check_expr_requires_existing_row_validation(left)
+                || check_expr_requires_existing_row_validation(right)
+        }
+        super::schema::CheckExpr::Not(inner) => check_expr_requires_existing_row_validation(inner),
+        _ => false,
+    }
 }
 
 fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
@@ -866,6 +953,33 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely add required columns without a default/generated value to existing tables: {}. \
              Use an explicit migration to add the column nullable, backfill, then set NOT NULL.",
             new_required_columns.join(", ")
+        ));
+    }
+
+    let new_unique_value_columns = new_unique_column_additions_with_value(old, new);
+    if !new_unique_value_columns.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add UNIQUE columns with default/generated values to existing tables: {}. \
+             Use an explicit migration to backfill distinct values before adding the UNIQUE constraint.",
+            new_unique_value_columns.join(", ")
+        ));
+    }
+
+    let new_fk_value_columns = new_foreign_key_column_additions_with_value(old, new);
+    if !new_fk_value_columns.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add FOREIGN KEY columns with default/generated values to existing tables: {}. \
+             Use an explicit migration to backfill valid references before adding the FOREIGN KEY constraint.",
+            new_fk_value_columns.join(", ")
+        ));
+    }
+
+    let new_check_validation_columns = new_check_column_additions_requiring_validation(old, new);
+    if !new_check_validation_columns.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add CHECK constraints that may validate existing rows on new columns: {}. \
+             Use an explicit migration to add/backfill/validate the CHECK constraint.",
+            new_check_validation_columns.join(", ")
         ));
     }
 
@@ -1917,6 +2031,97 @@ mod tests {
             sql.contains("ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"),
             "add-column SQL should preserve default-backed NOT NULL, got: {sql}"
         );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_unique_column_with_default() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("users")
+            .expect("users table should exist")
+            .columns
+            .push(
+                Column::new("external_id", ColumnType::Text)
+                    .unique()
+                    .default("'same-for-existing-rows'"),
+            );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("UNIQUE column with default can duplicate existing rows");
+        assert!(err.contains("UNIQUE columns"));
+        assert!(err.contains("users.external_id"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_foreign_key_column_with_default() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Uuid)));
+        old.add_table(Table::new("orders").column(Column::new("id", ColumnType::Uuid)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("orders")
+            .expect("orders table should exist")
+            .columns
+            .push(
+                Column::new("tenant_id", ColumnType::Uuid)
+                    .references("tenants", "id")
+                    .default("'00000000-0000-0000-0000-000000000000'::uuid"),
+            );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("FK column with default can violate existing references");
+        assert!(err.contains("FOREIGN KEY columns"));
+        assert!(err.contains("orders.tenant_id"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_column_with_raw_sql_check() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("users")
+            .expect("users table should exist")
+            .columns
+            .push(
+                Column::new("email", ColumnType::Text)
+                    .check(CheckExpr::Sql("email IS NOT NULL".to_string())),
+            );
+
+        let err =
+            diff_schemas_checked(&old, &new).expect_err("raw SQL CHECK may validate existing rows");
+        assert!(err.contains("CHECK constraints"));
+        assert!(err.contains("users.email"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_column_with_check_and_default() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("inventory").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("inventory")
+            .expect("inventory table should exist")
+            .columns
+            .push(
+                Column::new("quantity", ColumnType::Int)
+                    .default("-1")
+                    .check(CheckExpr::GreaterOrEqual {
+                        column: "quantity".to_string(),
+                        value: 0,
+                    }),
+            );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("CHECK column with default can validate existing rows");
+        assert!(err.contains("CHECK constraints"));
+        assert!(err.contains("inventory.quantity"));
     }
 
     #[test]
