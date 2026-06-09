@@ -1062,6 +1062,7 @@ impl Schema {
                 .iter()
                 .map(|column| column.name.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
+            let mut seen_constraint_names = std::collections::BTreeSet::new();
 
             for col in &table.columns {
                 if col.primary_key && !col.data_type.can_be_primary_key() {
@@ -1079,6 +1080,22 @@ impl Schema {
                         col.name,
                         col.data_type.name()
                     ));
+                }
+
+                if let Some(check) = &col.check
+                    && let Some(name) = &check.name
+                {
+                    if name.trim().is_empty() {
+                        errors.push(format!(
+                            "Constraint error: {}.{} has empty CHECK constraint name",
+                            table.name, col.name
+                        ));
+                    } else if !seen_constraint_names.insert(name.as_str()) {
+                        errors.push(format!(
+                            "Constraint error: table '{}' has duplicate constraint name '{}'",
+                            table.name, name
+                        ));
+                    }
                 }
 
                 if let Some(ref fk) = col.foreign_key {
@@ -1121,6 +1138,20 @@ impl Schema {
             }
 
             for fk in &table.multi_column_fks {
+                if let Some(name) = &fk.name {
+                    if name.trim().is_empty() {
+                        errors.push(format!(
+                            "Multi-column FK error: {} has empty constraint name",
+                            table.name
+                        ));
+                    } else if !seen_constraint_names.insert(name.as_str()) {
+                        errors.push(format!(
+                            "Constraint error: table '{}' has duplicate constraint name '{}'",
+                            table.name, name
+                        ));
+                    }
+                }
+
                 if fk.columns.is_empty() {
                     errors.push(format!(
                         "Multi-column FK error: {} has no source columns",
@@ -3012,6 +3043,107 @@ mod tests {
             errors
                 .iter()
                 .any(|err| err.contains("pricing_plans.missing_fallback_date")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_duplicate_check_constraint_names() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("orders")
+                .column(Column::new("status", ColumnType::Text).check_named(
+                    "orders_status_check",
+                    CheckExpr::In {
+                        column: "status".to_string(),
+                        values: vec!["pending".to_string(), "paid".to_string()],
+                    },
+                ))
+                .column(Column::new("payment_status", ColumnType::Text).check_named(
+                    "orders_status_check",
+                    CheckExpr::In {
+                        column: "payment_status".to_string(),
+                        values: vec!["pending".to_string(), "paid".to_string()],
+                    },
+                )),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("duplicate constraint names should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| { err.contains("duplicate constraint name 'orders_status_check'") }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_duplicate_check_and_fk_constraint_names() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        schema.add_index(
+            Index::new(
+                "schedules_route_schedule_key",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
+        schema.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text).check_named(
+                    "trips_schedule_guard",
+                    CheckExpr::NotNull {
+                        column: "route_id".to_string(),
+                    },
+                ))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(
+                    MultiColumnForeignKey::new(
+                        vec!["route_id".to_string(), "schedule_id".to_string()],
+                        "schedules",
+                        vec!["route_id".to_string(), "schedule_id".to_string()],
+                    )
+                    .named("trips_schedule_guard"),
+                ),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("duplicate constraint names across constraint kinds should fail");
+        assert!(
+            errors
+                .iter()
+                .any(|err| { err.contains("duplicate constraint name 'trips_schedule_guard'") }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_constraint_names() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("orders").column(
+            Column::new("status", ColumnType::Text).check_named(
+                " ",
+                CheckExpr::NotNull {
+                    column: "status".to_string(),
+                },
+            ),
+        ));
+
+        let errors = schema
+            .validate()
+            .expect_err("empty constraint names should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("empty CHECK constraint name")),
             "{errors:?}"
         );
     }
