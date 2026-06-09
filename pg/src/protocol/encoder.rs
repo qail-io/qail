@@ -25,6 +25,23 @@ impl PgEncoder {
     pub const FORMAT_BINARY: i16 = 1;
 
     #[inline(always)]
+    fn validate_format_code(format: i16) -> Result<(), EncodeError> {
+        match format {
+            Self::FORMAT_TEXT | Self::FORMAT_BINARY => Ok(()),
+            other => Err(EncodeError::InvalidAst(format!(
+                "invalid PostgreSQL format code {other}; expected 0 text or 1 binary"
+            ))),
+        }
+    }
+
+    #[inline(always)]
+    fn validate_format_codes(param_format: i16, result_format: i16) -> Result<(), EncodeError> {
+        Self::validate_format_code(param_format)?;
+        Self::validate_format_code(result_format)?;
+        Ok(())
+    }
+
+    #[inline(always)]
     fn param_format_wire_len(param_format: i16) -> usize {
         if param_format == Self::FORMAT_TEXT {
             2 // parameter format count = 0 (server default text)
@@ -124,6 +141,7 @@ impl PgEncoder {
         param_format: i16,
         result_format: i16,
     ) -> Result<usize, EncodeError> {
+        Self::validate_format_codes(param_format, result_format)?;
         if Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -332,6 +350,7 @@ impl PgEncoder {
         param_format: i16,
         result_format: i16,
     ) -> Result<BytesMut, EncodeError> {
+        Self::validate_format_codes(param_format, result_format)?;
         if Self::has_nul(portal) || Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -461,6 +480,7 @@ impl PgEncoder {
         param_format: i16,
         result_format: i16,
     ) -> Result<BytesMut, EncodeError> {
+        Self::validate_format_codes(param_format, result_format)?;
         if Self::has_nul(sql) {
             return Err(EncodeError::NullByte);
         }
@@ -652,6 +672,7 @@ impl PgEncoder {
         param_format: i16,
         result_format: i16,
     ) -> Result<(), EncodeError> {
+        Self::validate_format_codes(param_format, result_format)?;
         if Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -767,6 +788,7 @@ impl PgEncoder {
         param_format: i16,
         result_format: i16,
     ) -> Result<(), EncodeError> {
+        Self::validate_format_codes(param_format, result_format)?;
         if Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -946,6 +968,23 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_bind_rejects_invalid_format_codes() {
+        let err = PgEncoder::encode_bind_with_result_format("", "", &[], 2)
+            .expect_err("invalid result format must fail");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("format code 2")),
+            "{err}"
+        );
+
+        let err = PgEncoder::encode_bind_with_formats("", "", &[], -1, PgEncoder::FORMAT_TEXT)
+            .expect_err("invalid parameter format must fail");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("format code -1")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_encode_execute() {
         let bytes = PgEncoder::try_encode_execute("", 0).unwrap();
 
@@ -1027,6 +1066,28 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_extended_query_rejects_invalid_format_codes() {
+        let err = PgEncoder::encode_extended_query_with_result_format("SELECT 1", &[], 2)
+            .expect_err("invalid result format must fail");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("format code 2")),
+            "{err}"
+        );
+
+        let err = PgEncoder::encode_extended_query_with_formats(
+            "SELECT 1",
+            &[],
+            PgEncoder::FORMAT_TEXT,
+            -1,
+        )
+        .expect_err("invalid result format must fail");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("format code -1")),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_encode_copy_fail() {
         let bytes = PgEncoder::try_encode_copy_fail("bad data").unwrap();
         assert_eq!(bytes[0], b'f');
@@ -1093,6 +1154,18 @@ mod tests {
         assert_eq!(&buf[7..11], &[0, 1, 0, 1]);
         assert_eq!(&buf[11..13], &[0, 0]);
         assert_eq!(&buf[13..17], &[0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn test_encode_bind_to_rejects_invalid_format_codes() {
+        let mut buf = BytesMut::new();
+        let err = PgEncoder::encode_bind_to_with_result_format(&mut buf, "", &[], 2)
+            .expect_err("invalid result format must fail");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("format code 2")),
+            "{err}"
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]
@@ -1172,6 +1245,18 @@ mod tests {
         assert_eq!(&buf[7..11], &[0, 1, 0, 1]);
         assert_eq!(&buf[11..13], &[0, 0]);
         assert_eq!(&buf[13..17], &[0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn test_encode_bind_ultra_rejects_invalid_format_codes() {
+        let mut buf = BytesMut::new();
+        let err = PgEncoder::encode_bind_ultra_with_formats(&mut buf, "", &[], 2, 1)
+            .expect_err("invalid parameter format must fail");
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("format code 2")),
+            "{err}"
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]

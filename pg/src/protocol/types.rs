@@ -266,49 +266,7 @@ pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
 /// Decode a PostgreSQL text-format array like `{a,b,c}` to `Vec<String>`.
 /// This handles the common text-format arrays returned by PostgreSQL.
 pub fn decode_text_array(s: &str) -> Vec<String> {
-    if let Ok(values) = try_decode_text_array(s) {
-        return values;
-    }
-
-    if s.is_empty() || s == "{}" {
-        return vec![];
-    }
-
-    // Remove outer braces
-    let inner = s.trim_start_matches('{').trim_end_matches('}');
-    if inner.is_empty() {
-        return vec![];
-    }
-
-    // Split by comma, handling quoted elements
-    let mut result = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut escape_next = false;
-
-    for c in inner.chars() {
-        if escape_next {
-            current.push(c);
-            escape_next = false;
-            continue;
-        }
-
-        match c {
-            '\\' => escape_next = true,
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => {
-                result.push(current.clone());
-                current.clear();
-            }
-            _ => current.push(c),
-        }
-    }
-
-    if !current.is_empty() {
-        result.push(current);
-    }
-
-    result
+    try_decode_text_array(s).unwrap_or_default()
 }
 
 /// Strictly decode a PostgreSQL text-format array like `{a,b,c}`.
@@ -497,6 +455,8 @@ mod tests {
             decode_text_array("{\"hello, world\",foo}"),
             vec!["hello, world", "foo"]
         );
+        assert_eq!(decode_text_array("{NULL}"), Vec::<String>::new());
+        assert_eq!(decode_text_array("{\"unterminated}"), Vec::<String>::new());
     }
 
     #[test]
