@@ -2231,7 +2231,9 @@ fn parse_simple_cmp(s: &str) -> Option<(String, CmpOp, i64)> {
 
     for (op_str, op) in ops {
         if let Some(pos) = s.find(op_str) {
-            let col = strip_wrapping_parens(s[..pos].trim()).to_string();
+            let Some(col) = normalize_simple_check_column_ref(&s[..pos]) else {
+                continue;
+            };
             let val_str = strip_wrapping_parens(s[pos + op_str.len()..].trim());
             // Strip type casts like ::numeric, ::integer
             let val_clean = if let Some(cast_pos) = val_str.find("::") {
@@ -2254,6 +2256,27 @@ fn parse_simple_cmp(s: &str) -> Option<(String, CmpOp, i64)> {
         }
     }
     None
+}
+
+fn normalize_simple_check_column_ref(raw: &str) -> Option<String> {
+    let mut value = strip_wrapping_parens(raw.trim()).trim();
+    if let Some(cast_pos) = value.find("::") {
+        value = value[..cast_pos].trim();
+        value = strip_wrapping_parens(value).trim();
+    }
+    if value.is_empty() || value.contains('(') || value.contains(')') || value.contains(',') {
+        return None;
+    }
+    let unqualified = value.rsplit('.').next().unwrap_or(value);
+    let unquoted = unqualified
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(unqualified);
+    (!unquoted.is_empty()
+        && unquoted
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+    .then(|| unquoted.to_string())
 }
 
 fn cmp_to_check_expr(
@@ -2397,6 +2420,27 @@ mod tests {
         assert!(matches!(
             normalized,
             CheckExpr::LowerTrimEquals { column } if column == "slug"
+        ));
+
+        let casted_numeric = parse_check_expr("(pax_count)::integer > 0", "pax_count")
+            .expect("casted numeric comparison should parse");
+        assert!(matches!(
+            casted_numeric,
+            CheckExpr::GreaterThan { column, value } if column == "pax_count" && value == 0
+        ));
+
+        let function_length = parse_check_expr("char_length(btrim((name)::text)) > 0", "name")
+            .expect("function expression should remain raw SQL");
+        assert!(matches!(
+            function_length,
+            CheckExpr::Sql(sql) if sql == "char_length(btrim((name)::text)) > 0"
+        ));
+
+        let function_coalesce = parse_check_expr("COALESCE(count, 1) > 0", "count")
+            .expect("function expression should remain raw SQL");
+        assert!(matches!(
+            function_coalesce,
+            CheckExpr::Sql(sql) if sql == "COALESCE(count, 1) > 0"
         ));
     }
 

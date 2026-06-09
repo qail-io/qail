@@ -2324,10 +2324,9 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
 
     for (op, constructor) in ops {
         if let Some(pos) = s.find(op) {
-            let col = s[..pos].trim().to_string();
-            if col.is_empty() {
+            let Some(col) = parse_postgres_any_check_column(&s[..pos]) else {
                 continue;
-            }
+            };
             let Some(val) = parse_check_integer_literal(&s[pos + op.len()..]) else {
                 continue;
             };
@@ -5064,15 +5063,33 @@ table vendors {
 }
 "#;
         let schema = parse_qail(input).unwrap();
+        schema
+            .validate()
+            .expect("raw expression checks should not invent column refs");
         let col = &schema.tables["vendors"].columns[0];
         let expr = &col.check.as_ref().unwrap().expr;
         match expr {
             CheckExpr::Sql(raw) => assert_eq!(raw, "char_length(btrim(name::text)) > 0"),
-            CheckExpr::GreaterThan { column, value } => {
-                assert_eq!(column, "char_length(btrim(name::text))");
-                assert_eq!(*value, 0);
-            }
-            other => panic!("Expected raw-or-greater-than check expression, got {other:?}"),
+            other => panic!("Expected raw check expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_check_expression_keeps_function_coalesce_as_raw() {
+        let input = r#"
+table schedule_patterns {
+  count int check(COALESCE(count, 1) > 0)
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        schema
+            .validate()
+            .expect("function expression checks should not invent column refs");
+        let col = &schema.tables["schedule_patterns"].columns[0];
+        let expr = &col.check.as_ref().unwrap().expr;
+        match expr {
+            CheckExpr::Sql(raw) => assert_eq!(raw, "COALESCE(count, 1) > 0"),
+            other => panic!("Expected raw check expression, got {other:?}"),
         }
     }
 
