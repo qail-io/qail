@@ -1065,6 +1065,55 @@ impl Schema {
                     }
                 }
             }
+
+            for fk in &table.multi_column_fks {
+                if fk.columns.is_empty() {
+                    errors.push(format!(
+                        "Multi-column FK error: {} has no source columns",
+                        table.name
+                    ));
+                }
+                if fk.ref_columns.is_empty() {
+                    errors.push(format!(
+                        "Multi-column FK error: {} references '{}' with no target columns",
+                        table.name, fk.ref_table
+                    ));
+                }
+                if fk.columns.len() != fk.ref_columns.len() {
+                    errors.push(format!(
+                        "Multi-column FK error: {} column count {} does not match referenced column count {}",
+                        table.name,
+                        fk.columns.len(),
+                        fk.ref_columns.len()
+                    ));
+                }
+
+                for source_col in &fk.columns {
+                    if !table.columns.iter().any(|c| c.name == *source_col) {
+                        errors.push(format!(
+                            "Multi-column FK error: {} references non-existent source column '{}.{}'",
+                            table.name, table.name, source_col
+                        ));
+                    }
+                }
+
+                let Some(ref_table) = self.tables.get(&fk.ref_table) else {
+                    errors.push(format!(
+                        "Multi-column FK error: {} references non-existent table '{}'",
+                        table.name, fk.ref_table
+                    ));
+                    continue;
+                };
+
+                for ref_col in &fk.ref_columns {
+                    if !ref_table.columns.iter().any(|c| c.name == *ref_col) {
+                        errors.push(format!(
+                            "Multi-column FK error: {} references non-existent column '{}.{}'",
+                            table.name, fk.ref_table, ref_col
+                        ));
+                    }
+                }
+            }
         }
 
         if errors.is_empty() {
@@ -2399,6 +2448,65 @@ mod tests {
         let result = schema.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err()[0].contains("non-existent column"));
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_invalid_table_and_columns() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid composite FK should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("non-existent source column 'trips.schedule_id'")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("non-existent table 'schedules'")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_invalid_target_column_and_arity() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("schedules").column(Column::new("route_id", ColumnType::Text)));
+        schema.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid composite FK should fail validation");
+        assert!(
+            errors.iter().any(|err| err.contains("column count 1")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("non-existent column 'schedules.schedule_id'")),
+            "{errors:?}"
+        );
     }
 
     #[test]

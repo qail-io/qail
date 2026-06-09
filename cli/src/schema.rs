@@ -146,6 +146,13 @@ pub fn check_schema(
 
     match parse_qail(&content) {
         Ok(schema) => {
+            if let Err(validation_errors) = schema.validate() {
+                return Err(anyhow::anyhow!(
+                    "Schema validation failed:\n{}",
+                    validation_errors.join("\n")
+                ));
+            }
+
             println!("{}", "✓ Schema is valid".green().bold());
             println!("  Tables: {}", schema.tables.len());
 
@@ -815,6 +822,41 @@ fn demo() {
         .expect_err("source schema errors should fail qail check");
 
         assert!(err.to_string().contains("Source validation"));
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn check_schema_fails_when_multi_column_fk_is_invalid() {
+        let dir = unique_temp_dir("invalid_composite_fk");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let schema_path = dir.join("schema.qail");
+        fs::write(
+            &schema_path,
+            r#"
+table trips {
+  route_id text
+  foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id)
+}
+"#,
+        )
+        .expect("write schema");
+
+        let err = check_schema(
+            schema_path.to_str().expect("schema path should be utf8"),
+            None,
+            dir.join("migrations")
+                .to_str()
+                .expect("migration path should be utf8"),
+            false,
+        )
+        .expect_err("invalid composite FK should fail qail check");
+
+        assert!(err.to_string().contains("Schema validation failed"));
+        assert!(err.to_string().contains("non-existent table 'schedules'"));
+        assert!(
+            err.to_string()
+                .contains("non-existent source column 'trips.schedule_id'")
+        );
         fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
