@@ -1116,12 +1116,95 @@ impl Schema {
             }
         }
 
+        for index in &self.indexes {
+            let Some(table) = self.tables.get(&index.table) else {
+                errors.push(format!(
+                    "Index error: {} references non-existent table '{}'",
+                    index.name, index.table
+                ));
+                continue;
+            };
+
+            for column in &index.columns {
+                let Some(column_name) = index_column_reference_name(column) else {
+                    continue;
+                };
+                if !table.columns.iter().any(|c| c.name == column_name) {
+                    errors.push(format!(
+                        "Index error: {} references non-existent column '{}.{}'",
+                        index.name, index.table, column_name
+                    ));
+                }
+            }
+
+            for include_column in &index.include {
+                let Some(column_name) = index_column_reference_name(include_column) else {
+                    errors.push(format!(
+                        "Index error: {} has invalid INCLUDE column '{}'",
+                        index.name, include_column
+                    ));
+                    continue;
+                };
+                if !table.columns.iter().any(|c| c.name == column_name) {
+                    errors.push(format!(
+                        "Index error: {} references non-existent INCLUDE column '{}.{}'",
+                        index.name, index.table, column_name
+                    ));
+                }
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
             Err(errors)
         }
     }
+}
+
+fn index_column_reference_name(fragment: &str) -> Option<String> {
+    let fragment = fragment.trim();
+    if fragment.is_empty() || fragment.contains('(') || fragment.contains("->") {
+        return None;
+    }
+
+    let token = first_index_column_token(fragment)?;
+    let unqualified = token.rsplit('.').next().unwrap_or(token);
+    Some(unquote_identifier(unqualified))
+}
+
+fn first_index_column_token(fragment: &str) -> Option<&str> {
+    let fragment = fragment.trim_start();
+    if fragment.starts_with('"') {
+        let mut escaped = false;
+        for (idx, ch) in fragment.char_indices().skip(1) {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '"' {
+                if fragment[idx + ch.len_utf8()..].starts_with('"') {
+                    escaped = true;
+                    continue;
+                }
+                return Some(&fragment[..=idx]);
+            }
+        }
+        return None;
+    }
+
+    let end = fragment
+        .find(|ch: char| ch.is_whitespace() || ch == '-' || ch == '>')
+        .unwrap_or(fragment.len());
+    (end > 0).then_some(&fragment[..end])
+}
+
+fn unquote_identifier(identifier: &str) -> String {
+    identifier
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .map(|s| s.replace("\"\"", "\""))
+        .unwrap_or_else(|| identifier.to_string())
 }
 
 impl Table {
@@ -2507,6 +2590,90 @@ mod tests {
                 .any(|err| err.contains("non-existent column 'schedules.schedule_id'")),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_index_on_missing_table_or_column() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        schema.add_index(Index::new(
+            "idx_missing_table",
+            "profiles",
+            vec!["email".to_string()],
+        ));
+        schema.add_index(Index::new(
+            "idx_missing_column",
+            "users",
+            vec!["username".to_string()],
+        ));
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid indexes should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("idx_missing_table") && err.contains("profiles")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("idx_missing_column") && err.contains("users.username")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_missing_index_include_column() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("users")
+                .column(Column::new("email", ColumnType::Text))
+                .column(Column::new("created_at", ColumnType::Timestamp)),
+        );
+        schema.add_index(
+            Index::new("idx_users_email_cover", "users", vec!["email".to_string()])
+                .include(vec!["name".to_string()]),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid INCLUDE column should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| { err.contains("idx_users_email_cover") && err.contains("users.name") }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_allows_index_sort_direction_and_opclass_columns() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("documents")
+                .column(Column::new(
+                    "embedding",
+                    ColumnType::Array(Box::new(ColumnType::Float)),
+                ))
+                .column(Column::new("created_at", ColumnType::Timestamptz)),
+        );
+        schema.add_index(
+            Index::new(
+                "idx_docs_embedding_hnsw",
+                "documents",
+                vec!["embedding vector_l2_ops".to_string()],
+            )
+            .using(IndexMethod::Hnsw),
+        );
+        schema.add_index(Index::new(
+            "idx_docs_created_at",
+            "documents",
+            vec!["created_at DESC NULLS LAST".to_string()],
+        ));
+
+        assert!(schema.validate().is_ok());
     }
 
     #[test]
