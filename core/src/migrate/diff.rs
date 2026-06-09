@@ -100,15 +100,25 @@ fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
         let old_checks = table_check_signatures(old_table, &existing_column_names);
         let new_checks = table_check_signatures(new_table, &existing_column_names);
 
-        for (signature, column) in &new_checks {
+        for (signature, columns) in &new_checks {
             if !old_checks.contains_key(signature) {
-                changes.push(format!("{}.{}", table_name, column));
+                changes.push(format!(
+                    "{}.{} (new CHECK not present in old schema: {})",
+                    table_name,
+                    columns.join("|"),
+                    signature
+                ));
             }
         }
 
-        for (signature, column) in &old_checks {
+        for (signature, columns) in &old_checks {
             if !new_checks.contains_key(signature) {
-                changes.push(format!("{}.{}", table_name, column));
+                changes.push(format!(
+                    "{}.{} (old CHECK not present in new schema: {})",
+                    table_name,
+                    columns.join("|"),
+                    signature
+                ));
             }
         }
     }
@@ -121,15 +131,21 @@ fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
 fn table_check_signatures(
     table: &super::schema::Table,
     existing_column_names: &std::collections::BTreeSet<&str>,
-) -> std::collections::BTreeMap<String, String> {
-    table
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut signatures = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for column in table
         .columns
         .iter()
         .filter(|column| existing_column_names.contains(column.name.as_str()))
-        .filter_map(|column| {
-            check_signature(&column.check).map(|signature| (signature, column.name.clone()))
-        })
-        .collect()
+    {
+        if let Some(signature) = check_signature(&column.check) {
+            signatures
+                .entry(signature)
+                .or_default()
+                .push(column.name.clone());
+        }
+    }
+    signatures
 }
 
 fn existing_column_foreign_key_diffs(old: &Schema, new: &Schema) -> Vec<String> {
@@ -707,6 +723,7 @@ fn normalize_index_sql_fragment(input: &str) -> String {
     normalized = normalized.replace("::charactervarying", "");
     normalized = normalized.replace("::varchar", "");
     normalized = normalized.replace("::text", "");
+    normalized = unquote_simple_lowercase_identifiers(&normalized);
 
     loop {
         let stripped = strip_redundant_outer_parens(&normalized);
@@ -719,6 +736,71 @@ fn normalize_index_sql_fragment(input: &str) -> String {
     }
 
     normalize_any_array_predicate(&normalized)
+}
+
+fn unquote_simple_lowercase_identifiers(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.char_indices().peekable();
+    let mut last = 0usize;
+    let mut in_single = false;
+
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\'' {
+            if in_single && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+            in_single = !in_single;
+            continue;
+        }
+        if in_single {
+            continue;
+        }
+        if ch != '"' {
+            continue;
+        }
+
+        out.push_str(&input[last..idx]);
+        let content_start = idx + ch.len_utf8();
+        let mut content = String::new();
+        let mut end = None;
+        while let Some((inner_idx, inner_ch)) = chars.next() {
+            if inner_ch == '"' {
+                if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                    content.push('"');
+                    continue;
+                }
+                end = Some(inner_idx);
+                break;
+            }
+            content.push(inner_ch);
+        }
+
+        let Some(end_idx) = end else {
+            out.push('"');
+            out.push_str(&input[content_start..]);
+            return out;
+        };
+
+        if is_simple_lowercase_identifier(&content) {
+            out.push_str(&content);
+        } else {
+            out.push('"');
+            out.push_str(&input[content_start..end_idx]);
+            out.push('"');
+        }
+        last = end_idx + 1;
+    }
+
+    out.push_str(&input[last..]);
+    out
+}
+
+fn is_simple_lowercase_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_lowercase() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn compact_sql_for_index_compare(input: &str) -> String {
@@ -2000,6 +2082,56 @@ mod tests {
         let cmds = diff_schemas_checked(&old, &new)
             .expect("equivalent SQL and AST-native CHECK predicates should not fail closed");
         assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn state_diff_check_compare_ignores_lowercase_identifier_quotes() {
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("schedule_patterns").column(
+                Column::new("interval", ColumnType::Int)
+                    .check(CheckExpr::Sql("\"interval\" > 0".to_string())),
+            ),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("schedule_patterns").column(
+            Column::new("interval", ColumnType::Int).check(CheckExpr::GreaterThan {
+                column: "interval".to_string(),
+                value: 0,
+            }),
+        ));
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("quoted lowercase identifier should match unquoted column reference");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn state_diff_check_error_reports_directional_signatures() {
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("charters_diathesi")
+                .column(
+                    Column::new("current_bookings", ColumnType::Int).check(CheckExpr::Sql(
+                        "current_bookings <= max_bookings".to_string(),
+                    )),
+                )
+                .column(Column::new("max_bookings", ColumnType::Int)),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("charters_diathesi")
+                .column(Column::new("current_bookings", ColumnType::Int))
+                .column(Column::new("max_bookings", ColumnType::Int)),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("missing target CHECK should fail closed with details");
+        assert!(err.contains("charters_diathesi.current_bookings"), "{err}");
+        assert!(err.contains("old CHECK not present in new schema"), "{err}");
+        assert!(err.contains("current_bookings<=max_bookings"), "{err}");
     }
 
     #[test]
