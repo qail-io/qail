@@ -1057,6 +1057,12 @@ impl Schema {
                 }
             }
 
+            let table_columns = table
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+
             for col in &table.columns {
                 if let Some(ref fk) = col.foreign_key {
                     if !self.tables.contains_key(&fk.table) {
@@ -1070,6 +1076,18 @@ impl Schema {
                             errors.push(format!(
                                 "FK error: {}.{} references non-existent column '{}.{}'",
                                 table.name, col.name, fk.table, fk.column
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(check) = &col.check {
+                    for referenced in check_expr_column_references(&check.expr) {
+                        let referenced_column = check_expr_reference_name(referenced);
+                        if !table_columns.contains(referenced_column.as_str()) {
+                            errors.push(format!(
+                                "CHECK error: {}.{} references non-existent column '{}.{}'",
+                                table.name, col.name, table.name, referenced_column
                             ));
                         }
                     }
@@ -1178,6 +1196,60 @@ impl Schema {
             Err(errors)
         }
     }
+}
+
+fn check_expr_column_references(expr: &CheckExpr) -> Vec<&str> {
+    let mut refs = Vec::new();
+    collect_check_expr_column_references(expr, &mut refs);
+    refs.sort_unstable();
+    refs.dedup();
+    refs
+}
+
+fn collect_check_expr_column_references<'a>(expr: &'a CheckExpr, refs: &mut Vec<&'a str>) {
+    match expr {
+        CheckExpr::GreaterThan { column, .. }
+        | CheckExpr::GreaterOrEqual { column, .. }
+        | CheckExpr::LessThan { column, .. }
+        | CheckExpr::LessOrEqual { column, .. }
+        | CheckExpr::Between { column, .. }
+        | CheckExpr::In { column, .. }
+        | CheckExpr::InIntegers { column, .. }
+        | CheckExpr::TextCompare { column, .. }
+        | CheckExpr::LowerTrimEquals { column }
+        | CheckExpr::Regex { column, .. }
+        | CheckExpr::MaxLength { column, .. }
+        | CheckExpr::MinLength { column, .. }
+        | CheckExpr::NotNull { column } => refs.push(column),
+        CheckExpr::CompareColumns {
+            left_column,
+            right_column,
+            ..
+        } => {
+            refs.push(left_column);
+            refs.push(right_column);
+        }
+        CheckExpr::CompareColumnToCoalesce {
+            left_column,
+            coalesce_column,
+            ..
+        } => {
+            refs.push(left_column);
+            refs.push(coalesce_column);
+        }
+        CheckExpr::And(left, right) | CheckExpr::Or(left, right) => {
+            collect_check_expr_column_references(left, refs);
+            collect_check_expr_column_references(right, refs);
+        }
+        CheckExpr::Not(inner) => collect_check_expr_column_references(inner, refs),
+        CheckExpr::Sql(_) => {}
+    }
+}
+
+fn check_expr_reference_name(reference: &str) -> String {
+    let trimmed = reference.trim();
+    let unqualified = trimmed.rsplit('.').next().unwrap_or(trimmed);
+    unquote_identifier(unqualified)
 }
 
 fn index_column_reference_name(fragment: &str) -> Option<String> {
@@ -2652,6 +2724,64 @@ mod tests {
             errors
                 .iter()
                 .any(|err| err.contains("duplicate index name 'idx_users_email'")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_check_on_missing_column() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("orders").column(
+            Column::new("status", ColumnType::Text).check(CheckExpr::In {
+                column: "missing_status".to_string(),
+                values: vec!["paid".to_string(), "pending".to_string()],
+            }),
+        ));
+
+        let errors = schema
+            .validate()
+            .expect_err("CHECK references should fail validation");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("CHECK error")
+                    && err.contains("orders.status")
+                    && err.contains("orders.missing_status")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nested_check_on_missing_column() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("pricing_plans")
+                .column(Column::new("start_date", ColumnType::Date))
+                .column(
+                    Column::new("end_date", ColumnType::Date).check(CheckExpr::And(
+                        Box::new(CheckExpr::CompareColumns {
+                            left_column: "end_date".to_string(),
+                            op: CheckComparisonOp::GreaterOrEqual,
+                            right_column: "start_date".to_string(),
+                        }),
+                        Box::new(CheckExpr::CompareColumnToCoalesce {
+                            left_column: "end_date".to_string(),
+                            op: CheckComparisonOp::GreaterOrEqual,
+                            coalesce_column: "missing_fallback_date".to_string(),
+                            fallback: "1970-01-01".to_string(),
+                            fallback_cast: Some("date".to_string()),
+                        }),
+                    )),
+                ),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("nested CHECK references should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("pricing_plans.missing_fallback_date")),
             "{errors:?}"
         );
     }
