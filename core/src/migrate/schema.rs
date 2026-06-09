@@ -1161,7 +1161,24 @@ impl Schema {
                 continue;
             };
 
+            if index.columns.is_empty() && index.expressions.is_empty() {
+                errors.push(format!(
+                    "Index error: {} must define at least one column or expression",
+                    index.name
+                ));
+            }
+            if !index.columns.is_empty() && !index.expressions.is_empty() {
+                errors.push(format!(
+                    "Index error: {} cannot mix columns and expressions",
+                    index.name
+                ));
+            }
+
             for column in &index.columns {
+                if column.trim().is_empty() {
+                    errors.push(format!("Index error: {} has empty column", index.name));
+                    continue;
+                }
                 let Some(column_name) = index_column_reference_name(column) else {
                     continue;
                 };
@@ -1170,6 +1187,12 @@ impl Schema {
                         "Index error: {} references non-existent column '{}.{}'",
                         index.name, index.table, column_name
                     ));
+                }
+            }
+
+            for expression in &index.expressions {
+                if expression.trim().is_empty() {
+                    errors.push(format!("Index error: {} has empty expression", index.name));
                 }
             }
 
@@ -2826,6 +2849,68 @@ mod tests {
             errors
                 .iter()
                 .any(|err| err.contains("idx_missing_column") && err.contains("users.username")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_index_definition() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        schema.add_index(Index::new("idx_users_empty", "users", vec![]));
+
+        let errors = schema
+            .validate()
+            .expect_err("empty index definitions should fail validation");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("idx_users_empty") && err.contains("at least one column or expression")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_blank_index_column_fragment() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        schema.add_index(Index::new(
+            "idx_users_blank",
+            "users",
+            vec![" ".to_string()],
+        ));
+
+        let errors = schema
+            .validate()
+            .expect_err("blank index columns should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("idx_users_blank") && err.contains("empty column")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_index_columns_and_expressions() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        let mut index = Index::expression(
+            "idx_users_email_lower",
+            "users",
+            vec!["lower(email)".to_string()],
+        );
+        index.columns.push("email".to_string());
+        schema.add_index(index);
+
+        let errors = schema
+            .validate()
+            .expect_err("mixed index keys should fail validation");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("idx_users_email_lower")
+                    && err.contains("cannot mix columns and expressions")
+            }),
             "{errors:?}"
         );
     }
