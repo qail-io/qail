@@ -158,6 +158,7 @@ impl PgConnection {
                             continue;
                         }
                         BackendMessage::ErrorResponse(err) => {
+                            self.mark_io_desynced();
                             return Err(PgError::QueryServer(err.into()));
                         }
                         msg if is_ignorable_session_message(&msg) => continue,
@@ -272,6 +273,20 @@ mod tests {
         bytes
     }
 
+    fn error_response_payload(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(b'S');
+        payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'C');
+        payload.extend_from_slice(code.as_bytes());
+        payload.push(0);
+        payload.push(b'M');
+        payload.extend_from_slice(message.as_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn notification_return_with_desync_marks_protocol_error() {
@@ -308,5 +323,21 @@ mod tests {
             "empty-query flush frames must not remain buffered"
         );
         assert!(!conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_notification_error_response_marks_connection_desynced() {
+        let (mut conn, _peer) = test_conn_with_peer();
+        let payload = error_response_payload("XX000", "notify wait failed");
+        push_backend_frame(&mut conn, b'E', &payload);
+
+        let err = conn
+            .recv_notification()
+            .await
+            .expect_err("server error must fail");
+
+        assert!(matches!(err, PgError::QueryServer(_)));
+        assert!(conn.is_io_desynced());
     }
 }

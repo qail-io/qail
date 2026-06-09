@@ -330,6 +330,7 @@ pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
     let mut in_quotes = false;
     let mut escape_next = false;
     let mut element_started = false;
+    let mut element_quoted = false;
 
     for c in inner.chars() {
         if escape_next {
@@ -352,6 +353,7 @@ pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
             '"' if !element_started => {
                 in_quotes = true;
                 element_started = true;
+                element_quoted = true;
             }
             '"' => return Err("Unexpected quote in unquoted array element".to_string()),
             '\\' => {
@@ -362,8 +364,9 @@ pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
                 if !element_started {
                     return Err("Empty unquoted array element".to_string());
                 }
-                result.push(std::mem::take(&mut current));
+                push_text_array_element(&mut result, &mut current, element_quoted)?;
                 element_started = false;
+                element_quoted = false;
             }
             _ => {
                 current.push(c);
@@ -382,8 +385,20 @@ pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
         return Err("Array ends with empty unquoted element".to_string());
     }
 
-    result.push(current);
+    push_text_array_element(&mut result, &mut current, element_quoted)?;
     Ok(result)
+}
+
+fn push_text_array_element(
+    result: &mut Vec<String>,
+    current: &mut String,
+    quoted: bool,
+) -> Result<(), String> {
+    if !quoted && current.eq_ignore_ascii_case("NULL") {
+        return Err("Array contains NULL element that cannot be represented as String".to_string());
+    }
+    result.push(std::mem::take(current));
+    Ok(())
 }
 
 /// Encode a `Vec<String>` to PostgreSQL text-format array `{a,b,c}`.
@@ -496,6 +511,8 @@ mod tests {
         assert!(try_decode_text_array("{a,}").is_err());
         assert!(try_decode_text_array("{,a}").is_err());
         assert!(try_decode_text_array(r#"{a\}"#).is_err());
+        assert!(try_decode_text_array("{NULL}").is_err());
+        assert_eq!(try_decode_text_array(r#"{"NULL"}"#).unwrap(), vec!["NULL"]);
     }
 
     #[test]

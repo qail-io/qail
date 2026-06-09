@@ -47,6 +47,12 @@ impl FrontendMessage {
                             "key must not be empty".to_string(),
                         ));
                     }
+                    if key_trimmed != key {
+                        return Err(FrontendEncodeError::InvalidStartupParam(format!(
+                            "key contains leading/trailing whitespace: '{}'",
+                            key
+                        )));
+                    }
                     let key_lc = key_trimmed.to_ascii_lowercase();
                     if key_lc == "user" || key_lc == "database" {
                         return Err(FrontendEncodeError::InvalidStartupParam(format!(
@@ -66,7 +72,7 @@ impl FrontendMessage {
                     if Self::has_nul(value) {
                         return Err(FrontendEncodeError::InteriorNul("startup_param_value"));
                     }
-                    buf.extend_from_slice(key.as_bytes());
+                    buf.extend_from_slice(key_trimmed.as_bytes());
                     buf.push(0);
                     buf.extend_from_slice(value.as_bytes());
                     buf.push(0);

@@ -11,6 +11,26 @@ use qail_core::transpiler::escape_identifier;
 
 use super::super::helpers::{NUMERIC_VALUES, i64_to_bytes, write_param_placeholder};
 
+fn reject_non_finite_f64(label: &str, value: f64) -> Result<(), crate::protocol::EncodeError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{label} must be finite, got {value}"
+        )))
+    }
+}
+
+fn reject_non_finite_f32(label: &str, value: f32) -> Result<(), crate::protocol::EncodeError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{label} must be finite, got {value}"
+        )))
+    }
+}
+
 fn push_identifier_ref(buf: &mut BytesMut, ident: &str, allow_star: bool) {
     if allow_star && ident == "*" {
         buf.extend_from_slice(b"*");
@@ -770,6 +790,21 @@ fn encode_inline_value(
             }
             buf.extend_from_slice(b")");
         }
+        Value::Float(value) => {
+            reject_non_finite_f64("inline float value", *value)?;
+            buf.extend_from_slice(value.to_string().as_bytes());
+        }
+        Value::Vector(values) => {
+            buf.extend_from_slice(b"[");
+            for (idx, value) in values.iter().enumerate() {
+                reject_non_finite_f32("inline vector value", *value)?;
+                if idx > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                buf.extend_from_slice(value.to_string().as_bytes());
+            }
+            buf.extend_from_slice(b"]");
+        }
         _ => buf.extend_from_slice(value.to_string().as_bytes()),
     }
     Ok(())
@@ -1127,6 +1162,7 @@ pub fn encode_value(
             write_param_placeholder(buf, params.len());
         }
         Value::Float(f) => {
+            reject_non_finite_f64("float parameter", *f)?;
             params.push(Some(f.to_string().into_bytes()));
             write_param_placeholder(buf, params.len());
         }
@@ -1225,6 +1261,7 @@ pub fn encode_value(
             let mut arr_buf = Vec::with_capacity(vec.len() * 12 + 2);
             arr_buf.push(b'{');
             for (i, v) in vec.iter().enumerate() {
+                reject_non_finite_f32("vector parameter", *v)?;
                 if i > 0 {
                     arr_buf.push(b',');
                 }
@@ -1263,7 +1300,10 @@ pub fn write_value_to_array(
         }
         Value::Bool(b) => buf.extend_from_slice(if *b { b"t" } else { b"f" }),
         Value::Null | Value::NullUuid => buf.extend_from_slice(b"NULL"),
-        Value::Float(f) => buf.extend_from_slice(f.to_string().as_bytes()),
+        Value::Float(f) => {
+            reject_non_finite_f64("array float value", *f)?;
+            buf.extend_from_slice(f.to_string().as_bytes());
+        }
         Value::Uuid(uuid) => buf.extend_from_slice(uuid.to_string().as_bytes()),
         Value::Interval { amount, unit } => {
             write_quoted_array_element(buf, &format!("{amount} {unit}"))?;
@@ -1393,6 +1433,36 @@ mod tests {
         let err = encode_value(&value, &mut sql, &mut params).unwrap_err();
 
         assert_eq!(err, crate::protocol::EncodeError::NullByte);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn encode_float_parameter_rejects_non_finite_values() {
+        let value = Value::Float(f64::NAN);
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        let err = encode_value(&value, &mut sql, &mut params).unwrap_err();
+
+        assert!(
+            matches!(err, crate::protocol::EncodeError::InvalidAst(ref message) if message.contains("must be finite")),
+            "{err}"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn encode_vector_parameter_rejects_non_finite_values() {
+        let value = Value::Vector(vec![1.0, f32::INFINITY]);
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        let err = encode_value(&value, &mut sql, &mut params).unwrap_err();
+
+        assert!(
+            matches!(err, crate::protocol::EncodeError::InvalidAst(ref message) if message.contains("must be finite")),
+            "{err}"
+        );
         assert!(params.is_empty());
     }
 

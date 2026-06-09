@@ -72,7 +72,10 @@ fn parse_copy_text_row(line: &[u8]) -> PgResult<Vec<String>> {
 
 fn decode_copy_text_field(field: &[u8]) -> PgResult<String> {
     if field == b"\\N" {
-        return Ok(String::new());
+        return Err(PgError::Protocol(
+            "COPY text NULL cannot be represented by Vec<String>; use copy_export_stream_raw for nullable exports"
+                .to_string(),
+        ));
     }
 
     let mut out = Vec::with_capacity(field.len());
@@ -592,6 +595,15 @@ impl PgConnection {
                     saw_copy_done = true;
                 }
                 BackendMessage::CommandComplete(_) => {
+                    if !saw_copy_done {
+                        return return_with_desync(
+                            self,
+                            PgError::Protocol(format!(
+                                "{} received CommandComplete before CopyDone",
+                                context
+                            )),
+                        );
+                    }
                     if saw_command_complete {
                         return return_with_desync(
                             self,
@@ -789,9 +801,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_copy_text_row_maps_copy_null_marker_to_empty_string() {
-        let row = parse_copy_text_row(b"a\t\\N\tb").unwrap();
-        assert_eq!(row, vec!["a", "", "b"]);
+    fn parse_copy_text_row_rejects_copy_null_marker() {
+        let err = parse_copy_text_row(b"a\t\\N\tb").expect_err("COPY NULL must not be lossy");
+        assert!(
+            err.to_string()
+                .contains("COPY text NULL cannot be represented"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -600,6 +600,7 @@ impl PgConnection {
                 BackendMessage::ErrorResponse(err) => {
                     self.replication_stream_active = false;
                     self.last_replication_wal_end = None;
+                    self.mark_io_desynced();
                     return Err(PgError::QueryServer(err.into()));
                 }
                 BackendMessage::CopyDone => {
@@ -776,6 +777,28 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn push_backend_frame(conn: &mut PgConnection, msg_type: u8, payload: &[u8]) {
+        conn.buffer.extend_from_slice(&[msg_type]);
+        conn.buffer
+            .extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        conn.buffer.extend_from_slice(payload);
+    }
+
+    fn error_response_payload(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(b'S');
+        payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'C');
+        payload.extend_from_slice(code.as_bytes());
+        payload.push(0);
+        payload.push(b'M');
+        payload.extend_from_slice(message.as_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn replication_wal_regression_marks_connection_desynced() {
         let mut conn = test_conn();
@@ -787,6 +810,26 @@ mod tests {
             .expect_err("wal regression must fail");
 
         assert!(err.to_string().contains("wal_end regressed"));
+        assert!(!conn.replication_stream_active);
+        assert!(conn.last_replication_wal_end.is_none());
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replication_error_response_marks_connection_desynced() {
+        let mut conn = test_conn();
+        conn.replication_stream_active = true;
+        conn.last_replication_wal_end = Some(20);
+        let payload = error_response_payload("XX000", "replication failed");
+        push_backend_frame(&mut conn, b'E', &payload);
+
+        let err = conn
+            .recv_replication_message()
+            .await
+            .expect_err("server error must fail");
+
+        assert!(matches!(err, PgError::QueryServer(_)));
         assert!(!conn.replication_stream_active);
         assert!(conn.last_replication_wal_end.is_none());
         assert!(conn.is_io_desynced());

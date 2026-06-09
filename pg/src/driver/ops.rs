@@ -7,8 +7,8 @@ use super::prepared::PreparedStatement;
 use super::rls;
 use super::types::*;
 use super::{AutoCountPath, AutoCountPlan};
+use crate::protocol::AstEncoder;
 use qail_core::ast::Qail;
-use qail_core::transpiler::ToSql;
 
 impl PgDriver {
     // ==================== TRANSACTION CONTROL ====================
@@ -77,7 +77,9 @@ impl PgDriver {
             match self.execute(cmd).await {
                 Ok(n) => results.push(n),
                 Err(e) => {
-                    self.rollback().await?;
+                    if self.rollback().await.is_err() {
+                        self.connection.mark_io_desynced();
+                    }
                     return Err(e);
                 }
             }
@@ -274,12 +276,14 @@ impl PgDriver {
         &mut self,
         cmd: &Qail,
     ) -> PgResult<Option<crate::driver::explain::ExplainEstimate>> {
-        let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", cmd.to_sql());
-        let rows = self.connection.simple_query(&explain_sql).await?;
+        let (sql, params) =
+            AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
+        let rows = self.connection.query(&explain_sql, &params).await?;
 
         let mut json_output = String::new();
         for row in &rows {
-            if let Some(Some(val)) = row.columns.first()
+            if let Some(Some(val)) = row.first()
                 && let Ok(text) = std::str::from_utf8(val)
             {
                 json_output.push_str(text);
@@ -485,13 +489,14 @@ impl PgDriver {
     /// }
     /// ```
     pub async fn stream_cmd(&mut self, cmd: &Qail, batch_size: usize) -> PgResult<Vec<Vec<PgRow>>> {
+        validate_stream_batch_size(batch_size)?;
+
         use std::sync::atomic::{AtomicU64, Ordering};
         static CURSOR_ID: AtomicU64 = AtomicU64::new(0);
 
         let cursor_name = format!("qail_cursor_{}", CURSOR_ID.fetch_add(1, Ordering::SeqCst));
 
         // AST-NATIVE: Generate SQL directly from AST (no to_sql_parameterized!)
-        use crate::protocol::AstEncoder;
         let mut sql_buf = bytes::BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
         AstEncoder::encode_select_sql(cmd, &mut sql_buf, &mut params)
@@ -543,5 +548,30 @@ impl PgDriver {
                 Err(err)
             }
         }
+    }
+}
+
+fn validate_stream_batch_size(batch_size: usize) -> PgResult<()> {
+    if batch_size == 0 {
+        return Err(PgError::Query(
+            "stream_cmd batch_size must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_stream_batch_size;
+
+    #[test]
+    fn stream_batch_size_zero_is_rejected() {
+        let err = validate_stream_batch_size(0).expect_err("zero batch size must fail");
+        assert!(err.to_string().contains("batch_size"));
+    }
+
+    #[test]
+    fn stream_batch_size_positive_is_accepted() {
+        validate_stream_batch_size(1).expect("positive batch size should pass");
     }
 }

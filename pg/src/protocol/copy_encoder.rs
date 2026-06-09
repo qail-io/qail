@@ -15,14 +15,11 @@ use crate::protocol::EncodeError;
 /// - Numeric: raw digits (no quotes)
 /// - String: escape special chars (\\, \t, \n, \r)
 /// - UUID: hyphenated lowercase
+#[track_caller]
 #[inline]
 pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
-    let mut tmp = BytesMut::new();
-    if try_encode_copy_value(&mut tmp, value).is_ok() {
-        buf.extend_from_slice(&tmp);
-    } else {
-        buf.extend_from_slice(b"\\N");
-    }
+    try_encode_copy_value(buf, value)
+        .expect("invalid COPY value; use try_encode_copy_value to handle errors");
 }
 
 /// Fallible COPY text encoder for a single data value.
@@ -40,6 +37,11 @@ pub fn try_encode_copy_value(buf: &mut BytesMut, value: &Value) -> Result<(), En
         }
 
         Value::Float(n) => {
+            if !n.is_finite() {
+                return Err(EncodeError::InvalidAst(format!(
+                    "COPY float value must be finite, got {n}"
+                )));
+            }
             // Zero-alloc float formatting
             let mut tmp = ryu::Buffer::new();
             buf.extend_from_slice(tmp.format(*n).as_bytes());
@@ -105,6 +107,11 @@ pub fn try_encode_copy_value(buf: &mut BytesMut, value: &Value) -> Result<(), En
             // PostgreSQL array format for vectors: {1.0,2.0,3.0}
             buf.extend_from_slice(b"{");
             for (i, v) in vec.iter().enumerate() {
+                if !v.is_finite() {
+                    return Err(EncodeError::InvalidAst(format!(
+                        "COPY vector value must be finite, got {v}"
+                    )));
+                }
                 if i > 0 {
                     buf.extend_from_slice(b",");
                 }
@@ -143,7 +150,14 @@ fn write_copy_array_value(buf: &mut Vec<u8>, value: &Value) -> Result<(), Encode
         Value::Null | Value::NullUuid => buf.extend_from_slice(b"NULL"),
         Value::Bool(value) => buf.extend_from_slice(if *value { b"t" } else { b"f" }),
         Value::Int(value) => buf.extend_from_slice(value.to_string().as_bytes()),
-        Value::Float(value) => buf.extend_from_slice(value.to_string().as_bytes()),
+        Value::Float(value) => {
+            if !value.is_finite() {
+                return Err(EncodeError::InvalidAst(format!(
+                    "COPY array float value must be finite, got {value}"
+                )));
+            }
+            buf.extend_from_slice(value.to_string().as_bytes());
+        }
         Value::Uuid(value) => buf.extend_from_slice(value.to_string().as_bytes()),
         Value::String(value) | Value::Timestamp(value) | Value::Json(value) => {
             write_quoted_array_element(buf, value)?
@@ -188,6 +202,7 @@ fn write_quoted_array_element(buf: &mut Vec<u8>, value: &str) -> Result<(), Enco
 /// Encode a batch of rows into a single COPY data buffer.
 /// Returns a BytesMut containing all rows in tab-separated format,
 /// ready to be sent as a single CopyData message.
+#[track_caller]
 #[inline]
 pub fn encode_copy_batch(rows: &[Vec<Value>]) -> BytesMut {
     // Pre-allocate: estimate ~50 bytes per column, 7 columns avg
@@ -273,6 +288,36 @@ mod tests {
 
         assert_eq!(err, EncodeError::NullByte);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_try_encode_rejects_non_finite_float() {
+        let mut buf = BytesMut::new();
+        let err = try_encode_copy_value(&mut buf, &Value::Float(f64::INFINITY)).unwrap_err();
+
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("must be finite")),
+            "{err}"
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_try_encode_rejects_non_finite_vector() {
+        let mut buf = BytesMut::new();
+        let err = try_encode_copy_value(&mut buf, &Value::Vector(vec![1.0, f32::NAN])).unwrap_err();
+
+        assert!(
+            matches!(err, EncodeError::InvalidAst(ref message) if message.contains("must be finite")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid COPY value")]
+    fn test_encode_copy_value_panics_on_invalid_value() {
+        let mut buf = BytesMut::new();
+        encode_copy_value(&mut buf, &Value::Function("now()".to_string()));
     }
 
     #[test]

@@ -79,6 +79,12 @@ fn copy_done() -> Vec<u8> {
     backend_frame(b'c', &[])
 }
 
+fn command_complete(tag: &str) -> Vec<u8> {
+    let mut payload = Vec::from(tag.as_bytes());
+    payload.push(0);
+    backend_frame(b'C', &payload)
+}
+
 #[tokio::test]
 async fn copy_in_raw_rejects_unexpected_startup_message() {
     let (listener, port) = mock_listener().await;
@@ -294,6 +300,45 @@ async fn copy_export_rejects_ready_without_commandcomplete() {
     let msg = err.to_string();
     assert!(
         msg.contains("missing CommandComplete"),
+        "unexpected error message: {msg}"
+    );
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_export_rejects_commandcomplete_before_copydone() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, _payload) = read_frontend_frame(&mut sock).await;
+        assert_eq!(msg_type, b'Q');
+
+        sock.write_all(&copy_out_response_text_zero_cols())
+            .await
+            .unwrap();
+        sock.write_all(&command_complete("COPY 0")).await.unwrap();
+        sock.write_all(&copy_done()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut conn =
+        PgConnection::connect_with_password("127.0.0.1", port, "test_user", "test_db", None)
+            .await
+            .unwrap();
+
+    let cmd = Qail::export("users").columns(["id"]);
+    let err = conn.copy_export(&cmd).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CommandComplete before CopyDone"),
         "unexpected error message: {msg}"
     );
 

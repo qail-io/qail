@@ -133,9 +133,9 @@ impl PooledConnection {
     /// Deterministic connection cleanup and pool return.
     ///
     /// This is the **correct** way to return a connection to the pool.
-    /// COMMITs the transaction (which auto-resets transaction-local RLS
-    /// session variables) and returns the connection to the pool with
-    /// prepared statement caches intact.
+    /// ROLLBACKs raw pooled connections and COMMITs RLS-scoped connections
+    /// where transaction-local RLS session variables must be reset. Prepared
+    /// statement caches remain intact.
     ///
     /// If cleanup fails, the connection is destroyed (not returned to pool).
     ///
@@ -150,21 +150,21 @@ impl PooledConnection {
         let _ = self.release_checked().await;
     }
 
-    /// Commit the pool-managed transaction and return the connection to the pool.
+    /// Reset and return the connection to the pool.
     ///
     /// This is the checked form of [`Self::release`]. It is useful for callers
-    /// that need to report commit/reset failures rather than only logging them.
+    /// that need to report reset failures rather than only logging them.
     pub async fn release_checked(self) -> PgResult<()> {
-        // COMMIT the transaction opened by acquire_with_rls.
-        // Transaction-local set_config values auto-reset on COMMIT,
-        // so no explicit RLS cleanup is needed.
-        // Prepared statements survive — they are NOT transaction-scoped.
-        self.finish_with_reset(
-            crate::driver::rls::reset_sql(),
-            "pool release reset/COMMIT",
-            "release_reset_failed",
-        )
-        .await
+        let (sql, context) = if self.rls_dirty {
+            // COMMIT the transaction opened by acquire_with_rls.
+            // Transaction-local set_config values auto-reset on COMMIT,
+            // so no explicit RLS cleanup is needed.
+            (crate::driver::rls::reset_sql(), "pool release reset/COMMIT")
+        } else {
+            ("ROLLBACK", "pool release reset/ROLLBACK")
+        };
+        self.finish_with_reset(sql, context, "release_reset_failed")
+            .await
     }
 
     /// Roll back the pool-managed transaction and return the connection to the pool.
@@ -258,17 +258,16 @@ impl PooledConnection {
         &mut self,
         cmd: &qail_core::ast::Qail,
     ) -> PgResult<Option<crate::driver::explain::ExplainEstimate>> {
-        use qail_core::transpiler::ToSql;
-
-        let sql = cmd.to_sql();
+        let (sql, params) = crate::protocol::AstEncoder::encode_cmd_sql(cmd)
+            .map_err(|e| crate::driver::PgError::Encode(e.to_string()))?;
         let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
 
-        let rows = self.conn_mut()?.simple_query(&explain_sql).await?;
+        let rows = self.conn_mut()?.query(&explain_sql, &params).await?;
 
         // PostgreSQL returns the JSON plan as a single text column across one or more rows
         let mut json_output = String::new();
         for row in &rows {
-            if let Some(Some(val)) = row.columns.first()
+            if let Some(Some(val)) = row.first()
                 && let Ok(text) = std::str::from_utf8(val)
             {
                 json_output.push_str(text);

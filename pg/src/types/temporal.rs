@@ -26,18 +26,20 @@ impl Timestamp {
     /// Create from Unix timestamp (seconds since 1970-01-01)
     pub fn from_unix_secs(secs: i64) -> Self {
         Self {
-            usec: secs * 1_000_000 - PG_EPOCH_OFFSET_USEC,
+            usec: secs
+                .saturating_mul(1_000_000)
+                .saturating_sub(PG_EPOCH_OFFSET_USEC),
         }
     }
 
     /// Convert to Unix timestamp (seconds since 1970-01-01)
     pub fn to_unix_secs(&self) -> i64 {
-        (self.usec + PG_EPOCH_OFFSET_USEC) / 1_000_000
+        self.to_unix_usec() / 1_000_000
     }
 
     /// Convert to Unix timestamp with microseconds
     pub fn to_unix_usec(&self) -> i64 {
-        self.usec + PG_EPOCH_OFFSET_USEC
+        self.usec.saturating_add(PG_EPOCH_OFFSET_USEC)
     }
 }
 
@@ -409,12 +411,18 @@ impl Time {
     /// * `second` — Second component (0–59).
     /// * `usec` — Microseconds within the current second.
     pub fn new(hour: u8, minute: u8, second: u8, usec: u32) -> Self {
-        Self {
+        Self::try_new(hour, minute, second, usec).expect("invalid time components")
+    }
+
+    /// Fallible constructor from hours, minutes, seconds, microseconds.
+    pub fn try_new(hour: u8, minute: u8, second: u8, usec: u32) -> Result<Self, TypeError> {
+        validate_time_components(hour as i32, minute as i32, second as i32, usec as i64)?;
+        Ok(Self {
             usec: hour as i64 * 3_600_000_000
                 + minute as i64 * 60_000_000
                 + second as i64 * 1_000_000
                 + usec as i64,
-        }
+        })
     }
 
     /// Get hours component (0-23)
@@ -501,6 +509,15 @@ mod tests {
     }
 
     #[test]
+    fn test_timestamp_extreme_conversion_saturates() {
+        assert_eq!(
+            Timestamp::from_unix_secs(i64::MAX).usec,
+            i64::MAX.saturating_sub(PG_EPOCH_OFFSET_USEC)
+        );
+        assert_eq!(Timestamp::from_pg_usec(i64::MAX).to_unix_usec(), i64::MAX);
+    }
+
+    #[test]
     fn test_timestamp_from_pg_binary() {
         // Some arbitrary timestamp in binary
         let usec: i64 = 789_012_345_678_900; // ~25 years after 2000
@@ -534,6 +551,15 @@ mod tests {
     fn test_time_from_pg_binary_rejects_out_of_range_values() {
         assert!(Time::from_pg(&(-1i64).to_be_bytes(), oid::TIME, 1).is_err());
         assert!(Time::from_pg(&USEC_PER_DAY.to_be_bytes(), oid::TIME, 1).is_err());
+    }
+
+    #[test]
+    fn test_time_new_rejects_invalid_components() {
+        assert!(Time::try_new(24, 0, 0, 0).is_err());
+        assert!(Time::try_new(23, 60, 0, 0).is_err());
+        assert!(Time::try_new(23, 59, 60, 0).is_err());
+        assert!(Time::try_new(23, 59, 59, 1_000_000).is_err());
+        assert!(std::panic::catch_unwind(|| Time::new(24, 0, 0, 0)).is_err());
     }
 
     #[test]

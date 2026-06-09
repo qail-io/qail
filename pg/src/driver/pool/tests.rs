@@ -358,6 +358,102 @@ async fn test_release_drops_desynced_connection_without_commit() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_release_raw_rolls_back_before_returning_connection() {
+    use crate::driver::connection::StatementCache;
+    use crate::driver::stream::PgStream;
+    use bytes::BytesMut;
+    use std::collections::{HashMap, VecDeque};
+    use std::num::NonZeroUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    fn backend_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(msg_type);
+        out.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn command_complete(tag: &str) -> Vec<u8> {
+        let mut payload = Vec::from(tag.as_bytes());
+        payload.push(0);
+        backend_frame(b'C', &payload)
+    }
+
+    let (unix_stream, mut peer) = UnixStream::pair().expect("unix stream pair");
+    let conn = PgConnection {
+        stream: PgStream::Unix(unix_stream),
+        buffer: BytesMut::with_capacity(1024),
+        write_buf: BytesMut::with_capacity(1024),
+        sql_buf: BytesMut::with_capacity(256),
+        params_buf: Vec::new(),
+        prepared_statements: HashMap::new(),
+        stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+        column_info_cache: HashMap::new(),
+        process_id: 0,
+        cancel_key_bytes: Vec::new(),
+        requested_protocol_minor: PgConnection::default_protocol_minor(),
+        negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+        notifications: VecDeque::new(),
+        replication_stream_active: false,
+        replication_mode_enabled: false,
+        last_replication_wal_end: None,
+        io_desynced: false,
+        pending_statement_closes: Vec::new(),
+        draining_statement_closes: false,
+    };
+
+    let pool = PgPool::connect(
+        PoolConfig::new_dev("localhost", 5432, "user", "db")
+            .min_connections(0)
+            .max_connections(1),
+    )
+    .await
+    .expect("pool init");
+
+    let permit = pool
+        .inner
+        .semaphore
+        .acquire()
+        .await
+        .expect("semaphore permit");
+    permit.forget();
+    pool.inner.active_count.store(1, Ordering::Relaxed);
+
+    let peer_task = tokio::spawn(async move {
+        let mut head = [0u8; 5];
+        peer.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], b'Q');
+        let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+        let mut payload = vec![0u8; len - 4];
+        peer.read_exact(&mut payload).await.unwrap();
+        assert_eq!(payload, b"ROLLBACK\0");
+
+        peer.write_all(&command_complete("ROLLBACK")).await.unwrap();
+        peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        peer.flush().await.unwrap();
+    });
+
+    let pooled = PooledConnection {
+        conn: Some(conn),
+        pool: std::sync::Arc::clone(&pool.inner),
+        rls_dirty: false,
+        created_at: Instant::now(),
+    };
+    pooled
+        .release_checked()
+        .await
+        .expect("release should succeed");
+    peer_task.await.unwrap();
+
+    assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
+    assert_eq!(pool.inner.semaphore.available_permits(), 1);
+    assert_eq!(pool.inner.connections.lock().await.len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_execute_simple_with_timeout_marks_connection_desynced() {
     use crate::driver::connection::StatementCache;
     use crate::driver::stream::PgStream;

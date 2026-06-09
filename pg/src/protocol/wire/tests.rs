@@ -1169,6 +1169,21 @@ fn encode_startup_with_duplicate_param_keys_returns_error() {
 }
 
 #[test]
+fn encode_startup_with_whitespace_param_key_returns_error() {
+    let msg = FrontendMessage::Startup {
+        user: "alice".to_string(),
+        database: "app".to_string(),
+        protocol_version: PROTOCOL_VERSION_3_2,
+        startup_params: vec![(" application_name ".to_string(), "qail".to_string())],
+    };
+    let err = msg.encode_checked().unwrap_err();
+    assert!(
+        matches!(err, FrontendEncodeError::InvalidStartupParam(ref message) if message.contains("whitespace")),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn encode_terminate() {
     let msg = FrontendMessage::Terminate;
     let encoded = msg.encode_checked().unwrap();

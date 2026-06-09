@@ -82,15 +82,30 @@ impl ToPg for &str {
 // ==================== Integer Types ====================
 
 impl FromPg for i32 {
-    fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
         if format == 1 {
-            // Binary format: 4 bytes big-endian
-            if bytes.len() != 4 {
-                return Err(TypeError::InvalidData(
-                    "Expected 4 bytes for i32".to_string(),
-                ));
+            match oid_val {
+                oid::INT2 => {
+                    if bytes.len() != 2 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 2 bytes for int2".to_string(),
+                        ));
+                    }
+                    Ok(i16::from_be_bytes([bytes[0], bytes[1]]) as i32)
+                }
+                oid::INT4 => {
+                    if bytes.len() != 4 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 4 bytes for int4".to_string(),
+                        ));
+                    }
+                    Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                }
+                _ => Err(TypeError::UnexpectedOid {
+                    expected: "int2/int4",
+                    got: oid_val,
+                }),
             }
-            Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         } else {
             // Text format
             std::str::from_utf8(bytes)
@@ -108,17 +123,41 @@ impl ToPg for i32 {
 }
 
 impl FromPg for i64 {
-    fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
         if format == 1 {
-            // Binary format: 8 bytes big-endian
-            if bytes.len() != 8 {
-                return Err(TypeError::InvalidData(
-                    "Expected 8 bytes for i64".to_string(),
-                ));
+            match oid_val {
+                oid::INT2 => {
+                    if bytes.len() != 2 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 2 bytes for int2".to_string(),
+                        ));
+                    }
+                    Ok(i16::from_be_bytes([bytes[0], bytes[1]]) as i64)
+                }
+                oid::INT4 => {
+                    if bytes.len() != 4 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 4 bytes for int4".to_string(),
+                        ));
+                    }
+                    Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64)
+                }
+                oid::INT8 => {
+                    if bytes.len() != 8 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 8 bytes for int8".to_string(),
+                        ));
+                    }
+                    Ok(i64::from_be_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
+                    ]))
+                }
+                _ => Err(TypeError::UnexpectedOid {
+                    expected: "int2/int4/int8",
+                    got: oid_val,
+                }),
             }
-            Ok(i64::from_be_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ]))
         } else {
             // Text format
             std::str::from_utf8(bytes)
@@ -138,17 +177,33 @@ impl ToPg for i64 {
 // ==================== Float Types ====================
 
 impl FromPg for f64 {
-    fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
         if format == 1 {
-            // Binary format: 8 bytes IEEE 754
-            if bytes.len() != 8 {
-                return Err(TypeError::InvalidData(
-                    "Expected 8 bytes for f64".to_string(),
-                ));
+            match oid_val {
+                oid::FLOAT4 => {
+                    if bytes.len() != 4 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 4 bytes for float4".to_string(),
+                        ));
+                    }
+                    Ok(f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64)
+                }
+                oid::FLOAT8 => {
+                    if bytes.len() != 8 {
+                        return Err(TypeError::InvalidData(
+                            "Expected 8 bytes for float8".to_string(),
+                        ));
+                    }
+                    Ok(f64::from_be_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                        bytes[7],
+                    ]))
+                }
+                _ => Err(TypeError::UnexpectedOid {
+                    expected: "float4/float8",
+                    got: oid_val,
+                }),
             }
-            Ok(f64::from_be_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ]))
         } else {
             // Text format
             std::str::from_utf8(bytes)
@@ -516,14 +571,24 @@ impl ToPg for Json {
 // ==================== Arrays ====================
 
 impl FromPg for Vec<String> {
-    fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
+    fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
+        if format == 1 {
+            return Err(TypeError::InvalidData(
+                "binary array decoding is not supported for Vec<String>".to_string(),
+            ));
+        }
         let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
         try_decode_text_array(s).map_err(TypeError::InvalidData)
     }
 }
 
 impl FromPg for Vec<i64> {
-    fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
+    fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
+        if format == 1 {
+            return Err(TypeError::InvalidData(
+                "binary array decoding is not supported for Vec<i64>".to_string(),
+            ));
+        }
         let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
         crate::protocol::types::decode_int_array(s).map_err(TypeError::InvalidData)
     }
@@ -540,8 +605,44 @@ impl<T: FromPg> FromPg for Option<T> {
 
 // ==================== Bytes ====================
 
+fn decode_bytea_hex_text(bytes: &[u8]) -> Result<Vec<u8>, TypeError> {
+    if !bytes.starts_with(br"\x") {
+        return Ok(bytes.to_vec());
+    }
+
+    let hex = &bytes[2..];
+    if !hex.len().is_multiple_of(2) {
+        return Err(TypeError::InvalidData(
+            "Invalid bytea hex text length".to_string(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.chunks_exact(2) {
+        let hi = decode_hex_nibble(pair[0])?;
+        let lo = decode_hex_nibble(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn decode_hex_nibble(byte: u8) -> Result<u8, TypeError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(TypeError::InvalidData(format!(
+            "Invalid bytea hex digit: {}",
+            byte as char
+        ))),
+    }
+}
+
 impl FromPg for Vec<u8> {
-    fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        if format == 0 && oid_val == oid::BYTEA {
+            return decode_bytea_hex_text(bytes);
+        }
         Ok(bytes.to_vec())
     }
 }
@@ -579,6 +680,27 @@ mod tests {
         let bytes = 42i32.to_be_bytes();
         let result = i32::from_pg(&bytes, oid::INT4, 1).unwrap();
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_i32_from_pg_binary_accepts_int2_oid() {
+        let bytes = 123i16.to_be_bytes();
+        let result = i32::from_pg(&bytes, oid::INT2, 1).unwrap();
+        assert_eq!(result, 123);
+    }
+
+    #[test]
+    fn test_i64_from_pg_binary_accepts_int4_oid() {
+        let bytes = 123_456i32.to_be_bytes();
+        let result = i64::from_pg(&bytes, oid::INT4, 1).unwrap();
+        assert_eq!(result, 123_456);
+    }
+
+    #[test]
+    fn test_f64_from_pg_binary_accepts_float4_oid() {
+        let bytes = 1.5f32.to_be_bytes();
+        let result = f64::from_pg(&bytes, oid::FLOAT4, 1).unwrap();
+        assert_eq!(result, 1.5);
     }
 
     #[test]
@@ -637,6 +759,18 @@ mod tests {
         let bytes = [2u8, 32, 0, 4, 10, 1, 2, 3];
         let inet = Inet::from_pg(&bytes, oid::INET, 1).unwrap();
         assert_eq!(inet.0, "10.1.2.3");
+    }
+
+    #[test]
+    fn test_bytea_text_hex_decodes_to_bytes() {
+        let bytes = Vec::<u8>::from_pg(br"\x000102ff", oid::BYTEA, 0).unwrap();
+        assert_eq!(bytes, vec![0, 1, 2, 255]);
+    }
+
+    #[test]
+    fn test_binary_arrays_return_explicit_error() {
+        assert!(Vec::<String>::from_pg(b"\0\0\0\0", oid::TEXT_ARRAY, 1).is_err());
+        assert!(Vec::<i64>::from_pg(b"\0\0\0\0", oid::INT8_ARRAY, 1).is_err());
     }
 
     #[test]
