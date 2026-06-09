@@ -49,6 +49,22 @@ fn unsupported_state_diff_features(schema: &Schema) -> BTreeSet<&'static str> {
     out
 }
 
+fn unconfirmed_drop_hints(schema: &Schema) -> Vec<String> {
+    let mut hints = schema
+        .migrations
+        .iter()
+        .filter_map(|hint| match hint {
+            MigrationHint::Drop {
+                target,
+                confirmed: false,
+            } => Some(target.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    hints.sort();
+    hints
+}
+
 fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -763,6 +779,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
         ));
     }
 
+    let unconfirmed_drops = unconfirmed_drop_hints(new);
+    if !unconfirmed_drops.is_empty() {
+        return Err(format!(
+            "State-based diff refuses unconfirmed destructive drop hints: {}. \
+             Add `confirm` to the drop hint or restore the object.",
+            unconfirmed_drops.join(", ")
+        ));
+    }
+
     let index_diffs = same_name_index_definition_diffs(old, new);
     if !index_diffs.is_empty() {
         return Err(format!(
@@ -1433,6 +1458,23 @@ mod tests {
             cmds.iter().any(|c| matches!(c.action, Action::Make)),
             "checked diff should still produce normal table commands"
         );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_unconfirmed_drop_hint() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = Schema::default();
+        new.add_hint(MigrationHint::Drop {
+            target: "users".to_string(),
+            confirmed: false,
+        });
+
+        let err =
+            diff_schemas_checked(&old, &new).expect_err("unconfirmed drop hint should fail closed");
+        assert!(err.contains("unconfirmed destructive drop hints"));
+        assert!(err.contains("users"));
     }
 
     fn schema_with_users_index(index: Index) -> Schema {
