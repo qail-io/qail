@@ -183,9 +183,15 @@ impl std::str::FromStr for ColumnType {
         let lower = raw.to_lowercase();
 
         if let Some(inner) = lower.strip_suffix("[]") {
-            let inner_ty = inner
-                .parse::<ColumnType>()
-                .unwrap_or_else(|_| Self::Range(inner.to_uppercase()));
+            let inner = inner.trim();
+            if inner.is_empty() {
+                return Err(());
+            }
+            let inner_ty = match inner.parse::<ColumnType>() {
+                Ok(ty) => ty,
+                Err(_) if is_custom_array_type_name(inner) => Self::Range(inner.to_uppercase()),
+                Err(_) => return Err(()),
+            };
             return Ok(Self::Array(Box::new(inner_ty)));
         }
 
@@ -266,6 +272,23 @@ impl std::str::FromStr for ColumnType {
     }
 }
 
+fn is_custom_array_type_name(input: &str) -> bool {
+    let mut parts = input.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    is_custom_type_ident(first) && parts.all(is_custom_type_ident)
+}
+
+fn is_custom_type_ident(input: &str) -> bool {
+    let mut chars = input.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +336,24 @@ mod tests {
             Ok(ColumnType::Range("SMALLINT".to_string()))
         );
         assert!("unknown".parse::<ColumnType>().is_err());
+    }
+
+    #[test]
+    fn array_type_parser_rejects_column_options_after_type() {
+        assert!(
+            "text[] not_null default '{}'::text[]"
+                .parse::<ColumnType>()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn array_type_parser_allows_custom_array_type_names() {
+        assert_eq!(
+            "ltree[]".parse::<ColumnType>(),
+            Ok(ColumnType::Array(Box::new(ColumnType::Range(
+                "LTREE".to_string()
+            ))))
+        );
     }
 }

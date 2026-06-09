@@ -1093,6 +1093,61 @@ pub fn encode_alter_add_column(
     Ok(())
 }
 
+/// Encode ALTER TABLE ADD CHECK CONSTRAINT statement.
+pub fn encode_alter_add_check_constraint(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let name = cmd
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            crate::protocol::EncodeError::InvalidAst(
+                "ALTER ADD CONSTRAINT requires a constraint name".to_string(),
+            )
+        })?;
+    let expr = cmd.payload.as_deref().ok_or_else(|| {
+        crate::protocol::EncodeError::InvalidAst(
+            "ALTER ADD CONSTRAINT requires a check expression".to_string(),
+        )
+    })?;
+    let expr = checked_sql_expr_fragment(expr, "check constraint expression")?;
+
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" ADD CONSTRAINT ");
+    push_identifier(buf, name);
+    buf.extend_from_slice(b" CHECK (");
+    buf.extend_from_slice(expr.as_bytes());
+    buf.extend_from_slice(b")");
+    Ok(())
+}
+
+/// Encode ALTER TABLE DROP CONSTRAINT statement.
+pub fn encode_alter_drop_constraint(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let name = cmd
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            crate::protocol::EncodeError::InvalidAst(
+                "ALTER DROP CONSTRAINT requires a constraint name".to_string(),
+            )
+        })?;
+
+    buf.extend_from_slice(b"ALTER TABLE ");
+    push_identifier(buf, &cmd.table);
+    buf.extend_from_slice(b" DROP CONSTRAINT ");
+    push_identifier(buf, name);
+    Ok(())
+}
+
 /// Encode ALTER TABLE DROP COLUMN statement.
 pub fn encode_alter_drop_column(
     cmd: &Qail,
@@ -2058,6 +2113,67 @@ mod tests {
         assert!(
             sql.contains("CHECK (score >= 0)"),
             "add-column SQL should preserve CHECK constraint, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn encode_alter_add_check_constraint_renders_sql() {
+        let cmd = Qail {
+            action: Action::AlterAddConstraint,
+            table: "odyssey_legs".to_string(),
+            channel: Some("odyssey_legs_arrival_day_offset_check".to_string()),
+            payload: Some(
+                "arrival_day_offset >= 0 AND arrival_day_offset <= 7 AND arrival_day_offset >= departure_day_offset"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        encode_alter_add_check_constraint(&cmd, &mut buf).unwrap();
+
+        let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
+        assert_eq!(
+            sql,
+            "ALTER TABLE odyssey_legs ADD CONSTRAINT odyssey_legs_arrival_day_offset_check CHECK (arrival_day_offset >= 0 AND arrival_day_offset <= 7 AND arrival_day_offset >= departure_day_offset)"
+        );
+    }
+
+    #[test]
+    fn encode_alter_drop_constraint_renders_sql() {
+        let cmd = Qail {
+            action: Action::AlterDropConstraint,
+            table: "odyssey_legs".to_string(),
+            channel: Some("odyssey_legs_check".to_string()),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        encode_alter_drop_constraint(&cmd, &mut buf).unwrap();
+
+        let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
+        assert_eq!(
+            sql,
+            "ALTER TABLE odyssey_legs DROP CONSTRAINT odyssey_legs_check"
+        );
+    }
+
+    #[test]
+    fn encode_alter_add_check_constraint_rejects_unsafe_expression() {
+        let cmd = Qail {
+            action: Action::AlterAddConstraint,
+            table: "odyssey_legs".to_string(),
+            channel: Some("odyssey_legs_arrival_day_offset_check".to_string()),
+            payload: Some("arrival_day_offset >= 0; DROP TABLE users".to_string()),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let err = encode_alter_add_check_constraint(&cmd, &mut buf)
+            .expect_err("unsafe check expression must fail");
+        assert!(
+            matches!(&err, crate::protocol::EncodeError::InvalidAst(message) if message.contains("check constraint expression")),
+            "unexpected error: {err:?}"
         );
     }
 

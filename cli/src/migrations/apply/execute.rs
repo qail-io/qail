@@ -870,6 +870,7 @@ async fn verify_applied_commands_effects(
 
     let mut failures = Vec::<String>::new();
     let policy_expectations = collect_policy_final_expectations(cmds);
+    let constraint_expectations = collect_constraint_final_expectations(cmds);
 
     for cmd in cmds {
         match cmd.action {
@@ -893,13 +894,8 @@ async fn verify_applied_commands_effects(
                 verify_table_constraints(pg, cmd, &mut failures).await?;
             }
             Action::AlterAddConstraint => {
-                let name = cmd.channel.as_deref().unwrap_or("");
-                if name.is_empty() || !table_constraint_exists(pg, &cmd.table, name).await? {
-                    failures.push(format!(
-                        "expected constraint '{}.{}' to exist",
-                        cmd.table, name
-                    ));
-                }
+                // Verified in final-state pass below so drop/add replacements in the
+                // same migration are checked by the last command's intent.
             }
             Action::Drop if table_exists(pg, &cmd.table).await? => {
                 failures.push(format!("expected table '{}' to be dropped", cmd.table));
@@ -933,13 +929,8 @@ async fn verify_applied_commands_effects(
                 }
             }
             Action::AlterDropConstraint => {
-                let name = cmd.channel.as_deref().unwrap_or("");
-                if !name.is_empty() && table_constraint_exists(pg, &cmd.table, name).await? {
-                    failures.push(format!(
-                        "expected constraint '{}.{}' to be dropped",
-                        cmd.table, name
-                    ));
-                }
+                // Verified in final-state pass below so drop/add replacements in the
+                // same migration are checked by the last command's intent.
             }
             Action::Mod => {
                 for rename_expr in cmd.columns.iter().filter_map(|col| match col {
@@ -991,6 +982,31 @@ async fn verify_applied_commands_effects(
                 // same migration are checked by the last command's intent.
             }
             _ => {}
+        }
+    }
+
+    for ((table, constraint_name), should_exist) in constraint_expectations {
+        if constraint_name.is_empty() {
+            if should_exist {
+                failures.push(format!(
+                    "expected named constraint on table '{}' to exist",
+                    table
+                ));
+            }
+            continue;
+        }
+        let exists = table_constraint_exists(pg, &table, &constraint_name).await?;
+        if should_exist && !exists {
+            failures.push(format!(
+                "expected constraint '{}.{}' to exist",
+                table, constraint_name
+            ));
+        }
+        if !should_exist && exists {
+            failures.push(format!(
+                "expected constraint '{}.{}' to be dropped",
+                table, constraint_name
+            ));
         }
     }
 
@@ -1098,6 +1114,24 @@ fn collect_policy_final_expectations(cmds: &[Qail]) -> HashMap<(String, String),
                 if let Some(policy_name) = cmd.payload.as_ref() {
                     expected.insert((cmd.table.clone(), policy_name.clone()), false);
                 }
+            }
+            _ => {}
+        }
+    }
+    expected
+}
+
+fn collect_constraint_final_expectations(cmds: &[Qail]) -> HashMap<(String, String), bool> {
+    let mut expected = HashMap::<(String, String), bool>::new();
+    for cmd in cmds {
+        match cmd.action {
+            Action::AlterAddConstraint => {
+                let name = cmd.channel.as_deref().unwrap_or("").trim().to_string();
+                expected.insert((cmd.table.clone(), name), true);
+            }
+            Action::AlterDropConstraint => {
+                let name = cmd.channel.as_deref().unwrap_or("").trim().to_string();
+                expected.insert((cmd.table.clone(), name), false);
             }
             _ => {}
         }
@@ -2241,13 +2275,14 @@ mod tests {
     use super::{
         ApplyDownContext, ApplyReceiptContext, LiveColumnDefinition,
         active_contract_baseline_group, apply_commands_and_record_receipt_atomic,
-        apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
-        column_type_matches, constraint_columns_match, deferrable_matches,
-        enforce_apply_destructive_policy, enforce_apply_down_destructive_policy,
-        ensure_applied_checksum_matches, ensure_up_down_pairing, fk_rule_matches,
-        foreign_key_constraint_matches, normalize_column_type, parse_qail_to_commands_strict,
-        parse_rename_expr, should_adopt_existing_error, should_run_apply_lock_risk_preflight,
-        split_schema_ident, strip_optional_if_exists_prefix, validate_receipts_against_local,
+        apply_down_commands_and_reconcile_history_atomic, collect_constraint_final_expectations,
+        collect_policy_final_expectations, column_type_matches, constraint_columns_match,
+        deferrable_matches, enforce_apply_destructive_policy,
+        enforce_apply_down_destructive_policy, ensure_applied_checksum_matches,
+        ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches,
+        normalize_column_type, parse_qail_to_commands_strict, parse_rename_expr,
+        should_adopt_existing_error, should_run_apply_lock_risk_preflight, split_schema_ident,
+        strip_optional_if_exists_prefix, validate_receipts_against_local,
         verify_applied_commands_effects,
     };
     use super::{ExpectedForeignKeyConstraint, LiveForeignKeyConstraint};
@@ -2764,6 +2799,62 @@ mod tests {
                 "reseller_pricing_overrides".to_string(),
                 "tenant_isolation".to_string()
             )),
+            Some(&false)
+        );
+    }
+
+    #[test]
+    fn constraint_expectations_follow_last_command_intent() {
+        let cmds = vec![
+            Qail {
+                action: Action::AlterDropConstraint,
+                table: "odyssey_legs".to_string(),
+                channel: Some("odyssey_legs_arrival_day_offset_check".to_string()),
+                ..Default::default()
+            },
+            Qail {
+                action: Action::AlterAddConstraint,
+                table: "odyssey_legs".to_string(),
+                channel: Some("odyssey_legs_arrival_day_offset_check".to_string()),
+                payload: Some(
+                    "arrival_day_offset >= 0 AND arrival_day_offset <= 7 AND arrival_day_offset >= departure_day_offset"
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        let expected = collect_constraint_final_expectations(&cmds);
+        assert_eq!(
+            expected.get(&(
+                "odyssey_legs".to_string(),
+                "odyssey_legs_arrival_day_offset_check".to_string()
+            )),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn constraint_expectations_handle_create_then_drop() {
+        let cmds = vec![
+            Qail {
+                action: Action::AlterAddConstraint,
+                table: "odyssey_legs".to_string(),
+                channel: Some("odyssey_legs_check".to_string()),
+                payload: Some("arrival_day_offset >= departure_day_offset".to_string()),
+                ..Default::default()
+            },
+            Qail {
+                action: Action::AlterDropConstraint,
+                table: "odyssey_legs".to_string(),
+                channel: Some("odyssey_legs_check".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let expected = collect_constraint_final_expectations(&cmds);
+        assert_eq!(
+            expected.get(&("odyssey_legs".to_string(), "odyssey_legs_check".to_string())),
             Some(&false)
         );
     }

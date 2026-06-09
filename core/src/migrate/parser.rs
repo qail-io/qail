@@ -5485,6 +5485,30 @@ index idx_booking_orders_user on booking_orders (user_id)
     }
 
     #[test]
+    fn parse_text_array_column_does_not_absorb_default_into_type() {
+        let input = r#"
+table agents {
+  id uuid primary_key
+  verticals TEXT[] not_null default '{}'::text[]
+}
+"#;
+        let schema = parse_qail(input).expect("array column with default should parse");
+        let table = &schema.tables["agents"];
+        let verticals = table
+            .columns
+            .iter()
+            .find(|col| col.name == "verticals")
+            .expect("verticals column should exist");
+
+        assert_eq!(
+            verticals.data_type,
+            ColumnType::Array(Box::new(ColumnType::Text))
+        );
+        assert!(!verticals.nullable);
+        assert_eq!(verticals.default.as_deref(), Some("'{}'::text[]"));
+    }
+
+    #[test]
     fn test_parse_rejects_invalid_primary_key_type() {
         let input = r#"
 table bad_pk {

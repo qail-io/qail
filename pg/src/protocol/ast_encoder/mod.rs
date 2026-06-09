@@ -178,6 +178,8 @@ impl AstEncoder {
             Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, sql_buf),
             Action::Alter => ddl::encode_alter_add_column(cmd, sql_buf)?,
+            Action::AlterAddConstraint => ddl::encode_alter_add_check_constraint(cmd, sql_buf)?,
+            Action::AlterDropConstraint => ddl::encode_alter_drop_constraint(cmd, sql_buf)?,
             Action::AlterDrop => ddl::encode_alter_drop_column(cmd, sql_buf)?,
             Action::AlterType => ddl::encode_alter_column_type(cmd, sql_buf)?,
             Action::Mod => ddl::encode_rename_column(cmd, sql_buf)?,
@@ -263,6 +265,10 @@ impl AstEncoder {
             Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
             Action::DropIndex => ddl::encode_drop_index(cmd, &mut sql_buf),
             Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf)?,
+            Action::AlterAddConstraint => {
+                ddl::encode_alter_add_check_constraint(cmd, &mut sql_buf)?
+            }
+            Action::AlterDropConstraint => ddl::encode_alter_drop_constraint(cmd, &mut sql_buf)?,
             Action::AlterDrop => ddl::encode_alter_drop_column(cmd, &mut sql_buf)?,
             Action::AlterType => ddl::encode_alter_column_type(cmd, &mut sql_buf)?,
             Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf)?,

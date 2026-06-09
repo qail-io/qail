@@ -450,6 +450,34 @@ mod tests {
     }
 
     #[test]
+    fn constraint_index_metadata_skips_owned_indexes_without_suffix_heuristics() {
+        let index_oid_to_name = std::collections::HashMap::from([
+            ("11".to_string(), "fishing_skaphos_pkey1".to_string()),
+            (
+                "12".to_string(),
+                "reseller_pricing_overrides_contract_tier_date_key".to_string(),
+            ),
+            ("13".to_string(), "idx_holds_idempotency_key".to_string()),
+            ("14".to_string(), "users_email_key".to_string()),
+        ]);
+        let constraint_indexes = vec![
+            ("11".to_string(), "p".to_string()),
+            ("14".to_string(), "u".to_string()),
+            ("0".to_string(), "c".to_string()),
+        ];
+
+        let names = constraint_index_names_from_metadata(&index_oid_to_name, &constraint_indexes);
+
+        assert!(names.contains("fishing_skaphos_pkey1"));
+        assert!(names.contains("users_email_key"));
+        assert!(!names.contains("reseller_pricing_overrides_contract_tier_date_key"));
+        assert!(
+            !names.contains("idx_holds_idempotency_key"),
+            "suffix-only _key names must not be treated as constraint-backed"
+        );
+    }
+
+    #[test]
     fn live_shadow_diff_scope_prunes_non_table_families() {
         use qail_core::migrate::{Comment, RlsPolicy, diff_schemas_checked};
 
@@ -672,18 +700,34 @@ mod tests {
     #[test]
     fn parse_column_type_preserves_unknown_and_user_defined_types() {
         assert_eq!(
-            parse_column_type("USER-DEFINED", Some("booking_status")),
+            parse_column_type("USER-DEFINED", Some("booking_status"), false),
             ColumnType::Range("BOOKING_STATUS".to_string())
         );
         assert_eq!(
-            parse_column_type("ltree", None),
+            parse_column_type("ltree", None, false),
             ColumnType::Range("LTREE".to_string())
         );
         assert_eq!(
-            parse_column_type("ARRAY", Some("_int4")),
+            parse_column_type("ARRAY", Some("_int4"), false),
             ColumnType::Array(Box::new(ColumnType::Int))
         );
-        assert_ne!(parse_column_type("ltree", None), ColumnType::Text);
+        assert_ne!(parse_column_type("ltree", None, false), ColumnType::Text);
+    }
+
+    #[test]
+    fn parse_column_type_preserves_serial_pseudo_types_from_nextval_default() {
+        assert_eq!(
+            parse_column_type("integer", Some("int4"), true),
+            ColumnType::Serial
+        );
+        assert_eq!(
+            parse_column_type("bigint", Some("int8"), true),
+            ColumnType::BigSerial
+        );
+        assert_eq!(
+            parse_column_type("bigint", Some("int8"), false),
+            ColumnType::BigInt
+        );
     }
 
     #[test]
@@ -854,7 +898,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .transpose()?
         .ok_or_else(|| anyhow!("Public schema not found in pg_namespace"))?;
 
-    let (single_unique_columns, unique_constraint_indexes, unique_constraint_names) =
+    let (single_unique_columns, unique_constraint_indexes, _unique_constraint_names) =
         introspect_unique_constraints(driver).await?;
     let primary_key_columns = introspect_primary_key_columns(driver).await?;
 
@@ -910,8 +954,12 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             let generation_expression = row.get_string(7);
             let udt_name = row.get_string(8);
 
+            let has_nextval_default = raw_default
+                .as_deref()
+                .is_some_and(|d| d.trim_start().starts_with("nextval("));
             // Parse data type to ColumnType
-            let data_type = parse_column_type(&data_type_str, udt_name.as_deref());
+            let data_type =
+                parse_column_type(&data_type_str, udt_name.as_deref(), has_nextval_default);
             let generated = introspected_column_generation(
                 is_identity,
                 identity_generation.as_deref(),
@@ -922,7 +970,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             // Strip defaults for SERIAL and IDENTITY columns (auto-generated)
             // nextval() for SERIAL, identity columns handle their own generation
             let default = match &raw_default {
-                Some(d) if d.starts_with("nextval(") => None,
+                Some(d) if d.trim_start().starts_with("nextval(") => None,
                 _ if generated.is_some() => None, // Generated columns don't need explicit default
                 other => other.clone(),
             };
@@ -966,6 +1014,34 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
 
+    let table_name_set: std::collections::HashSet<String> = table_names.iter().cloned().collect();
+    let idx_class_cmd = Qail::get("pg_catalog.pg_class")
+        .columns(["oid", "relname"])
+        .filter("relkind", Operator::Eq, "i")
+        .filter("relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let idx_class_rows = driver
+        .fetch_all(&idx_class_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query index class metadata: {}", e))?;
+    let mut index_oid_to_name = std::collections::HashMap::new();
+    for row in idx_class_rows {
+        index_oid_to_name.insert(row.text(0), row.text(1));
+    }
+
+    let conidx_cmd = Qail::get("pg_catalog.pg_constraint")
+        .columns(["conindid", "contype"])
+        .filter("connamespace", Operator::Eq, public_namespace_oid.clone());
+    let conidx_rows = driver
+        .fetch_all(&conidx_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query constraint index metadata: {}", e))?;
+    let mut constraint_index_metadata = Vec::new();
+    for row in conidx_rows {
+        constraint_index_metadata.push((row.text(0), row.text(1)));
+    }
+    let constraint_index_names =
+        constraint_index_names_from_metadata(&index_oid_to_name, &constraint_index_metadata);
+
     let unique_constraint_index_names: std::collections::HashSet<String> =
         unique_constraint_indexes
             .iter()
@@ -978,15 +1054,14 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         let table_name = required_shadow_metadata_string(row, 1, "tablename")?;
         let indexdef = required_shadow_metadata_string(row, 2, "indexdef")?;
 
-        // Skip primary key indexes (they're implicit)
-        if idx_name.ends_with("_pkey") {
+        if !table_name_set.contains(&table_name) {
             continue;
         }
 
-        // Skip constraint-backed unique indexes; they are represented as
-        // column-level unique flags or explicit composite unique indexes.
-        if idx_name.ends_with("_key")
-            || unique_constraint_names.contains(&idx_name)
+        // Skip constraint-backed indexes; primary keys are represented by
+        // column flags, and unique constraints are represented by column flags
+        // or explicit composite unique indexes from introspect_unique_constraints.
+        if constraint_index_names.contains(&idx_name)
             || unique_constraint_index_names.contains(&idx_name)
         {
             continue;
@@ -1430,6 +1505,22 @@ fn resolve_introspected_primary_key_columns(
     primary_key_columns
 }
 
+fn constraint_index_names_from_metadata(
+    index_oid_to_name: &std::collections::HashMap<String, String>,
+    constraint_indexes: &[(String, String)],
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for (conindid, contype) in constraint_indexes {
+        if matches!(contype.as_str(), "p" | "u" | "x")
+            && conindid != "0"
+            && let Some(name) = index_oid_to_name.get(conindid)
+        {
+            names.insert(name.clone());
+        }
+    }
+    names
+}
+
 async fn introspect_unique_constraints(
     driver: &mut PgDriver,
 ) -> Result<(
@@ -1506,11 +1597,11 @@ async fn introspect_unique_constraints(
 }
 
 /// Parse PostgreSQL data type metadata to ColumnType.
-fn parse_column_type(data_type: &str, udt_name: Option<&str>) -> ColumnType {
+fn parse_column_type(data_type: &str, udt_name: Option<&str>, nextval_default: bool) -> ColumnType {
     if data_type.eq_ignore_ascii_case("array")
         && let Some(array_inner) = udt_name.and_then(|name| name.strip_prefix('_'))
     {
-        return ColumnType::Array(Box::new(parse_column_type(array_inner, None)));
+        return ColumnType::Array(Box::new(parse_column_type(array_inner, None, false)));
     }
 
     let raw_type = if data_type.eq_ignore_ascii_case("user-defined") {
@@ -1520,8 +1611,20 @@ fn parse_column_type(data_type: &str, udt_name: Option<&str>) -> ColumnType {
     };
 
     match raw_type.to_lowercase().as_str() {
-        "integer" | "int" | "int4" => ColumnType::Int,
-        "bigint" | "int8" => ColumnType::BigInt,
+        "integer" | "int" | "int4" => {
+            if nextval_default {
+                ColumnType::Serial
+            } else {
+                ColumnType::Int
+            }
+        }
+        "bigint" | "int8" => {
+            if nextval_default {
+                ColumnType::BigSerial
+            } else {
+                ColumnType::BigInt
+            }
+        }
         "smallint" | "int2" => ColumnType::Range("SMALLINT".to_string()),
         "text" => ColumnType::Text,
         "character varying" | "varchar" => ColumnType::Varchar(None),

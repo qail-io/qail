@@ -349,7 +349,7 @@ fn unsupported_existing_column_type_diffs(old: &Schema, new: &Schema) -> Vec<Str
                 continue;
             };
 
-            if old_col.data_type != new_col.data_type
+            if !column_types_equivalent_for_diff(&old_col.data_type, &new_col.data_type)
                 && !is_safe_existing_column_type_change(&old_col.data_type, &new_col.data_type)
             {
                 changes.push(format!(
@@ -368,7 +368,7 @@ fn unsupported_existing_column_type_diffs(old: &Schema, new: &Schema) -> Vec<Str
 }
 
 fn is_safe_existing_column_type_change(old: &ColumnType, new: &ColumnType) -> bool {
-    if old == new {
+    if column_types_equivalent_for_diff(old, new) {
         return true;
     }
 
@@ -386,6 +386,25 @@ fn is_safe_existing_column_type_change(old: &ColumnType, new: &ColumnType) -> bo
         }
         (ColumnType::Varchar(Some(_)), ColumnType::Varchar(None)) => true,
         (old, ColumnType::Int | ColumnType::BigInt) if is_smallint_type(old) => true,
+        _ => false,
+    }
+}
+
+fn column_types_equivalent_for_diff(old: &ColumnType, new: &ColumnType) -> bool {
+    if old == new {
+        return true;
+    }
+
+    match (old, new) {
+        (ColumnType::Array(old_inner), ColumnType::Array(new_inner)) => {
+            column_types_equivalent_for_diff(old_inner, new_inner)
+        }
+        (ColumnType::Enum { name: old_name, .. }, ColumnType::Enum { name: new_name, .. })
+        | (ColumnType::Enum { name: old_name, .. }, ColumnType::Range(new_name))
+        | (ColumnType::Range(old_name), ColumnType::Enum { name: new_name, .. })
+        | (ColumnType::Range(old_name), ColumnType::Range(new_name)) => {
+            old_name.eq_ignore_ascii_case(new_name)
+        }
         _ => false,
     }
 }
@@ -1496,10 +1515,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
             // Detect type changes in existing columns
             for new_col in &new_table.columns {
                 if let Some(old_col) = old_table.columns.iter().find(|c| c.name == new_col.name) {
-                    let old_type = old_col.data_type.to_pg_type();
                     let new_type = new_col.data_type.to_pg_type();
 
-                    if old_type != new_type {
+                    if !column_types_equivalent_for_diff(&old_col.data_type, &new_col.data_type) {
                         // Type changed - ALTER COLUMN TYPE
                         // SERIAL is pseudo-type only valid in CREATE TABLE
                         let safe_new_type = match &new_col.data_type {
@@ -2398,6 +2416,114 @@ mod tests {
         assert!(err.contains("existing column types"));
         assert!(err.contains("events.external_id"));
         assert!(err.contains("TEXT -> UUID"));
+    }
+
+    #[test]
+    fn state_diff_checked_does_not_treat_array_default_as_type_suffix() {
+        let old = super::super::parser::parse_qail(
+            r#"
+table agents {
+  id uuid primary_key
+  verticals TEXT[]
+}
+"#,
+        )
+        .expect("old schema should parse");
+        let new = super::super::parser::parse_qail(
+            r#"
+table agents {
+  id uuid primary_key
+  verticals TEXT[] not_null default '{}'::text[]
+}
+"#,
+        )
+        .expect("new schema should parse");
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("setting NOT NULL on an existing array column needs explicit migration");
+        assert!(err.contains("set NOT NULL"));
+        assert!(err.contains("agents.verticals"));
+        assert!(!err.contains("existing column types"));
+        assert!(!err.contains("TEXT[] NOT_NULL DEFAULT"));
+    }
+
+    #[test]
+    fn state_diff_checked_ignores_unquoted_enum_identifier_case_drift() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("articles").column(Column::new(
+            "status",
+            ColumnType::Range("ARTICLE_STATUS".to_string()),
+        )));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("articles").column(Column::new(
+            "status",
+            ColumnType::Enum {
+                name: "article_status".to_string(),
+                values: vec![
+                    "draft".to_string(),
+                    "published".to_string(),
+                    "archived".to_string(),
+                ],
+            },
+        )));
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("case-only enum placeholder drift should be treated as same type");
+        assert!(
+            cmds.iter()
+                .all(|cmd| cmd.action != Action::AlterType || cmd.table != "articles"),
+            "case-only enum type drift must not emit ALTER TYPE: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn state_diff_checked_ignores_array_enum_identifier_case_drift() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("operators").column(Column::new(
+            "roles",
+            ColumnType::Array(Box::new(ColumnType::Range("USER_ROLE".to_string()))),
+        )));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("operators").column(Column::new(
+            "roles",
+            ColumnType::Array(Box::new(ColumnType::Enum {
+                name: "user_role".to_string(),
+                values: vec!["admin".to_string(), "operator".to_string()],
+            })),
+        )));
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("case-only array enum placeholder drift should be treated as same type");
+        assert!(
+            cmds.iter()
+                .all(|cmd| cmd.action != Action::AlterType || cmd.table != "operators"),
+            "case-only array enum type drift must not emit ALTER TYPE: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_distinct_custom_type_names() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("articles").column(Column::new(
+            "status",
+            ColumnType::Range("article_status".to_string()),
+        )));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("articles").column(Column::new(
+            "status",
+            ColumnType::Enum {
+                name: "user_role".to_string(),
+                values: vec!["admin".to_string(), "operator".to_string()],
+            },
+        )));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("distinct custom type names should require explicit migration");
+        assert!(err.contains("existing column types"));
+        assert!(err.contains("articles.status"));
     }
 
     #[test]
