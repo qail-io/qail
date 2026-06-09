@@ -32,7 +32,7 @@ fn cmds_wire_json(cmds: &[Qail], dialect: Dialect) -> serde_json::Value {
     serde_json::Value::Array(rows)
 }
 
-fn schema_for_live_table_index_diff(
+pub(crate) fn schema_for_live_table_index_diff(
     mut schema: Schema,
     skipped: &mut BTreeSet<&'static str>,
 ) -> Schema {

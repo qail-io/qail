@@ -450,6 +450,33 @@ mod tests {
     }
 
     #[test]
+    fn live_shadow_diff_scope_prunes_non_table_families() {
+        use qail_core::migrate::{Comment, RlsPolicy, diff_schemas_checked};
+
+        let mut live = Schema::default();
+        live.add_table(Table::new("users"));
+
+        let mut target = live.clone();
+        target.add_comment(Comment::on_table("users", "profile rows"));
+        target.add_policy(RlsPolicy::create("users_isolation", "users"));
+
+        let err = diff_schemas_checked(&live, &target)
+            .expect_err("raw state diff should reject rich object families");
+        assert!(err.contains("Unsupported schema object families"), "{err}");
+
+        let (scoped_live, scoped_target, skipped) = prepare_live_shadow_diff_schemas(live, target);
+
+        assert!(scoped_target.comments.is_empty());
+        assert!(scoped_target.policies.is_empty());
+        assert_eq!(
+            skipped.into_iter().collect::<Vec<_>>(),
+            vec!["comments", "policies"]
+        );
+        diff_schemas_checked(&scoped_live, &scoped_target)
+            .expect("live shadow diff should stay scoped to tables/indexes");
+    }
+
+    #[test]
     fn shadow_check_introspection_preserves_single_column_checks() {
         let mut schema = Schema::default();
         schema.tables.insert(
@@ -2150,7 +2177,18 @@ pub async fn run_shadow_migration_live(
     let new_schema = parse_qail_file(new_schema_path)
         .map_err(|e| anyhow!("Failed to parse new schema: {}", e))?;
 
-    // Step 2: Generate diff between LIVE schema and new schema
+    // Step 2: Generate diff between LIVE schema and new schema. Live state
+    // diff is intentionally scoped to tables/indexes; strict migrations cover
+    // richer object families such as policies, comments, functions, and views.
+    let (live_schema, new_schema, skipped_families) =
+        prepare_live_shadow_diff_schemas(live_schema, new_schema);
+    if !skipped_families.is_empty() {
+        println!(
+            "    {} live shadow diff scoped to tables/indexes; strict migrations cover other object families",
+            "↷".yellow()
+        );
+    }
+
     let old_cmds = schema_to_commands(&live_schema);
     let diff_cmds = diff_schemas_checked(&live_schema, &new_schema).map_err(|e| {
         anyhow!(
@@ -2202,6 +2240,18 @@ pub async fn run_shadow_migration_live(
     display_shadow_status(&state);
 
     Ok(state)
+}
+
+fn prepare_live_shadow_diff_schemas(
+    live_schema: Schema,
+    new_schema: Schema,
+) -> (Schema, Schema, std::collections::BTreeSet<&'static str>) {
+    let mut skipped_families = std::collections::BTreeSet::new();
+    let live_schema =
+        crate::schema::schema_for_live_table_index_diff(live_schema, &mut skipped_families);
+    let new_schema =
+        crate::schema::schema_for_live_table_index_diff(new_schema, &mut skipped_families);
+    (live_schema, new_schema, skipped_families)
 }
 
 /// Apply base schema to shadow (CREATE TABLEs from old.qail)
