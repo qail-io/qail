@@ -65,6 +65,15 @@ fn unconfirmed_drop_hints(schema: &Schema) -> Vec<String> {
     hints
 }
 
+fn validate_schema_for_state_diff(label: &str, schema: &Schema) -> Result<(), String> {
+    schema.validate().map_err(|errors| {
+        format!(
+            "State-based diff cannot use invalid {label} schema:\n{}",
+            errors.join("\n")
+        )
+    })
+}
+
 fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -172,6 +181,30 @@ fn removed_or_changed_multi_column_foreign_keys(old: &Schema, new: &Schema) -> V
     }
 
     changes.sort();
+    changes
+}
+
+fn added_multi_column_foreign_keys_on_existing_tables(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_fk in &new_table.multi_column_fks {
+            if !old_table.multi_column_fks.contains(new_fk) {
+                changes.push(format!(
+                    "{}.{}",
+                    table_name,
+                    multi_column_fk_signature(new_fk)
+                ));
+            }
+        }
+    }
+
+    changes.sort();
+    changes.dedup();
     changes
 }
 
@@ -541,6 +574,26 @@ fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     changes
 }
 
+fn existing_table_rls_downgrades(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, old_table) in &old.tables {
+        let Some(new_table) = new.tables.get(table_name) else {
+            continue;
+        };
+
+        if old_table.enable_rls && !new_table.enable_rls {
+            changes.push(format!("{table_name} (disable RLS)"));
+        }
+        if old_table.force_rls && !new_table.force_rls {
+            changes.push(format!("{table_name} (drop FORCE RLS)"));
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
     check
         .as_ref()
@@ -853,6 +906,9 @@ fn table_references_table(table: &super::schema::Table, target: &str) -> bool {
 ///
 /// Returns an error when object families outside table/index/hint coverage are present.
 pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), String> {
+    validate_schema_for_state_diff("source", old)?;
+    validate_schema_for_state_diff("target", new)?;
+
     let mut unsupported = unsupported_state_diff_features(old);
     unsupported.extend(unsupported_state_diff_features(new));
 
@@ -1001,12 +1057,30 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
         ));
     }
 
+    let added_multi_fks = added_multi_column_foreign_keys_on_existing_tables(old, new);
+    if !added_multi_fks.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add multi-column foreign keys to existing tables: {}. \
+             Use an explicit migration to validate/backfill references before ADD CONSTRAINT.",
+            added_multi_fks.join(", ")
+        ));
+    }
+
     let generated_diffs = existing_column_generated_diffs(old, new);
     if !generated_diffs.is_empty() {
         return Err(format!(
             "State-based diff cannot safely alter GENERATED/IDENTITY clauses on existing columns: {}. \
              Use an explicit migration for GENERATED/IDENTITY changes.",
             generated_diffs.join(", ")
+        ));
+    }
+
+    let rls_downgrades = existing_table_rls_downgrades(old, new);
+    if !rls_downgrades.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely downgrade RLS on existing tables: {}. \
+             Use an explicit migration for DISABLE ROW LEVEL SECURITY or NO FORCE ROW LEVEL SECURITY.",
+            rls_downgrades.join(", ")
         ));
     }
 
@@ -1575,6 +1649,24 @@ mod tests {
     }
 
     #[test]
+    fn state_diff_checked_rejects_invalid_target_schema() {
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.add_index(Index::new(
+            "idx_users_missing",
+            "users",
+            vec!["missing_col".to_string()],
+        ));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("checked diff must reject invalid target schema");
+        assert!(err.contains("invalid target schema"));
+        assert!(err.contains("non-existent column 'users.missing_col'"));
+    }
+
+    #[test]
     fn state_diff_checked_rejects_unconfirmed_drop_hint() {
         let mut old = Schema::default();
         old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
@@ -1600,6 +1692,23 @@ mod tests {
                 .column(Column::new("email", ColumnType::Text))
                 .column(Column::new("username", ColumnType::Text))
                 .column(Column::new("deleted_at", ColumnType::Text)),
+        );
+        schema.add_table(
+            Table::new("audit_log")
+                .column(Column::new("impersonation_session_id", ColumnType::Text)),
+        );
+        schema.add_table(
+            Table::new("whatsapp_outbox")
+                .column(Column::new("next_attempt_at", ColumnType::Timestamp))
+                .column(Column::new("status", ColumnType::Text)),
+        );
+        schema.add_table(
+            Table::new("car_availability")
+                .column(Column::new("vehicle_id", ColumnType::Text))
+                .column(Column::new("service_date", ColumnType::Date))
+                .column(Column::new("start_time", ColumnType::Time))
+                .column(Column::new("end_time", ColumnType::Time))
+                .column(Column::new("status", ColumnType::Text)),
         );
         schema.add_index(index);
         schema
@@ -2528,6 +2637,41 @@ mod tests {
     }
 
     #[test]
+    fn state_diff_checked_rejects_existing_table_rls_disable() {
+        let mut old = Schema::default();
+        let mut docs = Table::new("docs").column(Column::new("id", ColumnType::Int));
+        docs.enable_rls = true;
+        old.add_table(docs);
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("docs").column(Column::new("id", ColumnType::Int)));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("RLS disable should require an explicit migration");
+        assert!(err.contains("downgrade RLS"));
+        assert!(err.contains("docs (disable RLS)"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_table_force_rls_drop() {
+        let mut old = Schema::default();
+        let mut docs = Table::new("docs").column(Column::new("id", ColumnType::Int));
+        docs.enable_rls = true;
+        docs.force_rls = true;
+        old.add_table(docs);
+
+        let mut new = Schema::default();
+        let mut docs = Table::new("docs").column(Column::new("id", ColumnType::Int));
+        docs.enable_rls = true;
+        new.add_table(docs);
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("FORCE RLS removal should require an explicit migration");
+        assert!(err.contains("downgrade RLS"));
+        assert!(err.contains("docs (drop FORCE RLS)"));
+    }
+
+    #[test]
     fn diff_dropped_tables_orders_child_before_parent_by_incoming_fk_topology() {
         use super::super::types::ColumnType;
 
@@ -3040,6 +3184,39 @@ mod tests {
             ),
             "generated SQL should add composite foreign key, got: {sql}"
         );
+    }
+
+    #[test]
+    fn state_diff_support_rejects_added_multi_column_foreign_key_on_existing_table() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        old.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("trips")
+            .expect("trips table should exist")
+            .multi_column_fks
+            .push(MultiColumnForeignKey::new(
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            ));
+
+        let err =
+            diff_schemas_checked(&old, &new).expect_err("added composite FK should fail closed");
+        assert!(err.contains("add multi-column foreign keys"));
+        assert!(err.contains("trips."));
     }
 
     #[test]
