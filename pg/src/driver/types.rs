@@ -28,7 +28,7 @@ impl ColumnInfo {
         let mut formats = Vec::with_capacity(fields.len());
 
         for (i, field) in fields.iter().enumerate() {
-            name_to_index.insert(field.name.clone(), i);
+            name_to_index.entry(field.name.clone()).or_insert(i);
             oids.push(field.type_oid);
             formats.push(field.format);
         }
@@ -258,6 +258,32 @@ impl PgError {
             | "57P01"
             | "57P02"
         ) || code.starts_with("08") // connection_exception class
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ColumnInfo;
+    use crate::protocol::FieldDescription;
+
+    fn field(name: &str, type_oid: u32) -> FieldDescription {
+        FieldDescription {
+            name: name.to_string(),
+            table_oid: 0,
+            column_attr: 0,
+            type_oid,
+            type_size: -1,
+            type_modifier: -1,
+            format: 0,
+        }
+    }
+
+    #[test]
+    fn column_info_preserves_first_duplicate_column_name() {
+        let info = ColumnInfo::from_fields(&[field("id", 23), field("id", 25)]);
+
+        assert_eq!(info.name_to_index.get("id").copied(), Some(0));
+        assert_eq!(info.oids, vec![23, 25]);
     }
 }
 

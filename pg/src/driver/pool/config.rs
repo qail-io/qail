@@ -569,10 +569,14 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
 
     let (host_port, database) = if host_part.contains('/') {
         let mut parts = host_part.splitn(2, '/');
-        (
-            parts.next().unwrap_or("localhost"),
-            percent_decode(parts.next().unwrap_or("postgres"))?,
-        )
+        let host_port = parts.next().unwrap_or("localhost");
+        let database = percent_decode(parts.next().unwrap_or("postgres"))?;
+        if database.is_empty() {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL database: missing database name".to_string(),
+            ));
+        }
+        (host_port, database)
     } else {
         (host_part, "postgres".to_string())
     };
@@ -681,10 +685,19 @@ fn percent_decode(s: &str) -> PgResult<String> {
     let mut i = 0;
 
     while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
-        {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(PgError::Connection(
+                    "Invalid PostgreSQL URL percent-encoding: '%' must be followed by two hex digits"
+                        .to_string(),
+                ));
+            }
+            let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) else {
+                return Err(PgError::Connection(
+                    "Invalid PostgreSQL URL percent-encoding: '%' must be followed by two hex digits"
+                        .to_string(),
+                ));
+            };
             decoded.push((hi << 4) | lo);
             i += 3;
         } else {

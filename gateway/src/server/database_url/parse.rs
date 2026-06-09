@@ -5,11 +5,44 @@ use qail_pg::{PoolConfig, TlsConfig};
 
 use super::{gss::apply_gss_provider, parse_bool_query};
 
+fn percent_decode_component(value: &str, label: &str) -> Result<String, GatewayError> {
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = value.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' {
+            if idx + 2 >= bytes.len()
+                || hex_value(bytes[idx + 1]).is_none()
+                || hex_value(bytes[idx + 2]).is_none()
+            {
+                return Err(GatewayError::Config(format!(
+                    "Invalid percent encoding in {label}: '%' must be followed by two hex digits"
+                )));
+            }
+            idx += 3;
+        } else {
+            idx += 1;
+        }
+    }
+
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .map_err(|e| GatewayError::Config(format!("Invalid UTF-8 in {label}: {}", e)))
+        .map(std::borrow::Cow::into_owned)
+}
+
 pub(super) fn parse_database_url(
     url_str: &str,
     gateway_config: &GatewayConfig,
 ) -> Result<PoolConfig, GatewayError> {
-    use percent_encoding::percent_decode_str;
     use qail_pg::driver::{AuthSettings, ScramChannelBindingMode, TlsMode};
 
     let url = url::Url::parse(url_str)
@@ -24,20 +57,17 @@ pub(super) fn parse_database_url(
     let user = if url.username().is_empty() {
         "postgres".to_string()
     } else {
-        percent_decode_str(url.username())
-            .decode_utf8()
-            .map_err(|e| GatewayError::Config(format!("Invalid UTF-8 in username: {}", e)))?
-            .into_owned()
+        percent_decode_component(url.username(), "username")?
     };
 
-    let database = url.path().trim_start_matches('/');
+    let database = percent_decode_component(url.path().trim_start_matches('/'), "database name")?;
     if database.is_empty() {
         return Err(GatewayError::Config(
             "Missing database name in URL".to_string(),
         ));
     }
 
-    let mut config = PoolConfig::new(host, port, &user, database);
+    let mut config = PoolConfig::new(host, port, &user, &database);
 
     if let Some(mode) = TlsMode::parse_sslmode(&gateway_config.pg_sslmode) {
         config = config.tls_mode(mode);
@@ -48,9 +78,7 @@ pub(super) fn parse_database_url(
     }
 
     if let Some(password) = url.password() {
-        let decoded = percent_decode_str(password)
-            .decode_utf8()
-            .map_err(|e| GatewayError::Config(format!("Invalid UTF-8 in password: {}", e)))?;
+        let decoded = percent_decode_component(password, "password")?;
         config = config.password(&decoded);
     }
 

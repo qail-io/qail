@@ -455,15 +455,24 @@ impl PgConnection {
                     self.process_id = process_id;
                     self.cancel_key_bytes = secret_key;
                 }
-                BackendMessage::ReadyForQuery(TransactionStatus::Idle)
-                | BackendMessage::ReadyForQuery(TransactionStatus::InBlock)
-                | BackendMessage::ReadyForQuery(TransactionStatus::Failed) => {
+                BackendMessage::ReadyForQuery(TransactionStatus::Idle) => {
                     if !saw_auth_ok {
                         return Err(PgError::Protocol(
                             "Startup completed without AuthenticationOk".to_string(),
                         ));
                     }
                     return Ok(());
+                }
+                BackendMessage::ReadyForQuery(status) => {
+                    if !saw_auth_ok {
+                        return Err(PgError::Protocol(
+                            "Startup completed without AuthenticationOk".to_string(),
+                        ));
+                    }
+                    return Err(PgError::Protocol(format!(
+                        "Startup completed with non-idle transaction status: {:?}",
+                        status
+                    )));
                 }
                 BackendMessage::ErrorResponse(err) => {
                     return Err(PgError::Connection(err.message));

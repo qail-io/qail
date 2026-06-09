@@ -260,6 +260,11 @@ impl PgDriver {
             let raw_db = &host_db_part[slash_pos + 1..];
             // Strip ?query params — they're handled separately by connect_url
             let db = Self::percent_decode(raw_db.split('?').next().unwrap_or(raw_db))?;
+            if db.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid DATABASE_URL: missing database name".to_string(),
+                ));
+            }
             (&host_db_part[..slash_pos], db)
         } else {
             return Err(PgError::Connection(
@@ -345,10 +350,20 @@ impl PgDriver {
         let mut i = 0;
 
         while i < bytes.len() {
-            if bytes[i] == b'%'
-                && i + 2 < bytes.len()
-                && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
-            {
+            if bytes[i] == b'%' {
+                if i + 2 >= bytes.len() {
+                    return Err(PgError::Connection(
+                        "Invalid DATABASE_URL percent-encoding: '%' must be followed by two hex digits"
+                            .to_string(),
+                    ));
+                }
+                let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+                else {
+                    return Err(PgError::Connection(
+                        "Invalid DATABASE_URL percent-encoding: '%' must be followed by two hex digits"
+                            .to_string(),
+                    ));
+                };
                 decoded.push((hi << 4) | lo);
                 i += 3;
             } else {

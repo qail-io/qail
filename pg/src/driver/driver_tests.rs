@@ -374,6 +374,7 @@ mod tests {
         assert!(crate::driver::PgDriver::parse_database_url("postgres://@host/db").is_err());
         assert!(crate::driver::PgDriver::parse_database_url("postgres://user@:5432/db").is_err());
         assert!(crate::driver::PgDriver::parse_database_url("postgres://user@host:0/db").is_err());
+        assert!(crate::driver::PgDriver::parse_database_url("postgres://user@host/").is_err());
     }
 
     #[test]
@@ -396,6 +397,20 @@ mod tests {
             .expect_err("invalid percent-decoded UTF-8 must fail");
 
         assert!(err.to_string().contains("percent-encoding"));
+    }
+
+    #[test]
+    fn parse_database_url_rejects_malformed_percent_encoding() {
+        let err =
+            crate::driver::PgDriver::parse_database_url("postgres://user:bad%XX@localhost/app")
+                .expect_err("malformed percent escape must fail");
+
+        assert!(err.to_string().contains("two hex digits"));
+
+        let err = crate::driver::PgDriver::parse_database_url("postgres://user:bad%@localhost/app")
+            .expect_err("trailing percent escape must fail");
+
+        assert!(err.to_string().contains("two hex digits"));
     }
 
     #[test]

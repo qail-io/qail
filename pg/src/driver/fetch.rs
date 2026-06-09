@@ -760,11 +760,24 @@ impl PgDriver {
                 }
                 crate::protocol::BackendMessage::DataRow(data) => {
                     if error.is_none() {
-                        let row: Vec<Option<String>> = data
+                        match data
                             .into_iter()
-                            .map(|col| col.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
-                            .collect();
-                        rows.push(row);
+                            .enumerate()
+                            .map(|(idx, col)| {
+                                col.map(|bytes| {
+                                    String::from_utf8(bytes).map_err(|err| {
+                                        PgError::Protocol(format!(
+                                            "query_ast column {idx} is not valid UTF-8: {err}"
+                                        ))
+                                    })
+                                })
+                                .transpose()
+                            })
+                            .collect::<PgResult<Vec<Option<String>>>>()
+                        {
+                            Ok(row) => rows.push(row),
+                            Err(err) => error = Some(err),
+                        }
                     }
                 }
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
@@ -870,6 +883,30 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn push_text_row_description(driver: &mut PgDriver, name: &str) {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&crate::protocol::types::oid::TEXT.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.extend_from_slice(&(-1i32).to_be_bytes());
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        push_backend_frame(driver, b'T', &payload);
+    }
+
+    #[cfg(unix)]
+    fn push_single_column_data_row(driver: &mut PgDriver, data: &[u8]) {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(&(data.len() as i32).to_be_bytes());
+        payload.extend_from_slice(data);
+        push_backend_frame(driver, b'D', &payload);
+    }
+
+    #[cfg(unix)]
     fn prepared_ast_for_sql(sql: &str) -> PreparedAstQuery {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -918,8 +955,29 @@ mod tests {
         assert!(
             err.to_string().contains("missing affected row count")
                 || err.to_string().contains("invalid affected row count")
+                || err.to_string().contains("malformed affected-row shape")
         );
         assert!(driver.connection.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn query_ast_rejects_invalid_utf8_without_desyncing_connection() {
+        let (mut driver, _peer) = test_driver_with_peer();
+        push_backend_frame(&mut driver, b'1', &[]);
+        push_backend_frame(&mut driver, b'2', &[]);
+        push_text_row_description(&mut driver, "bad_text");
+        push_single_column_data_row(&mut driver, &[0xff]);
+        push_command_complete(&mut driver, "SELECT 1");
+        push_backend_frame(&mut driver, b'Z', b"I");
+
+        let err = driver
+            .query_ast(&Qail::get("users").columns(["bad_text"]))
+            .await
+            .expect_err("invalid UTF-8 row data must fail");
+
+        assert!(err.to_string().contains("not valid UTF-8"));
+        assert!(!driver.connection.is_io_desynced());
     }
 
     #[cfg(unix)]

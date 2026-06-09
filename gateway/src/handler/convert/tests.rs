@@ -85,6 +85,16 @@ fn binary_numeric_oid_1700_preserves_fractional_value() {
 }
 
 #[test]
+fn row_to_array_hex_encodes_invalid_utf8() {
+    let row = qail_pg::PgRow {
+        columns: vec![Some(vec![0xff, 0x00, 0x41])],
+        column_info: None,
+    };
+
+    assert_eq!(row_to_array(&row), vec![serde_json::json!("\\xff0041")]);
+}
+
+#[test]
 fn typed_json_oid_114() {
     assert_eq!(
         text_to_json_typed(r#"{"key":"val"}"#, 114),

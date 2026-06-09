@@ -31,10 +31,10 @@ pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, S
     let user = if parsed.username().is_empty() {
         "postgres".to_string()
     } else {
-        percent_decode(parsed.username())
+        percent_decode(parsed.username())?
     };
-    let password = parsed.password().map(percent_decode);
-    let database = percent_decode(parsed.path().trim_start_matches('/'));
+    let password = parsed.password().map(percent_decode).transpose()?;
+    let database = percent_decode(parsed.path().trim_start_matches('/'))?;
     if database.is_empty() {
         return Err(anyhow::anyhow!("Missing database in URL"));
     }
@@ -120,7 +120,7 @@ fn default_port(scheme: &str) -> u16 {
     }
 }
 
-fn percent_decode(s: &str) -> String {
+fn percent_decode(s: &str) -> Result<String> {
     fn hex_value(byte: u8) -> Option<u8> {
         match byte {
             b'0'..=b'9' => Some(byte - b'0'),
@@ -135,10 +135,13 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
 
     while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
-        {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                anyhow::bail!("Invalid percent encoding: '%' must be followed by two hex digits");
+            }
+            let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) else {
+                anyhow::bail!("Invalid percent encoding: '%' must be followed by two hex digits");
+            };
             decoded.push((hi << 4) | lo);
             i += 3;
         } else {
@@ -147,7 +150,8 @@ fn percent_decode(s: &str) -> String {
         }
     }
 
-    String::from_utf8_lossy(&decoded).into_owned()
+    String::from_utf8(decoded)
+        .map_err(|_| anyhow::anyhow!("Invalid percent encoding: decoded value is not valid UTF-8"))
 }
 
 #[cfg(test)]
@@ -237,6 +241,24 @@ mod tests {
         assert_eq!(user, "café");
         assert_eq!(password, Some("péss".to_string()));
         assert_eq!(database, "app_✓");
+    }
+
+    #[test]
+    fn test_parse_pg_url_rejects_malformed_percent_encoding() {
+        let err = parse_pg_url("postgres://user:bad%ZZ@db.example.com/app")
+            .expect_err("malformed percent escape must fail");
+        assert!(err.to_string().contains("two hex digits"));
+
+        let err = parse_pg_url("postgres://user:bad%@db.example.com/app")
+            .expect_err("trailing percent escape must fail");
+        assert!(err.to_string().contains("two hex digits"));
+    }
+
+    #[test]
+    fn test_parse_pg_url_rejects_invalid_percent_encoded_utf8() {
+        let err = parse_pg_url("postgres://user:%FF@db.example.com/app")
+            .expect_err("invalid decoded UTF-8 must fail");
+        assert!(err.to_string().contains("not valid UTF-8"));
     }
 
     #[test]

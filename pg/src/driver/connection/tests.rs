@@ -167,7 +167,19 @@ fn test_parse_affected_rows_rejects_malformed_counted_tags() {
 
     let err = parse_affected_rows("DELETE").unwrap_err();
     assert!(
-        matches!(err, PgError::Protocol(ref msg) if msg.contains("missing affected row count")),
+        matches!(err, PgError::Protocol(ref msg) if msg.contains("malformed affected-row shape")),
+        "unexpected error: {err:?}"
+    );
+
+    let err = parse_affected_rows("UPDATE 1 garbage 500").unwrap_err();
+    assert!(
+        matches!(err, PgError::Protocol(ref msg) if msg.contains("malformed affected-row shape")),
+        "unexpected error: {err:?}"
+    );
+
+    let err = parse_affected_rows("INSERT 0 1 extra").unwrap_err();
+    assert!(
+        matches!(err, PgError::Protocol(ref msg) if msg.contains("malformed INSERT shape")),
         "unexpected error: {err:?}"
     );
 }

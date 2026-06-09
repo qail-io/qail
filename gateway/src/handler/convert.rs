@@ -58,27 +58,29 @@ pub(crate) fn row_to_array(row: &qail_pg::PgRow) -> Vec<serde_json::Value> {
         .iter()
         .map(|col| match col {
             Some(bytes) => {
-                let s = String::from_utf8_lossy(bytes);
+                let Ok(s) = std::str::from_utf8(bytes) else {
+                    return serde_json::Value::String(format!("\\x{}", hex_encode(bytes)));
+                };
                 if (s.starts_with('{') && s.ends_with('}'))
                     || (s.starts_with('[') && s.ends_with(']'))
                 {
-                    match serde_json::from_str(&s) {
+                    match serde_json::from_str(s) {
                         Ok(v) => v,
-                        Err(_) => serde_json::Value::String(s.into_owned()),
+                        Err(_) => serde_json::Value::String(s.to_string()),
                     }
                 } else if let Ok(n) = s.parse::<i64>() {
                     serde_json::Value::Number(n.into())
                 } else if let Ok(f) = s.parse::<f64>() {
                     match serde_json::Number::from_f64(f) {
                         Some(num) => serde_json::Value::Number(num),
-                        None => serde_json::Value::String(s.into_owned()),
+                        None => serde_json::Value::String(s.to_string()),
                     }
                 } else if s == "t" || s == "true" {
                     serde_json::Value::Bool(true)
                 } else if s == "f" || s == "false" {
                     serde_json::Value::Bool(false)
                 } else {
-                    serde_json::Value::String(s.into_owned())
+                    serde_json::Value::String(s.to_string())
                 }
             }
             None => serde_json::Value::Null,

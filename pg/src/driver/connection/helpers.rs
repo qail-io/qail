@@ -229,20 +229,35 @@ fn command_tag_carries_affected_rows(command: &str) -> bool {
 }
 
 pub(crate) fn parse_affected_rows(tag: &str) -> PgResult<u64> {
-    let mut parts = tag.split_whitespace();
-    let Some(command) = parts.next() else {
+    let parts: Vec<&str> = tag.split_whitespace().collect();
+    let Some(command) = parts.first().copied() else {
         return Ok(0);
     };
     if !command_tag_carries_affected_rows(command) {
         return Ok(0);
     }
 
-    let Some(count) = parts.last() else {
-        return Err(PgError::Protocol(format!(
-            "CommandComplete tag '{}' missing affected row count",
-            tag
-        )));
+    let count = match command {
+        "INSERT" => {
+            if parts.len() != 3 {
+                return Err(PgError::Protocol(format!(
+                    "CommandComplete tag '{}' has malformed INSERT shape",
+                    tag
+                )));
+            }
+            parts[2]
+        }
+        _ => {
+            if parts.len() != 2 {
+                return Err(PgError::Protocol(format!(
+                    "CommandComplete tag '{}' has malformed affected-row shape",
+                    tag
+                )));
+            }
+            parts[1]
+        }
     };
+
     count.parse::<u64>().map_err(|_| {
         PgError::Protocol(format!(
             "CommandComplete tag '{}' has invalid affected row count",

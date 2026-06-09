@@ -88,8 +88,9 @@ fn decode_copy_text_field(field: &[u8]) -> PgResult<String> {
         }
 
         let Some(&escaped) = field.get(idx + 1) else {
-            out.push(b'\\');
-            break;
+            return Err(PgError::Protocol(
+                "COPY text field ends with incomplete backslash escape".to_string(),
+            ));
         };
 
         match escaped {
@@ -134,6 +135,12 @@ fn decode_copy_text_field(field: &[u8]) -> PgResult<String> {
                     value = (value * 8) + u16::from(digit - b'0');
                     next += 1;
                 }
+                if value > u16::from(u8::MAX) {
+                    return Err(PgError::Protocol(format!(
+                        "COPY text octal escape is out of byte range: \\{:o}",
+                        value
+                    )));
+                }
                 out.push(value as u8);
                 idx = next;
             }
@@ -153,8 +160,9 @@ fn decode_copy_text_field(field: &[u8]) -> PgResult<String> {
                     digits += 1;
                 }
                 if digits == 0 {
-                    out.push(b'x');
-                    idx += 2;
+                    return Err(PgError::Protocol(
+                        "COPY text hex escape requires at least one hex digit".to_string(),
+                    ));
                 } else {
                     out.push(value);
                     idx = next;
@@ -224,16 +232,13 @@ where
     Ok(())
 }
 
-fn flush_pending_copy_text_row<F>(pending: &mut Vec<u8>, on_row: &mut F) -> PgResult<()>
-where
-    F: FnMut(Vec<String>) -> PgResult<()>,
-{
+fn flush_pending_copy_text_row(pending: &[u8]) -> PgResult<()> {
     if pending.is_empty() {
         return Ok(());
     }
-    let line = std::mem::take(pending);
-    let row = parse_copy_text_row(&line)?;
-    on_row(row)
+    Err(PgError::Protocol(
+        "COPY text stream ended with a truncated row without final newline".to_string(),
+    ))
 }
 
 impl PgConnection {
@@ -701,7 +706,7 @@ impl PgConnection {
             std::future::ready(res)
         })
         .await?;
-        flush_pending_copy_text_row(&mut pending, &mut on_row)
+        flush_pending_copy_text_row(&pending)
     }
 
     /// Export data using raw COPY TO STDOUT, returning raw bytes.
@@ -820,6 +825,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_copy_text_row_rejects_incomplete_escape() {
+        let err = parse_copy_text_row(b"bad\\").expect_err("trailing backslash must fail");
+        assert!(err.to_string().contains("incomplete backslash escape"));
+    }
+
+    #[test]
+    fn parse_copy_text_row_rejects_out_of_range_octal_escape() {
+        let err = parse_copy_text_row(br"\400").expect_err("octal escape > 377 must fail");
+        assert!(err.to_string().contains("out of byte range"));
+    }
+
+    #[test]
+    fn parse_copy_text_row_rejects_hex_escape_without_digits() {
+        let err = parse_copy_text_row(br"\xG").expect_err("hex escape without digits must fail");
+        assert!(err.to_string().contains("hex escape requires"));
+    }
+
+    #[test]
     fn copy_table_quoting_preserves_schema_qualification() {
         assert_eq!(
             quote_copy_table_ref("tenant_a.users").unwrap(),
@@ -885,17 +908,12 @@ mod tests {
     }
 
     #[test]
-    fn flush_pending_copy_text_row_emits_final_partial_line() {
-        let mut pending = b"x\ty".to_vec();
-        let mut rows = Vec::new();
-        let mut on_row = |row: Vec<String>| -> PgResult<()> {
-            rows.push(row);
-            Ok(())
-        };
-
-        flush_pending_copy_text_row(&mut pending, &mut on_row).unwrap();
-        assert_eq!(rows, vec![vec!["x".to_string(), "y".to_string()]]);
-        assert!(pending.is_empty());
+    fn flush_pending_copy_text_row_rejects_final_partial_line() {
+        let pending = b"x\ty".to_vec();
+        let err = flush_pending_copy_text_row(&pending)
+            .expect_err("partial final COPY row must fail closed");
+        assert!(matches!(err, PgError::Protocol(msg) if msg.contains("truncated row")));
+        assert_eq!(pending, b"x\ty");
     }
 
     #[test]

@@ -611,6 +611,17 @@ fn test_parse_pg_url_rejects_invalid_percent_encoded_utf8() {
 }
 
 #[test]
+fn test_parse_pg_url_rejects_malformed_percent_encoding() {
+    let err = parse_pg_url("postgresql://app:bad%ZZ@db.internal/app")
+        .expect_err("malformed percent escape must fail");
+    assert!(err.to_string().contains("two hex digits"));
+
+    let err = parse_pg_url("postgresql://app:bad%@db.internal/app")
+        .expect_err("trailing percent escape must fail");
+    assert!(err.to_string().contains("two hex digits"));
+}
+
+#[test]
 fn test_parse_pg_url_supports_bracketed_ipv6() {
     let (host, port, user, db, password) =
         parse_pg_url("postgresql://alice:secret@[::1]:5544/app").unwrap();
@@ -643,6 +654,13 @@ fn test_parse_pg_url_rejects_non_postgres_scheme_and_missing_host() {
         Err(other) => panic!("unexpected error: {other:?}"),
     };
     assert!(err.contains("missing host"));
+
+    let err = match parse_pg_url("postgres://db.internal/") {
+        Ok(_) => panic!("missing database must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+    assert!(err.contains("missing database"));
 }
 
 #[test]

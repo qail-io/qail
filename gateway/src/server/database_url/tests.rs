@@ -41,6 +41,37 @@ fn test_load_rpc_allow_list_skips_comments_and_normalizes() {
 }
 
 #[test]
+fn test_parse_database_url_decodes_user_password_and_database() {
+    let cfg = parse_database_url(
+        "postgres://us%40er:p%40ss%2Fword@db.internal:5432/my%2Fdb",
+        &default_cfg(),
+    )
+    .expect("expected valid encoded postgres URL");
+
+    assert_eq!(cfg.user, "us@er");
+    assert_eq!(cfg.password.as_deref(), Some("p@ss/word"));
+    assert_eq!(cfg.database, "my/db");
+}
+
+#[test]
+fn test_parse_database_url_rejects_malformed_percent_encoding() {
+    let err = match parse_database_url(
+        "postgres://alice:bad%ZZ@db.internal:5432/app",
+        &default_cfg(),
+    ) {
+        Ok(_) => panic!("expected malformed password percent escape error"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("two hex digits"));
+
+    let err = match parse_database_url("postgres://alice@db.internal:5432/app%", &default_cfg()) {
+        Ok(_) => panic!("expected trailing database percent escape error"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("two hex digits"));
+}
+
+#[test]
 fn test_parse_database_url_rejects_invalid_gss_provider() {
     let err = match parse_database_url(
         "postgres://alice@db.internal:5432/app?gss_provider=unknown",

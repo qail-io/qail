@@ -511,6 +511,25 @@ fn decode_backend_key_too_short() {
 }
 
 #[test]
+fn decode_backend_key_rejects_non_positive_process_id() {
+    let mut zero_pid = 0i32.to_be_bytes().to_vec();
+    zero_pid.extend_from_slice(&99i32.to_be_bytes());
+    assert!(
+        BackendMessage::decode(&wire_msg(b'K', &zero_pid))
+            .unwrap_err()
+            .contains("invalid process id")
+    );
+
+    let mut negative_pid = (-7i32).to_be_bytes().to_vec();
+    negative_pid.extend_from_slice(&99i32.to_be_bytes());
+    assert!(
+        BackendMessage::decode(&wire_msg(b'K', &negative_pid))
+            .unwrap_err()
+            .contains("invalid process id")
+    );
+}
+
+#[test]
 fn decode_backend_key_extended_secret_key() {
     let mut payload = 7i32.to_be_bytes().to_vec();
     payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55]);
@@ -655,6 +674,16 @@ fn decode_command_complete_missing_null_returns_error() {
         BackendMessage::decode(&buf)
             .unwrap_err()
             .contains("missing null")
+    );
+}
+
+#[test]
+fn decode_command_complete_empty_tag_returns_error() {
+    let buf = wire_msg(b'C', b"\0");
+    assert!(
+        BackendMessage::decode(&buf)
+            .unwrap_err()
+            .contains("tag is empty")
     );
 }
 
@@ -825,6 +854,18 @@ fn decode_notification_missing_payload_terminator_returns_error() {
 }
 
 #[test]
+fn decode_notification_empty_channel_returns_error() {
+    let mut payload = 1i32.to_be_bytes().to_vec();
+    payload.extend_from_slice(b"\0payload\0");
+    let buf = wire_msg(b'A', &payload);
+    assert!(
+        BackendMessage::decode(&buf)
+            .unwrap_err()
+            .contains("channel is empty")
+    );
+}
+
+#[test]
 fn decode_notification_invalid_utf8_returns_error() {
     let mut payload = 1i32.to_be_bytes().to_vec();
     payload.extend_from_slice(&[0xff, 0]);
@@ -980,6 +1021,16 @@ fn decode_parameter_status_missing_terminator_returns_error() {
         BackendMessage::decode(&buf)
             .unwrap_err()
             .contains("missing name terminator")
+    );
+}
+
+#[test]
+fn decode_parameter_status_empty_name_returns_error() {
+    let buf = wire_msg(b'S', b"\0UTF8\0");
+    assert!(
+        BackendMessage::decode(&buf)
+            .unwrap_err()
+            .contains("name is empty")
     );
 }
 

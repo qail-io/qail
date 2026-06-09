@@ -230,6 +230,9 @@ impl BackendMessage {
             .iter()
             .position(|&b| b == 0)
             .ok_or("ParameterStatus missing name terminator")?;
+        if name_end == 0 {
+            return Err("ParameterStatus name is empty".to_string());
+        }
         let value_start = name_end + 1;
         if value_start > payload.len() {
             return Err("ParameterStatus missing value".to_string());
@@ -259,8 +262,12 @@ impl BackendMessage {
                 key_len
             ));
         }
+        let process_id = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        if process_id <= 0 {
+            return Err(format!("BackendKeyData invalid process id: {process_id}"));
+        }
         Ok(BackendMessage::BackendKeyData {
-            process_id: i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            process_id,
             secret_key: payload[4..].to_vec(),
         })
     }
@@ -479,6 +486,9 @@ impl BackendMessage {
             return Err("CommandComplete missing null terminator".to_string());
         }
         let tag_bytes = &payload[..payload.len() - 1];
+        if tag_bytes.is_empty() {
+            return Err("CommandComplete tag is empty".to_string());
+        }
         if tag_bytes.contains(&0) {
             return Err("CommandComplete contains interior null byte".to_string());
         }
@@ -707,6 +717,9 @@ impl BackendMessage {
             .iter()
             .position(|&b| b == 0)
             .ok_or("NotificationResponse: missing channel null terminator")?;
+        if channel_end == 0 {
+            return Err("NotificationResponse channel is empty".to_string());
+        }
         let channel = decode_utf8(&remaining[..channel_end], "NotificationResponse channel")?;
         i += channel_end + 1;
 

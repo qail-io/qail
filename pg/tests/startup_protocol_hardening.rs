@@ -141,6 +141,21 @@ async fn startup_rejects_ready_before_auth_ok() {
 }
 
 #[tokio::test]
+async fn startup_rejects_non_idle_ready_after_auth_ok() {
+    let msg = run_startup_script(vec![auth_ok(), ready_for_query(b'E')], None).await;
+    assert!(
+        msg.contains("non-idle transaction status"),
+        "unexpected error: {msg}"
+    );
+
+    let msg = run_startup_script(vec![auth_ok(), ready_for_query(b'T')], None).await;
+    assert!(
+        msg.contains("non-idle transaction status"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn startup_rejects_auth_method_switch_mid_handshake() {
     let msg = run_startup_script(vec![auth_cleartext(), auth_md5()], Some("secret")).await;
     assert!(
