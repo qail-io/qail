@@ -1064,6 +1064,23 @@ impl Schema {
                 .collect::<std::collections::BTreeSet<_>>();
 
             for col in &table.columns {
+                if col.primary_key && !col.data_type.can_be_primary_key() {
+                    errors.push(format!(
+                        "Schema error: {}.{} of type {} cannot be a primary key",
+                        table.name,
+                        col.name,
+                        col.data_type.name()
+                    ));
+                }
+                if col.unique && !col.data_type.supports_indexing() {
+                    errors.push(format!(
+                        "Schema error: {}.{} of type {} cannot have UNIQUE constraint",
+                        table.name,
+                        col.name,
+                        col.data_type.name()
+                    ));
+                }
+
                 if let Some(ref fk) = col.foreign_key {
                     if !self.tables.contains_key(&fk.table) {
                         errors.push(format!(
@@ -2652,6 +2669,46 @@ mod tests {
     fn test_invalid_unique_type_fail_soft() {
         let col = Column::new("data", ColumnType::Jsonb).unique();
         assert!(col.unique);
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_primary_key_type() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("events").column(Column::new("data", ColumnType::Jsonb).primary_key()),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid primary-key type should fail validation");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("events.data")
+                    && err.contains("JSONB")
+                    && err.contains("cannot be a primary key")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_unique_type() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("events").column(Column::new("data", ColumnType::Jsonb).unique()),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid unique type should fail validation");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("events.data")
+                    && err.contains("JSONB")
+                    && err.contains("cannot have UNIQUE")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]
