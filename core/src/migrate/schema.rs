@@ -1047,6 +1047,16 @@ impl Schema {
         let mut errors = Vec::new();
 
         for table in self.tables.values() {
+            let mut seen_columns = std::collections::BTreeSet::new();
+            for col in &table.columns {
+                if !seen_columns.insert(col.name.as_str()) {
+                    errors.push(format!(
+                        "Schema error: table '{}' has duplicate column '{}'",
+                        table.name, col.name
+                    ));
+                }
+            }
+
             for col in &table.columns {
                 if let Some(ref fk) = col.foreign_key {
                     if !self.tables.contains_key(&fk.table) {
@@ -1116,7 +1126,15 @@ impl Schema {
             }
         }
 
+        let mut seen_index_names = std::collections::BTreeSet::new();
         for index in &self.indexes {
+            if !seen_index_names.insert(index.name.as_str()) {
+                errors.push(format!(
+                    "Index error: duplicate index name '{}'",
+                    index.name
+                ));
+            }
+
             let Some(table) = self.tables.get(&index.table) else {
                 errors.push(format!(
                     "Index error: {} references non-existent table '{}'",
@@ -2588,6 +2606,52 @@ mod tests {
             errors
                 .iter()
                 .any(|err| err.contains("non-existent column 'schedules.schedule_id'")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_duplicate_columns() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("users")
+                .column(Column::new("email", ColumnType::Text))
+                .column(Column::new("email", ColumnType::Text)),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("duplicate columns should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("duplicate column 'email'")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_duplicate_index_names() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        schema.add_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+        schema.add_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+
+        let errors = schema
+            .validate()
+            .expect_err("duplicate indexes should fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("duplicate index name 'idx_users_email'")),
             "{errors:?}"
         );
     }
