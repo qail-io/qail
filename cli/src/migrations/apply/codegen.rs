@@ -108,6 +108,8 @@ pub(crate) fn commands_to_sql(cmds: &[Qail]) -> String {
 }
 
 fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) -> Result<Vec<Qail>> {
+    validate_migrate_schema_for_strict_compile(schema)?;
+
     let (hint_cmds, hint_unsupported) = compile_migration_hints_strict(&schema.migrations)?;
     let (early_hint_cmds, late_hint_cmds): (Vec<Qail>, Vec<Qail>) = hint_cmds
         .into_iter()
@@ -166,6 +168,125 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     }
 
     Ok(cmds)
+}
+
+fn validate_migrate_schema_for_strict_compile(
+    schema: &qail_core::migrate::schema::Schema,
+) -> Result<()> {
+    let declared_tables = schema
+        .tables
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut errors = Vec::new();
+
+    let mut seen_index_names = std::collections::BTreeSet::new();
+    for index in &schema.indexes {
+        if !seen_index_names.insert(index.name.as_str()) {
+            errors.push(format!(
+                "Index error: duplicate index name '{}'",
+                index.name
+            ));
+        }
+        if index.columns.is_empty() && index.expressions.is_empty() {
+            errors.push(format!(
+                "Index error: {} must define at least one column or expression",
+                index.name
+            ));
+        }
+        if !index.columns.is_empty() && !index.expressions.is_empty() {
+            errors.push(format!(
+                "Index error: {} cannot mix columns and expressions",
+                index.name
+            ));
+        }
+        for column in &index.columns {
+            if column.trim().is_empty() {
+                errors.push(format!("Index error: {} has empty column", index.name));
+            }
+        }
+        for expression in &index.expressions {
+            if expression.trim().is_empty() {
+                errors.push(format!("Index error: {} has empty expression", index.name));
+            }
+        }
+    }
+
+    for table in schema.tables.values() {
+        let table_columns = table
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for fk in &table.multi_column_fks {
+            if declared_tables.contains(fk.ref_table.as_str()) {
+                continue;
+            }
+            if fk.columns.is_empty() {
+                errors.push(format!(
+                    "Multi-column FK error: {} has no source columns",
+                    table.name
+                ));
+            }
+            if fk.ref_columns.is_empty() {
+                errors.push(format!(
+                    "Multi-column FK error: {} references '{}' with no target columns",
+                    table.name, fk.ref_table
+                ));
+            }
+            if fk.columns.len() != fk.ref_columns.len() {
+                errors.push(format!(
+                    "Multi-column FK error: {} column count {} does not match referenced column count {}",
+                    table.name,
+                    fk.columns.len(),
+                    fk.ref_columns.len()
+                ));
+            }
+            for source_col in &fk.columns {
+                if !table_columns.contains(source_col.as_str()) {
+                    errors.push(format!(
+                        "Multi-column FK error: {} references non-existent source column '{}.{}'",
+                        table.name, table.name, source_col
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut local_schema = schema.clone();
+    for table in local_schema.tables.values_mut() {
+        for column in &mut table.columns {
+            if column
+                .foreign_key
+                .as_ref()
+                .is_some_and(|fk| !declared_tables.contains(fk.table.as_str()))
+            {
+                column.foreign_key = None;
+            }
+        }
+        table
+            .multi_column_fks
+            .retain(|fk| declared_tables.contains(fk.ref_table.as_str()));
+    }
+    local_schema
+        .indexes
+        .retain(|index| declared_tables.contains(index.table.as_str()));
+
+    if let Err(local_errors) = local_schema.validate() {
+        errors.extend(local_errors);
+    }
+
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    errors.retain(|error| seen.insert(error.clone()));
+    bail!(
+        "Schema validation failed before strict AST migration compile:\n{}",
+        errors.join("\n")
+    );
 }
 
 fn is_early_hint_action(action: Action) -> bool {

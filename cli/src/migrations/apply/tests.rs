@@ -472,6 +472,49 @@ table trips {
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_validates_migrate_schema() {
+        let input = r#"
+table schedules {
+    route_id text not_null
+    schedule_id text not_null
+}
+
+table trips {
+    route_id text not_null
+    schedule_id text not_null
+    foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id)
+}
+"#;
+
+        let err = parse_qail_to_commands_strict(input)
+            .expect_err("strict compile should reject invalid schema references");
+        let message = err.to_string();
+        assert!(message.contains("Schema validation failed"), "{message}");
+        assert!(
+            message.contains("matching UNIQUE or PRIMARY KEY"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_allows_external_fk_target() {
+        let input = r#"
+table sessions {
+    id uuid primary_key
+    user_id uuid not_null references users(id)
+}
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("delta schema may reference an existing table outside the file");
+        let sql = commands_to_sql(&cmds);
+        assert!(
+            sql.contains("REFERENCES users(id)"),
+            "external FK should be preserved in compiled SQL: {sql}"
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_policies() {
         let input = r#"
 table users (
