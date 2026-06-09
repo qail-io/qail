@@ -1188,6 +1188,18 @@ impl Schema {
                     ));
                 }
             }
+
+            if let Some(where_clause) = &index.where_clause {
+                for referenced in check_expr_column_references(where_clause) {
+                    let referenced_column = check_expr_reference_name(referenced);
+                    if !table.columns.iter().any(|c| c.name == referenced_column) {
+                        errors.push(format!(
+                            "Index error: {} WHERE references non-existent column '{}.{}'",
+                            index.name, index.table, referenced_column
+                        ));
+                    }
+                }
+            }
         }
 
         if errors.is_empty() {
@@ -2838,6 +2850,29 @@ mod tests {
             errors
                 .iter()
                 .any(|err| { err.contains("idx_users_email_cover") && err.contains("users.name") }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_missing_partial_index_predicate_column() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        schema.add_index(
+            Index::new("idx_users_active_email", "users", vec!["email".to_string()]).partial(
+                CheckExpr::NotNull {
+                    column: "deleted_at".to_string(),
+                },
+            ),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("invalid partial-index predicates should fail validation");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("idx_users_active_email") && err.contains("users.deleted_at")
+            }),
             "{errors:?}"
         );
     }
