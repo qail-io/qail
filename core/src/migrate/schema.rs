@@ -1077,6 +1077,15 @@ impl Schema {
                                 "FK error: {}.{} references non-existent column '{}.{}'",
                                 table.name, col.name, fk.table, fk.column
                             ));
+                        } else if !schema_has_unique_key(
+                            self,
+                            &fk.table,
+                            std::slice::from_ref(&fk.column),
+                        ) {
+                            errors.push(format!(
+                                "FK error: {}.{} references '{}.{}' without a UNIQUE or PRIMARY KEY constraint",
+                                table.name, col.name, fk.table, fk.column
+                            ));
                         }
                     }
                 }
@@ -1133,13 +1142,28 @@ impl Schema {
                     continue;
                 };
 
+                let mut all_ref_columns_exist = true;
                 for ref_col in &fk.ref_columns {
                     if !ref_table.columns.iter().any(|c| c.name == *ref_col) {
+                        all_ref_columns_exist = false;
                         errors.push(format!(
                             "Multi-column FK error: {} references non-existent column '{}.{}'",
                             table.name, fk.ref_table, ref_col
                         ));
                     }
+                }
+
+                if all_ref_columns_exist
+                    && !fk.ref_columns.is_empty()
+                    && fk.columns.len() == fk.ref_columns.len()
+                    && !schema_has_unique_key(self, &fk.ref_table, &fk.ref_columns)
+                {
+                    errors.push(format!(
+                        "Multi-column FK error: {} references '{}({})' without a matching UNIQUE or PRIMARY KEY constraint",
+                        table.name,
+                        fk.ref_table,
+                        fk.ref_columns.join(", ")
+                    ));
                 }
             }
         }
@@ -1285,6 +1309,38 @@ fn check_expr_reference_name(reference: &str) -> String {
     let trimmed = reference.trim();
     let unqualified = trimmed.rsplit('.').next().unwrap_or(trimmed);
     unquote_identifier(unqualified)
+}
+
+fn schema_has_unique_key(schema: &Schema, table_name: &str, columns: &[String]) -> bool {
+    if columns.is_empty() {
+        return false;
+    }
+
+    let Some(table) = schema.tables.get(table_name) else {
+        return false;
+    };
+
+    if columns.len() == 1
+        && table
+            .columns
+            .iter()
+            .any(|column| column.name == columns[0] && (column.primary_key || column.unique))
+    {
+        return true;
+    }
+
+    schema.indexes.iter().any(|index| {
+        index.table == table_name
+            && index.unique
+            && index.where_clause.is_none()
+            && index.expressions.is_empty()
+            && index.columns.len() == columns.len()
+            && index
+                .columns
+                .iter()
+                .filter_map(|column| index_column_reference_name(column))
+                .eq(columns.iter().cloned())
+    })
 }
 
 fn index_column_reference_name(fragment: &str) -> Option<String> {
@@ -2659,6 +2715,26 @@ mod tests {
     }
 
     #[test]
+    fn test_foreign_key_requires_unique_target() {
+        let mut schema = Schema::new();
+        schema.add_table(Table::new("users").column(Column::new("email", ColumnType::Text)));
+        schema.add_table(
+            Table::new("posts")
+                .column(Column::new("id", ColumnType::Uuid).primary_key())
+                .column(Column::new("author_email", ColumnType::Text).references("users", "email")),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("FK targets must be unique or primary-key backed");
+        assert!(
+            errors.iter().any(|err| err.contains("posts.author_email")
+                && err.contains("without a UNIQUE or PRIMARY KEY constraint")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn test_multi_column_foreign_key_invalid_table_and_columns() {
         let mut schema = Schema::new();
         schema.add_table(
@@ -2715,6 +2791,68 @@ mod tests {
                 .any(|err| err.contains("non-existent column 'schedules.schedule_id'")),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_requires_unique_target() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        schema.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let errors = schema
+            .validate()
+            .expect_err("composite FK targets must have a matching unique key");
+        assert!(
+            errors.iter().any(|err| {
+                err.contains("Multi-column FK error")
+                    && err.contains("schedules(route_id, schedule_id)")
+                    && err.contains("matching UNIQUE or PRIMARY KEY")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_valid_with_unique_index() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        schema.add_index(
+            Index::new(
+                "schedules_route_schedule_key",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
+        schema.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        assert!(schema.validate().is_ok());
     }
 
     #[test]

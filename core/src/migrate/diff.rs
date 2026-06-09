@@ -2167,7 +2167,9 @@ mod tests {
     #[test]
     fn state_diff_checked_rejects_new_foreign_key_column_with_default() {
         let mut old = Schema::default();
-        old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Uuid)));
+        old.add_table(
+            Table::new("tenants").column(Column::new("id", ColumnType::Uuid).primary_key()),
+        );
         old.add_table(Table::new("orders").column(Column::new("id", ColumnType::Uuid)));
 
         let mut new = old.clone();
@@ -2324,11 +2326,15 @@ mod tests {
     #[test]
     fn state_diff_checked_rejects_existing_column_foreign_key_addition() {
         let mut old = Schema::default();
-        old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        old.add_table(
+            Table::new("tenants").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
         old.add_table(Table::new("orders").column(Column::new("tenant_id", ColumnType::Int)));
 
         let mut new = Schema::default();
-        new.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        new.add_table(
+            Table::new("tenants").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
         new.add_table(
             Table::new("orders")
                 .column(Column::new("tenant_id", ColumnType::Int).references("tenants", "id")),
@@ -2346,7 +2352,9 @@ mod tests {
         use crate::transpiler::ToSql;
 
         let mut old = Schema::default();
-        old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        old.add_table(
+            Table::new("tenants").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
         old.add_table(Table::new("orders").column(Column::new("id", ColumnType::Int)));
 
         let mut new = old.clone();
@@ -2517,7 +2525,9 @@ mod tests {
 
         let old = Schema::default();
         let mut new = Schema::default();
-        new.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        new.add_table(
+            Table::new("tenants").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
         new.add_table(
             Table::new("orders").column(
                 Column::new("tenant_id", ColumnType::Int)
@@ -2676,11 +2686,15 @@ mod tests {
         use super::super::types::ColumnType;
 
         let mut old = Schema::default();
-        old.add_table(Table::new("root_a").column(Column::new("id", ColumnType::Int)));
-        old.add_table(Table::new("root_b").column(Column::new("id", ColumnType::Int)));
+        old.add_table(
+            Table::new("root_a").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
+        old.add_table(
+            Table::new("root_b").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
         old.add_table(
             Table::new("parent")
-                .column(Column::new("id", ColumnType::Int))
+                .column(Column::new("id", ColumnType::Int).primary_key())
                 .column(Column::new("root_a_id", ColumnType::Int).references("root_a", "id"))
                 .column(Column::new("root_b_id", ColumnType::Int).references("root_b", "id")),
         );
@@ -2691,8 +2705,12 @@ mod tests {
         );
 
         let mut new = Schema::default();
-        new.add_table(Table::new("root_a").column(Column::new("id", ColumnType::Int)));
-        new.add_table(Table::new("root_b").column(Column::new("id", ColumnType::Int)));
+        new.add_table(
+            Table::new("root_a").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
+        new.add_table(
+            Table::new("root_b").column(Column::new("id", ColumnType::Int).primary_key()),
+        );
 
         let cmds = diff_schemas_checked(&old, &new).expect("dropped tables should diff");
         let child_drop_idx = cmds
@@ -3196,6 +3214,14 @@ mod tests {
                 .column(Column::new("route_id", ColumnType::Text))
                 .column(Column::new("schedule_id", ColumnType::Text)),
         );
+        old.add_index(
+            Index::new(
+                "idx_schedules_route_schedule",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
         old.add_table(
             Table::new("trips")
                 .column(Column::new("route_id", ColumnType::Text))
@@ -3228,6 +3254,14 @@ mod tests {
             Table::new("schedules")
                 .column(Column::new("route_id", ColumnType::Text))
                 .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        old.add_index(
+            Index::new(
+                "idx_schedules_route_schedule",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
         );
         old.add_table(
             Table::new("trips")
@@ -3263,6 +3297,14 @@ mod tests {
                 .column(Column::new("route_id", ColumnType::Text))
                 .column(Column::new("schedule_id", ColumnType::Text)),
         );
+        old.add_index(
+            Index::new(
+                "idx_schedules_route_schedule",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
         old.add_table(
             Table::new("trips")
                 .column(Column::new("route_id", ColumnType::Text))
@@ -3279,9 +3321,9 @@ mod tests {
             .get_mut("trips")
             .expect("trips table should exist")
             .multi_column_fks[0] = MultiColumnForeignKey::new(
-            vec!["route_id".to_string(), "schedule_id".to_string()],
-            "schedules",
             vec!["schedule_id".to_string(), "route_id".to_string()],
+            "schedules",
+            vec!["route_id".to_string(), "schedule_id".to_string()],
         );
 
         let err =
