@@ -269,7 +269,7 @@ impl PgConnection {
 
         // Send COPY command
         let bytes = PgEncoder::try_encode_query_string(&sql)?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         // Wait for CopyInResponse
         let mut startup_error: Option<PgError> = None;
@@ -393,7 +393,7 @@ impl PgConnection {
 
         // Send COPY command
         let bytes = PgEncoder::try_encode_query_string(&sql)?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         // Wait for CopyInResponse
         let mut startup_error: Option<PgError> = None;
@@ -507,20 +507,19 @@ impl PgConnection {
         buf.extend_from_slice(b"d");
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(data);
-        self.write_all_with_timeout(&buf, "stream write").await?;
+        self.send_bytes(&buf).await?;
         Ok(())
     }
 
     async fn send_copy_done(&mut self) -> PgResult<()> {
         // CopyDone: 'c' + length (4)
-        self.write_all_with_timeout(&[b'c', 0, 0, 0, 4], "stream write")
-            .await?;
+        self.send_bytes(&[b'c', 0, 0, 0, 4]).await?;
         Ok(())
     }
 
     async fn start_copy_out(&mut self, sql: &str, context: &str) -> PgResult<()> {
         let bytes = PgEncoder::try_encode_query_string(sql)?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         let mut startup_error: Option<PgError> = None;
         loop {

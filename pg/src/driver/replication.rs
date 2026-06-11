@@ -504,7 +504,7 @@ impl PgConnection {
         }
         let sql = build_start_logical_replication_sql(slot_name, start_lsn, options)?;
         let bytes = PgEncoder::try_encode_query_string(&sql)?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         let mut startup_error: Option<PgError> = None;
         loop {

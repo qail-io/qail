@@ -469,7 +469,7 @@ impl PgConnection {
         buf.extend_from_slice(&PgEncoder::encode_sync());
 
         // Send all queries in ONE write
-        self.write_all_with_timeout(&buf, "stream write").await?;
+        self.send_bytes(&buf).await?;
 
         // Collect all results
         let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(queries.len());
@@ -788,7 +788,7 @@ impl PgConnection {
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
         let buf = AstEncoder::encode_batch(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
-        self.write_all_with_timeout(&buf, "stream write").await?;
+        self.send_bytes(&buf).await?;
 
         let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(cmds.len());
         let mut current_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();

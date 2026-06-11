@@ -86,7 +86,7 @@ impl PgConnection {
 
         // Send empty query to flush any pending notifications from server
         let bytes = PgEncoder::try_encode_query_string("")?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         // Read messages — use recv() for the initial empty query response
         // (which completes quickly), then switch to no-timeout reads

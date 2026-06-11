@@ -761,8 +761,7 @@ impl PgConnection {
         let bytes = msg
             .encode_checked()
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        self.write_all_with_timeout(&bytes, "send frontend message")
-            .await?;
+        self.send_bytes(&bytes).await?;
         Ok(())
     }
 

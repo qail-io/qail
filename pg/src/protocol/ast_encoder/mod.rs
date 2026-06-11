@@ -868,6 +868,127 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_fetch_with_ties_requires_order_by() {
+        let cmd = Qail::get("employees").columns(["id"]).fetch_with_ties(5);
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("FETCH WITH TIES without ORDER BY must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("FETCH WITH TIES requires ORDER BY"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_select_sort_nulls_and_table_modifiers() {
+        use qail_core::ast::{Cage, CageKind, LogicalOp, SortOrder};
+
+        let cmd = Qail::get("events")
+            .only()
+            .tablesample_system(12.5)
+            .repeatable(7)
+            .columns(["id"])
+            .order_by("created_at", SortOrder::AscNullsLast);
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "SELECT id FROM ONLY events TABLESAMPLE SYSTEM (12.5) REPEATABLE (7) ORDER BY created_at ASC NULLS LAST"
+        );
+
+        let mut legacy_sample = Qail::get("events").columns(["id"]);
+        legacy_sample.cages.push(Cage {
+            kind: CageKind::Sample(20),
+            conditions: Vec::new(),
+            logical_op: LogicalOp::And,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&legacy_sample).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(sql, "SELECT id FROM events TABLESAMPLE BERNOULLI (20)");
+    }
+
+    #[test]
+    fn test_encode_select_row_lock_modes() {
+        let cases = [
+            (Qail::get("jobs").columns(["id"]).for_update(), "FOR UPDATE"),
+            (
+                Qail::get("jobs").columns(["id"]).for_update_skip_locked(),
+                "FOR UPDATE SKIP LOCKED",
+            ),
+            (
+                Qail::get("jobs").columns(["id"]).for_no_key_update(),
+                "FOR NO KEY UPDATE",
+            ),
+            (Qail::get("jobs").columns(["id"]).for_share(), "FOR SHARE"),
+            (
+                Qail::get("jobs").columns(["id"]).for_key_share(),
+                "FOR KEY SHARE",
+            ),
+        ];
+
+        for (cmd, suffix) in cases {
+            let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+            assert!(params.is_empty());
+            assert_eq!(sql, format!("SELECT id FROM jobs {suffix}"));
+        }
+    }
+
+    #[test]
+    fn test_encode_select_rejects_invalid_table_sample_percent() {
+        let cmd = Qail::get("events")
+            .columns(["id"])
+            .tablesample_bernoulli(f64::NAN);
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("invalid table sample percent must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("TABLESAMPLE percent must be finite and between 0 and 100"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_select_rejects_unsupported_cages() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut qualify = Qail::get("events").columns(["id"]);
+        qualify.cages.push(Cage {
+            kind: CageKind::Qualify,
+            conditions: vec![Condition {
+                left: Expr::Named("rn".to_string()),
+                op: Operator::Eq,
+                value: Value::Int(1),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+        let err = AstEncoder::encode_cmd_sql(&qualify)
+            .expect_err("PostgreSQL encoder must reject QUALIFY");
+        assert!(
+            err.to_string()
+                .contains("QUALIFY is not supported by PostgreSQL"),
+            "unexpected error: {err}"
+        );
+
+        let payload = Qail::get("events").set_value("status", "closed");
+        let err = AstEncoder::encode_cmd_sql(&payload)
+            .expect_err("SELECT payload cages must fail closed");
+        assert!(
+            err.to_string()
+                .contains("SELECT cannot contain payload assignments"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_encode_set_op_parenthesizes_fetch_left_operand() {
         use qail_core::ast::SetOp;
 
@@ -1654,6 +1775,137 @@ mod tests {
             "INSERT INTO archived_orders (id, total) SELECT id, total FROM orders"
         );
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_insert_positional_values_omits_fake_columns() {
+        let cmd = Qail::add("events").values([1, 2]);
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(sql, "INSERT INTO events VALUES ($1, $2)");
+        assert_eq!(params, vec![Some(b"1".to_vec()), Some(b"2".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_insert_default_values_and_overriding() {
+        let default_cmd = Qail::add("events").default_values();
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&default_cmd).unwrap();
+
+        assert_eq!(sql, "INSERT INTO events DEFAULT VALUES");
+        assert!(params.is_empty());
+
+        let overriding_cmd = Qail::add("events")
+            .columns(["id"])
+            .values([1])
+            .overriding_system_value();
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&overriding_cmd).unwrap();
+
+        assert_eq!(
+            sql,
+            "INSERT INTO events (id) OVERRIDING SYSTEM VALUE VALUES ($1)"
+        );
+        assert_eq!(params, vec![Some(b"1".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_insert_rejects_mismatched_columns_and_values() {
+        let cmd = Qail::add("events").columns(["id", "name"]).values([1]);
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("mismatched insert columns and values must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("INSERT column count must match value count"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_insert_rejects_ambiguous_source_and_payload() {
+        let mut cmd = Qail::add("archived_orders").columns(["id"]).values([1]);
+        cmd.source_query = Some(Box::new(Qail::get("orders").columns(["id"])));
+
+        let err = AstEncoder::encode_cmd_sql(&cmd)
+            .expect_err("insert source query plus payload must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("INSERT cannot combine source query with VALUES payload"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_update_rejects_empty_or_mismatched_payload() {
+        use qail_core::ast::Operator;
+
+        let empty = Qail::set("events").filter("id", Operator::Eq, 1);
+        let err =
+            AstEncoder::encode_cmd_sql(&empty).expect_err("empty update payload must fail closed");
+        assert!(
+            err.to_string()
+                .contains("UPDATE requires at least one assignment"),
+            "unexpected error: {err}"
+        );
+
+        let mismatched = Qail::set("events")
+            .columns(["name", "status"])
+            .values(["ready"]);
+        let err = AstEncoder::encode_cmd_sql(&mismatched)
+            .expect_err("mismatched update columns and values must fail closed");
+        assert!(
+            err.to_string()
+                .contains("UPDATE column count must match value count"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_update_and_delete_only_table() {
+        let update = Qail::set("events").only().set_value("status", "closed");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&update).unwrap();
+
+        assert_eq!(sql, "UPDATE ONLY events SET status = $1");
+        assert_eq!(params, vec![Some(b"closed".to_vec())]);
+
+        let delete = Qail::del("events").only();
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&delete).unwrap();
+
+        assert_eq!(sql, "DELETE FROM ONLY events");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_insert_rejects_malformed_conflict_update() {
+        use qail_core::ast::Expr;
+
+        let no_target = Qail::add("events")
+            .set_value("id", 1)
+            .on_conflict_update::<&str>(&[], &[("name", Expr::Named("EXCLUDED.name".into()))]);
+        let err = AstEncoder::encode_cmd_sql(&no_target)
+            .expect_err("conflict update without target must fail closed");
+        assert!(
+            err.to_string()
+                .contains("ON CONFLICT DO UPDATE requires at least one conflict target"),
+            "unexpected error: {err}"
+        );
+
+        let no_assignments = Qail::add("events")
+            .set_value("id", 1)
+            .on_conflict_update::<&str>(&["id"], &[]);
+        let err = AstEncoder::encode_cmd_sql(&no_assignments)
+            .expect_err("conflict update without assignments must fail closed");
+        assert!(
+            err.to_string()
+                .contains("ON CONFLICT DO UPDATE requires at least one assignment"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

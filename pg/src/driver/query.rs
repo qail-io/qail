@@ -182,7 +182,7 @@ impl PgConnection {
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         let bytes = PgEncoder::encode_extended_query_with_result_format(sql, params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         let mut rows = Vec::new();
 
@@ -645,7 +645,7 @@ impl PgConnection {
         bytes.extend_from_slice(&bind);
         bytes.extend_from_slice(&describe);
         bytes.extend_from_slice(&sync);
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         let mut saw_describe_response = false;
         let mut error: Option<PgError> = None;
@@ -775,7 +775,7 @@ impl PgConnection {
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 
-        if let Err(err) = self.write_all_with_timeout(&buf, "stream write").await {
+        if let Err(err) = self.send_bytes(&buf).await {
             if is_new {
                 self.prepared_statements.remove(&stmt_name);
             }
@@ -879,7 +879,7 @@ impl PgConnection {
     /// Execute a simple SQL statement (no parameters).
     pub async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
         let bytes = PgEncoder::try_encode_query_string(sql)?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         let mut error: Option<PgError> = None;
         let mut flow = SimpleFlowTracker::new();
@@ -949,7 +949,7 @@ impl PgConnection {
         const MAX_SIMPLE_QUERY_ROWS: usize = 10_000;
 
         let bytes = PgEncoder::try_encode_query_string(sql)?;
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        self.send_bytes(&bytes).await?;
 
         let mut rows: Vec<super::PgRow> = Vec::new();
         let mut column_info: Option<Arc<super::ColumnInfo>> = None;
@@ -1121,7 +1121,7 @@ impl PgConnection {
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 
-        self.write_all_with_timeout(&buf, "stream write").await?;
+        self.send_bytes(&buf).await?;
 
         let mut rows = Vec::new();
 

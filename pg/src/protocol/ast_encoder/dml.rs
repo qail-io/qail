@@ -5,8 +5,8 @@
 use bytes::BytesMut;
 use qail_core::ast::{
     Action, CTEDef, CageKind, ColumnGeneration, Condition, ConflictAction, Constraint, Expr,
-    GroupByMode, JoinKind, LogicalOp, Merge, MergeAction, MergeMatchKind, MergeSource, Operator,
-    Qail, SetOp, SortOrder, Value,
+    GroupByMode, JoinKind, LockMode, LogicalOp, Merge, MergeAction, MergeMatchKind, MergeSource,
+    Operator, OverridingKind, Qail, SampleMethod, SetOp, SortOrder, Value,
 };
 use qail_core::transpiler::escape_identifier;
 use std::collections::HashSet;
@@ -267,6 +267,229 @@ fn is_positional_placeholder(expr: &Expr) -> bool {
     };
     name.strip_prefix('$')
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadShape {
+    Empty,
+    Positional,
+    Named,
+    Mixed,
+}
+
+fn payload_shape(conditions: &[Condition]) -> PayloadShape {
+    let mut saw_positional = false;
+    let mut saw_named = false;
+
+    for condition in conditions {
+        if is_positional_placeholder(&condition.left) {
+            saw_positional = true;
+        } else {
+            saw_named = true;
+        }
+    }
+
+    match (saw_positional, saw_named) {
+        (false, false) => PayloadShape::Empty,
+        (true, false) => PayloadShape::Positional,
+        (false, true) => PayloadShape::Named,
+        (true, true) => PayloadShape::Mixed,
+    }
+}
+
+fn payload_cage(cmd: &Qail) -> Option<&qail_core::ast::Cage> {
+    cmd.cages.iter().find(|cage| cage.kind == CageKind::Payload)
+}
+
+fn validate_write_column_expr(
+    field: &str,
+    expr: &Expr,
+) -> Result<String, crate::protocol::EncodeError> {
+    let Expr::Named(name) = expr else {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{field} must be a simple column identifier"
+        )));
+    };
+    validate_ident_atom(field, name)?;
+    Ok(name.to_ascii_lowercase())
+}
+
+fn validate_unique_write_columns<I>(
+    field: &str,
+    columns: I,
+) -> Result<(), crate::protocol::EncodeError>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = HashSet::new();
+    for column in columns {
+        if !seen.insert(column.clone()) {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "{field} assigns column more than once: {column}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_insert_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    let payload = payload_cage(cmd);
+    let payload_len = payload.map_or(0, |cage| cage.conditions.len());
+    let payload_shape = payload.map_or(PayloadShape::Empty, |cage| payload_shape(&cage.conditions));
+
+    if payload_shape == PayloadShape::Mixed {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "INSERT payload cannot mix positional values with named column assignments".to_string(),
+        ));
+    }
+
+    if cmd.default_values {
+        if cmd.source_query.is_some() || payload_len > 0 {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "INSERT DEFAULT VALUES cannot combine source query or VALUES payload".to_string(),
+            ));
+        }
+    } else if cmd.source_query.is_some() {
+        if payload_len > 0 {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "INSERT cannot combine source query with VALUES payload".to_string(),
+            ));
+        }
+    } else if payload_len == 0 {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "INSERT requires VALUES, source query, or DEFAULT VALUES".to_string(),
+        ));
+    }
+
+    if !cmd.columns.is_empty() {
+        let columns = cmd
+            .columns
+            .iter()
+            .map(|expr| validate_write_column_expr("insert.column", expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_write_columns("INSERT", columns)?;
+
+        if !cmd.default_values && cmd.source_query.is_none() && cmd.columns.len() != payload_len {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "INSERT column count must match value count".to_string(),
+            ));
+        }
+    } else if let Some(payload) = payload
+        && payload_shape == PayloadShape::Named
+    {
+        let columns = payload
+            .conditions
+            .iter()
+            .map(|condition| validate_write_column_expr("insert.payload.column", &condition.left))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_write_columns("INSERT", columns)?;
+    }
+
+    validate_on_conflict_shape(cmd)?;
+    Ok(())
+}
+
+fn validate_update_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    let payload = payload_cage(cmd).ok_or_else(|| {
+        crate::protocol::EncodeError::InvalidAst(
+            "UPDATE requires at least one assignment".to_string(),
+        )
+    })?;
+    if payload.conditions.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "UPDATE requires at least one assignment".to_string(),
+        ));
+    }
+
+    let shape = payload_shape(&payload.conditions);
+    if shape == PayloadShape::Mixed {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "UPDATE payload cannot mix positional values with named column assignments".to_string(),
+        ));
+    }
+
+    if !cmd.columns.is_empty() {
+        let columns = cmd
+            .columns
+            .iter()
+            .map(|expr| validate_write_column_expr("update.column", expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_write_columns("UPDATE", columns)?;
+        if cmd.columns.len() != payload.conditions.len() {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "UPDATE column count must match value count".to_string(),
+            ));
+        }
+    } else {
+        if shape == PayloadShape::Positional {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "UPDATE positional values require explicit target columns".to_string(),
+            ));
+        }
+        let columns = payload
+            .conditions
+            .iter()
+            .map(|condition| validate_write_column_expr("update.payload.column", &condition.left))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_write_columns("UPDATE", columns)?;
+    }
+
+    Ok(())
+}
+
+fn validate_select_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    for cage in &cmd.cages {
+        match cage.kind {
+            CageKind::Payload if !cage.conditions.is_empty() => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "SELECT cannot contain payload assignments".to_string(),
+                ));
+            }
+            CageKind::Qualify if !cage.conditions.is_empty() => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "QUALIFY is not supported by PostgreSQL".to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_on_conflict_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    let Some(on_conflict) = &cmd.on_conflict else {
+        return Ok(());
+    };
+
+    let mut conflict_targets = HashSet::new();
+    for column in &on_conflict.columns {
+        validate_ident_atom("on_conflict.column", column)?;
+        if !conflict_targets.insert(column.to_ascii_lowercase()) {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "ON CONFLICT target column appears more than once: {column}"
+            )));
+        }
+    }
+
+    if let ConflictAction::DoUpdate { assignments } = &on_conflict.action {
+        if on_conflict.columns.is_empty() {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "ON CONFLICT DO UPDATE requires at least one conflict target".to_string(),
+            ));
+        }
+        if assignments.is_empty() {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "ON CONFLICT DO UPDATE requires at least one assignment".to_string(),
+            ));
+        }
+        validate_merge_write_targets(
+            assignments.iter().map(|(column, _)| column.as_str()),
+            "ON CONFLICT UPDATE",
+        )?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn validate_expr_ref(
@@ -569,6 +792,41 @@ fn validate_dml_command(
         validate_table_ref("table", &cmd.table)?;
     }
 
+    if let Some((_, percent, _)) = cmd.sample
+        && (!percent.is_finite() || !(0.0..=100.0).contains(&percent))
+    {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "TABLESAMPLE percent must be finite and between 0 and 100".to_string(),
+        ));
+    }
+    for cage in &cmd.cages {
+        if let CageKind::Sample(percent) = cage.kind
+            && percent > 100
+        {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "TABLESAMPLE percent must be between 0 and 100".to_string(),
+            ));
+        }
+    }
+
+    if cmd.skip_locked && cmd.lock_mode.is_none() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "SKIP LOCKED requires a row lock mode".to_string(),
+        ));
+    }
+
+    if let Some((_, true)) = cmd.fetch {
+        let has_order_by = cmd
+            .cages
+            .iter()
+            .any(|cage| matches!(cage.kind, CageKind::Sort(_)) && !cage.conditions.is_empty());
+        if !has_order_by {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "FETCH WITH TIES requires ORDER BY".to_string(),
+            ));
+        }
+    }
+
     for column in projection_columns {
         validate_expr_ref("columns", column)?;
     }
@@ -768,6 +1026,7 @@ fn encode_select_with_columns(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, columns)?;
+    validate_select_shape(cmd)?;
 
     if try_encode_simple_select_fast(cmd, columns, buf, params)? {
         return Ok(());
@@ -799,7 +1058,11 @@ fn encode_select_with_columns(
 
     // FROM
     buf.extend_from_slice(b" FROM ");
+    if cmd.only_table {
+        buf.extend_from_slice(b"ONLY ");
+    }
     push_table_ref(buf, &cmd.table);
+    append_table_sample_clause(cmd, buf);
 
     // JOINs
     for join in &cmd.joins {
@@ -936,12 +1199,7 @@ fn encode_select_with_columns(
                 }
                 first = false;
                 encode_expr(&cond.left, buf)?;
-                match order {
-                    SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => {
-                        buf.extend_from_slice(b" DESC");
-                    }
-                    SortOrder::Asc | SortOrder::AscNullsFirst | SortOrder::AscNullsLast => {}
-                }
+                append_sort_order(*order, buf);
             }
         }
     }
@@ -965,6 +1223,7 @@ fn encode_select_with_columns(
     }
 
     append_fetch_clause(cmd, buf);
+    append_lock_clause(cmd, buf);
 
     if !cmd.set_ops.is_empty() && set_operand_has_branch_clauses(cmd) {
         wrap_sql_range_in_parens(buf, select_start);
@@ -1009,6 +1268,7 @@ fn set_operand_needs_wrapper(query: &Qail) -> bool {
 
 fn set_operand_has_branch_clauses(query: &Qail) -> bool {
     query.fetch.is_some()
+        || query.lock_mode.is_some()
         || query.cages.iter().any(|cage| {
             matches!(
                 cage.kind,
@@ -1036,6 +1296,58 @@ fn append_fetch_clause(cmd: &Qail, buf: &mut BytesMut) {
     }
 }
 
+fn append_sort_order(order: SortOrder, buf: &mut BytesMut) {
+    match order {
+        SortOrder::Asc => {}
+        SortOrder::Desc => buf.extend_from_slice(b" DESC"),
+        SortOrder::AscNullsFirst => buf.extend_from_slice(b" ASC NULLS FIRST"),
+        SortOrder::AscNullsLast => buf.extend_from_slice(b" ASC NULLS LAST"),
+        SortOrder::DescNullsFirst => buf.extend_from_slice(b" DESC NULLS FIRST"),
+        SortOrder::DescNullsLast => buf.extend_from_slice(b" DESC NULLS LAST"),
+    }
+}
+
+fn append_table_sample_clause(cmd: &Qail, buf: &mut BytesMut) {
+    let sample = cmd.sample.or_else(|| {
+        cmd.cages.iter().find_map(|cage| match cage.kind {
+            CageKind::Sample(percent) => Some((SampleMethod::Bernoulli, percent as f64, None)),
+            _ => None,
+        })
+    });
+    let Some((method, percent, seed)) = sample else {
+        return;
+    };
+
+    match method {
+        SampleMethod::Bernoulli => buf.extend_from_slice(b" TABLESAMPLE BERNOULLI ("),
+        SampleMethod::System => buf.extend_from_slice(b" TABLESAMPLE SYSTEM ("),
+    }
+    buf.extend_from_slice(percent.to_string().as_bytes());
+    buf.extend_from_slice(b")");
+    if let Some(seed) = seed {
+        buf.extend_from_slice(b" REPEATABLE (");
+        buf.extend_from_slice(seed.to_string().as_bytes());
+        buf.extend_from_slice(b")");
+    }
+}
+
+fn append_lock_clause(cmd: &Qail, buf: &mut BytesMut) {
+    let Some(lock_mode) = cmd.lock_mode else {
+        return;
+    };
+
+    match lock_mode {
+        LockMode::Update => buf.extend_from_slice(b" FOR UPDATE"),
+        LockMode::NoKeyUpdate => buf.extend_from_slice(b" FOR NO KEY UPDATE"),
+        LockMode::Share => buf.extend_from_slice(b" FOR SHARE"),
+        LockMode::KeyShare => buf.extend_from_slice(b" FOR KEY SHARE"),
+    }
+
+    if cmd.skip_locked {
+        buf.extend_from_slice(b" SKIP LOCKED");
+    }
+}
+
 /// Fast path for the dominant read shape:
 /// `SELECT <columns> FROM <table> [LIMIT n] [OFFSET n]`
 ///
@@ -1055,6 +1367,13 @@ fn try_encode_simple_select_fast(
         || !cmd.set_ops.is_empty()
         || !cmd.having.is_empty()
         || cmd.fetch.is_some()
+        || cmd.lock_mode.is_some()
+        || cmd.sample.is_some()
+        || cmd
+            .cages
+            .iter()
+            .any(|cage| matches!(cage.kind, CageKind::Sample(_)))
+        || cmd.only_table
         || !matches!(cmd.group_by_mode, GroupByMode::Simple)
     {
         return Ok(false);
@@ -1210,19 +1529,24 @@ pub fn encode_insert(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, &cmd.columns)?;
+    validate_insert_shape(cmd)?;
 
     buf.extend_from_slice(b"INSERT INTO ");
     push_table_ref(buf, &cmd.table);
 
     // Find payload cage
-    let payload_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Payload);
+    let payload_cage = payload_cage(cmd);
+    let payload_shape =
+        payload_cage.map_or(PayloadShape::Empty, |cage| payload_shape(&cage.conditions));
 
     // Column list - prefer cmd.columns, but extract from conditions if empty (set_value pattern)
     if !cmd.columns.is_empty() {
         buf.extend_from_slice(b" (");
         encode_columns(&cmd.columns, buf)?;
         buf.extend_from_slice(b")");
-    } else if let Some(cage) = payload_cage {
+    } else if let Some(cage) = payload_cage
+        && payload_shape == PayloadShape::Named
+    {
         // Extract column names from condition.left (set_value pattern)
         buf.extend_from_slice(b" (");
         for (i, cond) in cage.conditions.iter().enumerate() {
@@ -1234,8 +1558,17 @@ pub fn encode_insert(
         buf.extend_from_slice(b")");
     }
 
+    if let Some(overriding) = &cmd.overriding {
+        match overriding {
+            OverridingKind::SystemValue => buf.extend_from_slice(b" OVERRIDING SYSTEM VALUE"),
+            OverridingKind::UserValue => buf.extend_from_slice(b" OVERRIDING USER VALUE"),
+        }
+    }
+
     // INSERT ... SELECT source query takes the place of VALUES.
-    if let Some(source_query) = &cmd.source_query {
+    if cmd.default_values {
+        buf.extend_from_slice(b" DEFAULT VALUES");
+    } else if let Some(source_query) = &cmd.source_query {
         buf.extend_from_slice(b" ");
         encode_select(source_query, buf, params)?;
     } else if let Some(cage) = payload_cage {
@@ -1309,13 +1642,17 @@ pub fn encode_update(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, &cmd.columns)?;
+    validate_update_shape(cmd)?;
 
     buf.extend_from_slice(b"UPDATE ");
+    if cmd.only_table {
+        buf.extend_from_slice(b"ONLY ");
+    }
     push_table_ref(buf, &cmd.table);
     buf.extend_from_slice(b" SET ");
 
     // SET clause - pair columns with payload values
-    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Payload) {
+    if let Some(cage) = payload_cage(cmd) {
         // Use cmd.columns if available (from .columns([...]).values([...]) pattern)
         // Otherwise use cage.conditions.left (from .set("col", value) pattern)
         if !cmd.columns.is_empty() {
@@ -1380,6 +1717,9 @@ pub fn encode_delete(
     validate_dml_command(cmd, &cmd.columns)?;
 
     buf.extend_from_slice(b"DELETE FROM ");
+    if cmd.only_table {
+        buf.extend_from_slice(b"ONLY ");
+    }
     push_table_ref(buf, &cmd.table);
 
     if !cmd.using_tables.is_empty() {
