@@ -15,7 +15,7 @@ use nom::{
     bytes::complete::{tag, tag_no_case},
     character::complete::{char, multispace0, multispace1},
     combinator::{map, opt, peek},
-    multi::separated_list0,
+    multi::{separated_list0, separated_list1},
     sequence::preceded,
 };
 
@@ -177,6 +177,12 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
                         .parse(input)?;
                 let (input, _) = multispace0(input)?;
                 let (input, _) = char(')').parse(input)?;
+                if values.is_empty() {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::SeparatedList,
+                    )));
+                }
                 (input, Value::Array(values))
             } else {
                 parse_value(input)?
@@ -305,7 +311,7 @@ fn parse_partition_by(input: &str) -> IResult<&str, Vec<String>> {
     let (input, _) = multispace1(input)?;
 
     let (input, cols) =
-        separated_list0((multispace0, char(','), multispace0), parse_identifier).parse(input)?;
+        separated_list1((multispace0, char(','), multispace0), parse_identifier).parse(input)?;
 
     Ok((input, cols.into_iter().map(|s| s.to_string()).collect()))
 }
@@ -317,7 +323,7 @@ fn parse_window_order_by(input: &str) -> IResult<&str, Vec<Cage>> {
     let (input, _) = tag_no_case("by").parse(input)?;
     let (input, _) = multispace1(input)?;
 
-    let (input, order_parts) = separated_list0(
+    let (input, order_parts) = separated_list1(
         (multispace0, char(','), multispace0),
         parse_window_sort_item,
     )

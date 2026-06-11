@@ -113,17 +113,10 @@ pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
     let (input, name) = parse_bare_identifier(input)?;
     let (input, _) = char(':').parse(input)?;
 
-    let (input, data_type) = recognize((
-        take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-        opt(delimited(
-            char('('),
-            take_while1(|c: char| c != ')'),
-            char(')'),
-        )),
-    ))
-    .parse(input)?;
+    let (input, data_type) = parse_data_type(input)?;
 
     let (input, constraints) = many0(preceded(char(':'), parse_constraint)).parse(input)?;
+    validate_column_constraints(input, &constraints)?;
 
     Ok((
         input,
@@ -133,6 +126,97 @@ pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
             constraints,
         },
     ))
+}
+
+fn parse_data_type(input: &str) -> IResult<&str, String> {
+    let (input, base_type) = parse_bare_identifier(input)?;
+    let (input, params) = opt(delimited(
+        char('('),
+        take_while1(|c: char| c != ')'),
+        char(')'),
+    ))
+    .parse(input)?;
+
+    if let Some(params) = params {
+        validate_type_params(input, params)?;
+        Ok((input, format!("{base_type}({params})")))
+    } else {
+        Ok((input, base_type.to_string()))
+    }
+}
+
+fn validate_type_params<'a>(error_input: &'a str, params: &str) -> IResult<&'a str, ()> {
+    let mut has_part = false;
+    for part in params.split(',') {
+        let part = part.trim();
+        if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+            return Err(column_definition_error(error_input));
+        }
+        has_part = true;
+    }
+
+    if !has_part {
+        return Err(column_definition_error(error_input));
+    }
+
+    Ok((error_input, ()))
+}
+
+fn validate_column_constraints<'a>(
+    error_input: &'a str,
+    constraints: &[Constraint],
+) -> IResult<&'a str, ()> {
+    let mut primary_key = false;
+    let mut unique = false;
+    let mut nullable = false;
+    let mut default = false;
+    let mut check = false;
+
+    for constraint in constraints {
+        match constraint {
+            Constraint::PrimaryKey => {
+                if primary_key {
+                    return Err(column_definition_error(error_input));
+                }
+                primary_key = true;
+            }
+            Constraint::Unique => {
+                if unique {
+                    return Err(column_definition_error(error_input));
+                }
+                unique = true;
+            }
+            Constraint::Nullable => {
+                if nullable {
+                    return Err(column_definition_error(error_input));
+                }
+                nullable = true;
+            }
+            Constraint::Default(_) => {
+                if default {
+                    return Err(column_definition_error(error_input));
+                }
+                default = true;
+            }
+            Constraint::Check(_) => {
+                if check {
+                    return Err(column_definition_error(error_input));
+                }
+                check = true;
+            }
+            _ => {}
+        }
+    }
+
+    if primary_key && nullable {
+        return Err(column_definition_error(error_input));
+    }
+
+    Ok((error_input, ()))
+}
+
+fn column_definition_error(input: &str) -> nom::Err<nom::error::Error<&str>> {
+    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
 }
 
 /// Parse column constraint: pk, unique, nullable, default=value, check=expr

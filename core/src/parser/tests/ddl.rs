@@ -135,6 +135,32 @@ fn test_make_rejects_malformed_identifiers() {
     }
 }
 
+#[test]
+fn test_make_rejects_malformed_types_and_duplicate_column_constraints() {
+    for query in [
+        "make users id:1uuid",
+        "make users id:uuid-name",
+        "make users id:varchar()",
+        "make users id:varchar( )",
+        "make users id:varchar(255,)",
+        "make users id:varchar(,255)",
+        "make users id:varchar(255,,10)",
+        "make users id:uuid:pk:pk",
+        "make users id:uuid:primarykey:pk",
+        "make users id:uuid:unique:uniq",
+        "make users id:uuid:null:nullable",
+        "make users id:uuid:default=1:def=2",
+        "make users id:uuid:check=a:check=b",
+        "make users id:uuid:pk:null",
+        "make users id:uuid:null:pk",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "bad DDL column definition parsed: {query}"
+        );
+    }
+}
+
 // Keep manual construction for unimplemented/complex commands
 #[test]
 fn test_ddl_commands_manual() {

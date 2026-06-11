@@ -309,6 +309,12 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
                 separated_list0((multispace0, char(','), multispace0), parse_value).parse(input)?;
             let (input, _) = multispace0(input)?;
             let (input, _) = char(')').parse(input)?;
+            if values.is_empty() {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::SeparatedList,
+                )));
+            }
             (input, Value::Array(values))
         } else {
             parse_value(input)?

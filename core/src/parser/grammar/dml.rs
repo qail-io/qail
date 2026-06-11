@@ -1,4 +1,4 @@
-use super::base::{parse_identifier, parse_value};
+use super::base::{parse_bare_identifier, parse_value};
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -6,6 +6,7 @@ use nom::{
     character::complete::{char, multispace0, multispace1},
     multi::separated_list1,
 };
+use std::collections::HashSet;
 
 /// Parse: values col = val, col2 = val2 (for SET/UPDATE)
 pub fn parse_values_clause(input: &str) -> IResult<&str, Cage> {
@@ -57,7 +58,12 @@ pub fn parse_insert_values(input: &str) -> IResult<&str, Cage> {
 
 /// Parse comma-separated assignments: col = val, col2 = val2
 pub fn parse_set_assignments(input: &str) -> IResult<&str, Vec<Condition>> {
-    separated_list1((multispace0, char(','), multispace0), parse_assignment).parse(input)
+    let (remaining, conditions) =
+        separated_list1((multispace0, char(','), multispace0), parse_assignment).parse(input)?;
+    if !condition_targets_are_unique(&conditions) {
+        return Err(duplicate_target_error(input));
+    }
+    Ok((remaining, conditions))
 }
 
 /// Parse single assignment: column = value or column = expression (supports functions and subqueries)
@@ -65,7 +71,7 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
     use super::expressions::parse_expression;
     use nom::branch::alt;
 
-    let (input, column) = parse_identifier(input)?;
+    let (input, column) = parse_bare_identifier(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -116,7 +122,11 @@ pub fn parse_on_conflict(input: &str) -> IResult<&str, OnConflict> {
     let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, columns) =
-        separated_list1((multispace0, char(','), multispace0), parse_identifier).parse(input)?;
+        separated_list1((multispace0, char(','), multispace0), parse_bare_identifier)
+            .parse(input)?;
+    if !identifier_targets_are_unique(&columns) {
+        return Err(duplicate_target_error(input));
+    }
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')').parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -149,11 +159,15 @@ fn parse_conflict_update(input: &str) -> IResult<&str, ConflictAction> {
 
 /// Parse assignments for ON CONFLICT UPDATE: col = val, col2 = excluded.col2
 fn parse_conflict_assignments(input: &str) -> IResult<&str, Vec<(String, Expr)>> {
-    separated_list1(
+    let (remaining, assignments) = separated_list1(
         (multispace0, char(','), multispace0),
         parse_conflict_assignment,
     )
-    .parse(input)
+    .parse(input)?;
+    if !conflict_assignment_targets_are_unique(&assignments) {
+        return Err(duplicate_target_error(input));
+    }
+    Ok((remaining, assignments))
 }
 
 /// Parse single conflict assignment: column = expression (supports :named_params)
@@ -161,7 +175,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
     use super::expressions::parse_expression;
     use nom::branch::alt;
 
-    let (input, column) = parse_identifier(input)?;
+    let (input, column) = parse_bare_identifier(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -176,6 +190,30 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
     .parse(input)?;
 
     Ok((input, (column.to_string(), expr)))
+}
+
+fn condition_targets_are_unique(conditions: &[Condition]) -> bool {
+    let mut seen = HashSet::new();
+    conditions.iter().all(|condition| match &condition.left {
+        Expr::Named(name) => seen.insert(name.as_str()),
+        _ => true,
+    })
+}
+
+fn identifier_targets_are_unique(columns: &[&str]) -> bool {
+    let mut seen = HashSet::new();
+    columns.iter().all(|column| seen.insert(*column))
+}
+
+fn conflict_assignment_targets_are_unique(assignments: &[(String, Expr)]) -> bool {
+    let mut seen = HashSet::new();
+    assignments
+        .iter()
+        .all(|(column, _)| seen.insert(column.as_str()))
+}
+
+fn duplicate_target_error(input: &str) -> nom::Err<nom::error::Error<&str>> {
+    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
 }
 
 /// Parse: from (get ...) - source query for INSERT...SELECT

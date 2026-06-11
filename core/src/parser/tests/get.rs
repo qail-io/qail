@@ -189,6 +189,19 @@ fn test_v2_in_accepts_named_parameter_array() {
 }
 
 #[test]
+fn test_v2_rejects_empty_in_lists() {
+    for query in [
+        "get users fields id where id in ()",
+        "get users fields id where id not in ()",
+        "get users fields id where id in ( )",
+        "get users fields count(id) filter (where id in ())",
+        "get users fields count(id) filter (where id not in ())",
+    ] {
+        assert!(parse(query).is_err(), "empty IN list parsed: {query}");
+    }
+}
+
+#[test]
 fn test_v2_numeric_overflow_is_rejected() {
     let huge = "999999999999999999999999999999999999999999999999";
 
@@ -250,6 +263,25 @@ fn test_v2_get_with_or_conditions() {
     assert_eq!(cmd.cages[0].kind, CageKind::Filter);
     assert_eq!(cmd.cages[0].logical_op, LogicalOp::Or);
     assert_eq!(cmd.cages[0].conditions.len(), 2);
+}
+
+#[test]
+fn test_v2_rejects_case_without_when_and_empty_window_clauses() {
+    for query in [
+        "get users fields CASE ELSE 1 END",
+        "get users fields CASE END",
+        "get users fields row_number() over (partition by) as rn",
+        "get users fields row_number() over (partition by ) as rn",
+        "get users fields row_number() over (order by) as rn",
+        "get users fields row_number() over (order by ) as rn",
+        "get users fields row_number() over (partition by, order by id) as rn",
+        "get users fields row_number() over (partition by tenant_id order by) as rn",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "invalid CASE/window expression parsed: {query}"
+        );
+    }
 }
 
 #[test]

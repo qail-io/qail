@@ -42,6 +42,19 @@ fn test_update_multiple_values() {
 }
 
 #[test]
+fn test_set_rejects_malformed_or_duplicate_assignment_targets() {
+    for query in [
+        "set users values .name = \"Ana\"",
+        "set users values name. = \"Ana\"",
+        "set users values profile.name = \"Ana\"",
+        "set users values name = \"Ana\", name = \"Bob\"",
+        "set users values name = \"Ana\", active = true, name = \"Bob\"",
+    ] {
+        assert!(parse(query).is_err(), "bad SET target parsed: {query}");
+    }
+}
+
+#[test]
 fn test_delete_with_filter() {
     let cmd = parse("del sessions where user_id = $1 and expired = true").unwrap();
     assert_eq!(cmd.action, Action::Del);
@@ -77,6 +90,40 @@ fn test_conflict_update_escapes_triple_quoted_string_assignment() {
                 assignments[0].1,
                 Expr::Literal(Value::String("O'Reilly".to_string()))
             );
+        }
+        other => panic!("expected conflict update, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_conflict_rejects_malformed_or_duplicate_targets() {
+    for query in [
+        "add users values 1 conflict (.id) nothing",
+        "add users values 1 conflict (id.) nothing",
+        "add users values 1 conflict (users.id) nothing",
+        "add users values 1 conflict (id, id) nothing",
+        "add users values 1 conflict (id) update .name = \"Ana\"",
+        "add users values 1 conflict (id) update name. = \"Ana\"",
+        "add users values 1 conflict (id) update profile.name = \"Ana\"",
+        "add users values 1 conflict (id) update name = \"Ana\", name = \"Bob\"",
+        "add users values 1 conflict (id) update name = excluded.name, name = \"Bob\"",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "bad ON CONFLICT target parsed: {query}"
+        );
+    }
+}
+
+#[test]
+fn test_conflict_update_keeps_qualified_rhs_expression_valid() {
+    let cmd = parse("add users values 1 conflict (id) update name = excluded.name").unwrap();
+
+    let on_conflict = cmd.on_conflict.unwrap();
+    match on_conflict.action {
+        ConflictAction::DoUpdate { assignments } => {
+            assert_eq!(assignments[0].0, "name");
+            assert_eq!(assignments[0].1, Expr::Named("excluded.name".to_string()));
         }
         other => panic!("expected conflict update, got {other:?}"),
     }

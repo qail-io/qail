@@ -18,6 +18,12 @@ pub fn parse_case(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace1(input)?;
 
     let (input, when_clauses) = separated_list0(multispace1, parse_when).parse(input)?;
+    if when_clauses.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     let (input, _) = multispace0(input)?;
 

@@ -198,3 +198,28 @@ fn test_bracket_literal_does_not_trigger_table_filter_desugar() {
     assert_eq!(cmd.table, "users");
     assert_eq!(cmd.cages[0].conditions[0].op, Operator::Overlaps);
 }
+
+#[test]
+fn test_json_literals_are_validated_as_json() {
+    let cmd = parse("get docs fields id where metadata @> {\"tags\":[\"a\",{\"b\":true}],\"n\":1}")
+        .unwrap();
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::Json("{\"tags\":[\"a\",{\"b\":true}],\"n\":1}".to_string())
+    );
+
+    for query in [
+        "get docs fields id where metadata @> {]}",
+        "get docs fields id where metadata @> {\"a\": [1, }",
+        "get docs fields id where metadata @> [1, } ]",
+        "get docs fields id where metadata @> {\"a\": \"unterminated}",
+        "get docs fields id where metadata @> {\"a\": tru}",
+        "get docs fields id where metadata @> {\"a\", 1}",
+        "get docs fields id where metadata @> [1,,2]",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "invalid JSON literal parsed: {query}"
+        );
+    }
+}

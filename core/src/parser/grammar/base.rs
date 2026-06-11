@@ -245,6 +245,13 @@ fn parse_json_literal(input: &str) -> IResult<&str, Value> {
     let json_str = &trimmed[..end_pos];
     let _remaining = &trimmed[end_pos..];
 
+    if serde_json::from_str::<serde_json::Value>(json_str).is_err() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
     // Calculate how much of original input we consumed (account for leading whitespace)
     let consumed = input.len() - trimmed.len() + end_pos;
     let remaining_original = &input[consumed..];
