@@ -180,6 +180,18 @@ fn test_parse_extended_keyword_operators() {
 }
 
 #[test]
+fn test_interval_month_suffix_is_not_parsed_as_minutes() {
+    let cmd = parse("get subscriptions fields id where age = 6mo").unwrap();
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::Interval {
+            amount: 6,
+            unit: crate::ast::values::IntervalUnit::Month
+        }
+    );
+}
+
+#[test]
 fn test_bracket_literal_does_not_trigger_table_filter_desugar() {
     let cmd = parse("get users fields id where tags && '[\"a\",\"b\"]'").unwrap();
     assert_eq!(cmd.action, Action::Get);

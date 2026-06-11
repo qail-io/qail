@@ -1,4 +1,4 @@
-use super::base::parse_identifier;
+use super::base::{parse_bare_identifier, parse_identifier};
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -110,7 +110,7 @@ pub fn parse_table_constraint(input: &str) -> IResult<&str, TableConstraint> {
 
 /// Parse column definition: `name:type[:constraint1[:constraint2]]`
 pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
-    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
+    let (input, name) = parse_bare_identifier(input)?;
     let (input, _) = char(':').parse(input)?;
 
     let (input, data_type) = recognize((

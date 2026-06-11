@@ -40,3 +40,23 @@ fn test_index_unique() {
     assert_eq!(idx.name, "idx_phone");
     assert!(idx.unique);
 }
+
+#[test]
+fn test_index_rejects_malformed_identifiers() {
+    for query in [
+        "index 1idx on users email",
+        "index .idx on users email",
+        "index idx. on users email",
+        "index idx on 1users email",
+        "index idx on .users email",
+        "index idx on users. email",
+        "index idx on users .email",
+        "index idx on users email.",
+        "index idx on users email, .tenant_id",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "malformed index identifier parsed: {query}"
+        );
+    }
+}

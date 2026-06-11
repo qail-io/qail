@@ -20,6 +20,7 @@ use nom::{
     combinator::map,
     multi::{many0, separated_list0},
 };
+use std::collections::HashSet;
 
 /// Collection of named queries from a queries.qail file
 #[derive(Debug, Clone, Default)]
@@ -154,13 +155,19 @@ fn rust_type_expr(input: &str) -> IResult<&str, &str> {
         )));
     }
     let typ = &input[..end];
-    if !validate_rust_type_generics(typ) {
+    if !validate_rust_type_expr(typ) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::TakeWhile1,
         )));
     }
     Ok((&input[end..], typ))
+}
+
+fn validate_rust_type_expr(typ: &str) -> bool {
+    validate_rust_type_generics(typ)
+        && validate_rust_type_paths(typ)
+        && validate_rust_type_group_adjacency(typ)
 }
 
 fn validate_rust_type_generics(typ: &str) -> bool {
@@ -200,6 +207,82 @@ fn validate_rust_type_generics(typ: &str) -> bool {
     }
 
     stack.is_empty()
+}
+
+fn validate_rust_type_paths(typ: &str) -> bool {
+    let mut token = String::new();
+
+    for ch in typ.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '.') {
+            token.push(ch);
+            continue;
+        }
+
+        if !token.is_empty() {
+            if !validate_rust_type_path_token(&token) {
+                return false;
+            }
+            token.clear();
+        }
+
+        if !(ch.is_whitespace() || matches!(ch, '<' | '>' | ',' | '[' | ']')) {
+            return false;
+        }
+    }
+
+    token.is_empty() || validate_rust_type_path_token(&token)
+}
+
+fn validate_rust_type_path_token(token: &str) -> bool {
+    if token.is_empty()
+        || token.contains(":::")
+        || token.contains("..")
+        || token.contains(".:")
+        || token.contains(":.")
+        || token.starts_with(':')
+        || token.starts_with('.')
+        || token.ends_with(':')
+        || token.ends_with('.')
+    {
+        return false;
+    }
+
+    token.replace("::", ".").split('.').all(|part| {
+        let mut chars = part.chars();
+        matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+            && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    })
+}
+
+fn validate_rust_type_group_adjacency(typ: &str) -> bool {
+    let mut prev_sig: Option<char> = None;
+    let mut depth = 0usize;
+
+    for ch in typ.chars().filter(|ch| !ch.is_whitespace()) {
+        match ch {
+            '<' => {
+                if matches!(prev_sig, Some('<' | '>' | ',')) {
+                    return false;
+                }
+                depth += 1;
+            }
+            '>' => {
+                if matches!(prev_sig, None | Some('<' | ',')) {
+                    return false;
+                }
+                let Some(next) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next;
+            }
+            ',' if depth == 0 || matches!(prev_sig, None | Some('<' | ',')) => return false,
+            ',' => {}
+            _ => {}
+        }
+        prev_sig = Some(ch);
+    }
+
+    !matches!(prev_sig, Some('<' | ','))
 }
 
 /// Skip whitespace and comments
@@ -304,6 +387,12 @@ fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
     let (input, _) = multispace1(input)?;
     let (input, name) = identifier(input)?;
     let (input, params) = parse_params(input)?;
+    if !query_params_are_unique(&params) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     // Return type (optional for execute)
     let (input, return_type) = if is_execute {
@@ -314,6 +403,12 @@ fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
     };
 
     let (input, body) = parse_body(input)?;
+    if body.is_empty() || super::parse(body).is_err() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     Ok((
         input,
@@ -327,13 +422,33 @@ fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
     ))
 }
 
+fn query_params_are_unique(params: &[QueryParam]) -> bool {
+    let mut names = HashSet::new();
+    params
+        .iter()
+        .all(|param| names.insert(param.name.to_ascii_lowercase()))
+}
+
 /// Parse complete query file
 fn parse_query_file(input: &str) -> IResult<&str, QueryFile> {
     let (input, _) = ws_and_comments(input)?;
     let (input, queries) = many0(parse_query_def).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
+    if !query_names_are_unique(&queries) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     Ok((input, QueryFile { queries }))
+}
+
+fn query_names_are_unique(queries: &[QueryDef]) -> bool {
+    let mut names = HashSet::new();
+    queries
+        .iter()
+        .all(|query| names.insert(query.name.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -448,6 +563,66 @@ mod tests {
         ] {
             QueryFile::parse(input).expect_err("empty generic type arguments must fail");
         }
+    }
+
+    #[test]
+    fn test_parse_rejects_malformed_type_paths() {
+        for input in [
+            r#"
+            query broken(id: .Uuid) -> User:
+              get users where id = :id
+            "#,
+            r#"
+            query broken(id: std::::Uuid) -> User:
+              get users where id = :id
+            "#,
+            r#"
+            query broken(id: Uuid) -> Vec<1User>:
+              get users where id = :id
+            "#,
+            r#"
+            query broken(id: Uuid) -> Option<User><Other>:
+              get users where id = :id
+            "#,
+        ] {
+            QueryFile::parse(input).expect_err("malformed Rust type path must fail");
+        }
+    }
+
+    #[test]
+    fn test_parse_rejects_duplicate_names_params_and_invalid_bodies() {
+        let duplicate_query = r#"
+            query find_user(id: Uuid) -> User:
+              get users where id = :id
+
+            query find_user(email: String) -> User:
+              get users where email = :email
+        "#;
+        QueryFile::parse(duplicate_query).expect_err("duplicate query names must fail");
+
+        let duplicate_param = r#"
+            query find_user(id: Uuid, id: String) -> User:
+              get users where id = :id
+        "#;
+        QueryFile::parse(duplicate_param).expect_err("duplicate params must fail");
+
+        let empty_body = r#"
+            query find_user(id: Uuid) -> User:
+
+        "#;
+        QueryFile::parse(empty_body).expect_err("empty body must fail");
+
+        let invalid_body = r#"
+            query find_user(id: Uuid) -> User:
+              SELECT * FROM users WHERE id = :id
+        "#;
+        QueryFile::parse(invalid_body).expect_err("raw SQL body must fail QAIL parsing");
+
+        let malformed_qail_body = r#"
+            query find_user(id: Uuid) -> User:
+              get .users where id = :id
+        "#;
+        QueryFile::parse(malformed_qail_body).expect_err("malformed QAIL body must fail");
     }
 
     #[test]

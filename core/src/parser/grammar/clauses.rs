@@ -302,13 +302,17 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         // Store as array with 2 elements [min, max]
         (input, Value::Array(vec![min_val, max_val]))
     } else if matches!(op, Operator::In | Operator::NotIn) {
-        let (input, _) = char('(').parse(input)?;
         let (input, _) = multispace0(input)?;
-        let (input, values) =
-            separated_list0((multispace0, char(','), multispace0), parse_value).parse(input)?;
-        let (input, _) = multispace0(input)?;
-        let (input, _) = char(')').parse(input)?;
-        (input, Value::Array(values))
+        if let Ok((input, _)) = char::<_, nom::error::Error<&str>>('(').parse(input) {
+            let (input, _) = multispace0(input)?;
+            let (input, values) =
+                separated_list0((multispace0, char(','), multispace0), parse_value).parse(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')').parse(input)?;
+            (input, Value::Array(values))
+        } else {
+            parse_value(input)?
+        }
     } else if let Ok((i, val)) = parse_value(input) {
         (i, val)
     } else {

@@ -173,6 +173,22 @@ fn test_v2_param_in_filter() {
 }
 
 #[test]
+fn test_v2_in_accepts_named_parameter_array() {
+    let cmd = parse("get users fields id where id in :ids").unwrap();
+    assert_eq!(cmd.cages.len(), 1);
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::NamedParam("ids".to_string())
+    );
+
+    let cmd = parse("get users fields id where id not in :blocked_ids").unwrap();
+    assert_eq!(
+        cmd.cages[0].conditions[0].value,
+        Value::NamedParam("blocked_ids".to_string())
+    );
+}
+
+#[test]
 fn test_v2_numeric_overflow_is_rejected() {
     let huge = "999999999999999999999999999999999999999999999999";
 
@@ -181,6 +197,36 @@ fn test_v2_numeric_overflow_is_rejected() {
     assert!(parse(&format!("get users fields id where email = ${huge}")).is_err());
     assert!(parse(&format!("get users fields id where age = {huge}")).is_err());
     assert!(parse(&format!("get users fields id where age = {huge}d")).is_err());
+}
+
+#[test]
+fn test_v2_rejects_malformed_identifiers_across_query_clauses() {
+    for query in [
+        "get 1users",
+        "get üsers",
+        "get .users",
+        "get users.",
+        "get users..archive",
+        "get users fields .id",
+        "get users fields id.",
+        "get users fields naïve",
+        "get users fields id as 1alias",
+        "get users fields id as alias.",
+        "get users fields id where .active = true",
+        "get users fields id where active. = true",
+        "get users fields id where active = .other",
+        "get users fields id where active = other.",
+        "get users fields id where active = :1active",
+        "get users fields id order by .created_at",
+        "get users fields id order by created_at.",
+        "get distinct on (.id) users fields id",
+        "get distinct on (id.) users fields id",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "malformed identifier parsed: {query}"
+        );
+    }
 }
 
 #[test]

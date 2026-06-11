@@ -169,13 +169,18 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
         let (input, value) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
             (input, Value::Null)
         } else if matches!(op, Operator::In | Operator::NotIn) {
-            let (input, _) = char('(').parse(input)?;
             let (input, _) = multispace0(input)?;
-            let (input, values) =
-                separated_list0((multispace0, char(','), multispace0), parse_value).parse(input)?;
-            let (input, _) = multispace0(input)?;
-            let (input, _) = char(')').parse(input)?;
-            (input, Value::Array(values))
+            if let Ok((input, _)) = char::<_, nom::error::Error<&str>>('(').parse(input) {
+                let (input, _) = multispace0(input)?;
+                let (input, values) =
+                    separated_list0((multispace0, char(','), multispace0), parse_value)
+                        .parse(input)?;
+                let (input, _) = multispace0(input)?;
+                let (input, _) = char(')').parse(input)?;
+                (input, Value::Array(values))
+            } else {
+                parse_value(input)?
+            }
         } else if matches!(op, Operator::Between | Operator::NotBetween) {
             let (input, min_val) = parse_value(input)?;
             let (input, _) = multispace1(input)?;

@@ -29,3 +29,19 @@ fn test_v2_right_join() {
     assert_eq!(cmd.joins[0].table, "customers");
     assert_eq!(cmd.joins[0].kind, JoinKind::Right);
 }
+
+#[test]
+fn test_join_rejects_malformed_identifiers() {
+    for query in [
+        "get users join .posts on users.id = posts.user_id",
+        "get users join posts. on users.id = posts.user_id",
+        "get users join posts on .users.id = posts.user_id",
+        "get users join posts on users.id = .posts.user_id",
+        "get users join posts on users.id = posts.user_id.",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "malformed join identifier parsed: {query}"
+        );
+    }
+}

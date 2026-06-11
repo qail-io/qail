@@ -66,3 +66,23 @@ fn test_parse_merge_by_source_delete() {
     );
     assert_eq!(merge.clauses[0].action, MergeAction::Delete);
 }
+
+#[test]
+fn test_merge_rejects_malformed_identifiers() {
+    for query in [
+        "merge .users using staging_users on users.id = staging_users.id when matched then delete",
+        "merge users. using staging_users on users.id = staging_users.id when matched then delete",
+        "merge users as 1u using staging_users on users.id = staging_users.id when matched then delete",
+        "merge users using .staging_users on users.id = staging_users.id when matched then delete",
+        "merge users using staging_users as s. on users.id = s.id when matched then delete",
+        "merge users using staging_users on .users.id = staging_users.id when matched then delete",
+        "merge users using staging_users on users.id = .staging_users.id when matched then delete",
+        "merge users using staging_users on users.id = staging_users.id when matched then update set .name = staging_users.name",
+        "merge users using staging_users on users.id = staging_users.id when not matched then insert (.id) values (staging_users.id)",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "malformed MERGE identifier parsed: {query}"
+        );
+    }
+}

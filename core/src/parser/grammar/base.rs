@@ -9,9 +9,38 @@ use nom::{
     sequence::{delimited, preceded},
 };
 
+/// Parse a bare identifier (column, alias, or parameter name).
+pub fn parse_bare_identifier(input: &str) -> IResult<&str, &str> {
+    let (remaining, ident) =
+        take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_').parse(input)?;
+    if is_valid_ident_part(ident) {
+        Ok((remaining, ident))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )))
+    }
+}
+
 /// Parse checking identifier (table name, column name, or qualified name like table.column)
 pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.').parse(input)
+    let (remaining, ident) =
+        take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.').parse(input)?;
+    if ident.split('.').all(is_valid_ident_part) {
+        Ok((remaining, ident))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )))
+    }
+}
+
+fn is_valid_ident_part(part: &str) -> bool {
+    let mut chars = part.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// Parse interval shorthand: 24h, 7d, 1w, 30m, 6mo, 1y
@@ -19,12 +48,12 @@ pub fn parse_interval(input: &str) -> IResult<&str, Value> {
     let (input, amount) = map_res(digit1, str::parse::<i64>).parse(input)?;
 
     let (input, unit) = alt((
+        value(IntervalUnit::Month, tag_no_case("mo")),
         value(IntervalUnit::Second, tag_no_case("s")),
         value(IntervalUnit::Minute, tag_no_case("m")),
         value(IntervalUnit::Hour, tag_no_case("h")),
         value(IntervalUnit::Day, tag_no_case("d")),
         value(IntervalUnit::Week, tag_no_case("w")),
-        value(IntervalUnit::Month, tag_no_case("mo")),
         value(IntervalUnit::Year, tag_no_case("y")),
     ))
     .parse(input)?;
@@ -40,13 +69,9 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
             d.parse::<usize>().map(Value::Param)
         }),
         // Named parameter: :name, :id, :user_id
-        map(
-            preceded(
-                char(':'),
-                take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-            ),
-            |name: &str| Value::NamedParam(name.to_string()),
-        ),
+        map(preceded(char(':'), parse_bare_identifier), |name: &str| {
+            Value::NamedParam(name.to_string())
+        }),
         // Boolean
         value(Value::Bool(true), tag_no_case("true")),
         value(Value::Bool(false), tag_no_case("false")),

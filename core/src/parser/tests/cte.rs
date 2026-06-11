@@ -205,6 +205,23 @@ fn test_non_recursive_cte_qail_valid() {
     assert_eq!(cmd.ctes[0].base_query.table, "orders");
 }
 
+#[test]
+fn test_cte_rejects_malformed_identifiers() {
+    for query in [
+        "WITH .summary AS (get orders fields id) get summary",
+        "WITH summary. AS (get orders fields id) get summary",
+        "WITH summary(.id) AS (get orders fields id) get summary",
+        "WITH summary(id.) AS (get orders fields id) get summary",
+        "WITH RECURSIVE .tree AS (get nodes UNION ALL get nodes join tree on parent_id = id) get tree",
+        "WITH RECURSIVE tree(.id) AS (get nodes UNION ALL get nodes join tree on parent_id = id) get tree",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "malformed CTE identifier parsed: {query}"
+        );
+    }
+}
+
 // ─── Recursive with column aliases ───────────────────────────────────
 
 #[test]

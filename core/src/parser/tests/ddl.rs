@@ -114,6 +114,27 @@ fn test_make_composite_pk() {
     }
 }
 
+#[test]
+fn test_make_rejects_malformed_identifiers() {
+    for query in [
+        "make 1users id:uuid",
+        "make .users id:uuid",
+        "make users. id:uuid",
+        "make users 1id:uuid",
+        "make users .id:uuid",
+        "make users id.:uuid",
+        "make users id:uuid unique(.id)",
+        "make users id:uuid unique(id.)",
+        "make users id:uuid primary key(.id)",
+        "make users id:uuid primary key(id.)",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "malformed DDL identifier parsed: {query}"
+        );
+    }
+}
+
 // Keep manual construction for unimplemented/complex commands
 #[test]
 fn test_ddl_commands_manual() {
