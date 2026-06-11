@@ -23,6 +23,7 @@ use nom::{
     multi::{many0, separated_list0},
     sequence::preceded,
 };
+use std::collections::HashSet;
 
 use crate::ast::{BinaryOp, Expr, Value as AstValue};
 use crate::migrate::alter::AlterTable;
@@ -237,7 +238,20 @@ impl TableDef {
 
 /// Parse identifier (table/column name)
 fn identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
+    let (remaining, ident) =
+        take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_').parse(input)?;
+    if ident
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        Ok((remaining, ident))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Alpha,
+        )))
+    }
 }
 
 /// Skip whitespace and comments (both `--` and `#` styles)
@@ -263,6 +277,12 @@ struct TypeInfo {
 fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
     let (input, type_name) =
         take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.').parse(input)?;
+    if !is_identifier_path(type_name) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Alpha,
+        )));
+    }
 
     let (input, params) = if let Some(after_open) = input.strip_prefix('(') {
         let Some(paren_end) = after_open.find(')') else {
@@ -272,7 +292,18 @@ fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
             )));
         };
         let param_str = &after_open[..paren_end];
-        let params: Vec<String> = param_str.split(',').map(|s| s.trim().to_string()).collect();
+        let Ok(params) = split_top_level_csv(param_str) else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::SeparatedList,
+            )));
+        };
+        if params.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::SeparatedList,
+            )));
+        }
         (&after_open[paren_end + 1..], Some(params))
     } else {
         (input, None)
@@ -296,6 +327,22 @@ fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
             is_serial,
         },
     ))
+}
+
+fn is_identifier_path(path: &str) -> bool {
+    let mut seen = false;
+    for part in path.split('.') {
+        seen = true;
+        let mut chars = part.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+    }
+    seen
 }
 
 /// Parse constraint text until comma or closing paren (handling nested parens)
@@ -380,6 +427,11 @@ fn check_expr_end(rest: &str) -> usize {
     }
 
     rest.len()
+}
+
+fn checked_check_expr_end(rest: &str) -> Option<usize> {
+    let end = check_expr_end(rest);
+    (end < rest.len()).then_some(end)
 }
 
 fn parenthesized_content(input: &str) -> IResult<&str, &str> {
@@ -551,59 +603,159 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
         ..Default::default()
     };
 
-    if let Some(constraints) = constraint_str {
-        let lower = constraints.to_lowercase();
-
-        if lower.contains("primary_key") || lower.contains("primary key") {
-            col.primary_key = true;
-            col.nullable = false;
-        }
-        if lower.contains("not_null") || lower.contains("not null") {
-            col.nullable = false;
-        }
-        if lower.contains("unique") {
-            col.unique = true;
-        }
-
-        if let Some(idx) = lower.find("references ") {
-            let rest = &constraints[idx + 11..];
-            // Find end (space or end of string), but handle nested parens
-            let mut paren_depth = 0;
-            let mut end = rest.len();
-            for (i, c) in rest.char_indices() {
-                match c {
-                    '(' => paren_depth += 1,
-                    ')' => {
-                        if paren_depth == 0 {
-                            end = i;
-                            break;
-                        }
-                        paren_depth -= 1;
-                    }
-                    c if c.is_whitespace() && paren_depth == 0 => {
-                        end = i;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            col.references = Some(rest[..end].to_string());
-        }
-
-        if let Some(idx) = lower.find("default ") {
-            let rest = &constraints[idx + 8..];
-            let end = default_expr_end(rest);
-            col.default_value = Some(rest[..end].to_string());
-        }
-
-        if let Some(idx) = lower.find("check(") {
-            let rest = &constraints[idx + 6..];
-            let end = check_expr_end(rest);
-            col.check = Some(rest[..end].to_string());
-        }
+    if let Some(constraints) = constraint_str
+        && parse_column_constraints(&mut col, constraints).is_err()
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            constraints,
+            nom::error::ErrorKind::Verify,
+        )));
     }
 
     Ok((input, col))
+}
+
+fn parse_column_constraints(col: &mut ColumnDef, constraints: &str) -> Result<(), ()> {
+    let mut rest = constraints.trim();
+    while !rest.is_empty() {
+        if let Some(next) = strip_keyword_ci(rest, "primary_key") {
+            if col.primary_key {
+                return Err(());
+            }
+            col.primary_key = true;
+            col.nullable = false;
+            rest = next.trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_pair_ci(rest, "primary", "key") {
+            if col.primary_key {
+                return Err(());
+            }
+            col.primary_key = true;
+            col.nullable = false;
+            rest = next.trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_ci(rest, "not_null") {
+            col.nullable = false;
+            rest = next.trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_pair_ci(rest, "not", "null") {
+            col.nullable = false;
+            rest = next.trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_ci(rest, "unique") {
+            if col.unique {
+                return Err(());
+            }
+            col.unique = true;
+            rest = next.trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_ci(rest, "references") {
+            if col.references.is_some() {
+                return Err(());
+            }
+            let next = next.trim_start();
+            let (target, tail) = parse_reference_constraint_target(next)?;
+            if target.is_empty() {
+                return Err(());
+            }
+            col.references = Some(target.to_string());
+            rest = tail.trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_ci(rest, "default") {
+            if col.default_value.is_some() {
+                return Err(());
+            }
+            let next = next.trim_start();
+            if next.is_empty() {
+                return Err(());
+            }
+            let end = default_expr_end(next);
+            if end == 0 {
+                return Err(());
+            }
+            col.default_value = Some(next[..end].trim_end().to_string());
+            rest = next[end..].trim_start();
+            continue;
+        }
+        if let Some(next) = strip_keyword_ci(rest, "check") {
+            if col.check.is_some() {
+                return Err(());
+            }
+            let next = next.trim_start();
+            let Some(after_open) = next.strip_prefix('(') else {
+                return Err(());
+            };
+            let Some(end) = checked_check_expr_end(after_open) else {
+                return Err(());
+            };
+            let expr = after_open[..end].trim();
+            if expr.is_empty() {
+                return Err(());
+            }
+            col.check = Some(expr.to_string());
+            rest = after_open[end + 1..].trim_start();
+            continue;
+        }
+
+        return Err(());
+    }
+
+    Ok(())
+}
+
+fn strip_keyword_pair_ci<'a>(input: &'a str, first: &str, second: &str) -> Option<&'a str> {
+    let rest = strip_keyword_ci(input, first)?.trim_start();
+    strip_keyword_ci(rest, second)
+}
+
+fn strip_keyword_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    if input.len() < keyword.len() {
+        return None;
+    }
+    let (head, tail) = input.split_at(keyword.len());
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if tail
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    Some(tail)
+}
+
+fn parse_reference_constraint_target(input: &str) -> Result<(&str, &str), ()> {
+    let mut paren_depth = 0usize;
+    let mut end = input.len();
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => {
+                if paren_depth == 0 {
+                    end = idx;
+                    break;
+                }
+                paren_depth -= 1;
+            }
+            c if c.is_whitespace() && paren_depth == 0 => {
+                end = idx;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if paren_depth != 0 {
+        return Err(());
+    }
+    Ok((&input[..end], &input[end..]))
 }
 
 /// Parse column list: (col1 type, col2 type, ...)
@@ -624,6 +776,12 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
     let (input, _) = multispace1(input)?;
     let (input, name) = identifier(input)?;
     let (input, columns) = parse_column_list(input)?;
+    if columns.is_empty() || has_duplicate_column_names(&columns) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     // Optional enable_rls annotation after closing paren
     let (input, _) = ws_and_comments(input)?;
@@ -650,6 +808,13 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
             enable_rls,
         },
     ))
+}
+
+fn has_duplicate_column_names(columns: &[ColumnDef]) -> bool {
+    let mut seen = HashSet::new();
+    columns
+        .iter()
+        .any(|column| !seen.insert(column.name.to_ascii_lowercase()))
 }
 
 // =============================================================================
@@ -688,11 +853,23 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
 
     // Parse optional clauses in any order
     let mut remaining = input;
+    let mut seen_for = false;
+    let mut seen_restrictive = false;
+    let mut seen_role = false;
+    let mut seen_using = false;
+    let mut seen_with_check = false;
     loop {
         let (input, _) = ws_and_comments(remaining)?;
 
         // for all|select|insert|update|delete
         if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("for").parse(input) {
+            if seen_for {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+            seen_for = true;
             let (rest, _) = multispace1(rest)?;
             let (rest, target) = alt((
                 map(tag_no_case("all"), |_| PolicyTarget::All),
@@ -711,6 +888,13 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
         if let Ok((rest, _)) =
             tag_no_case::<_, _, nom::error::Error<&str>>("restrictive").parse(input)
         {
+            if seen_restrictive {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+            seen_restrictive = true;
             policy.permissiveness = PolicyPermissiveness::Restrictive;
             remaining = rest;
             continue;
@@ -720,6 +904,13 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
         if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("to").parse(input) {
             // Make sure it's not "to_sql" or similar — needs whitespace after
             if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
+                if seen_role {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+                seen_role = true;
                 let (rest, role) = identifier(rest)?;
                 policy.role = Some(role.to_string());
                 remaining = rest;
@@ -732,6 +923,13 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
             let (rest, _) = multispace1(rest)?;
             if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("check").parse(rest)
             {
+                if seen_with_check {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+                seen_with_check = true;
                 let (rest, _) = nom_ws0(rest)?;
                 let (rest, _) = char('(').parse(rest)?;
                 let (rest, _) = nom_ws0(rest)?;
@@ -746,6 +944,13 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
 
         // using (<expr>)
         if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("using").parse(input) {
+            if seen_using {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+            seen_using = true;
             let (rest, _) = nom_ws0(rest)?;
             let (rest, _) = char('(').parse(rest)?;
             let (rest, _) = nom_ws0(rest)?;
@@ -774,9 +979,12 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
 /// - `column = function('arg')::type`   (function call + cast)
 /// - `expr AND expr`, `expr OR expr`
 fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
-    let (input, first) = parse_policy_comparison(input)?;
+    parse_policy_or_expr(input)
+}
 
-    // Check for AND/OR chaining
+fn parse_policy_or_expr(input: &str) -> IResult<&str, Expr> {
+    let (input, first) = parse_policy_and_expr(input)?;
+
     let mut result = first;
     let mut remaining = input;
     loop {
@@ -785,7 +993,7 @@ fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
         if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("or").parse(input)
             && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest)
         {
-            let (rest, right) = parse_policy_comparison(rest)?;
+            let (rest, right) = parse_policy_and_expr(rest)?;
             result = Expr::Binary {
                 left: Box::new(result),
                 op: BinaryOp::Or,
@@ -795,6 +1003,21 @@ fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
             remaining = rest;
             continue;
         }
+
+        remaining = input;
+        break;
+    }
+
+    Ok((remaining, result))
+}
+
+fn parse_policy_and_expr(input: &str) -> IResult<&str, Expr> {
+    let (input, first) = parse_policy_comparison(input)?;
+
+    let mut result = first;
+    let mut remaining = input;
+    loop {
+        let (input, _) = nom_ws0(remaining)?;
 
         if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("and").parse(input)
             && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest)
@@ -897,16 +1120,25 @@ fn parse_policy_bool(input: &str) -> IResult<&str, Expr> {
 /// Parse a 'string literal'
 fn parse_policy_string(input: &str) -> IResult<&str, Expr> {
     let (input, _) = char('\'').parse(input)?;
-    let mut end = 0;
-    for (i, c) in input.char_indices() {
-        if c == '\'' {
-            end = i;
-            break;
+    let mut content = String::new();
+    let mut iter = input.char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        if ch == '\'' {
+            if iter.peek().is_some_and(|(_, next)| *next == '\'') {
+                content.push('\'');
+                iter.next();
+                continue;
+            }
+            let rest = &input[idx + ch.len_utf8()..];
+            return Ok((rest, Expr::Literal(AstValue::String(content))));
         }
+        content.push(ch);
     }
-    let content = &input[..end];
-    let rest = &input[end + 1..];
-    Ok((rest, Expr::Literal(AstValue::String(content.to_string()))))
+
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Char,
+    )))
 }
 
 /// Parse numeric literal
@@ -1051,11 +1283,11 @@ fn parse_schema_item(input: &str) -> IResult<&str, SchemaItem> {
 fn parse_index(input: &str) -> IResult<&str, IndexDef> {
     let (input, _) = tag_no_case("index")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    let (input, name) = identifier(input)?;
     let (input, _) = multispace1(input)?;
     let (input, _) = tag_no_case("on")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, table) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    let (input, table) = identifier(input)?;
     let (input, _) = nom_ws0(input)?;
     let (input, _) = char('(')(input)?;
     let (input, cols_str) = parenthesized_content(input)?;
@@ -1106,6 +1338,12 @@ fn parse_schema(input: &str) -> IResult<&str, Schema> {
             SchemaItem::Index(i) => indexes.push(i),
         }
     }
+    if !schema_names_are_unique(&tables, &policies, &indexes) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     Ok((
         input,
@@ -1116,6 +1354,36 @@ fn parse_schema(input: &str) -> IResult<&str, Schema> {
             indexes,
         },
     ))
+}
+
+fn schema_names_are_unique(
+    tables: &[TableDef],
+    policies: &[RlsPolicy],
+    indexes: &[IndexDef],
+) -> bool {
+    let mut table_names = HashSet::new();
+    if tables
+        .iter()
+        .any(|table| !table_names.insert(table.name.to_ascii_lowercase()))
+    {
+        return false;
+    }
+
+    let mut index_names = HashSet::new();
+    if indexes
+        .iter()
+        .any(|index| !index_names.insert(index.name.to_ascii_lowercase()))
+    {
+        return false;
+    }
+
+    let mut policy_names = HashSet::new();
+    !policies.iter().any(|policy| {
+        !policy_names.insert((
+            policy.table.to_ascii_lowercase(),
+            policy.name.to_ascii_lowercase(),
+        ))
+    })
 }
 
 /// Extract version from `-- qail: version=N` directive
@@ -1262,6 +1530,46 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_invalid_identifiers_in_schema_shapes() {
+        for input in [
+            "table 1users (id uuid)",
+            "table users (1id uuid)",
+            "table users (id 1uuid)",
+            "index 1idx on users (id)",
+            "index idx on 1users (id)",
+            "policy 1policy on users using (id = 1)",
+            "policy users_policy on 1users using (id = 1)",
+        ] {
+            Schema::parse(input).expect_err("invalid identifier must fail");
+        }
+    }
+
+    #[test]
+    fn test_rejects_empty_tables_and_duplicate_schema_objects() {
+        for input in [
+            "table empty ()",
+            "table users (id uuid, id text)",
+            "table users (id uuid)\ntable users (id text)",
+            "index idx_users on users (id)\nindex idx_users on users (email)",
+            "policy users_filter on users using (id = 1)\npolicy users_filter on users using (id = 2)",
+        ] {
+            Schema::parse(input).expect_err("duplicate or empty schema object must fail");
+        }
+    }
+
+    #[test]
+    fn test_rejects_empty_type_parameters() {
+        for input in [
+            "table invoices (amount decimal())",
+            "table invoices (amount decimal(10,))",
+            "table invoices (amount decimal(,2))",
+            "table invoices (amount decimal(10,,2))",
+        ] {
+            Schema::parse(input).expect_err("empty type parameter must fail");
+        }
+    }
+
+    #[test]
     fn test_custom_type_names_with_underscores_and_schema() {
         let input = r#"
             table bookings (
@@ -1368,6 +1676,61 @@ mod tests {
             note.default_value,
             Some("'paren ) and comma, still literal'".to_string())
         );
+    }
+
+    #[test]
+    fn test_constraint_keywords_inside_literals_do_not_become_constraints() {
+        let input = r#"
+            table messages (
+                plain text default 'unique not null primary key references users(id) check(x)',
+                fn_default text default unique_label(),
+                guarded text check(note = 'unique not null primary key')
+            )
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let messages = &schema.tables[0];
+
+        let plain = messages.find_column("plain").expect("plain not found");
+        assert_eq!(
+            plain.default_value.as_deref(),
+            Some("'unique not null primary key references users(id) check(x)'")
+        );
+        assert!(!plain.unique);
+        assert!(plain.nullable);
+        assert!(!plain.primary_key);
+        assert!(plain.references.is_none());
+        assert!(plain.check.is_none());
+
+        let fn_default = messages
+            .find_column("fn_default")
+            .expect("fn_default not found");
+        assert_eq!(fn_default.default_value.as_deref(), Some("unique_label()"));
+        assert!(!fn_default.unique);
+
+        let guarded = messages.find_column("guarded").expect("guarded not found");
+        assert_eq!(
+            guarded.check.as_deref(),
+            Some("note = 'unique not null primary key'")
+        );
+        assert!(!guarded.unique);
+        assert!(guarded.nullable);
+        assert!(!guarded.primary_key);
+    }
+
+    #[test]
+    fn test_rejects_malformed_column_constraints() {
+        for input in [
+            "table bad (name text default)",
+            "table bad (user_id uuid references)",
+            "table bad (age int check())",
+            "table bad (age int check(age > 0)",
+            "table bad (name text unique unique)",
+            "table bad (id uuid primary_key primary key)",
+            "table bad (user_id uuid references users(id) references accounts(id))",
+        ] {
+            Schema::parse(input).expect_err("malformed column constraint must fail");
+        }
     }
 
     #[test]
@@ -1579,6 +1942,101 @@ mod tests {
             "Expected Binary OR, got {:?}",
             policy.using
         );
+    }
+
+    #[test]
+    fn test_parse_policy_string_literals_escape_and_fail_closed() {
+        let input = r#"
+            table users (
+                id uuid primary_key,
+                name text
+            )
+
+            policy users_name on users
+                for select
+                using (name = 'Bob''s account')
+        "#;
+        let schema = Schema::parse(input).expect("escaped quote string should parse");
+        let Expr::Binary { right, .. } = schema.policies[0].using.as_ref().unwrap() else {
+            panic!("expected binary expression");
+        };
+        assert!(matches!(
+            right.as_ref(),
+            Expr::Literal(AstValue::String(value)) if value == "Bob's account"
+        ));
+
+        let input = r#"
+            table users (
+                id uuid primary_key,
+                name text
+            )
+
+            policy users_name on users
+                for select
+                using (name = 'unterminated)
+        "#;
+        Schema::parse(input).expect_err("unterminated policy string must fail");
+    }
+
+    #[test]
+    fn test_parse_policy_rejects_duplicate_clauses() {
+        for input in [
+            r#"
+            table orders (id uuid primary_key)
+            policy p on orders for select for update using (id = 1)
+            "#,
+            r#"
+            table orders (id uuid primary_key)
+            policy p on orders to app_user to app_admin using (id = 1)
+            "#,
+            r#"
+            table orders (id uuid primary_key)
+            policy p on orders restrictive restrictive using (id = 1)
+            "#,
+            r#"
+            table orders (id uuid primary_key)
+            policy p on orders using (id = 1) using (id = 2)
+            "#,
+            r#"
+            table orders (id uuid primary_key)
+            policy p on orders with check (id = 1) with check (id = 2)
+            "#,
+        ] {
+            Schema::parse(input).expect_err("duplicate policy clause must fail");
+        }
+    }
+
+    #[test]
+    fn test_parse_policy_and_has_higher_precedence_than_or() {
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                tenant_id uuid,
+                active bool,
+                public bool
+            )
+
+            policy mixed on orders
+                for select
+                using (public = true or tenant_id = 7 and active = true)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let Expr::Binary {
+            op: BinaryOp::Or,
+            right,
+            ..
+        } = schema.policies[0].using.as_ref().unwrap()
+        else {
+            panic!("expected top-level OR");
+        };
+        assert!(matches!(
+            right.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
     }
 
     #[test]
