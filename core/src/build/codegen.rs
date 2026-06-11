@@ -16,10 +16,11 @@ fn qail_type_to_rust(col_type: &ColumnType) -> &'static str {
         ColumnType::Int | ColumnType::Serial => "i32",
         ColumnType::BigInt | ColumnType::BigSerial => "i64",
         ColumnType::Bool => "bool",
-        ColumnType::Float => "f32",
+        ColumnType::Float => "f64",
         ColumnType::Decimal(_) => "rust_decimal::Decimal",
         ColumnType::Jsonb => "serde_json::Value",
-        ColumnType::Timestamp | ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>",
+        ColumnType::Timestamp => "chrono::NaiveDateTime",
+        ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>",
         ColumnType::Date => "chrono::NaiveDate",
         ColumnType::Time => "chrono::NaiveTime",
         ColumnType::Bytea => "Vec<u8>",
@@ -387,6 +388,38 @@ table secrets {
 
         // Verify Protected policy
         assert!(code.contains("pub const token: TypedColumn<String, Protected>"));
+    }
+
+    #[test]
+    fn test_generate_float_column_uses_double_precision_rust_type() {
+        let schema_content = r#"
+table metrics {
+    score FLOAT
+}
+"#;
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+
+        assert!(code.contains("pub const score: TypedColumn<f64, Public>"));
+    }
+
+    #[test]
+    fn test_generate_timestamp_columns_preserve_timezone_semantics() {
+        let schema_content = r#"
+table events {
+    happened_at TIMESTAMP
+    recorded_at TIMESTAMPTZ
+}
+"#;
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+
+        assert!(code.contains("pub const happened_at: TypedColumn<chrono::NaiveDateTime, Public>"));
+        assert!(
+            code.contains(
+                "pub const recorded_at: TypedColumn<chrono::DateTime<chrono::Utc>, Public>"
+            )
+        );
     }
 
     #[test]

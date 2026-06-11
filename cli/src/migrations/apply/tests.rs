@@ -718,13 +718,14 @@ drop extension pgcrypto
 drop sequence order_seq
 drop enum status
 drop function set_updated_at
+drop function price_quote(numeric(12,2), text[])
 drop trigger users.trg_users_updated
 drop policy users_isolation on users
 "#;
 
         let cmds =
             parse_qail_to_commands_strict(input).expect("extended drop hints should compile");
-        assert_eq!(cmds.len(), 8);
+        assert_eq!(cmds.len(), 9);
         assert!(matches!(cmds[0].action, qail_core::ast::Action::DropView));
         assert!(matches!(
             cmds[1].action,
@@ -745,12 +746,21 @@ drop policy users_isolation on users
         ));
         assert!(matches!(
             cmds[6].action,
+            qail_core::ast::Action::DropFunction
+        ));
+        assert_eq!(cmds[6].table, "price_quote");
+        assert_eq!(
+            cmds[6].payload.as_deref(),
+            Some("price_quote(numeric(12,2), text[])")
+        );
+        assert!(matches!(
+            cmds[7].action,
             qail_core::ast::Action::DropTrigger
         ));
-        assert_eq!(cmds[6].table, "users.trg_users_updated");
-        assert!(matches!(cmds[7].action, qail_core::ast::Action::DropPolicy));
-        assert_eq!(cmds[7].table, "users");
-        assert_eq!(cmds[7].payload.as_deref(), Some("users_isolation"));
+        assert_eq!(cmds[7].table, "users.trg_users_updated");
+        assert!(matches!(cmds[8].action, qail_core::ast::Action::DropPolicy));
+        assert_eq!(cmds[8].table, "users");
+        assert_eq!(cmds[8].payload.as_deref(), Some("users_isolation"));
     }
 
     #[test]
@@ -867,6 +877,14 @@ function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END;
             detect_phase("20260101010101_contract_cleanup.up.qail"),
             MigrationPhase::Contract
         );
+        assert_eq!(
+            detect_phase("20260101010101_add_tenant_contracts.up.qail"),
+            MigrationPhase::Expand
+        );
+        assert_eq!(
+            detect_phase("20260101010101_backfilled_status.up.qail"),
+            MigrationPhase::Expand
+        );
     }
 
     #[test]
@@ -890,11 +908,16 @@ function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END;
                 DROP COLUMN old_email,
                 DROP COLUMN IF EXISTS old_name;
             DROP TABLE IF EXISTS audit_logs, old_events CASCADE;
+            DROP TABLE ONLY archived_events RESTRICT;
         "#;
         let (tables, columns) = parse_drop_targets(sql);
         assert_eq!(
             tables,
-            vec!["audit_logs".to_string(), "old_events".to_string()]
+            vec![
+                "audit_logs".to_string(),
+                "old_events".to_string(),
+                "archived_events".to_string()
+            ]
         );
         assert_eq!(
             columns,

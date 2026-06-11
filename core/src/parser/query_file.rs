@@ -87,7 +87,119 @@ impl QueryFile {
 
 /// Parse identifier
 fn identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)
+    let (remaining, ident) =
+        take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_').parse(input)?;
+    if ident
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        Ok((remaining, ident))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )))
+    }
+}
+
+fn rust_type_expr(input: &str) -> IResult<&str, &str> {
+    let mut angle_depth = 0usize;
+    let mut end = None;
+
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '<' => {
+                angle_depth += 1;
+            }
+            '>' => {
+                let Some(next) = angle_depth.checked_sub(1) else {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::TakeWhile1,
+                    )));
+                };
+                angle_depth = next;
+            }
+            ',' | ')' if angle_depth == 0 => {
+                end = Some(idx);
+                break;
+            }
+            ':' if angle_depth == 0
+                && !input[..idx].ends_with(':')
+                && !input[idx + ch.len_utf8()..].starts_with(':') =>
+            {
+                end = Some(idx);
+                break;
+            }
+            c if c.is_whitespace() && angle_depth == 0 => {
+                end = Some(idx);
+                break;
+            }
+            c if c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '[' | ']' | '.') => {}
+            _ => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::TakeWhile1,
+                )));
+            }
+        }
+    }
+
+    let end = end.unwrap_or(input.len());
+    if end == 0 || angle_depth != 0 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )));
+    }
+    let typ = &input[..end];
+    if !validate_rust_type_generics(typ) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )));
+    }
+    Ok((&input[end..], typ))
+}
+
+fn validate_rust_type_generics(typ: &str) -> bool {
+    let mut stack: Vec<Option<char>> = Vec::new();
+
+    for ch in typ.chars() {
+        match ch {
+            '<' => stack.push(None),
+            '>' => {
+                let Some(last_arg) = stack.pop() else {
+                    return false;
+                };
+                if !matches!(last_arg, Some('t')) {
+                    return false;
+                }
+                if let Some(parent) = stack.last_mut() {
+                    *parent = Some('t');
+                }
+            }
+            ',' if !stack.is_empty() => {
+                let Some(current) = stack.last_mut() else {
+                    return false;
+                };
+                if !matches!(current, Some('t')) {
+                    return false;
+                }
+                *current = Some(',');
+            }
+            c if c.is_whitespace() => {}
+            _ if !stack.is_empty() => {
+                if let Some(current) = stack.last_mut() {
+                    *current = Some('t');
+                }
+            }
+            _ => {}
+        }
+    }
+
+    stack.is_empty()
 }
 
 /// Skip whitespace and comments
@@ -107,7 +219,7 @@ fn parse_param(input: &str) -> IResult<&str, QueryParam> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char(':').parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, typ) = identifier(input)?;
+    let (input, typ) = rust_type_expr(input)?;
 
     Ok((
         input,
@@ -134,21 +246,22 @@ fn parse_return_type(input: &str) -> IResult<&str, ReturnType> {
     let (input, _) = tag("->").parse(input)?;
     let (input, _) = multispace0(input)?;
 
-    if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("Vec<")(input) {
-        let (input, inner) = take_while1(|c: char| c != '>').parse(input)?;
-        let (input, _) = char('>').parse(input)?;
+    let (input, typ) = rust_type_expr(input)?;
+    if let Some(inner) = strip_outer_generic(typ, "Vec") {
         return Ok((input, ReturnType::Vec(inner.to_string())));
     }
-
-    if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("Option<")(input) {
-        let (input, inner) = take_while1(|c: char| c != '>').parse(input)?;
-        let (input, _) = char('>').parse(input)?;
+    if let Some(inner) = strip_outer_generic(typ, "Option") {
         return Ok((input, ReturnType::Option(inner.to_string())));
     }
-
-    // Single type
-    let (input, typ) = identifier(input)?;
     Ok((input, ReturnType::Single(typ.to_string())))
+}
+
+fn strip_outer_generic<'a>(typ: &'a str, outer: &str) -> Option<&'a str> {
+    let inner = typ
+        .strip_prefix(outer)?
+        .strip_prefix('<')?
+        .strip_suffix('>')?;
+    (!inner.is_empty()).then_some(inner)
 }
 
 /// Parse query body (everything after : until next query/execute or EOF)
@@ -269,6 +382,72 @@ mod tests {
         let qf = QueryFile::parse(input).expect("parse failed");
         let q = &qf.queries[0];
         assert!(matches!(q.return_type, Some(ReturnType::Option(ref t)) if t == "User"));
+    }
+
+    #[test]
+    fn test_parse_generic_param_and_nested_return_types() {
+        let input = r#"
+            query find_many(ids: std::vec::Vec<Uuid>, tags: Option<Vec<String>>) -> Option<Vec<User>>:
+              get users where id in :ids
+        "#;
+
+        let qf = QueryFile::parse(input).expect("parse failed");
+        let q = &qf.queries[0];
+        assert_eq!(q.params[0].typ, "std::vec::Vec<Uuid>");
+        assert_eq!(q.params[1].typ, "Option<Vec<String>>");
+        assert!(matches!(q.return_type, Some(ReturnType::Option(ref t)) if t == "Vec<User>"));
+    }
+
+    #[test]
+    fn test_parse_rejects_unbalanced_generic_param_type() {
+        let input = r#"
+            query broken(ids: Vec<Uuid) -> Vec<User>:
+              get users where id in :ids
+        "#;
+
+        let err = QueryFile::parse(input).expect_err("unbalanced generic must fail");
+        assert!(err.contains("Parse error") || err.contains("Unexpected content"));
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_query_and_param_identifiers() {
+        let invalid_query_name = r#"
+            query 1find_user(id: Uuid) -> User:
+              get users where id = :id
+        "#;
+        QueryFile::parse(invalid_query_name)
+            .expect_err("query names must be valid Rust identifiers");
+
+        let invalid_param_name = r#"
+            query find_user(1id: Uuid) -> User:
+              get users where id = :id
+        "#;
+        QueryFile::parse(invalid_param_name)
+            .expect_err("parameter names must be valid Rust identifiers");
+    }
+
+    #[test]
+    fn test_parse_rejects_empty_generic_type_arguments() {
+        for input in [
+            r#"
+            query broken(ids: Vec<>) -> Vec<User>:
+              get users where id in :ids
+            "#,
+            r#"
+            query broken(id: Uuid) -> Option<>:
+              get users where id = :id
+            "#,
+            r#"
+            query broken(ids: Vec<,Uuid>) -> Vec<User>:
+              get users where id in :ids
+            "#,
+            r#"
+            query broken(ids: Vec<Uuid,>) -> Vec<User>:
+              get users where id in :ids
+            "#,
+        ] {
+            QueryFile::parse(input).expect_err("empty generic type arguments must fail");
+        }
     }
 
     #[test]

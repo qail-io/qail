@@ -1124,11 +1124,33 @@ fn is_valid_function_signature(target: &str) -> bool {
     if !is_valid_ident_path(name) {
         return false;
     }
-    if args.contains(';') || args.contains('\n') || args.contains('\r') {
+    if args.contains(';') || args.contains('\n') || args.contains('\r') || args.contains('\0') {
         return false;
     }
-    args.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ',' || c == ' ')
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    for ch in args.chars() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => {
+                let Some(next) = paren_depth.checked_sub(1) else {
+                    return false;
+                };
+                paren_depth = next;
+            }
+            '[' => bracket_depth += 1,
+            ']' => {
+                let Some(next) = bracket_depth.checked_sub(1) else {
+                    return false;
+                };
+                bracket_depth = next;
+            }
+            _ if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == ',' || ch == ' ' => {
+            }
+            _ => return false,
+        }
+    }
+    paren_depth == 0 && bracket_depth == 0
 }
 
 fn is_valid_ident_path(path: &str) -> bool {

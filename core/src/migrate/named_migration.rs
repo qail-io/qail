@@ -97,7 +97,15 @@ pub fn parse_migration_meta(content: &str) -> Option<MigrationMeta> {
 
 /// Validate migration dependencies (check for cycles and missing deps).
 pub fn validate_dependencies(migrations: &[MigrationMeta]) -> Result<Vec<String>, String> {
-    let names: HashSet<_> = migrations.iter().map(|m| m.name.as_str()).collect();
+    let mut names = HashSet::new();
+    for mig in migrations {
+        if mig.name.trim().is_empty() {
+            return Err("Migration name must not be empty".to_string());
+        }
+        if !names.insert(mig.name.as_str()) {
+            return Err(format!("Duplicate migration name '{}'", mig.name));
+        }
+    }
 
     for mig in migrations {
         for dep in &mig.depends {
@@ -199,5 +207,21 @@ mod tests {
 
         let order = validate_dependencies(&migs).unwrap();
         assert_eq!(order, vec!["001_init", "002_users", "003_posts"]);
+    }
+
+    #[test]
+    fn dependency_validation_rejects_duplicate_and_empty_names() {
+        let duplicate = vec![
+            MigrationMeta::new("001_init"),
+            MigrationMeta::new("001_init"),
+        ];
+        let err = validate_dependencies(&duplicate)
+            .expect_err("duplicate migration names must fail closed");
+        assert!(err.contains("Duplicate migration name"));
+
+        let empty = vec![MigrationMeta::new("")];
+        let err =
+            validate_dependencies(&empty).expect_err("empty migration names must fail closed");
+        assert!(err.contains("must not be empty"));
     }
 }

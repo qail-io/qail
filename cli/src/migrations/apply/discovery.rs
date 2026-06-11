@@ -15,9 +15,15 @@ pub(super) fn phase_rank(phase: MigrationPhase) -> u8 {
 
 pub(super) fn detect_phase(name: &str) -> MigrationPhase {
     let lower = name.to_ascii_lowercase();
-    if lower.contains("contract") {
+    if lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| part == "contract")
+    {
         MigrationPhase::Contract
-    } else if lower.contains("backfill") {
+    } else if lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| part == "backfill")
+    {
         MigrationPhase::Backfill
     } else {
         MigrationPhase::Expand
@@ -105,6 +111,9 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
                 && upper.get(idx + 1).is_some_and(|t| t == "EXISTS")
             {
                 idx += 2;
+            }
+            if upper.get(idx).is_some_and(|t| t == "ONLY") {
+                idx += 1;
             }
             while let Some(name) = tokens.get(idx) {
                 if upper

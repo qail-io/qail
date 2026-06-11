@@ -37,7 +37,7 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
         let line = line.trim();
 
         // Skip empty lines, # comments, -- comments, and version directives
-        if line.is_empty() || line.starts_with('#') || line.starts_with("--") {
+        if is_blank_or_qail_comment(line) {
             continue;
         }
 
@@ -195,6 +195,11 @@ pub fn parse_qail_file(path: &str) -> Result<Schema, String> {
     parse_qail(&content)
 }
 
+fn is_blank_or_qail_comment(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("--")
+}
+
 /// Parse a table definition with columns.
 fn parse_table<'a, I>(
     first_line: &str,
@@ -236,7 +241,7 @@ where
             break;
         }
 
-        if line.is_empty() || line.starts_with('#') {
+        if is_blank_or_qail_comment(line) {
             continue;
         }
 
@@ -389,21 +394,20 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 }
                 seen_generated = true;
                 let mut generated_str = s.to_string();
-                let mut depth: i32 = s.chars().fold(0, |acc, ch| match ch {
-                    '(' => acc + 1,
-                    ')' => acc - 1,
-                    _ => acc,
-                });
+                let mut quote = None;
+                let mut depth = paren_delta_ignoring_quotes(s, &mut quote);
 
-                while depth > 0 && i + 1 < parts.len() {
+                while (depth > 0 || quote.is_some()) && i + 1 < parts.len() {
                     i += 1;
                     generated_str.push(' ');
                     generated_str.push_str(parts[i]);
-                    depth += parts[i].chars().fold(0, |acc, ch| match ch {
-                        '(' => acc + 1,
-                        ')' => acc - 1,
-                        _ => acc,
-                    });
+                    depth += paren_delta_ignoring_quotes(parts[i], &mut quote);
+                }
+                if quote.is_some() {
+                    return Err(format!(
+                        "unterminated quote in generated_stored expression for column '{}'",
+                        name
+                    ));
                 }
                 if depth != 0 {
                     return Err(format!(
@@ -464,21 +468,20 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 // Parse check(expr) — expression may contain nested parens and spaces.
                 // Keep consuming tokens until the outer `check(` parenthesis is balanced.
                 let mut check_str = s.to_string();
-                let mut depth: i32 = s.chars().fold(0, |acc, ch| match ch {
-                    '(' => acc + 1,
-                    ')' => acc - 1,
-                    _ => acc,
-                });
+                let mut quote = None;
+                let mut depth = paren_delta_ignoring_quotes(s, &mut quote);
 
-                while depth > 0 && i + 1 < parts.len() {
+                while (depth > 0 || quote.is_some()) && i + 1 < parts.len() {
                     i += 1;
                     check_str.push(' ');
                     check_str.push_str(parts[i]);
-                    depth += parts[i].chars().fold(0, |acc, ch| match ch {
-                        '(' => acc + 1,
-                        ')' => acc - 1,
-                        _ => acc,
-                    });
+                    depth += paren_delta_ignoring_quotes(parts[i], &mut quote);
+                }
+                if quote.is_some() {
+                    return Err(format!(
+                        "unterminated quote in check expression for column '{}'",
+                        name
+                    ));
                 }
                 if depth != 0 {
                     return Err(format!("unclosed check expression for column '{}'", name));
@@ -526,6 +529,33 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     }
 
     Ok(col)
+}
+
+fn paren_delta_ignoring_quotes(raw: &str, quote: &mut Option<char>) -> i32 {
+    let mut delta = 0i32;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if let Some(q) = *quote {
+            if ch == q {
+                if chars.peek().is_some_and(|next| *next == q) {
+                    chars.next();
+                } else {
+                    *quote = None;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => *quote = Some(ch),
+            '(' => delta += 1,
+            ')' => delta -= 1,
+            _ => {}
+        }
+    }
+
+    delta
 }
 
 fn parse_column_type_prefix(
@@ -987,6 +1017,9 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
         if !found_closing_brace {
             for line in lines.by_ref() {
                 let line = line.trim();
+                if is_blank_or_qail_comment(line) {
+                    continue;
+                }
                 tokens_str.push(' ');
                 tokens_str.push_str(line);
                 if line.contains('}') {
@@ -1118,6 +1151,9 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
         if enum_body_before_closing_brace(&values_str)?.is_none() {
             for line in lines.by_ref() {
                 let line = line.trim();
+                if is_blank_or_qail_comment(line) {
+                    continue;
+                }
                 values_str.push(' ');
                 values_str.push_str(line);
                 if enum_body_before_closing_brace(&values_str)?.is_some() {
@@ -2948,6 +2984,9 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
         } else {
             for next_line in lines.by_ref() {
                 let next_line = next_line.trim();
+                if is_blank_or_qail_comment(next_line) {
+                    continue;
+                }
                 block_content.push(' ');
                 block_content.push_str(next_line);
                 if let Some(closed_content) = resource_block_content_before_closing(&block_content)?
@@ -3121,7 +3160,7 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
     // Consume indented continuation lines (using / with_check)
     while let Some(&next_line) = lines.peek() {
         let trimmed = next_line.trim();
-        if trimmed.is_empty() {
+        if is_blank_or_qail_comment(trimmed) {
             lines.next();
             continue;
         }
@@ -3311,6 +3350,75 @@ table users {
 "#;
         let err = parse_qail(input).expect_err("duplicate columns should fail");
         assert!(err.contains("duplicate column 'id' in table 'users'"));
+    }
+
+    #[test]
+    fn test_parse_table_skips_sql_style_comments_inside_block() {
+        let input = r#"
+table users {
+  -- external auth identifier
+  id UUID primary_key
+  # display field
+  name TEXT
+}
+"#;
+        let schema = parse_qail(input).expect("comments inside table blocks should parse");
+        let table = &schema.tables["users"];
+        assert_eq!(table.columns.len(), 2);
+        assert!(table.columns.iter().any(|col| col.name == "id"));
+        assert!(table.columns.iter().any(|col| col.name == "name"));
+    }
+
+    #[test]
+    fn test_parse_schema_blocks_skip_full_line_comments() {
+        let input = r#"
+enum order_status {
+  -- active order lifecycle states
+  pending,
+  # terminal success state
+  paid
+}
+
+sequence order_seq {
+  -- production starts above legacy rows
+  start 100
+  # allocate in small chunks
+  increment 5
+}
+
+bucket avatars {
+  -- storage backend
+  provider s3
+  # primary deployment region
+  region "ap-southeast-1"
+}
+
+table docs {
+  id UUID primary_key
+}
+
+policy docs_all on docs for all
+  -- tenant filter is deliberately delegated to SQL
+  using $$ true $$
+"#;
+
+        let schema = parse_qail(input).expect("comments inside schema blocks should parse");
+        assert_eq!(
+            schema.enums[0].values,
+            vec!["pending".to_string(), "paid".to_string()]
+        );
+        assert_eq!(schema.sequences[0].start, Some(100));
+        assert_eq!(schema.sequences[0].increment, Some(5));
+        assert_eq!(schema.resources[0].provider.as_deref(), Some("s3"));
+        assert_eq!(
+            schema.resources[0]
+                .properties
+                .get("region")
+                .map(String::as_str),
+            Some("ap-southeast-1")
+        );
+        assert_eq!(schema.policies.len(), 1);
+        assert!(schema.policies[0].using.is_some());
     }
 
     #[test]
@@ -5094,6 +5202,26 @@ table schedule_patterns {
     }
 
     #[test]
+    fn test_parse_check_expression_ignores_parentheses_inside_literals() {
+        let input = r#"
+table vendors {
+  code text check(code <> '(')
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["vendors"].columns[0];
+        let expr = &col.check.as_ref().unwrap().expr;
+        match expr {
+            CheckExpr::TextCompare { column, op, value } => {
+                assert_eq!(column, "code");
+                assert!(matches!(op, CheckComparisonOp::NotEqual));
+                assert_eq!(value, "(");
+            }
+            other => panic!("Expected text comparison check expression, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_check_rejects_invalid_expression_shape() {
         for (input, expected) in [
             (
@@ -5356,6 +5484,23 @@ table people {
             .join("\n");
         assert!(sql.contains("GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED"));
         assert!(sql.contains("GENERATED BY DEFAULT AS IDENTITY"));
+    }
+
+    #[test]
+    fn test_parse_generated_stored_ignores_parentheses_inside_literals() {
+        let input = r#"
+table labels {
+  raw text
+  decorated text generated_stored(raw || '(')
+}
+"#;
+        let schema = parse_qail(input).expect("generated expression should parse");
+        let table = &schema.tables["labels"];
+
+        assert!(matches!(
+            table.columns[1].generated.as_ref(),
+            Some(Generated::AlwaysStored(expr)) if expr == "raw || '('"
+        ));
     }
 
     #[test]
