@@ -151,14 +151,20 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
         Action::Index => {
             if let Some(ref idx) = cmd.index_def {
                 let unique = if idx.unique { "UNIQUE " } else { "" };
+                let concurrently = if idx.concurrently {
+                    "CONCURRENTLY "
+                } else {
+                    ""
+                };
                 let table = if idx.table.trim().is_empty() {
                     cmd.table.as_str()
                 } else {
                     idx.table.as_str()
                 };
                 let mut sql = format!(
-                    "CREATE {}INDEX {} ON {} ({})",
+                    "CREATE {}INDEX {}{} ON {} ({})",
                     unique,
+                    concurrently,
                     idx.name,
                     table,
                     idx.columns.join(", ")
@@ -167,13 +173,19 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
                     && !method.trim().is_empty()
                 {
                     sql = format!(
-                        "CREATE {}INDEX {} ON {} USING {} ({})",
+                        "CREATE {}INDEX {}{} ON {} USING {} ({})",
                         unique,
+                        concurrently,
                         idx.name,
                         table,
                         method.trim(),
                         idx.columns.join(", ")
                     );
+                }
+                if !idx.include.is_empty() {
+                    sql.push_str(" INCLUDE (");
+                    sql.push_str(&idx.include.join(", "));
+                    sql.push(')');
                 }
                 if let Some(where_clause) = &idx.where_clause
                     && !where_clause.trim().is_empty()
@@ -448,8 +460,8 @@ mod tests {
                 columns: vec!["email".to_string()],
                 unique: true,
                 index_type: Some("gin".to_string()),
-                include: vec![],
-                concurrently: false,
+                include: vec!["name".to_string(), "created_at".to_string()],
+                concurrently: true,
                 where_clause: Some("deleted_at IS NULL".to_string()),
             }),
             ..Default::default()
@@ -459,7 +471,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            "CREATE UNIQUE INDEX idx_users_active_email ON users USING gin (email) WHERE deleted_at IS NULL"
+            "CREATE UNIQUE INDEX CONCURRENTLY idx_users_active_email ON users USING gin (email) INCLUDE (name, created_at) WHERE deleted_at IS NULL"
         );
     }
 

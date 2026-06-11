@@ -199,8 +199,12 @@ impl std::str::FromStr for ColumnType {
             .strip_prefix("varchar(")
             .and_then(|v| v.strip_suffix(')'))
         {
-            if let Ok(len) = inner.trim().parse::<u16>() {
+            let inner = inner.trim();
+            if let Ok(len) = inner.parse::<u16>() {
                 return Ok(Self::Varchar(Some(len)));
+            }
+            if inner.parse::<u32>().is_ok() {
+                return Ok(Self::Range(format!("VARCHAR({inner})")));
             }
             return Err(());
         }
@@ -209,8 +213,28 @@ impl std::str::FromStr for ColumnType {
             .strip_prefix("character varying(")
             .and_then(|v| v.strip_suffix(')'))
         {
-            if let Ok(len) = inner.trim().parse::<u16>() {
+            let inner = inner.trim();
+            if let Ok(len) = inner.parse::<u16>() {
                 return Ok(Self::Varchar(Some(len)));
+            }
+            if inner.parse::<u32>().is_ok() {
+                return Ok(Self::Range(format!("VARCHAR({inner})")));
+            }
+            return Err(());
+        }
+
+        if let Some(inner) = lower
+            .strip_prefix("char(")
+            .and_then(|v| v.strip_suffix(')'))
+            .or_else(|| {
+                lower
+                    .strip_prefix("character(")
+                    .and_then(|v| v.strip_suffix(')'))
+            })
+        {
+            let inner = inner.trim();
+            if inner.parse::<u32>().is_ok() {
+                return Ok(Self::Range(format!("CHARACTER({inner})")));
             }
             return Err(());
         }
@@ -220,10 +244,13 @@ impl std::str::FromStr for ColumnType {
             .and_then(|v| v.strip_suffix(')'))
         {
             let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
-            if parts.len() == 2
-                && let (Ok(p), Ok(s)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>())
-            {
-                return Ok(Self::Decimal(Some((p, s))));
+            if parts.len() == 2 {
+                if let (Ok(p), Ok(s)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
+                    return Ok(Self::Decimal(Some((p, s))));
+                }
+                if parts[0].parse::<u16>().is_ok() && parts[1].parse::<u16>().is_ok() {
+                    return Ok(Self::Range(format!("DECIMAL({},{})", parts[0], parts[1])));
+                }
             }
             return Err(());
         }
@@ -233,10 +260,13 @@ impl std::str::FromStr for ColumnType {
             .and_then(|v| v.strip_suffix(')'))
         {
             let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
-            if parts.len() == 2
-                && let (Ok(p), Ok(s)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>())
-            {
-                return Ok(Self::Decimal(Some((p, s))));
+            if parts.len() == 2 {
+                if let (Ok(p), Ok(s)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
+                    return Ok(Self::Decimal(Some((p, s))));
+                }
+                if parts[0].parse::<u16>().is_ok() && parts[1].parse::<u16>().is_ok() {
+                    return Ok(Self::Range(format!("DECIMAL({},{})", parts[0], parts[1])));
+                }
             }
             return Err(());
         }
@@ -336,6 +366,22 @@ mod tests {
             Ok(ColumnType::Range("SMALLINT".to_string()))
         );
         assert!("unknown".parse::<ColumnType>().is_err());
+    }
+
+    #[test]
+    fn test_from_str_preserves_postgres_typmods_outside_native_width() {
+        assert_eq!(
+            "varchar(70000)".parse::<ColumnType>(),
+            Ok(ColumnType::Range("VARCHAR(70000)".to_string()))
+        );
+        assert_eq!(
+            "numeric(1000,2)".parse::<ColumnType>(),
+            Ok(ColumnType::Range("DECIMAL(1000,2)".to_string()))
+        );
+        assert_eq!(
+            "char(2)".parse::<ColumnType>(),
+            Ok(ColumnType::Range("CHARACTER(2)".to_string()))
+        );
     }
 
     #[test]

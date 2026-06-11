@@ -558,10 +558,9 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
         ));
     };
 
-    let (credentials, host_part) = if url.contains('@') {
-        let mut parts = url.splitn(2, '@');
-        let creds = parts.next().unwrap_or("");
-        let host = parts.next().unwrap_or("localhost/postgres");
+    let (credentials, host_part) = if let Some(at_pos) = url.rfind('@') {
+        let creds = &url[..at_pos];
+        let host = &url[at_pos + 1..];
         (Some(creds), host)
     } else {
         (None, url)
@@ -658,10 +657,21 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
         if creds.contains(':') {
             let mut parts = creds.splitn(2, ':');
             let u = percent_decode(parts.next().unwrap_or("postgres"))?;
+            if u.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid PostgreSQL URL user: missing user".to_string(),
+                ));
+            }
             let p = parts.next().map(percent_decode).transpose()?;
             (u, p)
         } else {
-            (percent_decode(creds)?, None)
+            let u = percent_decode(creds)?;
+            if u.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid PostgreSQL URL user: missing user".to_string(),
+                ));
+            }
+            (u, None)
         }
     } else {
         ("postgres".to_string(), None)

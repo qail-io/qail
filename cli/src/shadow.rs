@@ -16,10 +16,11 @@ use qail_pg::driver::PgDriver;
 use crate::introspection::{
     IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
     IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspected_column_generation,
-    is_simple_index_column, is_trivial_not_null_check, parse_check_expr, parse_index_parts,
-    parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
-    resolve_introspected_unique_constraint, resolve_qualified_introspected_foreign_key,
-    sort_introspected_key_columns, sort_qualified_introspected_key_columns,
+    is_simple_index_column, is_trivial_not_null_check, is_unique_index_definition,
+    parse_check_expr, parse_index_parts, parse_pg_constraint_fk_action,
+    resolve_introspected_foreign_key, resolve_introspected_unique_constraint,
+    resolve_qualified_introspected_foreign_key, sort_introspected_key_columns,
+    sort_qualified_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -447,6 +448,26 @@ mod tests {
             vec!["is_active".to_string(), "\"position\"".to_string()]
         );
         assert!(quoted_index.expressions.is_empty());
+
+        let covering_index = index_from_pg_indexdef(
+            "idx_orders_cover".to_string(),
+            "orders".to_string(),
+            "CREATE INDEX idx_orders_cover ON orders USING btree (tenant_id) INCLUDE (status, total_cents)"
+                .to_string(),
+        );
+
+        assert_eq!(covering_index.columns, vec!["tenant_id".to_string()]);
+        assert_eq!(
+            covering_index.include,
+            vec!["status".to_string(), "total_cents".to_string()]
+        );
+
+        let misleading_name = index_from_pg_indexdef(
+            "idx_unique_label".to_string(),
+            "orders".to_string(),
+            "CREATE INDEX idx_unique_label ON orders USING btree (label)".to_string(),
+        );
+        assert!(!misleading_name.unique);
     }
 
     #[test]
@@ -700,33 +721,91 @@ mod tests {
     #[test]
     fn parse_column_type_preserves_unknown_and_user_defined_types() {
         assert_eq!(
-            parse_column_type("USER-DEFINED", Some("booking_status"), false),
+            parse_column_type(
+                "USER-DEFINED",
+                Some("booking_status"),
+                None,
+                None,
+                None,
+                false
+            ),
             ColumnType::Range("BOOKING_STATUS".to_string())
         );
         assert_eq!(
-            parse_column_type("ltree", None, false),
+            parse_column_type("ltree", None, None, None, None, false),
             ColumnType::Range("LTREE".to_string())
         );
         assert_eq!(
-            parse_column_type("ARRAY", Some("_int4"), false),
+            parse_column_type("ARRAY", Some("_int4"), None, None, None, false),
             ColumnType::Array(Box::new(ColumnType::Int))
         );
-        assert_ne!(parse_column_type("ltree", None, false), ColumnType::Text);
+        assert_ne!(
+            parse_column_type("ltree", None, None, None, None, false),
+            ColumnType::Text
+        );
     }
 
     #[test]
     fn parse_column_type_preserves_serial_pseudo_types_from_nextval_default() {
         assert_eq!(
-            parse_column_type("integer", Some("int4"), true),
+            parse_column_type("integer", Some("int4"), None, None, None, true),
             ColumnType::Serial
         );
         assert_eq!(
-            parse_column_type("bigint", Some("int8"), true),
+            parse_column_type("bigint", Some("int8"), None, None, None, true),
             ColumnType::BigSerial
         );
         assert_eq!(
-            parse_column_type("bigint", Some("int8"), false),
+            parse_column_type("bigint", Some("int8"), None, None, None, false),
             ColumnType::BigInt
+        );
+    }
+
+    #[test]
+    fn parse_column_type_preserves_typmods_for_shadow_validation() {
+        assert_eq!(
+            parse_column_type(
+                "character varying",
+                Some("varchar"),
+                Some("100"),
+                None,
+                None,
+                false
+            ),
+            ColumnType::Varchar(Some(100))
+        );
+        assert_eq!(
+            parse_column_type(
+                "numeric",
+                Some("numeric"),
+                None,
+                Some("12"),
+                Some("6"),
+                false
+            ),
+            ColumnType::Decimal(Some((12, 6)))
+        );
+        assert_eq!(
+            parse_column_type(
+                "character varying",
+                Some("varchar"),
+                Some("70000"),
+                None,
+                None,
+                false,
+            ),
+            ColumnType::Range("VARCHAR(70000)".to_string())
+        );
+        assert_eq!(
+            parse_column_type(
+                "numeric",
+                Some("numeric"),
+                None,
+                Some("1000"),
+                Some("2"),
+                false,
+            ),
+            ColumnType::Range("DECIMAL(1000,2)".to_string())
         );
     }
 
@@ -932,6 +1011,9 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 "is_generated",
                 "generation_expression",
                 "udt_name",
+                "character_maximum_length",
+                "numeric_precision",
+                "numeric_scale",
             ])
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table_name.clone());
@@ -953,13 +1035,22 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             let is_generated = row.get_string(6);
             let generation_expression = row.get_string(7);
             let udt_name = row.get_string(8);
+            let char_max_len = row.get_string(9);
+            let numeric_precision = row.get_string(10);
+            let numeric_scale = row.get_string(11);
 
             let has_nextval_default = raw_default
                 .as_deref()
                 .is_some_and(|d| d.trim_start().starts_with("nextval("));
             // Parse data type to ColumnType
-            let data_type =
-                parse_column_type(&data_type_str, udt_name.as_deref(), has_nextval_default);
+            let data_type = parse_column_type(
+                &data_type_str,
+                udt_name.as_deref(),
+                char_max_len.as_deref(),
+                numeric_precision.as_deref(),
+                numeric_scale.as_deref(),
+                has_nextval_default,
+            );
             let generated = introspected_column_generation(
                 is_identity,
                 identity_generation.as_deref(),
@@ -1597,11 +1688,25 @@ async fn introspect_unique_constraints(
 }
 
 /// Parse PostgreSQL data type metadata to ColumnType.
-fn parse_column_type(data_type: &str, udt_name: Option<&str>, nextval_default: bool) -> ColumnType {
+fn parse_column_type(
+    data_type: &str,
+    udt_name: Option<&str>,
+    char_max_len: Option<&str>,
+    numeric_precision: Option<&str>,
+    numeric_scale: Option<&str>,
+    nextval_default: bool,
+) -> ColumnType {
     if data_type.eq_ignore_ascii_case("array")
         && let Some(array_inner) = udt_name.and_then(|name| name.strip_prefix('_'))
     {
-        return ColumnType::Array(Box::new(parse_column_type(array_inner, None, false)));
+        return ColumnType::Array(Box::new(parse_column_type(
+            array_inner,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )));
     }
 
     let raw_type = if data_type.eq_ignore_ascii_case("user-defined") {
@@ -1627,7 +1732,16 @@ fn parse_column_type(data_type: &str, udt_name: Option<&str>, nextval_default: b
         }
         "smallint" | "int2" => ColumnType::Range("SMALLINT".to_string()),
         "text" => ColumnType::Text,
-        "character varying" | "varchar" => ColumnType::Varchar(None),
+        "character varying" | "varchar" => {
+            let len = match char_max_len {
+                Some(raw) => match raw.trim().parse::<u16>() {
+                    Ok(len) => Some(len),
+                    Err(_) => return ColumnType::Range(format!("VARCHAR({})", raw.trim())),
+                },
+                None => None,
+            };
+            ColumnType::Varchar(len)
+        }
         "boolean" | "bool" => ColumnType::Bool,
         "timestamp without time zone" | "timestamp" => ColumnType::Timestamp,
         "timestamp with time zone" | "timestamptz" => ColumnType::Timestamptz,
@@ -1636,7 +1750,38 @@ fn parse_column_type(data_type: &str, udt_name: Option<&str>, nextval_default: b
         "uuid" => ColumnType::Uuid,
         "jsonb" | "json" => ColumnType::Jsonb,
         "real" | "float4" | "double precision" | "float8" => ColumnType::Float,
-        "numeric" | "decimal" => ColumnType::Decimal(None),
+        "numeric" | "decimal" => {
+            let p = match numeric_precision {
+                Some(raw) => match raw.trim().parse::<u8>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return ColumnType::Range(format!(
+                            "DECIMAL({},{})",
+                            raw.trim(),
+                            numeric_scale.map(str::trim).unwrap_or("0")
+                        ));
+                    }
+                },
+                None => None,
+            };
+            let s = match numeric_scale {
+                Some(raw) => match raw.trim().parse::<u8>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return ColumnType::Range(format!(
+                            "DECIMAL({},{})",
+                            numeric_precision.map(str::trim).unwrap_or("0"),
+                            raw.trim()
+                        ));
+                    }
+                },
+                None => None,
+            };
+            ColumnType::Decimal(match (p, s) {
+                (Some(p), Some(s)) => Some((p, s)),
+                _ => None,
+            })
+        }
         "bytea" => ColumnType::Bytea,
         "interval" => ColumnType::Interval,
         "inet" => ColumnType::Inet,
@@ -1649,8 +1794,8 @@ fn parse_column_type(data_type: &str, udt_name: Option<&str>, nextval_default: b
 }
 
 fn index_from_pg_indexdef(idx_name: String, table_name: String, indexdef: String) -> Index {
-    let (cols, where_clause, method) = parse_index_parts(&indexdef);
-    let is_unique = indexdef.contains("UNIQUE");
+    let (cols, include, where_clause, method) = parse_index_parts(&indexdef);
+    let is_unique = is_unique_index_definition(&indexdef);
     let has_expressions = cols.iter().any(|c| !is_simple_index_column(c));
 
     let mut index = if has_expressions {
@@ -1659,6 +1804,7 @@ fn index_from_pg_indexdef(idx_name: String, table_name: String, indexdef: String
         Index::new(idx_name, table_name, cols)
     };
     index.unique = is_unique;
+    index.include = include;
     index.method = method;
     if let Some(predicate) = where_clause {
         index.where_clause = Some(CheckExpr::Sql(predicate));

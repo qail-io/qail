@@ -18,8 +18,8 @@ mod model;
 mod operations;
 
 use columns::{
-    check_named_read_column, check_projection_rule, create_columns, expr_projects_all_columns,
-    projection_restricted_action, update_columns,
+    check_named_read_column, check_projection_rule, check_qualified_read_column, create_columns,
+    expr_projects_all_columns, projection_restricted_action, update_columns,
 };
 use ident::{normalize_column_name, normalize_table_ref, target_refs_for_command};
 
@@ -533,7 +533,10 @@ impl AccessPolicy {
                 }
                 Ok(())
             }
-            Expr::Subquery { .. } | Expr::Exists { .. } | Expr::Star | Expr::Def { .. } => Ok(()),
+            Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+                self.check_outer_command_column_refs(table, rule, target_refs, query)
+            }
+            Expr::Star | Expr::Def { .. } => Ok(()),
         }
     }
 
@@ -561,7 +564,230 @@ impl AccessPolicy {
                 Some(AccessOperation::Read),
                 AccessErrorKind::UnsupportedColumnExpression { context },
             )),
-            Value::Subquery(_) => Ok(()),
+            Value::Subquery(query) => {
+                self.check_outer_command_column_refs(table, rule, target_refs, query)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn check_outer_command_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        cmd: &Qail,
+    ) -> Result<(), AccessError> {
+        for expr in &cmd.columns {
+            self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+        }
+        if let Some(returning) = &cmd.returning {
+            for expr in returning {
+                self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+            }
+        }
+        for cage in &cmd.cages {
+            for condition in &cage.conditions {
+                self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
+            }
+        }
+        for condition in &cmd.having {
+            self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
+        }
+        for join in &cmd.joins {
+            if let Some(conditions) = &join.on {
+                for condition in conditions {
+                    self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
+                }
+            }
+        }
+        if let Some(on_conflict) = &cmd.on_conflict
+            && let ConflictAction::DoUpdate { assignments } = &on_conflict.action
+        {
+            for (_, expr) in assignments {
+                self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+            }
+        }
+        if let Some(merge) = &cmd.merge {
+            if let MergeSource::Query { query, .. } = &merge.source {
+                self.check_outer_command_column_refs(table, rule, target_refs, query)?;
+            }
+            for condition in &merge.on {
+                self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
+            }
+            for clause in &merge.clauses {
+                for condition in &clause.condition {
+                    self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
+                }
+                match &clause.action {
+                    MergeAction::Update { assignments } => {
+                        for (_, expr) in assignments {
+                            self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+                        }
+                    }
+                    MergeAction::Insert { values, .. } => {
+                        for expr in values {
+                            self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+                        }
+                    }
+                    MergeAction::Delete | MergeAction::DoNothing => {}
+                }
+            }
+        }
+        for cte in &cmd.ctes {
+            self.check_outer_command_column_refs(table, rule, target_refs, &cte.base_query)?;
+            if let Some(recursive_query) = &cte.recursive_query {
+                self.check_outer_command_column_refs(table, rule, target_refs, recursive_query)?;
+            }
+        }
+        for (_, set_query) in &cmd.set_ops {
+            self.check_outer_command_column_refs(table, rule, target_refs, set_query)?;
+        }
+        if let Some(source_query) = &cmd.source_query {
+            self.check_outer_command_column_refs(table, rule, target_refs, source_query)?;
+        }
+        Ok(())
+    }
+
+    fn check_outer_condition_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        condition: &Condition,
+    ) -> Result<(), AccessError> {
+        self.check_outer_expr_column_refs(table, rule, target_refs, &condition.left)?;
+        self.check_outer_value_column_refs(table, rule, target_refs, &condition.value)
+    }
+
+    fn check_outer_expr_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        expr: &Expr,
+    ) -> Result<(), AccessError> {
+        match expr {
+            Expr::Named(name)
+            | Expr::Aliased { name, .. }
+            | Expr::JsonAccess { column: name, .. } => {
+                check_qualified_read_column(table, rule, target_refs, name)
+            }
+            Expr::Aggregate { col, filter, .. } => {
+                if col != "*" {
+                    check_qualified_read_column(table, rule, target_refs, col)?;
+                }
+                if let Some(conditions) = filter {
+                    for condition in conditions {
+                        self.check_outer_condition_column_refs(
+                            table,
+                            rule,
+                            target_refs,
+                            condition,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Cast { expr, .. }
+            | Expr::Mod { col: expr, .. }
+            | Expr::FieldAccess { expr, .. }
+            | Expr::Collate { expr, .. } => {
+                self.check_outer_expr_column_refs(table, rule, target_refs, expr)
+            }
+            Expr::Subscript { expr, index, .. } => {
+                self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+                self.check_outer_expr_column_refs(table, rule, target_refs, index)
+            }
+            Expr::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, arg)?;
+                }
+                Ok(())
+            }
+            Expr::SpecialFunction { args, .. } => {
+                for (_, arg) in args {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, arg)?;
+                }
+                Ok(())
+            }
+            Expr::Binary { left, right, .. } => {
+                self.check_outer_expr_column_refs(table, rule, target_refs, left)?;
+                self.check_outer_expr_column_refs(table, rule, target_refs, right)
+            }
+            Expr::Literal(value) => {
+                self.check_outer_value_column_refs(table, rule, target_refs, value)
+            }
+            Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
+                for element in elements {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, element)?;
+                }
+                Ok(())
+            }
+            Expr::Case {
+                when_clauses,
+                else_value,
+                ..
+            } => {
+                for (condition, value) in when_clauses {
+                    self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
+                    self.check_outer_expr_column_refs(table, rule, target_refs, value)?;
+                }
+                if let Some(value) = else_value {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, value)?;
+                }
+                Ok(())
+            }
+            Expr::Window {
+                params,
+                partition,
+                order,
+                ..
+            } => {
+                for param in params {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, param)?;
+                }
+                for column in partition {
+                    check_qualified_read_column(table, rule, target_refs, column)?;
+                }
+                for cage in order {
+                    for condition in &cage.conditions {
+                        self.check_outer_condition_column_refs(
+                            table,
+                            rule,
+                            target_refs,
+                            condition,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
+                self.check_outer_command_column_refs(table, rule, target_refs, query)
+            }
+            Expr::Star | Expr::Def { .. } => Ok(()),
+        }
+    }
+
+    fn check_outer_value_column_refs(
+        &self,
+        table: &str,
+        rule: &ColumnRule,
+        target_refs: &BTreeSet<String>,
+        value: &Value,
+    ) -> Result<(), AccessError> {
+        match value {
+            Value::Column(name) => check_qualified_read_column(table, rule, target_refs, name),
+            Value::Expr(expr) => self.check_outer_expr_column_refs(table, rule, target_refs, expr),
+            Value::Array(values) => {
+                for value in values {
+                    self.check_outer_value_column_refs(table, rule, target_refs, value)?;
+                }
+                Ok(())
+            }
+            Value::Subquery(query) => {
+                self.check_outer_command_column_refs(table, rule, target_refs, query)
+            }
             _ => Ok(()),
         }
     }

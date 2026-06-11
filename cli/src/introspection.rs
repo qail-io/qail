@@ -1487,8 +1487,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             continue;
         }
 
-        let is_unique = def.to_uppercase().contains("UNIQUE");
-        let (cols, where_clause, method) = parse_index_parts(&def);
+        let is_unique = is_unique_index_definition(&def);
+        let (cols, include, where_clause, method) = parse_index_parts(&def);
         let has_expressions = cols.iter().any(|c| !is_simple_index_column(c));
 
         let mut index = if has_expressions {
@@ -1502,6 +1502,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         if let Some(predicate) = where_clause {
             index.where_clause = Some(qail_core::migrate::schema::CheckExpr::Sql(predicate));
         }
+        index.include = include;
         index.method = method;
         schema.add_index(index);
     }
@@ -1552,12 +1553,47 @@ fn map_pg_column_type(
             }
         }
         "varchar" | "bpchar" => {
-            let len = char_max_len.and_then(|s| s.parse::<u16>().ok());
+            let len = match char_max_len {
+                Some(raw) => match raw.trim().parse::<u16>() {
+                    Ok(len) => Some(len),
+                    Err(_) => {
+                        return qail_core::migrate::ColumnType::Range(format!(
+                            "VARCHAR({})",
+                            raw.trim()
+                        ));
+                    }
+                },
+                None => None,
+            };
             qail_core::migrate::ColumnType::Varchar(len)
         }
         "numeric" => {
-            let p = numeric_precision.and_then(|s| s.parse::<u8>().ok());
-            let s = numeric_scale.and_then(|v| v.parse::<u8>().ok());
+            let p = match numeric_precision {
+                Some(raw) => match raw.trim().parse::<u8>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return qail_core::migrate::ColumnType::Range(format!(
+                            "DECIMAL({},{})",
+                            raw.trim(),
+                            numeric_scale.map(str::trim).unwrap_or("0")
+                        ));
+                    }
+                },
+                None => None,
+            };
+            let s = match numeric_scale {
+                Some(raw) => match raw.trim().parse::<u8>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return qail_core::migrate::ColumnType::Range(format!(
+                            "DECIMAL({},{})",
+                            numeric_precision.map(str::trim).unwrap_or("0"),
+                            raw.trim()
+                        ));
+                    }
+                },
+                None => None,
+            };
             qail_core::migrate::ColumnType::Decimal(match (p, s) {
                 (Some(p), Some(s)) => Some((p, s)),
                 _ => None,
@@ -1597,11 +1633,13 @@ pub(crate) fn parse_index_parts(
     def: &str,
 ) -> (
     Vec<String>,
+    Vec<String>,
     Option<String>,
     qail_core::migrate::schema::IndexMethod,
 ) {
     let Some(start) = find_sql_paren(def, '(') else {
         return (
+            Vec::new(),
             Vec::new(),
             None,
             qail_core::migrate::schema::IndexMethod::BTree,
@@ -1626,15 +1664,39 @@ pub(crate) fn parse_index_parts(
     };
 
     let Some(end_idx) = find_matching_sql_paren(def, start) else {
-        return (Vec::new(), None, method);
+        return (Vec::new(), Vec::new(), None, method);
     };
 
     let trailing = def[end_idx + 1..].trim();
-    let where_clause = find_top_level_keyword(trailing, "WHERE")
-        .map(|pos| trailing[pos + "WHERE".len()..].trim().to_string());
+    let where_pos = find_top_level_keyword(trailing, "WHERE");
+    let before_where = where_pos
+        .and_then(|pos| trailing.get(..pos))
+        .unwrap_or(trailing);
+    let include = find_top_level_keyword(before_where, "INCLUDE")
+        .and_then(|pos| {
+            let include_start = before_where[pos + "INCLUDE".len()..].trim_start();
+            let paren_start = find_sql_paren(include_start, '(')?;
+            let paren_end = find_matching_sql_paren(include_start, paren_start)?;
+            Some(split_top_level_csv(
+                &include_start[paren_start + 1..paren_end],
+            ))
+        })
+        .unwrap_or_default();
+    let where_clause = where_pos.map(|pos| trailing[pos + "WHERE".len()..].trim().to_string());
 
     let inner = &def[start + 1..end_idx];
-    (split_top_level_csv(inner), where_clause, method)
+    (split_top_level_csv(inner), include, where_clause, method)
+}
+
+pub(crate) fn is_unique_index_definition(def: &str) -> bool {
+    let mut tokens = def.split_whitespace();
+    matches!(
+        (tokens.next(), tokens.next(), tokens.next()),
+        (Some(create), Some(unique), Some(index))
+            if create.eq_ignore_ascii_case("CREATE")
+                && unique.eq_ignore_ascii_case("UNIQUE")
+                && index.eq_ignore_ascii_case("INDEX")
+    )
 }
 
 fn find_sql_paren(input: &str, target: char) -> Option<usize> {
@@ -2445,6 +2507,36 @@ mod tests {
     }
 
     #[test]
+    fn live_type_mapping_preserves_oversized_typmods_as_raw_contracts() {
+        let enum_names = std::collections::HashMap::new();
+
+        assert_eq!(
+            map_pg_column_type(
+                "varchar",
+                "character varying",
+                Some("70000"),
+                None,
+                None,
+                false,
+                &enum_names,
+            ),
+            qail_core::migrate::ColumnType::Range("VARCHAR(70000)".to_string())
+        );
+        assert_eq!(
+            map_pg_column_type(
+                "numeric",
+                "numeric",
+                None,
+                Some("1000"),
+                Some("2"),
+                false,
+                &enum_names,
+            ),
+            qail_core::migrate::ColumnType::Range("DECIMAL(1000,2)".to_string())
+        );
+    }
+
+    #[test]
     fn rls_status_query_is_scoped_to_public_namespace() {
         let cmd = public_rls_status_cmd("2200".to_string());
 
@@ -2639,19 +2731,22 @@ mod tests {
     fn parse_index_parts_preserves_vector_index_methods() {
         let hnsw_def =
             "CREATE INDEX idx_docs_embedding ON documents USING hnsw (embedding vector_l2_ops)";
-        let (hnsw_cols, hnsw_where, hnsw_method) = parse_index_parts(hnsw_def);
+        let (hnsw_cols, hnsw_include, hnsw_where, hnsw_method) = parse_index_parts(hnsw_def);
 
         assert_eq!(hnsw_cols, vec!["embedding vector_l2_ops".to_string()]);
+        assert!(hnsw_include.is_empty());
         assert_eq!(hnsw_where, None);
         assert_eq!(hnsw_method, qail_core::migrate::schema::IndexMethod::Hnsw);
 
         let ivfflat_def = "CREATE INDEX idx_docs_embedding_cosine ON documents USING ivfflat (embedding vector_cosine_ops) WHERE tenant_id IS NOT NULL";
-        let (ivfflat_cols, ivfflat_where, ivfflat_method) = parse_index_parts(ivfflat_def);
+        let (ivfflat_cols, ivfflat_include, ivfflat_where, ivfflat_method) =
+            parse_index_parts(ivfflat_def);
 
         assert_eq!(
             ivfflat_cols,
             vec!["embedding vector_cosine_ops".to_string()]
         );
+        assert!(ivfflat_include.is_empty());
         assert_eq!(ivfflat_where, Some("tenant_id IS NOT NULL".to_string()));
         assert_eq!(
             ivfflat_method,
@@ -2663,7 +2758,7 @@ mod tests {
     fn parse_index_parts_ignores_literals_inside_columns_and_predicates() {
         let def = "CREATE INDEX idx_docs_expr ON documents USING btree (regexp_replace(title, ')', '', 'g'), lower(slug)) WHERE notes <> 'keep WHERE literal'";
 
-        let (cols, where_clause, method) = parse_index_parts(def);
+        let (cols, include, where_clause, method) = parse_index_parts(def);
 
         assert_eq!(
             cols,
@@ -2672,11 +2767,54 @@ mod tests {
                 "lower(slug)".to_string()
             ]
         );
+        assert!(include.is_empty());
         assert_eq!(
             where_clause,
             Some("notes <> 'keep WHERE literal'".to_string())
         );
         assert_eq!(method, qail_core::migrate::schema::IndexMethod::BTree);
+    }
+
+    #[test]
+    fn parse_index_parts_preserves_covering_include_columns() {
+        let def = "CREATE UNIQUE INDEX idx_orders_cover ON orders USING btree (tenant_id, created_at DESC) INCLUDE (status, total_cents) WHERE deleted_at IS NULL";
+
+        let (cols, include, where_clause, method) = parse_index_parts(def);
+
+        assert_eq!(
+            cols,
+            vec!["tenant_id".to_string(), "created_at DESC".to_string()]
+        );
+        assert_eq!(
+            include,
+            vec!["status".to_string(), "total_cents".to_string()]
+        );
+        assert_eq!(where_clause, Some("deleted_at IS NULL".to_string()));
+        assert_eq!(method, qail_core::migrate::schema::IndexMethod::BTree);
+    }
+
+    #[test]
+    fn parse_index_parts_ignores_include_keyword_inside_predicate() {
+        let def = "CREATE INDEX idx_orders_predicate ON orders USING btree (tenant_id) WHERE include(status)";
+
+        let (cols, include, where_clause, _) = parse_index_parts(def);
+
+        assert_eq!(cols, vec!["tenant_id".to_string()]);
+        assert!(include.is_empty());
+        assert_eq!(where_clause, Some("include(status)".to_string()));
+    }
+
+    #[test]
+    fn unique_index_detection_uses_create_unique_prefix_only() {
+        assert!(is_unique_index_definition(
+            "CREATE UNIQUE INDEX idx_users_email ON users USING btree (email)"
+        ));
+        assert!(!is_unique_index_definition(
+            "CREATE INDEX idx_unique_email ON users USING btree (email)"
+        ));
+        assert!(!is_unique_index_definition(
+            "CREATE INDEX idx_users_email ON users USING btree (email) WHERE note = 'UNIQUE'"
+        ));
     }
 
     #[test]

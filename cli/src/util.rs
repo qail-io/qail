@@ -28,7 +28,14 @@ pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, S
         .ok_or_else(|| anyhow::anyhow!("Missing host in URL"))?
         .to_string();
     let port = parsed.port().unwrap_or(5432);
+    let has_userinfo = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .is_some_and(|authority| authority.contains('@'));
     let user = if parsed.username().is_empty() {
+        if has_userinfo {
+            anyhow::bail!("Missing user in URL");
+        }
         "postgres".to_string()
     } else {
         percent_decode(parsed.username())?
@@ -219,6 +226,14 @@ mod tests {
         assert_eq!(user, "admin");
         assert_eq!(password, Some("pass".to_string()));
         assert_eq!(database, "testdb");
+    }
+
+    #[test]
+    fn test_parse_pg_url_rejects_empty_userinfo_user() {
+        let err = parse_pg_url("postgres://@db.example.com/app")
+            .expect_err("empty URL userinfo user must fail");
+
+        assert!(err.to_string().contains("Missing user"));
     }
 
     #[test]

@@ -7,16 +7,25 @@
 //! - Merge logic (apply overlay → main tables)
 
 /// Safely escape a SQL string literal value.
-///
-/// Strips NUL bytes, escapes single quotes and backslashes, then wraps in
-/// single quotes. This is resistant to backslash-escaping attacks even
-/// when `standard_conforming_strings = off`.
 pub fn escape_literal(val: &str) -> String {
-    let clean = val
-        .replace('\0', "") // Strip NUL bytes (C-level truncation)
-        .replace('\\', "\\\\") // Escape backslashes FIRST
-        .replace('\'', "''"); // Then escape single quotes
-    format!("'{}'", clean)
+    let clean = val.replace('\0', "\u{FFFD}");
+    if !clean.contains('\\') {
+        return format!("'{}'", clean.replace('\'', "''"));
+    }
+
+    for idx in 0..=clean.len() {
+        let tag = if idx == 0 {
+            "qail_branch".to_string()
+        } else {
+            format!("qail_branch_{}", idx)
+        };
+        let delimiter = format!("${tag}$");
+        if !clean.contains(&delimiter) {
+            return format!("{delimiter}{clean}{delimiter}");
+        }
+    }
+
+    format!("'{}'", clean.replace('\'', "''"))
 }
 
 /// SQL to set the branch context on a connection session.
@@ -255,6 +264,21 @@ mod tests {
     fn test_branch_context_sql_escapes_quotes() {
         let sql = branch_context_sql("it's a branch");
         assert_eq!(sql, "BEGIN; SET LOCAL app.branch_id = 'it''s a branch';");
+    }
+
+    #[test]
+    fn test_branch_context_sql_preserves_backslashes() {
+        let sql = branch_context_sql(r"feature\auth");
+        assert_eq!(
+            sql,
+            r"BEGIN; SET LOCAL app.branch_id = $qail_branch$feature\auth$qail_branch$;"
+        );
+    }
+
+    #[test]
+    fn test_branch_context_sql_avoids_dollar_quote_collision() {
+        let sql = branch_context_sql(r"feature $qail_branch$ \ auth");
+        assert!(sql.contains(r"$qail_branch_1$feature $qail_branch$ \ auth$qail_branch_1$"));
     }
 
     #[test]

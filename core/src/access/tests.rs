@@ -99,6 +99,23 @@ fn read_column_allowlist_rejects_wildcard_and_denied_columns() {
 }
 
 #[test]
+fn quoted_schema_table_refs_match_normalized_policy_keys() {
+    let policy = AccessPolicy::new().with_table(
+        "public.users",
+        TableAccessPolicy::new()
+            .allow_operations([AccessOperation::Read])
+            .read_columns(ColumnRule::only(["id"])),
+    );
+
+    policy
+        .check_command(
+            &AccessContext::anonymous(),
+            &Qail::get("\"public\".\"users\"").columns(["id"]),
+        )
+        .expect("quoted schema-qualified table should match normalized policy key");
+}
+
+#[test]
 fn write_column_allowlist_checks_update_insert_upsert_and_merge() {
     let policy = AccessPolicy::new()
         .with_table(
@@ -510,6 +527,74 @@ fn subqueries_are_checked_recursively() {
     policy
         .check_command(&AccessContext::anonymous(), &cmd)
         .expect("outer and subquery table policies should pass");
+}
+
+#[test]
+fn correlated_subqueries_enforce_outer_read_column_policy() {
+    let policy = AccessPolicy::new()
+        .with_table(
+            "users",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id"])),
+        )
+        .with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id", "user_id"])),
+        );
+
+    let cmd = Qail::get("users").columns(["id"]).filter(
+        "id",
+        Operator::Exists,
+        Value::Subquery(Box::new(Qail::get("orders").columns(["id"]).filter(
+            "orders.user_id",
+            Operator::Eq,
+            Value::Column("users.password_hash".to_string()),
+        ))),
+    );
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &cmd)
+            .expect_err("correlated outer refs must obey the outer table read policy")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "password_hash".to_string()
+        }
+    );
+}
+
+#[test]
+fn inner_unqualified_subquery_columns_do_not_match_outer_policy() {
+    let policy = AccessPolicy::new()
+        .with_table(
+            "users",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id"])),
+        )
+        .with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Read])
+                .read_columns(ColumnRule::only(["id", "private_note"])),
+        );
+
+    let cmd = Qail::get("users").columns(["id"]).filter(
+        "id",
+        Operator::Exists,
+        Value::Subquery(Box::new(Qail::get("orders").columns(["id"]).filter(
+            "private_note",
+            Operator::Eq,
+            "visible",
+        ))),
+    );
+
+    policy
+        .check_command(&AccessContext::anonymous(), &cmd)
+        .expect("unqualified inner columns should be checked against the inner table only");
 }
 
 #[test]

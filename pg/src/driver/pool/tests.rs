@@ -593,6 +593,18 @@ fn test_parse_pg_url_decodes_percent_encoded_user_password_and_database() {
 }
 
 #[test]
+fn test_parse_pg_url_splits_credentials_at_last_at_sign() {
+    let (host, port, user, db, password) =
+        parse_pg_url("postgresql://alice:p@ss@db.internal:5433/app").unwrap();
+
+    assert_eq!(host, "db.internal");
+    assert_eq!(port, 5433);
+    assert_eq!(user, "alice");
+    assert_eq!(db, "app");
+    assert_eq!(password, Some("p@ss".to_string()));
+}
+
+#[test]
 fn test_parse_pg_url_decodes_utf8_percent_encoding() {
     let (host, _port, user, db, password) =
         parse_pg_url("postgresql://caf%C3%A9:p%C3%A9ss@db.internal/app_%E2%9C%93").unwrap();
@@ -661,6 +673,13 @@ fn test_parse_pg_url_rejects_non_postgres_scheme_and_missing_host() {
         Err(other) => panic!("unexpected error: {other:?}"),
     };
     assert!(err.contains("missing database"));
+
+    let err = match parse_pg_url("postgres://@db.internal/app") {
+        Ok(_) => panic!("missing user must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+    assert!(err.contains("missing user"));
 }
 
 #[test]

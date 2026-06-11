@@ -57,6 +57,14 @@ fn test_table(prefix: &str) -> String {
     format!("{}_{}", prefix, Uuid::new_v4().simple())
 }
 
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 async fn connect() -> PgResult<PgDriver> {
     PgDriver::connect_url(&database_url()).await
 }
@@ -80,6 +88,22 @@ async fn create_access_table(driver: &mut PgDriver, table: &str) -> PgResult<()>
 async fn drop_table(driver: &mut PgDriver, table: &str) -> PgResult<()> {
     driver
         .execute_simple(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+}
+
+async fn drop_role(driver: &mut PgDriver, role: &str) -> PgResult<()> {
+    let role = quote_literal(role);
+    driver
+        .execute_simple(&format!(
+            "DO $qail$
+             BEGIN
+               IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = {role}) THEN
+                 EXECUTE format('DROP OWNED BY %I', {role});
+                 EXECUTE format('DROP ROLE %I', {role});
+               END IF;
+             END
+             $qail$"
+        ))
         .await
 }
 
@@ -299,9 +323,12 @@ async fn checked_copy_and_stream_paths_against_postgres() -> PgResult<()> {
 async fn checked_pooled_rls_path_applies_vertical_and_tenant_policy() -> PgResult<()> {
     let mut setup = connect().await?;
     let table = test_table("qail_access_rls");
+    let role = test_table("qail_access_rls_role");
+    let password = format!("pw_{}", Uuid::new_v4().simple());
     create_access_table(&mut setup, &table).await?;
 
     let result = async {
+        let quoted_role = quote_ident(&role);
         setup
             .execute_simple(&format!(
                 "INSERT INTO {table} (id, name, private_note, tenant_id)
@@ -312,13 +339,22 @@ async fn checked_pooled_rls_path_applies_vertical_and_tenant_policy() -> PgResul
                  ALTER TABLE {table} FORCE ROW LEVEL SECURITY;
                  CREATE POLICY {table}_tenant_policy ON {table}
                    USING (tenant_id = current_setting('app.current_tenant_id', true))
-                   WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true))"
+                   WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true));
+                 CREATE ROLE {quoted_role}
+                   LOGIN PASSWORD {}
+                   NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+                 GRANT USAGE ON SCHEMA public TO {quoted_role};
+                 GRANT SELECT ON {table} TO {quoted_role}",
+                quote_literal(&password)
             ))
             .await?;
 
         let policy = policy_for(&table);
         let ctx = access_ctx();
-        let pool = PgPool::connect(pool_config_from_url(&database_url())?).await?;
+        let mut pool_config = pool_config_from_url(&database_url())?;
+        pool_config.user = role.clone();
+        pool_config.password = Some(password.clone());
+        let pool = PgPool::connect(pool_config).await?;
         let rls_sql = qail_pg::rls_sql_with_timeout(&RlsContext::tenant(TENANT_A), 5_000);
 
         let mut conn = pool.acquire_raw().await?;
@@ -339,17 +375,19 @@ async fn checked_pooled_rls_path_applies_vertical_and_tenant_policy() -> PgResul
         assert_eq!(text_cell(&rows[0], 2, "tenant_id")?, TENANT_A);
 
         let mut denied_conn = pool.acquire_raw().await?;
-        let err = denied_conn
+        let denied_result = denied_conn
             .fetch_all_with_rls_checked(
                 &Qail::get(&table).columns(["id", "private_note"]),
                 &rls_sql,
                 &ctx,
                 &policy,
             )
-            .await
+            .await;
+        let denied_release = denied_conn.release_checked().await;
+        let err = denied_result
             .err()
             .ok_or_else(|| PgError::Query("private_note RLS read should be denied".into()))?;
-        denied_conn.release_checked().await?;
+        denied_release?;
         assert!(query_error_string(err)?.contains("private_note"));
 
         pool.close().await;
@@ -358,5 +396,6 @@ async fn checked_pooled_rls_path_applies_vertical_and_tenant_policy() -> PgResul
     .await;
 
     let cleanup = drop_table(&mut setup, &table).await;
-    result.and(cleanup)
+    let role_cleanup = drop_role(&mut setup, &role).await;
+    result.and(cleanup).and(role_cleanup)
 }

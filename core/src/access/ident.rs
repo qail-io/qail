@@ -16,12 +16,7 @@ pub(super) fn normalize_identifier_part(part: &str) -> String {
 }
 
 pub(super) fn normalize_table_ref(table_ref: &str) -> String {
-    table_ref
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_matches('"')
-        .to_ascii_lowercase()
+    normalize_qualified_identifier(first_table_ref_token(table_ref))
 }
 
 pub(super) fn target_refs_for_command(cmd: &Qail, table: &str) -> BTreeSet<String> {
@@ -55,4 +50,35 @@ fn table_alias(table_ref: &str) -> Option<String> {
         token
     };
     Some(normalize_identifier_part(alias)).filter(|alias| !alias.is_empty())
+}
+
+fn first_table_ref_token(table_ref: &str) -> &str {
+    let trimmed = table_ref.trim_start();
+    let mut in_double = false;
+    let mut chars = trimmed.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '"' => {
+                if in_double && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                } else {
+                    in_double = !in_double;
+                }
+            }
+            _ if ch.is_whitespace() && !in_double => return &trimmed[..idx],
+            _ => {}
+        }
+    }
+
+    trimmed
+}
+
+fn normalize_qualified_identifier(value: &str) -> String {
+    value
+        .split('.')
+        .map(normalize_identifier_part)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
 }

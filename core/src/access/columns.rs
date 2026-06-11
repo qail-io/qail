@@ -244,6 +244,34 @@ pub(super) fn check_named_read_column(
     Ok(())
 }
 
+pub(super) fn check_qualified_read_column(
+    table: &str,
+    rule: &ColumnRule,
+    target_refs: &BTreeSet<String>,
+    name: &str,
+) -> Result<(), AccessError> {
+    let Some(column_ref) = parse_column_ref(name) else {
+        return Ok(());
+    };
+    if column_ref
+        .qualifier
+        .as_ref()
+        .is_none_or(|qualifier| !target_refs.contains(qualifier))
+    {
+        return Ok(());
+    }
+    if !rule.allows(&column_ref.column) {
+        return Err(AccessError::new(
+            table.to_string(),
+            Some(AccessOperation::Read),
+            AccessErrorKind::ColumnDenied {
+                column: column_ref.column,
+            },
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ColumnRef {
     qualifier: Option<String>,

@@ -1357,41 +1357,44 @@ fn type_modifiers_match(
     expected: &str,
     live: &LiveColumnDefinition,
 ) -> bool {
-    let modifiers = parse_type_modifiers(expected);
-    if modifiers.is_empty() {
-        return true;
-    }
+    let Some(modifiers) = parse_type_modifiers(expected) else {
+        return false;
+    };
 
     match normalized_expected_type {
-        "character varying" | "character" => modifiers
-            .first()
-            .is_none_or(|expected_len| live.character_maximum_length == Some(*expected_len)),
+        "character varying" | "character" => match modifiers.first() {
+            Some(expected_len) => live.character_maximum_length == Some(*expected_len),
+            None => live.character_maximum_length.is_none(),
+        },
         "numeric" => {
-            let expected_precision = modifiers[0];
-            let expected_scale = modifiers.get(1).copied().unwrap_or(0);
-            live.numeric_precision == Some(expected_precision)
-                && live.numeric_scale == Some(expected_scale)
+            if modifiers.is_empty() {
+                live.numeric_precision.is_none() && live.numeric_scale.is_none()
+            } else {
+                let expected_precision = modifiers[0];
+                let expected_scale = modifiers.get(1).copied().unwrap_or(0);
+                live.numeric_precision == Some(expected_precision)
+                    && live.numeric_scale == Some(expected_scale)
+            }
         }
         "timestamp without time zone"
         | "timestamp with time zone"
         | "time without time zone"
-        | "time with time zone" => modifiers
-            .first()
-            .is_none_or(|expected_precision| live.datetime_precision == Some(*expected_precision)),
+        | "time with time zone" => {
+            let expected_precision = modifiers.first().copied().unwrap_or(6);
+            live.datetime_precision == Some(expected_precision)
+        }
         _ => true,
     }
 }
 
-fn parse_type_modifiers(raw: &str) -> Vec<i32> {
+fn parse_type_modifiers(raw: &str) -> Option<Vec<i32>> {
     let Some(start) = raw.find('(') else {
-        return Vec::new();
+        return Some(Vec::new());
     };
-    let Some(end) = raw[start + 1..].find(')') else {
-        return Vec::new();
-    };
+    let end = raw[start + 1..].find(')')?;
     raw[start + 1..start + 1 + end]
         .split(',')
-        .filter_map(|part| part.trim().parse::<i32>().ok())
+        .map(|part| part.trim().parse::<i32>().ok())
         .collect()
 }
 
@@ -2450,15 +2453,26 @@ mod tests {
         let varchar_32 = live_column("character varying", Some(32), None, None, None);
         assert!(column_type_matches("varchar(32)", &varchar_32));
         assert!(!column_type_matches("varchar(255)", &varchar_32));
+        assert!(!column_type_matches("varchar", &varchar_32));
+        let varchar_unbounded = live_column("character varying", None, None, None, None);
+        assert!(column_type_matches("varchar", &varchar_unbounded));
 
         let numeric_10_2 = live_column("numeric", None, Some(10), Some(2), None);
         assert!(column_type_matches("numeric(10,2)", &numeric_10_2));
         assert!(!column_type_matches("numeric(12,2)", &numeric_10_2));
         assert!(!column_type_matches("numeric(10,4)", &numeric_10_2));
+        assert!(!column_type_matches("numeric", &numeric_10_2));
+        let numeric_unbounded = live_column("numeric", None, None, None, None);
+        assert!(column_type_matches("numeric", &numeric_unbounded));
+        assert!(!column_type_matches("numeric(10,nope)", &numeric_10_2));
 
         let timestamp_3 = live_column("timestamp without time zone", None, None, None, Some(3));
         assert!(column_type_matches("timestamp(3)", &timestamp_3));
         assert!(!column_type_matches("timestamp(6)", &timestamp_3));
+        assert!(!column_type_matches("timestamp", &timestamp_3));
+        let timestamp_default =
+            live_column("timestamp without time zone", None, None, None, Some(6));
+        assert!(column_type_matches("timestamp", &timestamp_default));
     }
 
     #[test]
