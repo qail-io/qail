@@ -78,7 +78,7 @@ pub(super) fn create_columns(cmd: &Qail) -> Result<Vec<String>, AccessError> {
 
 pub(super) fn update_columns(cmd: &Qail) -> Result<Vec<String>, AccessError> {
     let mut columns = match cmd.action {
-        Action::Merge => merge_update_columns(cmd),
+        Action::Merge => merge_update_columns(cmd)?,
         Action::Add | Action::Upsert => conflict_update_columns(cmd),
         _ => payload_columns(cmd)?,
     };
@@ -154,30 +154,43 @@ fn merge_insert_columns(cmd: &Qail) -> Result<Vec<String>, AccessError> {
             if insert_columns.is_empty() {
                 return Ok(Vec::new());
             }
-            columns.extend(
-                insert_columns
-                    .iter()
-                    .map(|column| normalize_column_name(column.as_str())),
-            );
+            for column in insert_columns {
+                columns.push(merge_write_column(column, "merge insert target")?);
+            }
         }
     }
     Ok(columns)
 }
 
-fn merge_update_columns(cmd: &Qail) -> Vec<String> {
+fn merge_update_columns(cmd: &Qail) -> Result<Vec<String>, AccessError> {
     let mut columns = Vec::new();
     if let Some(merge) = &cmd.merge {
         for clause in &merge.clauses {
             if let MergeAction::Update { assignments } = &clause.action {
-                columns.extend(
-                    assignments
-                        .iter()
-                        .map(|(column, _)| normalize_column_name(column)),
-                );
+                for (column, _) in assignments {
+                    columns.push(merge_write_column(column, "merge update target")?);
+                }
             }
         }
     }
-    columns
+    Ok(columns)
+}
+
+fn merge_write_column(column: &str, context: &'static str) -> Result<String, AccessError> {
+    if !is_bare_write_column(column) {
+        return Err(AccessError::new(
+            String::new(),
+            None,
+            AccessErrorKind::UnsupportedColumnExpression { context },
+        ));
+    }
+    Ok(normalize_column_name(column))
+}
+
+fn is_bare_write_column(column: &str) -> bool {
+    let mut chars = column.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 pub(super) fn expr_projects_all_columns(expr: &Expr) -> bool {

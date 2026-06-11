@@ -2254,6 +2254,64 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_merge_rejects_duplicate_and_qualified_write_targets() {
+        use qail_core::ast::{Expr, Operator};
+
+        let valid_expr = || Expr::Named("s.name".to_string());
+        let cases = [
+            (
+                Qail::merge_into("users")
+                    .using_table_as("staging_users", "s")
+                    .merge_on_column("users.id", Operator::Eq, "s.id")
+                    .when_matched_update(&[("name", valid_expr()), ("name", valid_expr())]),
+                "assigned more than once",
+            ),
+            (
+                Qail::merge_into("users")
+                    .using_table_as("staging_users", "s")
+                    .merge_on_column("users.id", Operator::Eq, "s.id")
+                    .when_matched_update(&[("Name", valid_expr()), ("name", valid_expr())]),
+                "assigned more than once",
+            ),
+            (
+                Qail::merge_into("users")
+                    .using_table_as("staging_users", "s")
+                    .merge_on_column("users.id", Operator::Eq, "s.id")
+                    .when_matched_update(&[("users.name", valid_expr())]),
+                "unsafe identifier",
+            ),
+            (
+                Qail::merge_into("users")
+                    .using_table_as("staging_users", "s")
+                    .merge_on_column("users.id", Operator::Eq, "s.id")
+                    .when_not_matched_insert(
+                        &["id", "id"],
+                        &[
+                            Expr::Named("s.id".to_string()),
+                            Expr::Named("s.other_id".to_string()),
+                        ],
+                    ),
+                "assigned more than once",
+            ),
+            (
+                Qail::merge_into("users")
+                    .using_table_as("staging_users", "s")
+                    .merge_on_column("users.id", Operator::Eq, "s.id")
+                    .when_not_matched_insert(&["users.id"], &[Expr::Named("s.id".to_string())]),
+                "unsafe identifier",
+            ),
+        ];
+
+        for (cmd, expected) in cases {
+            let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("invalid merge should fail");
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_encode_merge_rejects_mutating_source_query() {
         use qail_core::ast::{Expr, Operator};
 

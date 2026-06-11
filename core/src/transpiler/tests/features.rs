@@ -1256,6 +1256,86 @@ fn test_merge_postgres_rejects_invalid_action_shape() {
 }
 
 #[test]
+fn test_merge_postgres_rejects_invalid_builder_write_targets_and_aliases() {
+    fn base_merge() -> Qail {
+        Qail::merge_into("users")
+            .using_table_as("staging_users", "s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+    }
+
+    fn matched_update(assignments: &[(&str, Expr)]) -> Qail {
+        base_merge().when_matched_update(assignments)
+    }
+
+    fn source_update(assignments: &[(&str, Expr)]) -> Qail {
+        base_merge().when_not_matched_by_source_update(assignments)
+    }
+
+    fn target_insert(columns: &[&str]) -> Qail {
+        let values = columns
+            .iter()
+            .map(|column| Expr::Named(format!("s.{}", column.replace(['.', '-', '*'], "x"))))
+            .collect::<Vec<_>>();
+        base_merge().when_not_matched_insert(columns, &values)
+    }
+
+    let valid_expr = || Expr::Named("s.name".to_string());
+    let mut invalids = vec![
+        matched_update(&[("name", valid_expr()), ("name", valid_expr())]),
+        source_update(&[("status", valid_expr()), ("status", valid_expr())]),
+        matched_update(&[
+            ("name", valid_expr()),
+            ("email", valid_expr()),
+            ("name", valid_expr()),
+        ]),
+        matched_update(&[("users.name", valid_expr())]),
+        matched_update(&[("name.", valid_expr())]),
+        matched_update(&[(".name", valid_expr())]),
+        matched_update(&[("*", valid_expr())]),
+        matched_update(&[("lower(name)", valid_expr())]),
+        matched_update(&[("display name", valid_expr())]),
+        matched_update(&[("", valid_expr())]),
+        matched_update(&[("1name", valid_expr())]),
+        matched_update(&[("first-name", valid_expr())]),
+        matched_update(&[("na\0me", valid_expr())]),
+        target_insert(&["id", "id"]),
+        target_insert(&["id", "email", "id"]),
+        target_insert(&["users.id"]),
+        target_insert(&["id."]),
+        target_insert(&[".id"]),
+        target_insert(&["*"]),
+        target_insert(&["lower(id)"]),
+        target_insert(&["display id"]),
+        target_insert(&[""]),
+        target_insert(&["1id"]),
+        target_insert(&["first-id"]),
+        target_insert(&["i\0d"]),
+        base_merge()
+            .target_alias("public.u")
+            .when_matched_do_nothing(),
+        base_merge().target_alias("1u").when_matched_do_nothing(),
+        base_merge().target_alias("").when_matched_do_nothing(),
+        Qail::merge_into("users")
+            .using_table_as("staging_users", "staging.s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+            .when_matched_do_nothing(),
+        Qail::merge_into("users")
+            .using_query_as(Qail::get("staging_users").columns(["id"]), "staging.s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+            .when_matched_do_nothing(),
+    ];
+
+    assert_eq!(invalids.len(), 30);
+    for (idx, cmd) in invalids.drain(..).enumerate() {
+        let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+        assert!(
+            sql.starts_with("/* ERROR:"),
+            "invalid MERGE builder shape #{idx} rendered as SQL: {sql}"
+        );
+    }
+}
+
+#[test]
 fn test_merge_postgres_rejects_mutating_source_query_to_sql() {
     let cmd = Qail::merge_into("users")
         .using_query_as(Qail::del("staging_users"), "s")

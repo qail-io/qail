@@ -10,6 +10,7 @@ use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::render_table_reference;
 use crate::transpiler::traits::escape_sql_string_literal;
 use crate::transpiler::{SqlGenerator, ToSql};
+use std::collections::HashSet;
 
 /// Generate PostgreSQL `MERGE` SQL.
 pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
@@ -711,9 +712,23 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
 }
 
 fn validate_merge_shape(merge: &Merge) -> Option<String> {
+    if let Some(alias) = &merge.target_alias
+        && !is_bare_identifier(alias)
+    {
+        return Some("MERGE target alias must be a bare identifier".to_string());
+    }
+
     match &merge.source {
         MergeSource::Table { name, .. } if name.trim().is_empty() => {
             return Some("MERGE requires a USING source table or query".to_string());
+        }
+        MergeSource::Table {
+            alias: Some(alias), ..
+        }
+        | MergeSource::Query {
+            alias: Some(alias), ..
+        } if !is_bare_identifier(alias) => {
+            return Some("MERGE source alias must be a bare identifier".to_string());
         }
         MergeSource::Query { query, .. } => {
             if let Some(error) = validate_merge_source_query(query) {
@@ -740,6 +755,14 @@ fn validate_merge_shape(merge: &Merge) -> Option<String> {
             (_, MergeAction::Update { assignments }) if assignments.is_empty() => {
                 return Some("MERGE UPDATE requires at least one assignment".to_string());
             }
+            (_, MergeAction::Update { assignments }) => {
+                if let Some(error) = validate_merge_write_targets(
+                    assignments.iter().map(|(column, _)| column.as_str()),
+                    "UPDATE",
+                ) {
+                    return Some(error);
+                }
+            }
             (_, MergeAction::Insert { columns, values }) => {
                 if values.is_empty() {
                     return Some("MERGE INSERT requires at least one value".to_string());
@@ -747,12 +770,43 @@ fn validate_merge_shape(merge: &Merge) -> Option<String> {
                 if !columns.is_empty() && columns.len() != values.len() {
                     return Some("MERGE INSERT column count must match value count".to_string());
                 }
+                if let Some(error) =
+                    validate_merge_write_targets(columns.iter().map(String::as_str), "INSERT")
+                {
+                    return Some(error);
+                }
             }
             _ => {}
         }
     }
 
     None
+}
+
+fn validate_merge_write_targets<'a>(
+    columns: impl Iterator<Item = &'a str>,
+    action: &str,
+) -> Option<String> {
+    let mut seen = HashSet::new();
+    for column in columns {
+        if !is_bare_identifier(column) {
+            return Some(format!(
+                "MERGE {action} target column must be a bare identifier: {column:?}"
+            ));
+        }
+        if !seen.insert(column.to_ascii_lowercase()) {
+            return Some(format!(
+                "MERGE {action} target column is assigned more than once: {column}"
+            ));
+        }
+    }
+    None
+}
+
+fn is_bare_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn validate_merge_source_query(query: &Qail) -> Option<String> {

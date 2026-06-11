@@ -196,6 +196,61 @@ fn write_column_allowlist_checks_update_insert_upsert_and_merge() {
 }
 
 #[test]
+fn merge_write_targets_reject_qualified_builder_columns_before_policy_allowlist() {
+    let policy = AccessPolicy::new()
+        .with_table(
+            "orders",
+            TableAccessPolicy::new()
+                .allow_operations([AccessOperation::Create, AccessOperation::Update])
+                .write_columns(ColumnRule::only(["status"])),
+        )
+        .with_table(
+            "incoming_orders",
+            TableAccessPolicy::new().allow_operations([AccessOperation::Read]),
+        );
+
+    let qualified_update = Qail::merge_into("orders")
+        .using_table_as("incoming_orders", "src")
+        .merge_on_condition(Condition {
+            left: Expr::Named("orders.id".to_string()),
+            op: Operator::Eq,
+            value: Value::Column("src.id".to_string()),
+            is_array_unnest: false,
+        })
+        .when_matched_update(&[("orders.status", Expr::Named("src.status".to_string()))]);
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &qualified_update)
+            .expect_err("qualified MERGE update target must fail closed")
+            .kind,
+        AccessErrorKind::UnsupportedColumnExpression {
+            context: "merge update target"
+        }
+    );
+
+    let qualified_insert = Qail::merge_into("orders")
+        .using_table_as("incoming_orders", "src")
+        .merge_on_condition(Condition {
+            left: Expr::Named("orders.id".to_string()),
+            op: Operator::Eq,
+            value: Value::Column("src.id".to_string()),
+            is_array_unnest: false,
+        })
+        .when_not_matched_insert(&["orders.status"], &[Expr::Named("src.status".to_string())]);
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &qualified_insert)
+            .expect_err("qualified MERGE insert target must fail closed")
+            .kind,
+        AccessErrorKind::UnsupportedColumnExpression {
+            context: "merge insert target"
+        }
+    );
+}
+
+#[test]
 fn read_column_policy_does_not_block_write_only_payloads() {
     let policy = AccessPolicy::new().with_table(
         "orders",

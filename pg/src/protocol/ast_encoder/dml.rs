@@ -9,6 +9,7 @@ use qail_core::ast::{
     Qail, SetOp, SortOrder, Value,
 };
 use qail_core::transpiler::escape_identifier;
+use std::collections::HashSet;
 
 use super::helpers::write_usize;
 use super::values::{
@@ -1504,6 +1505,12 @@ fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeErro
                     "MERGE UPDATE requires at least one assignment".to_string(),
                 ));
             }
+            (_, MergeAction::Update { assignments }) => {
+                validate_merge_write_targets(
+                    assignments.iter().map(|(column, _)| column.as_str()),
+                    "UPDATE",
+                )?;
+            }
             (_, MergeAction::Insert { columns, values }) => {
                 if values.is_empty() {
                     return Err(crate::protocol::EncodeError::InvalidAst(
@@ -1515,11 +1522,28 @@ fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeErro
                         "MERGE INSERT column count must match value count".to_string(),
                     ));
                 }
+                validate_merge_write_targets(columns.iter().map(String::as_str), "INSERT")?;
             }
             _ => {}
         }
     }
 
+    Ok(())
+}
+
+fn validate_merge_write_targets<'a>(
+    columns: impl Iterator<Item = &'a str>,
+    action: &str,
+) -> Result<(), crate::protocol::EncodeError> {
+    let mut seen = HashSet::new();
+    for column in columns {
+        validate_ident_atom(&format!("merge.{action}.column"), column)?;
+        if !seen.insert(column.to_ascii_lowercase()) {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "MERGE {action} target column is assigned more than once: {column}"
+            )));
+        }
+    }
     Ok(())
 }
 
