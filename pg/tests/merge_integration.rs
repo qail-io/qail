@@ -9,7 +9,7 @@ use qail_core::ast::{Expr, Operator, Qail};
 use qail_core::parser::parse;
 use qail_core::rls::RlsContext;
 use qail_core::rls::tenant::register_tenant_table;
-use qail_pg::{PgDriver, PgResult};
+use qail_pg::{PgDriver, PgError, PgResult};
 use uuid::Uuid;
 
 const TENANT_A: &str = "tenant-a";
@@ -160,6 +160,20 @@ async fn expression_rows_for(
         .collect())
 }
 
+async fn assert_merge_encode_error(driver: &mut PgDriver, cmd: &Qail, expected: &str) {
+    let err = driver
+        .execute(cmd)
+        .await
+        .expect_err("invalid MERGE AST should fail before server execution");
+    match err {
+        PgError::Encode(message) => assert!(
+            message.contains(expected),
+            "expected encode error containing {expected:?}, got {message:?}"
+        ),
+        other => panic!("expected client-side encode error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 #[ignore = "Requires PostgreSQL 17+; run explicitly with QAIL_MERGE_DATABASE_URL"]
 async fn test_merge_parser_ast_encoder_update_insert_delete_against_postgres() -> PgResult<()> {
@@ -218,6 +232,88 @@ async fn test_merge_parser_ast_encoder_update_insert_delete_against_postgres() -
                 TENANT_A.to_string()
             ),
         ]
+    );
+
+    drop_merge_tables(&mut driver, &target, &source).await
+}
+
+#[tokio::test]
+#[ignore = "Requires PostgreSQL 17+; run explicitly with QAIL_MERGE_DATABASE_URL"]
+async fn test_merge_invalid_builder_asts_fail_before_postgres_mutation() -> PgResult<()> {
+    let mut driver = connect().await?;
+    let target = test_table("qail_merge_invalid_target");
+    let source = test_table("qail_merge_invalid_source");
+    create_merge_tables(&mut driver, &target, &source).await?;
+
+    driver
+        .execute_simple(&format!(
+            "INSERT INTO {target} (id, name, status, tenant_id) VALUES
+                (1, 'old-a', 'old', '{TENANT_A}')"
+        ))
+        .await?;
+    driver
+        .execute_simple(&format!(
+            "INSERT INTO {source} (id, name, status, tenant_id) VALUES
+                (1, 'new-a', 'active', '{TENANT_A}'),
+                (2, 'insert-a', 'active', '{TENANT_A}')"
+        ))
+        .await?;
+
+    let valid_value = || Expr::Named("s.name".to_string());
+    let duplicate_update = Qail::merge_into(&target)
+        .target_alias("t")
+        .using_table_as(&source, "s")
+        .merge_on_column("t.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", valid_value()), ("Name", valid_value())]);
+    assert_merge_encode_error(&mut driver, &duplicate_update, "assigned more than once").await;
+    assert_eq!(
+        rows_for(&mut driver, &target).await?,
+        vec![(
+            1,
+            "old-a".to_string(),
+            "old".to_string(),
+            TENANT_A.to_string()
+        )]
+    );
+
+    let qualified_update = Qail::merge_into(&target)
+        .target_alias("t")
+        .using_table_as(&source, "s")
+        .merge_on_column("t.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("t.name", Expr::Named("s.name".to_string()))]);
+    assert_merge_encode_error(&mut driver, &qualified_update, "unsafe identifier").await;
+    assert_eq!(
+        rows_for(&mut driver, &target).await?,
+        vec![(
+            1,
+            "old-a".to_string(),
+            "old".to_string(),
+            TENANT_A.to_string()
+        )]
+    );
+
+    let qualified_insert = Qail::merge_into(&target)
+        .target_alias("t")
+        .using_table_as(&source, "s")
+        .merge_on_column("t.id", Operator::Eq, "s.id")
+        .when_not_matched_insert(
+            &["t.id", "name", "status", "tenant_id"],
+            &[
+                Expr::Named("s.id".to_string()),
+                Expr::Named("s.name".to_string()),
+                Expr::Named("s.status".to_string()),
+                Expr::Named("s.tenant_id".to_string()),
+            ],
+        );
+    assert_merge_encode_error(&mut driver, &qualified_insert, "unsafe identifier").await;
+    assert_eq!(
+        rows_for(&mut driver, &target).await?,
+        vec![(
+            1,
+            "old-a".to_string(),
+            "old".to_string(),
+            TENANT_A.to_string()
+        )]
     );
 
     drop_merge_tables(&mut driver, &target, &source).await
