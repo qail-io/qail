@@ -99,8 +99,20 @@ fn command_complete(tag: &str) -> Vec<u8> {
     backend_frame(b'C', &payload)
 }
 
+fn malformed_command_complete_without_nul() -> Vec<u8> {
+    backend_frame(b'C', b"SELECT 1")
+}
+
+fn malformed_ready_for_query_with_trailing_status() -> Vec<u8> {
+    backend_frame(b'Z', b"II")
+}
+
 fn data_row_zero_cols() -> Vec<u8> {
     backend_frame(b'D', &0i16.to_be_bytes())
+}
+
+fn malformed_data_row_missing_column_length() -> Vec<u8> {
+    backend_frame(b'D', &1i16.to_be_bytes())
 }
 
 fn row_description_zero_cols() -> Vec<u8> {
@@ -817,6 +829,128 @@ async fn driver_fetch_all_fast_rejects_ready_before_completion() {
     let msg = err.to_string();
     assert!(
         msg.contains("ReadyForQuery before completion message"),
+        "unexpected error message: {msg}"
+    );
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn driver_fetch_all_fast_rejects_malformed_command_complete_payload() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let seq = read_frontend_msg_types_until_sync(&mut sock).await;
+        assert_eq!(seq.first().copied(), Some(b'P'));
+        assert!(seq.contains(&b'B'));
+        assert!(seq.contains(&b'E'));
+
+        sock.write_all(&parse_complete()).await.unwrap();
+        sock.write_all(&bind_complete()).await.unwrap();
+        sock.write_all(&malformed_command_complete_without_nul())
+            .await
+            .unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut driver = PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
+        .await
+        .unwrap();
+
+    let err = match driver.fetch_all_fast(&Qail::get("users")).await {
+        Ok(_) => panic!("expected protocol error"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CommandComplete missing null terminator"),
+        "unexpected error message: {msg}"
+    );
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn driver_fetch_all_fast_rejects_malformed_ready_for_query_payload() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let seq = read_frontend_msg_types_until_sync(&mut sock).await;
+        assert_eq!(seq.first().copied(), Some(b'P'));
+        assert!(seq.contains(&b'B'));
+        assert!(seq.contains(&b'E'));
+
+        sock.write_all(&parse_complete()).await.unwrap();
+        sock.write_all(&bind_complete()).await.unwrap();
+        sock.write_all(&command_complete("SELECT 0")).await.unwrap();
+        sock.write_all(&malformed_ready_for_query_with_trailing_status())
+            .await
+            .unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut driver = PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
+        .await
+        .unwrap();
+
+    let err = match driver.fetch_all_fast(&Qail::get("users")).await {
+        Ok(_) => panic!("expected protocol error"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ReadyForQuery"),
+        "unexpected error message: {msg}"
+    );
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn query_count_fast_rejects_malformed_data_row_payload() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let seq = read_frontend_msg_types_until_sync(&mut sock).await;
+        assert_eq!(seq.first().copied(), Some(b'P'));
+        assert!(seq.contains(&b'B'));
+        assert!(seq.contains(&b'E'));
+
+        sock.write_all(&parse_complete()).await.unwrap();
+        sock.write_all(&bind_complete()).await.unwrap();
+        sock.write_all(&malformed_data_row_missing_column_length())
+            .await
+            .unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut conn =
+        PgConnection::connect_with_password("127.0.0.1", port, "test_user", "test_db", None)
+            .await
+            .unwrap();
+
+    let err = conn.query_count("SELECT 1", &[]).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("DataRow truncated"),
         "unexpected error message: {msg}"
     );
 

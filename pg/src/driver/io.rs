@@ -1037,6 +1037,32 @@ impl PgConnection {
         Ok(())
     }
 
+    #[inline]
+    fn decode_fast_message_type(&mut self, msg_bytes: BytesMut) -> PgResult<Option<u8>> {
+        let msg_type = msg_bytes[0];
+        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
+            Ok(decoded) => decoded,
+            Err(e) => return self.protocol_desync(e),
+        };
+        match msg {
+            BackendMessage::ErrorResponse(err) => Err(PgError::QueryServer(err.into())),
+            BackendMessage::NotificationResponse {
+                process_id,
+                channel,
+                payload,
+            } => {
+                self.notifications
+                    .push_back(super::notification::Notification {
+                        process_id,
+                        channel,
+                        payload,
+                    });
+                Ok(None)
+            }
+            _ => Ok(Some(msg_type)),
+        }
+    }
+
     // ==================== BUFFERED WRITE API (High Performance) ====================
 
     /// Buffer bytes for later flush (NO SYSCALL).
@@ -1087,66 +1113,11 @@ impl PgConnection {
                 }
 
                 if self.buffer.len() > msg_len {
-                    let msg_type = self.buffer[0];
-
-                    if matches!(
-                        msg_type,
-                        b'E' | b'A'
-                            | b'Z'
-                            | b'C'
-                            | b'1'
-                            | b'2'
-                            | b'3'
-                            | b'n'
-                            | b's'
-                            | b'I'
-                            | b'S'
-                            | b'N'
-                    ) {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            BackendMessage::ReadyForQuery(_)
-                            | BackendMessage::CommandComplete(_)
-                            | BackendMessage::ParseComplete
-                            | BackendMessage::BindComplete
-                            | BackendMessage::CloseComplete
-                            | BackendMessage::NoData
-                            | BackendMessage::PortalSuspended
-                            | BackendMessage::EmptyQueryResponse
-                            | BackendMessage::ParameterStatus { .. }
-                            | BackendMessage::NoticeResponse(_) => {
-                                return Ok(msg_type);
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok(msg_type);
                     }
-
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok(msg_type);
+                    continue;
                 }
             }
 
@@ -1192,37 +1163,6 @@ impl PgConnection {
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
-
                     // Fast path: DataRow - parse inline
                     if msg_type == b'D' {
                         let parse_result = {
@@ -1237,9 +1177,11 @@ impl PgConnection {
                         }
                     }
 
-                    // Other messages - skip
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok((msg_type, None));
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok((msg_type, None));
+                    }
+                    continue;
                 }
             }
 
@@ -1285,37 +1227,6 @@ impl PgConnection {
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
-
                     if msg_type == b'D' {
                         let parse_result = {
                             let payload = &self.buffer[5..msg_len + 1];
@@ -1329,8 +1240,11 @@ impl PgConnection {
                         return Ok(msg_type);
                     }
 
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok(msg_type);
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok(msg_type);
+                    }
+                    continue;
                 }
             }
 
@@ -1373,37 +1287,6 @@ impl PgConnection {
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
-
                     if msg_type == b'D' {
                         let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
                         let payload = msg_bytes.slice(5..);
@@ -1413,8 +1296,11 @@ impl PgConnection {
                         return Ok(msg_type);
                     }
 
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok(msg_type);
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok(msg_type);
+                    }
+                    continue;
                 }
             }
 
@@ -1457,37 +1343,6 @@ impl PgConnection {
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
-
                     if msg_type == b'D' {
                         let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
                         let payload = msg_bytes.slice(5..);
@@ -1498,8 +1353,11 @@ impl PgConnection {
                         return Ok(msg_type);
                     }
 
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok(msg_type);
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok(msg_type);
+                    }
+                    continue;
                 }
             }
 
@@ -1542,37 +1400,6 @@ impl PgConnection {
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
-
                     if msg_type == b'D' {
                         let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
                         let payload = msg_bytes.slice(5..);
@@ -1584,8 +1411,11 @@ impl PgConnection {
                         return Ok(msg_type);
                     }
 
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok(msg_type);
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok(msg_type);
+                    }
+                    continue;
                 }
             }
 
@@ -1632,37 +1462,6 @@ impl PgConnection {
 
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
-
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
 
                     // Fast path: DataRow - ZERO-COPY using Bytes
                     if msg_type == b'D' {
@@ -1728,9 +1527,11 @@ impl PgConnection {
                         return self.protocol_desync("DataRow payload too short".into());
                     }
 
-                    // Other messages - skip
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok((msg_type, None));
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok((msg_type, None));
+                    }
+                    continue;
                 }
             }
 
@@ -1775,38 +1576,6 @@ impl PgConnection {
 
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
-
-                    // Error and async-notify checks
-                    if msg_type == b'E' || msg_type == b'A' {
-                        let msg_bytes = self.buffer.split_to(msg_len + 1);
-                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
-                            Ok(decoded) => decoded,
-                            Err(e) => return self.protocol_desync(e),
-                        };
-                        match msg {
-                            BackendMessage::ErrorResponse(err) => {
-                                return Err(PgError::QueryServer(err.into()));
-                            }
-                            BackendMessage::NotificationResponse {
-                                process_id,
-                                channel,
-                                payload,
-                            } => {
-                                self.notifications
-                                    .push_back(super::notification::Notification {
-                                        process_id,
-                                        channel,
-                                        payload,
-                                    });
-                                continue;
-                            }
-                            _ => {
-                                return Err(PgError::Protocol(
-                                    "Unexpected fast-path message".into(),
-                                ));
-                            }
-                        }
-                    }
 
                     if msg_type == b'D' {
                         let mut msg_bytes = self.buffer.split_to(msg_len + 1);
@@ -1891,9 +1660,11 @@ impl PgConnection {
                         return Ok((msg_type, Some((col0, col1))));
                     }
 
-                    // Other messages - skip
-                    let _ = self.buffer.split_to(msg_len + 1);
-                    return Ok((msg_type, None));
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    if let Some(msg_type) = self.decode_fast_message_type(msg_bytes)? {
+                        return Ok((msg_type, None));
+                    }
+                    continue;
                 }
             }
 
