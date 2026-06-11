@@ -1,6 +1,6 @@
 //! PostgreSQL MERGE parsing.
 
-use super::base::parse_identifier;
+use super::base::{parse_bare_identifier, parse_identifier};
 use super::clauses::parse_condition;
 use super::expressions::parse_expression;
 use crate::ast::*;
@@ -13,6 +13,7 @@ use nom::{
     multi::{many0, many1, separated_list1},
     sequence::delimited,
 };
+use std::collections::HashSet;
 
 /// Parse the body after `merge <target>`.
 pub fn parse_merge_after_target<'a>(
@@ -80,6 +81,9 @@ fn parse_query_source(input: &str) -> IResult<&str, MergeSource> {
         (multispace0, char(')')),
     )
     .parse(input)?;
+    if !matches!(query.action, Action::Get | Action::With) {
+        return Err(merge_shape_error(input));
+    }
 
     Ok((
         input,
@@ -94,7 +98,7 @@ fn parse_optional_alias(input: &str) -> IResult<&str, Option<String>> {
     let (input, _) = multispace0(input)?;
     if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("as").parse(input) {
         let (remaining, _) = multispace1(remaining)?;
-        let (remaining, alias) = parse_identifier(remaining)?;
+        let (remaining, alias) = parse_bare_identifier(remaining)?;
         return Ok((remaining, Some(alias.to_string())));
     }
 
@@ -111,7 +115,7 @@ fn parse_optional_alias(input: &str) -> IResult<&str, Option<String>> {
         return Ok((input, None));
     }
 
-    let (remaining, alias) = parse_identifier(trimmed)?;
+    let (remaining, alias) = parse_bare_identifier(trimmed)?;
     Ok((
         &input[consumed_ws + (trimmed.len() - remaining.len())..],
         Some(alias.to_string()),
@@ -128,6 +132,7 @@ fn parse_merge_clause(input: &str) -> IResult<&str, MergeClause> {
     let (input, _) = tag_no_case("then").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, action) = parse_merge_action(input)?;
+    validate_clause_action(&match_kind, &action, input)?;
 
     Ok((
         input,
@@ -216,11 +221,14 @@ fn parse_update_action(input: &str) -> IResult<&str, MergeAction> {
         parse_merge_assignment,
     )
     .parse(input)?;
+    if !assignment_targets_are_unique(&assignments) {
+        return Err(merge_shape_error(input));
+    }
     Ok((input, MergeAction::Update { assignments }))
 }
 
 fn parse_merge_assignment(input: &str) -> IResult<&str, (String, Expr)> {
-    let (input, column) = parse_identifier(input)?;
+    let (input, column) = parse_bare_identifier(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -233,7 +241,7 @@ fn parse_insert_action(input: &str) -> IResult<&str, MergeAction> {
     let (input, _) = multispace0(input)?;
     let (input, columns) = opt(delimited(
         (char('('), multispace0),
-        separated_list1((multispace0, char(','), multispace0), parse_identifier),
+        separated_list1((multispace0, char(','), multispace0), parse_bare_identifier),
         (multispace0, char(')')),
     ))
     .parse(input)?;
@@ -247,6 +255,12 @@ fn parse_insert_action(input: &str) -> IResult<&str, MergeAction> {
     )
     .parse(input)?;
 
+    if let Some(columns) = &columns
+        && (!identifier_targets_are_unique(columns) || columns.len() != values.len())
+    {
+        return Err(merge_shape_error(input));
+    }
+
     Ok((
         input,
         MergeAction::Insert {
@@ -258,4 +272,39 @@ fn parse_insert_action(input: &str) -> IResult<&str, MergeAction> {
             values,
         },
     ))
+}
+
+fn validate_clause_action<'a>(
+    match_kind: &MergeMatchKind,
+    action: &MergeAction,
+    error_input: &'a str,
+) -> IResult<&'a str, ()> {
+    match (match_kind, action) {
+        (MergeMatchKind::Matched, MergeAction::Insert { .. }) => {
+            Err(merge_shape_error(error_input))
+        }
+        (MergeMatchKind::NotMatchedByTarget, MergeAction::Update { .. } | MergeAction::Delete) => {
+            Err(merge_shape_error(error_input))
+        }
+        (MergeMatchKind::NotMatchedBySource, MergeAction::Insert { .. }) => {
+            Err(merge_shape_error(error_input))
+        }
+        _ => Ok((error_input, ())),
+    }
+}
+
+fn assignment_targets_are_unique(assignments: &[(String, Expr)]) -> bool {
+    let mut seen = HashSet::new();
+    assignments
+        .iter()
+        .all(|(column, _)| seen.insert(column.as_str()))
+}
+
+fn identifier_targets_are_unique(columns: &[&str]) -> bool {
+    let mut seen = HashSet::new();
+    columns.iter().all(|column| seen.insert(*column))
+}
+
+fn merge_shape_error(input: &str) -> nom::Err<nom::error::Error<&str>> {
+    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
 }
