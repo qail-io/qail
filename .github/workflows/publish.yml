@@ -1,4 +1,4 @@
-name: Publish to crates.io
+name: Release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run (do not actually publish)'
+        description: 'Dry run preflight only; do not create release assets or publish crates'
         required: false
         default: false
         type: boolean
@@ -24,15 +24,283 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: Release Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          components: rustfmt,clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+
+      - name: Check toolchain
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: Verify workspace versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace_manifests=(
+            core/Cargo.toml
+            pg/Cargo.toml
+            qdrant/Cargo.toml
+            cli/Cargo.toml
+            encoder/Cargo.toml
+            gateway/Cargo.toml
+            lsp/Cargo.toml
+            workflow/Cargo.toml
+          )
+
+          expected_version=""
+          for manifest in "${workspace_manifests[@]}"; do
+            version="$(awk -F '"' '/^version =/ {print $2; exit}' "$manifest")"
+            crate="$(awk -F '"' '/^name =/ {print $2; exit}' "$manifest")"
+            echo "$crate version: $version"
+            if [ -z "$expected_version" ]; then
+              expected_version="$version"
+            elif [ "$version" != "$expected_version" ]; then
+              echo "::error::$manifest has version $version, expected $expected_version"
+              exit 1
+            fi
+          done
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            echo "Tag version: $tag_version"
+            if [ "$expected_version" != "$tag_version" ]; then
+              echo "::error::workspace version $expected_version does not match tag $tag_version"
+              exit 1
+            fi
+          else
+            echo "No release tag detected; verified workspace crates share version $expected_version"
+          fi
+
+          while IFS= read -r line; do
+            dep_version="$(printf '%s\n' "$line" | sed -n 's/.*version = "\([^"]*\)".*/\1/p')"
+            if [ -n "$dep_version" ] && [ "$dep_version" != "$expected_version" ]; then
+              echo "::error::internal dependency version drift: $line"
+              exit 1
+            fi
+          done < <(grep -RInE 'qail-(core|pg|qdrant|gateway|encoder|lsp|workflow)[^=]*=.*version = "' */Cargo.toml || true)
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Panic safety
+        run: ./scripts/check-panic-safety.sh
+
+      - name: Workspace tests
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Package release crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo publish -p qail-core --dry-run
+          # Cargo cannot fully dry-run downstream crates until their same-version
+          # internal dependencies are visible in crates.io. Those dry-runs happen
+          # immediately before each real publish in the final publish job.
+          mkdir -p target
+          for crate in qail-pg qail-qdrant qail; do
+            cargo package -p "$crate" --list > "target/package-$crate.files"
+            test -s "target/package-$crate.files"
+          done
+
+  build-static-libraries:
+    name: Static Library (${{ matrix.target }})
+    needs: preflight
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: libqail-linux-x64.a
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            asset_name: libqail-linux-arm64.a
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset_name: libqail-darwin-x64.a
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: libqail-darwin-arm64.a
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: libqail-win-x64.lib
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build static library
+        run: cargo build --release --package qail-encoder --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Package artifact (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/libqail_encoder.a dist/${{ matrix.asset_name }}
+          gzip -9 dist/${{ matrix.asset_name }}
+
+      - name: Package artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/qail_encoder.lib dist/${{ matrix.asset_name }}
+          Compress-Archive -Path dist/${{ matrix.asset_name }} -DestinationPath dist/${{ matrix.asset_name }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/*
+
+  build-lsp-binaries:
+    name: LSP Binary (${{ matrix.target }})
+    needs: preflight
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-linux-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-darwin-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: qail-lsp.exe
+            asset_name: qail-lsp-win-x64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --package qail-lsp --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+  release-assets:
+    name: Release Assets
+    needs:
+      - build-static-libraries
+      - build-lsp-binaries
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: artifacts
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets
+          find artifacts -type f \( -name "*.gz" -o -name "*.zip" \) -exec cp {} release_assets/ \;
+          for dir in artifacts/qail-lsp-*; do
+            [ -d "$dir" ] || continue
+            asset_name="$(basename "$dir")"
+            if [ -f "$dir/qail-lsp.exe" ]; then
+              cp "$dir/qail-lsp.exe" "release_assets/$asset_name"
+            elif [ -f "$dir/qail-lsp" ]; then
+              cp "$dir/qail-lsp" "release_assets/$asset_name"
+            else
+              echo "::error::No LSP binary found in $dir"
+              exit 1
+            fi
+          done
+          ls -la release_assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844
+        with:
+          files: release_assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish:
-    name: Publish
+    name: Publish Crates
+    needs:
+      - preflight
+      - release-assets
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: release
     permissions:
       id-token: write
       contents: read
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -43,86 +311,76 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 
-      - name: Check Cargo Version
-        run: |
-          cargo --version
-          rustc --version
-
-      - name: Verify versions match tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          CORE_VERSION=$(grep '^version' core/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          PG_VERSION=$(grep '^version' pg/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          CLI_VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          QDRANT_VERSION=$(grep '^version' qdrant/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          
-          echo "Tag version: $TAG_VERSION"
-          echo "Core version: $CORE_VERSION"
-          echo "PG version: $PG_VERSION"
-          echo "CLI version: $CLI_VERSION"
-          echo "Qdrant version: $QDRANT_VERSION"
-          
-          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$PG_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ] || [ "$QDRANT_VERSION" != "$TAG_VERSION" ]; then
-            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, PG: $PG_VERSION, CLI: $CLI_VERSION, Qdrant: $QDRANT_VERSION"
-            exit 1
-          fi
-          echo "✅ All versions match tag"
-
-      - name: Run tests
-        run: cargo test --workspace
-
       - name: Authenticate with Crates.io
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec
         id: auth
-        
-      - name: Publish qail-core
-        if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail-core || echo "qail-core already published, skipping"
+
+      - name: Publish crates in dependency order
+        shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-
-      - name: Wait for qail-core to be available
-        if: ${{ !inputs.dry_run }}
         run: |
-          sleep 30
-          cargo update  # Force refresh crates.io index
+          set -euo pipefail
 
-      - name: Publish qail-pg
-        if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail-pg || echo "qail-pg already published, skipping"
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          version="${GITHUB_REF_NAME#v}"
 
-      - name: Wait for qail-pg to be available
-        if: ${{ !inputs.dry_run }}
-        run: |
-          sleep 30
-          cargo update  # Force refresh crates.io index
+          crate_available() {
+            local crate="$1"
+            cargo info --registry crates-io "$crate@$version" >/dev/null 2>&1
+          }
 
-      - name: Publish qail-qdrant
-        if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail-qdrant || echo "qail-qdrant already published, skipping"
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          wait_for_crate() {
+            local crate="$1"
+            for attempt in {1..20}; do
+              if crate_available "$crate"; then
+                echo "$crate@$version is visible in crates.io"
+                return 0
+              fi
+              echo "Waiting for $crate@$version to become visible in crates.io (attempt $attempt/20)"
+              sleep 30
+              cargo update || true
+            done
+            echo "::error::$crate@$version was not visible in crates.io after waiting"
+            return 1
+          }
 
-      - name: Wait for qail-qdrant to be available
-        if: ${{ !inputs.dry_run }}
-        run: |
-          sleep 30
-          cargo update  # Force refresh crates.io index
+          publish_crate() {
+            local crate="$1"
+            local log
+            log="$(mktemp)"
 
-      - name: Publish qail (CLI)
-        if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail || echo "qail already published, skipping"
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+            if crate_available "$crate"; then
+              echo "$crate@$version already exists in crates.io; skipping"
+              return 0
+            fi
 
-      - name: Dry run summary
-        if: ${{ inputs.dry_run }}
-        run: |
-          echo "🔍 Dry run completed - no packages were published"
-          cargo publish -p qail-core --dry-run
-          cargo publish -p qail-pg --dry-run
-          cargo publish -p qail-qdrant --dry-run
-          cargo publish -p qail --dry-run
+            cargo publish -p "$crate" --dry-run
+
+            set +e
+            cargo publish -p "$crate" 2>&1 | tee "$log"
+            local status="${PIPESTATUS[0]}"
+            set -e
+
+            if [ "$status" -eq 0 ]; then
+              return 0
+            fi
+
+            if grep -Eiq 'already (uploaded|exists)|crate version .* is already uploaded|previously uploaded' "$log"; then
+              echo "$crate@$version was already published by another run; continuing"
+              return 0
+            fi
+
+            echo "::error::cargo publish failed for $crate"
+            return "$status"
+          }
+
+          publish_crate qail-core
+          wait_for_crate qail-core
+
+          publish_crate qail-pg
+          wait_for_crate qail-pg
+
+          publish_crate qail-qdrant
+          wait_for_crate qail-qdrant
+
+          publish_crate qail
