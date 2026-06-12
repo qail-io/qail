@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-12
+
+### Fixed
+- **PostgreSQL protocol hardening:** Tightened fast-path backend control-frame validation, frontend send/flush handling, prepared statement lifecycle checks, and pooled raw connection cleanup expectations so malformed or stale protocol state fails closed instead of re-entering the pool.
+- **Native AST and parser validation:** Hardened QAIL grammar, schema/query-file parsing, native MERGE processing, identifier handling, and expression encoding against malformed shapes, unsafe references, and drift-prone parser edge cases.
+- **MERGE live behavior:** Added real PostgreSQL coverage for complex MERGE expressions, CTE/query sources, RLS-scoped update/insert/delete flows, and invalid builder ASTs that must fail before mutating PostgreSQL.
+
+### Changed
+- **Release validation:** Re-verified the release with the full Rust workspace tests, Clippy, and live PostgreSQL 18 lab coverage for cursor cleanup, set operations, recursive CTEs, access-checked execution, MERGE, legacy integration, and seeded RLS behavior.
+
 ## [1.3.0] - 2026-06-04
 
 Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://dev.qail.io/blog/qail-rs-v1-3-0-deep-audit-hardening)

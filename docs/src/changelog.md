@@ -4,6 +4,13 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
+## Current Highlights (v1.3.1)
+
+- **PostgreSQL protocol hardening**: fast-path backend control-frame validation, frontend send/flush handling, prepared statement lifecycle checks, and pooled raw cleanup behavior now fail closed more consistently.
+- **Native AST/parser validation**: QAIL grammar, schema/query-file parsing, native MERGE handling, identifiers, and expression encoding reject more malformed or unsafe AST shapes before PostgreSQL execution.
+- **MERGE live behavior**: PostgreSQL coverage now exercises complex expressions, CTE/query sources, RLS-scoped update/insert/delete flows, and invalid ASTs that must fail before mutation.
+- **Real database validation**: PostgreSQL 18 lab coverage passed for cursor cleanup, set operations, recursive CTEs, access-checked execution, MERGE, legacy integration, and seeded RLS behavior.
+
 ## Current Highlights (v1.3.0)
 
 - Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://dev.qail.io/blog/qail-rs-v1-3-0-deep-audit-hardening)
