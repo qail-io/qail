@@ -145,8 +145,8 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
-        sock.write_all(&command_complete("COMMIT")).await.unwrap();
+        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
         sock.flush().await.unwrap();
 
@@ -164,8 +164,8 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
-        sock.write_all(&command_complete("COMMIT")).await.unwrap();
+        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
         sock.flush().await.unwrap();
     });
@@ -250,9 +250,9 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut replacement_sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
+        assert_eq!(payload_cstr(&payload), "ROLLBACK");
         replacement_sock
-            .write_all(&command_complete("COMMIT"))
+            .write_all(&command_complete("ROLLBACK"))
             .await
             .unwrap();
         replacement_sock.write_all(&ready_idle()).await.unwrap();
@@ -279,9 +279,9 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut replacement_sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
+        assert_eq!(payload_cstr(&payload), "ROLLBACK");
         replacement_sock
-            .write_all(&command_complete("COMMIT"))
+            .write_all(&command_complete("ROLLBACK"))
             .await
             .unwrap();
         replacement_sock.write_all(&ready_idle()).await.unwrap();
@@ -289,9 +289,9 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut first_sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
+        assert_eq!(payload_cstr(&payload), "ROLLBACK");
         first_sock
-            .write_all(&command_complete("COMMIT"))
+            .write_all(&command_complete("ROLLBACK"))
             .await
             .unwrap();
         first_sock.write_all(&ready_idle()).await.unwrap();
