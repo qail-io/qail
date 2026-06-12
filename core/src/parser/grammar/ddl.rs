@@ -122,7 +122,7 @@ pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
         input,
         Expr::Def {
             name: name.to_string(),
-            data_type: data_type.to_string(),
+            data_type,
             constraints,
         },
     ))

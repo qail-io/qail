@@ -8,18 +8,22 @@ use qail_core::ast::Value;
 
 use crate::protocol::EncodeError;
 
-/// Encode a Value directly into COPY text format (no SQL quoting).
+/// Encode a data Value directly into COPY text format (no SQL quoting).
+///
+/// Invalid COPY data values leave `buf` unchanged. Use
+/// [`try_encode_copy_value`] when the caller must handle the validation error.
 /// COPY text format rules:
 /// - NULL: `\N`
 /// - Boolean: `t` or `f`
 /// - Numeric: raw digits (no quotes)
 /// - String: escape special chars (\\, \t, \n, \r)
 /// - UUID: hyphenated lowercase
-#[track_caller]
 #[inline]
 pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
-    try_encode_copy_value(buf, value)
-        .expect("invalid COPY value; use try_encode_copy_value to handle errors");
+    let original_len = buf.len();
+    if try_encode_copy_value(buf, value).is_err() {
+        buf.truncate(original_len);
+    }
 }
 
 /// Fallible COPY text encoder for a single data value.
@@ -202,24 +206,12 @@ fn write_quoted_array_element(buf: &mut Vec<u8>, value: &str) -> Result<(), Enco
 /// Encode a batch of rows into a single COPY data buffer.
 /// Returns a BytesMut containing all rows in tab-separated format,
 /// ready to be sent as a single CopyData message.
-#[track_caller]
+///
+/// Invalid COPY data values return an empty buffer. Use
+/// [`try_encode_copy_batch`] when the caller must handle the validation error.
 #[inline]
 pub fn encode_copy_batch(rows: &[Vec<Value>]) -> BytesMut {
-    // Pre-allocate: estimate ~50 bytes per column, 7 columns avg
-    let estimated_size = rows.len() * 7 * 50;
-    let mut buf = BytesMut::with_capacity(estimated_size);
-
-    for row in rows {
-        for (i, val) in row.iter().enumerate() {
-            if i > 0 {
-                buf.extend_from_slice(b"\t");
-            }
-            encode_copy_value(&mut buf, val);
-        }
-        buf.extend_from_slice(b"\n");
-    }
-
-    buf
+    try_encode_copy_batch(rows).unwrap_or_default()
 }
 
 /// Fallible batch COPY text encoder.
@@ -314,10 +306,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid COPY value")]
-    fn test_encode_copy_value_panics_on_invalid_value() {
+    fn test_encode_copy_value_leaves_buffer_unchanged_on_invalid_value() {
         let mut buf = BytesMut::new();
+        buf.extend_from_slice(b"prefix");
         encode_copy_value(&mut buf, &Value::Function("now()".to_string()));
+        assert_eq!(&buf[..], b"prefix");
     }
 
     #[test]
@@ -346,6 +339,15 @@ mod tests {
             matches!(err, EncodeError::InvalidAst(ref message) if message.contains("COPY data value cannot be an expression")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn test_encode_copy_batch_returns_empty_on_invalid_value() {
+        let rows = vec![vec![Value::Int(1), Value::Function("now()".to_string())]];
+
+        let buf = encode_copy_batch(&rows);
+
+        assert!(buf.is_empty());
     }
 
     #[test]

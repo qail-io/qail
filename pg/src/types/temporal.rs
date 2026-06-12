@@ -404,6 +404,9 @@ pub struct Time {
 impl Time {
     /// Create from hours, minutes, seconds, microseconds.
     ///
+    /// Invalid components return midnight instead of panicking. Use
+    /// [`Time::try_new`] when invalid input must be reported to the caller.
+    ///
     /// # Arguments
     ///
     /// * `hour` — Hour component (0–23).
@@ -411,7 +414,7 @@ impl Time {
     /// * `second` — Second component (0–59).
     /// * `usec` — Microseconds within the current second.
     pub fn new(hour: u8, minute: u8, second: u8, usec: u32) -> Self {
-        Self::try_new(hour, minute, second, usec).expect("invalid time components")
+        Self::try_new(hour, minute, second, usec).unwrap_or(Time { usec: 0 })
     }
 
     /// Fallible constructor from hours, minutes, seconds, microseconds.
@@ -559,7 +562,7 @@ mod tests {
         assert!(Time::try_new(23, 60, 0, 0).is_err());
         assert!(Time::try_new(23, 59, 60, 0).is_err());
         assert!(Time::try_new(23, 59, 59, 1_000_000).is_err());
-        assert!(std::panic::catch_unwind(|| Time::new(24, 0, 0, 0)).is_err());
+        assert_eq!(Time::new(24, 0, 0, 0), Time { usec: 0 });
     }
 
     #[test]

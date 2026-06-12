@@ -333,6 +333,8 @@ pub unsafe extern "C" fn qail_encode_get(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable output pointers.
         unsafe { clear_byte_output(out_ptr, out_len) };
         if table.is_null() {
             set_error("NULL pointer argument".to_string());
@@ -442,6 +444,8 @@ pub unsafe extern "C" fn qail_encode_uniform_batch(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable output pointers.
         unsafe { clear_byte_output(out_ptr, out_len) };
         if table.is_null() || count == 0 {
             set_error("NULL pointer or zero count".to_string());
@@ -650,6 +654,8 @@ pub unsafe extern "C" fn qail_encode_parse(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable output pointers.
         unsafe { clear_byte_output(out_ptr, out_len) };
         if sql.is_null() {
             set_error("NULL pointer argument".to_string());
@@ -719,6 +725,8 @@ pub unsafe extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut u
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable output pointers.
         unsafe { clear_byte_output(out_ptr, out_len) };
 
         let wire_bytes = vec![b'S', 0, 0, 0, 4];
@@ -776,6 +784,8 @@ pub unsafe extern "C" fn qail_encode_bind_execute_batch(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable output pointers.
         unsafe { clear_byte_output(out_ptr, out_len) };
         if statement.is_null() || count == 0 {
             set_error("NULL pointer or zero count".to_string());
@@ -985,6 +995,8 @@ pub unsafe extern "C" fn qail_decode_response(
             set_error("Null pointer".to_string());
             return -1;
         }
+        // SAFETY: `out_handle` was checked non-null and is required by the FFI
+        // contract to be a writable response-handle output pointer.
         unsafe { clear_response_output(out_handle) };
         if data.is_null() {
             set_error("Null pointer".to_string());
@@ -1196,6 +1208,8 @@ pub unsafe extern "C" fn qail_response_error_message(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable borrowed-output pointers.
         unsafe { clear_borrowed_output(out_ptr, out_len) };
         if handle.is_null() {
             set_error("NULL pointer argument".to_string());
@@ -1243,6 +1257,8 @@ pub unsafe extern "C" fn qail_response_get_string(
             set_error("NULL pointer argument".to_string());
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable borrowed-output pointers.
         unsafe { clear_borrowed_output(out_ptr, out_len) };
         if handle.is_null() {
             set_error("NULL pointer argument".to_string());
@@ -1542,6 +1558,8 @@ pub unsafe extern "C" fn qail_decode_response(
             set_response_feature_disabled_error();
             return -1;
         }
+        // SAFETY: `out_handle` was checked non-null and is required by the FFI
+        // contract to be a writable response-handle output pointer.
         unsafe { clear_response_output(out_handle) };
         set_response_feature_disabled_error();
         -1
@@ -1633,6 +1651,8 @@ pub unsafe extern "C" fn qail_response_error_message(
             set_response_feature_disabled_error();
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable borrowed-output pointers.
         unsafe { clear_borrowed_output(out_ptr, out_len) };
         set_response_feature_disabled_error();
         -1
@@ -1659,6 +1679,8 @@ pub unsafe extern "C" fn qail_response_get_string(
             set_response_feature_disabled_error();
             return -1;
         }
+        // SAFETY: `out_ptr` and `out_len` were checked non-null and are
+        // required by the FFI contract to be writable borrowed-output pointers.
         unsafe { clear_borrowed_output(out_ptr, out_len) };
         set_response_feature_disabled_error();
         -1
