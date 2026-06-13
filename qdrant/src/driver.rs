@@ -33,6 +33,20 @@ fn search_limit_from_ast(cmd: &Qail) -> QdrantResult<u64> {
     Ok(limit)
 }
 
+fn validate_collection_name(collection: &str) -> QdrantResult<()> {
+    if collection.trim().is_empty() {
+        return Err(encode_error("Qdrant collection name must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_payload_field_name(field_name: &str) -> QdrantResult<()> {
+    if field_name.trim().is_empty() {
+        return Err(encode_error("Qdrant payload field name must not be empty"));
+    }
+    Ok(())
+}
+
 fn validate_vector_finite(label: &str, vector: &[f32]) -> QdrantResult<()> {
     if vector.is_empty() {
         return Err(encode_error(format!(
@@ -71,9 +85,39 @@ fn validate_score_threshold(score_threshold: Option<f32>) -> QdrantResult<()> {
     Ok(())
 }
 
+fn validate_search_limit(limit: u64) -> QdrantResult<()> {
+    if limit == 0 {
+        return Err(encode_error(
+            "Qdrant search limit must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scroll_limit(limit: u32) -> QdrantResult<()> {
+    if limit == 0 {
+        return Err(encode_error(
+            "Qdrant scroll limit must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_vector_name(vector_name: Option<&str>) -> QdrantResult<()> {
+    if let Some(name) = vector_name
+        && name.trim().is_empty()
+    {
+        return Err(encode_error("Qdrant vector name must not be empty"));
+    }
+    Ok(())
+}
+
 fn validate_search_request(request: &encoder::SearchRequest<'_>) -> QdrantResult<()> {
+    validate_collection_name(request.collection)?;
     validate_vector_finite("search request", request.vector)?;
-    validate_score_threshold(request.score_threshold)
+    validate_search_limit(request.limit)?;
+    validate_score_threshold(request.score_threshold)?;
+    validate_vector_name(request.vector_name)
 }
 
 fn validate_ast_value_finite(value: &qail_core::ast::Value, label: &str) -> QdrantResult<()> {
@@ -246,7 +290,9 @@ impl QdrantDriver {
         limit: u64,
         score_threshold: Option<f32>,
     ) -> QdrantResult<Vec<ScoredPoint>> {
+        validate_collection_name(collection)?;
         validate_vector_finite("search request", vector)?;
+        validate_search_limit(limit)?;
         validate_score_threshold(score_threshold)?;
 
         self.buffer.clear();
@@ -273,7 +319,10 @@ impl QdrantDriver {
         limit: u64,
         score_threshold: Option<f32>,
     ) -> QdrantResult<Vec<ScoredPoint>> {
+        validate_collection_name(collection)?;
+        validate_vector_name(Some(vector_name))?;
         validate_vector_finite("search request", vector)?;
+        validate_search_limit(limit)?;
         validate_score_threshold(score_threshold)?;
 
         self.buffer.clear();
@@ -326,7 +375,9 @@ impl QdrantDriver {
         conditions: &[qail_core::ast::Condition],
         is_or: bool,
     ) -> QdrantResult<Vec<ScoredPoint>> {
+        validate_collection_name(collection)?;
         validate_vector_finite("search request", vector)?;
+        validate_search_limit(limit)?;
         validate_score_threshold(score_threshold)?;
         validate_conditions_finite(conditions, "filter condition")?;
 
@@ -418,6 +469,8 @@ impl QdrantDriver {
     ) -> QdrantResult<Vec<Vec<ScoredPoint>>> {
         use futures_util::future::join_all;
 
+        validate_collection_name(collection)?;
+        validate_search_limit(limit)?;
         validate_score_threshold(score_threshold)?;
 
         let mut encoded_requests = Vec::with_capacity(vectors.len());
@@ -458,11 +511,8 @@ impl QdrantDriver {
     pub async fn search_ast(&mut self, cmd: &Qail) -> QdrantResult<Vec<ScoredPoint>> {
         use qail_core::ast::LogicalOp;
 
-        let collection = if cmd.table.is_empty() {
-            return Err(QdrantError::Encode("Collection name required".to_string()));
-        } else {
-            &cmd.table
-        };
+        validate_collection_name(&cmd.table)?;
+        let collection = &cmd.table;
 
         let vector = cmd
             .vector
@@ -529,6 +579,7 @@ impl QdrantDriver {
         points: &[Point],
         wait: bool,
     ) -> QdrantResult<()> {
+        validate_collection_name(collection)?;
         validate_points_finite(points)?;
 
         self.buffer.clear();
@@ -545,6 +596,7 @@ impl QdrantDriver {
         ids: &[PointId],
         with_vectors: bool,
     ) -> QdrantResult<Vec<ScoredPoint>> {
+        validate_collection_name(collection)?;
         self.buffer.clear();
         encoder::encode_get_points_proto(&mut self.buffer, collection, ids, with_vectors);
         let request_bytes = self.buffer.split().freeze();
@@ -560,6 +612,9 @@ impl QdrantDriver {
         offset: Option<&PointId>,
         with_vectors: bool,
     ) -> QdrantResult<decoder::ScrollResult> {
+        validate_collection_name(collection)?;
+        validate_scroll_limit(limit)?;
+
         self.buffer.clear();
         encoder::encode_scroll_points_proto(
             &mut self.buffer,
@@ -583,6 +638,8 @@ impl QdrantDriver {
         must_conditions: &[qail_core::ast::Condition],
         should_groups: &[Vec<qail_core::ast::Condition>],
     ) -> QdrantResult<decoder::ScrollResult> {
+        validate_collection_name(collection)?;
+        validate_scroll_limit(limit)?;
         validate_conditions_finite(must_conditions, "filter condition")?;
         validate_condition_groups_finite(should_groups, "filter condition")?;
 
@@ -607,6 +664,7 @@ impl QdrantDriver {
         collection_name: &str,
         point_ids: &[u64],
     ) -> QdrantResult<()> {
+        validate_collection_name(collection_name)?;
         self.buffer.clear();
         encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids);
         let request = self.buffer.split().freeze();
@@ -620,6 +678,7 @@ impl QdrantDriver {
         collection_name: &str,
         ids: &[PointId],
     ) -> QdrantResult<()> {
+        validate_collection_name(collection_name)?;
         self.buffer.clear();
         encoder::encode_delete_points_mixed_proto(&mut self.buffer, collection_name, ids);
         let request = self.buffer.split().freeze();
@@ -635,6 +694,7 @@ impl QdrantDriver {
         payload: &Payload,
         wait: bool,
     ) -> QdrantResult<()> {
+        validate_collection_name(collection)?;
         validate_payload_finite(payload, "payload update")?;
 
         self.buffer.clear();
@@ -656,6 +716,7 @@ impl QdrantDriver {
         distance: crate::Distance,
         on_disk: bool,
     ) -> QdrantResult<()> {
+        validate_collection_name(collection_name)?;
         validate_vector_size(vector_size)?;
 
         self.buffer.clear();
@@ -673,6 +734,7 @@ impl QdrantDriver {
 
     /// Delete a collection.
     pub async fn delete_collection(&mut self, collection_name: &str) -> QdrantResult<()> {
+        validate_collection_name(collection_name)?;
         self.buffer.clear();
         encoder::encode_delete_collection_proto(&mut self.buffer, collection_name);
         let request = self.buffer.split().freeze();
@@ -692,6 +754,8 @@ impl QdrantDriver {
         field_type: encoder::FieldType,
         wait: bool,
     ) -> QdrantResult<()> {
+        validate_collection_name(collection)?;
+        validate_payload_field_name(field_name)?;
         self.buffer.clear();
         encoder::encode_create_field_index_proto(
             &mut self.buffer,
@@ -738,9 +802,11 @@ mod validation_tests {
     use crate::point::{PayloadValue, Point};
 
     use super::{
-        QdrantError, validate_condition_groups_finite, validate_conditions_finite,
-        validate_payload_finite, validate_points_finite, validate_score_threshold,
-        validate_vector_finite, validate_vector_size,
+        QdrantError, validate_collection_name, validate_condition_groups_finite,
+        validate_conditions_finite, validate_payload_field_name, validate_payload_finite,
+        validate_points_finite, validate_score_threshold, validate_scroll_limit,
+        validate_search_limit, validate_search_request, validate_vector_finite,
+        validate_vector_name, validate_vector_size,
     };
 
     fn assert_encode_error(result: crate::error::QdrantResult<()>, needle: &str) {
@@ -766,6 +832,61 @@ mod validation_tests {
             validate_score_threshold(Some(f32::INFINITY)),
             "score threshold",
         );
+    }
+
+    #[test]
+    fn rejects_zero_search_and_scroll_limits() {
+        assert_encode_error(validate_search_limit(0), "search limit");
+        validate_search_limit(1).expect("positive search limits should pass");
+
+        assert_encode_error(validate_scroll_limit(0), "scroll limit");
+        validate_scroll_limit(1).expect("positive scroll limits should pass");
+    }
+
+    #[test]
+    fn rejects_empty_collection_and_vector_names() {
+        assert_encode_error(validate_collection_name(""), "collection name");
+        assert_encode_error(validate_collection_name("   "), "collection name");
+        validate_collection_name("products").expect("non-empty collection names should pass");
+
+        assert_encode_error(validate_vector_name(Some("")), "vector name");
+        assert_encode_error(validate_vector_name(Some("  ")), "vector name");
+        validate_vector_name(Some("image")).expect("non-empty vector names should pass");
+        validate_vector_name(None).expect("unnamed vector searches should pass");
+    }
+
+    #[test]
+    fn rejects_empty_field_index_names() {
+        assert_encode_error(validate_payload_field_name(""), "payload field name");
+        assert_encode_error(validate_payload_field_name("  "), "payload field name");
+        validate_payload_field_name("tenant_id")
+            .expect("non-empty payload field names should pass");
+    }
+
+    #[test]
+    fn rejects_invalid_shared_search_requests() {
+        let vector = [0.1_f32, 0.2];
+        let err = validate_search_request(&crate::encoder::SearchRequest {
+            collection: "",
+            vector: &vector,
+            limit: 10,
+            score_threshold: None,
+            vector_name: None,
+            with_vectors: false,
+        })
+        .expect_err("empty collection must fail before transport");
+        assert!(err.to_string().contains("collection name"));
+
+        let err = validate_search_request(&crate::encoder::SearchRequest {
+            collection: "products",
+            vector: &vector,
+            limit: 10,
+            score_threshold: None,
+            vector_name: Some(""),
+            with_vectors: false,
+        })
+        .expect_err("empty vector name must fail before transport");
+        assert!(err.to_string().contains("vector name"));
     }
 
     #[test]

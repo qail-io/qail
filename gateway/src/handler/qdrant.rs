@@ -391,24 +391,44 @@ impl QdrantResponseProjection {
         self.exact_fields.contains(field)
             || self
                 .folded_fields
-                .contains(&normalize_qdrant_projection_name(field))
+                .contains(&normalize_qdrant_payload_field_name(field))
     }
 }
 
-fn qdrant_projection_segment(raw: &str) -> &str {
-    raw.trim().rsplit('.').next().unwrap_or(raw).trim()
+fn qdrant_requested_projection_segment<'a>(raw: &'a str, table: &str) -> &'a str {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed
+    } else if let Some(rest) = trimmed
+        .strip_prefix(table)
+        .and_then(|rest| rest.strip_prefix('.'))
+    {
+        rest.trim()
+    } else {
+        trimmed
+    }
 }
 
-fn normalize_qdrant_projection_name(raw: &str) -> String {
-    qdrant_projection_segment(raw)
+fn normalize_qdrant_payload_field_name(raw: &str) -> String {
+    raw.trim().trim_matches('"').to_ascii_lowercase()
+}
+
+fn normalize_qdrant_projection_name(raw: &str, table: &str) -> String {
+    qdrant_requested_projection_segment(raw, table)
         .trim_matches('"')
         .to_ascii_lowercase()
 }
 
-fn exact_qdrant_projection_name(raw: &str) -> Option<String> {
-    let segment = qdrant_projection_segment(raw);
+fn exact_qdrant_projection_name(raw: &str, table: &str) -> Option<String> {
+    let segment = qdrant_requested_projection_segment(raw, table);
     (segment.len() >= 2 && segment.starts_with('"') && segment.ends_with('"'))
         .then(|| segment.trim_matches('"').to_string())
+}
+
+fn qdrant_projection_is_wildcard(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !(trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"'))
+        && (trimmed == "*" || trimmed.ends_with(".*"))
 }
 
 fn qdrant_response_projection_from_cmd(
@@ -433,14 +453,13 @@ fn qdrant_response_projection_from_cmd(
                 ));
             }
         };
-        let trimmed = name.trim().trim_matches('"');
-        if trimmed == "*" || trimmed.ends_with(".*") {
+        if qdrant_projection_is_wildcard(name) {
             has_wildcard = true;
             continue;
         }
-        let (normalized, exact_match) = match exact_qdrant_projection_name(name) {
+        let (normalized, exact_match) = match exact_qdrant_projection_name(name, &cmd.table) {
             Some(exact) => (exact, true),
-            None => (normalize_qdrant_projection_name(name), false),
+            None => (normalize_qdrant_projection_name(name, &cmd.table), false),
         };
         if normalized.is_empty() {
             return Err(ApiError::bad_request(
@@ -753,6 +772,14 @@ fn extract_upsert_point_with_filter_fallback(
                 }
             };
 
+            let field = normalize_qdrant_field_name(field);
+            if field.is_empty() {
+                return Err(ApiError::bad_request(
+                    "INVALID_QDRANT_PAYLOAD",
+                    "Qdrant payload field cannot be empty",
+                ));
+            }
+
             match field {
                 "id" => {
                     let next = point_id_from_value(&cond.value).ok_or_else(|| {
@@ -969,6 +996,12 @@ fn validate_qdrant_read_filter_condition(
     };
 
     if field.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "INVALID_QDRANT_FILTER",
+            "Qdrant read filter field cannot be empty",
+        ));
+    }
+    if normalize_qdrant_field_name(field).is_empty() {
         return Err(ApiError::bad_request(
             "INVALID_QDRANT_FILTER",
             "Qdrant read filter field cannot be empty",
@@ -1831,6 +1864,183 @@ mod tests {
     }
 
     #[test]
+    fn scored_point_projection_preserves_quoted_dotted_payload_name() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata.source".to_string(),
+            qail_qdrant::PayloadValue::String("literal".to_string()),
+        );
+        payload.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("wrong".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: None,
+        };
+        let mut cmd = Qail::search("embeddings").vector(vec![0.3, 0.2, 0.1]);
+        cmd.columns = vec![Expr::Named("\"metadata.source\"".to_string())];
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("quoted dotted projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(
+            payload.get("metadata.source"),
+            Some(&serde_json::json!("literal"))
+        );
+        assert!(!payload.contains_key("source"));
+    }
+
+    #[test]
+    fn scored_point_projection_does_not_match_dotted_payload_by_last_segment() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata.source".to_string(),
+            qail_qdrant::PayloadValue::String("hidden".to_string()),
+        );
+        payload.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("visible".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: None,
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .columns(["source"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(payload.get("source"), Some(&serde_json::json!("visible")));
+        assert!(!payload.contains_key("metadata.source"));
+    }
+
+    #[test]
+    fn scored_point_projection_preserves_unqualified_dotted_payload_name() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata.source".to_string(),
+            qail_qdrant::PayloadValue::String("literal".to_string()),
+        );
+        payload.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("wrong".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: None,
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .columns(["metadata.source"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("dotted projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(
+            payload.get("metadata.source"),
+            Some(&serde_json::json!("literal"))
+        );
+        assert!(!payload.contains_key("source"));
+    }
+
+    #[test]
+    fn scored_point_projection_accepts_table_qualified_payload_name() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "title".to_string(),
+            qail_qdrant::PayloadValue::String("Visible".to_string()),
+        );
+        payload.insert(
+            "secret".to_string(),
+            qail_qdrant::PayloadValue::String("hidden".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: None,
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .columns(["embeddings.title"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("table-qualified projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(payload.get("title"), Some(&serde_json::json!("Visible")));
+        assert!(!payload.contains_key("secret"));
+    }
+
+    #[test]
+    fn scored_point_projection_does_not_treat_quoted_star_name_as_wildcard() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata.*".to_string(),
+            qail_qdrant::PayloadValue::String("literal".to_string()),
+        );
+        payload.insert(
+            "secret".to_string(),
+            qail_qdrant::PayloadValue::String("hidden".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: None,
+        };
+        let mut cmd = Qail::search("embeddings").vector(vec![0.3, 0.2, 0.1]);
+        cmd.columns = vec![Expr::Named("\"metadata.*\"".to_string())];
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("quoted star projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(
+            payload.get("metadata.*"),
+            Some(&serde_json::json!("literal"))
+        );
+        assert!(!payload.contains_key("secret"));
+    }
+
+    #[test]
     fn qdrant_projection_rejects_expression_columns() {
         let mut cmd = Qail::search("embeddings").vector(vec![0.1, 0.2]);
         cmd.columns = vec![Expr::FunctionCall {
@@ -2072,6 +2282,78 @@ mod tests {
 
         assert!(point.payload.contains_key("tenant_id"));
         assert!(!point.payload.contains_key("region"));
+    }
+
+    #[test]
+    fn extract_upsert_point_normalizes_quoted_special_payload_fields() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            cages: vec![Cage {
+                kind: CageKind::Payload,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("\"id\"".to_string()),
+                        op: Operator::Eq,
+                        value: Value::Int(7),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("\"vector\"".to_string()),
+                        op: Operator::Eq,
+                        value: Value::Vector(vec![0.1, 0.2]),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("\"DisplayName\"".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("visible".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        };
+
+        let point = extract_upsert_point(&cmd).unwrap();
+
+        assert_eq!(point.id, qail_qdrant::PointId::Num(7));
+        assert_eq!(point.vector, vec![0.1, 0.2]);
+        assert!(!point.payload.contains_key("\"id\""));
+        assert!(!point.payload.contains_key("\"vector\""));
+        assert_eq!(
+            point.payload.get("DisplayName"),
+            Some(&qail_qdrant::PayloadValue::String("visible".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_empty_payload_field_names() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            vector: Some(vec![0.1, 0.2]),
+            cages: vec![Cage {
+                kind: CageKind::Payload,
+                conditions: vec![
+                    value_cond("id", Value::Int(7)),
+                    Condition {
+                        left: Expr::Named("\"\"".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("bad".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        };
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
     }
 
     #[test]
@@ -2490,6 +2772,21 @@ mod tests {
             left: Expr::Named("id".to_string()),
             op: Operator::Eq,
             value: Value::Float(1.5),
+            is_array_unnest: false,
+        }];
+
+        let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+    }
+
+    #[test]
+    fn qdrant_read_filters_reject_quoted_empty_field_names() {
+        let conditions = vec![Condition {
+            left: Expr::Named("\"\"".to_string()),
+            op: Operator::Eq,
+            value: Value::String("value".to_string()),
             is_array_unnest: false,
         }];
 

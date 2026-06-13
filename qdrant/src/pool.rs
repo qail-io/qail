@@ -138,6 +138,11 @@ impl QdrantPool {
     /// Create a new connection pool.
     pub async fn new(config: PoolConfig) -> QdrantResult<Self> {
         let max = config.max_connections;
+        if max == 0 {
+            return Err(QdrantError::Connection(
+                "Qdrant pool max_connections must be greater than zero".to_string(),
+            ));
+        }
         Ok(Self {
             inner: Arc::new(PoolInner {
                 config,
@@ -314,6 +319,20 @@ mod tests {
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 6334);
+    }
+
+    #[tokio::test]
+    async fn pool_rejects_zero_max_connections_instead_of_deadlocking() {
+        let config = PoolConfig::new("localhost", 6334).max_connections(0);
+
+        let err = match QdrantPool::new(config).await {
+            Ok(_) => panic!("zero max_connections must fail during construction"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, QdrantError::Connection(message) if message.contains("max_connections"))
+        );
     }
 
     #[test]

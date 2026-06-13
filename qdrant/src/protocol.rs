@@ -22,6 +22,9 @@ fn encode_error_request(message: &str) -> Vec<u8> {
 }
 
 fn vector_to_json(values: &[f32], label: &str) -> Result<JsonValue, String> {
+    if values.is_empty() {
+        return Err(format!("Qdrant {label} vector must not be empty"));
+    }
     let mut json_values = Vec::with_capacity(values.len());
     for (idx, value) in values.iter().enumerate() {
         if !value.is_finite() {
@@ -32,6 +35,20 @@ fn vector_to_json(values: &[f32], label: &str) -> Result<JsonValue, String> {
         json_values.push(json!(value));
     }
     Ok(JsonValue::Array(json_values))
+}
+
+fn ensure_positive_limit(limit: u64, label: &str) -> Result<(), String> {
+    if limit == 0 {
+        return Err(format!("Qdrant {label} limit must be greater than zero"));
+    }
+    Ok(())
+}
+
+fn ensure_named_vector_name(name: &str, label: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err(format!("Qdrant {label} vector name must not be empty"));
+    }
+    Ok(())
 }
 
 fn optional_threshold_to_json(value: Option<f32>) -> Result<Option<JsonValue>, String> {
@@ -65,6 +82,9 @@ pub fn encode_search_request(
     score_threshold: Option<f32>,
     with_vector: bool,
 ) -> Vec<u8> {
+    if let Err(err) = ensure_positive_limit(limit, "search") {
+        return encode_error_request(&err);
+    }
     let vector = match vector_to_json(vector, "search request") {
         Ok(vector) => vector,
         Err(err) => return encode_error_request(&err),
@@ -100,6 +120,9 @@ pub fn encode_search_request_with_filter(
     with_vector: bool,
     filter: JsonValue,
 ) -> Vec<u8> {
+    if let Err(err) = ensure_positive_limit(limit, "search") {
+        return encode_error_request(&err);
+    }
     let vector = match vector_to_json(vector, "search request") {
         Ok(vector) => vector,
         Err(err) => return encode_error_request(&err),
@@ -183,6 +206,11 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
         .iter()
         .enumerate()
         .map(|(idx, p): (usize, &MultiVectorPoint)| {
+            if p.vectors.is_empty() {
+                return Err(format!(
+                    "Qdrant multi-vector point {idx} must contain at least one named vector"
+                ));
+            }
             let id = match &p.id {
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
@@ -199,6 +227,7 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
                 .vectors
                 .iter()
                 .map(|(k, v)| {
+                    ensure_named_vector_name(k, &format!("multi-vector point {idx}"))?;
                     Ok((
                         k.clone(),
                         vector_to_json(v, &format!("multi-vector point {idx}.{k}"))?,
@@ -250,6 +279,9 @@ pub fn encode_create_collection_request(
     vector_size: u64,
     distance: &str, // "Cosine", "Euclidean", "Dot"
 ) -> Vec<u8> {
+    if vector_size == 0 {
+        return encode_error_request("Qdrant collection vector_size must be greater than zero");
+    }
     let request = json!({
         "vectors": {
             "size": vector_size,
@@ -290,6 +322,21 @@ pub fn encode_conditions_to_filter(
             Expr::Aliased { name, .. } => name.clone(),
             _ => return impossible_filter(),
         };
+        let key = normalize_filter_key(&key);
+        if key.is_empty() {
+            return impossible_filter();
+        }
+
+        if key == "id" {
+            let Some(id) = point_id_value_to_json(&cond.value) else {
+                return impossible_filter();
+            };
+            if cond.op != Operator::Eq {
+                return impossible_filter();
+            }
+            clauses.push(json!({ "has_id": [id] }));
+            continue;
+        }
 
         // Convert operator and value to Qdrant filter clause
         let clause = match (&cond.op, &cond.value) {
@@ -301,6 +348,10 @@ pub fn encode_conditions_to_filter(
             (Operator::Eq, Value::Int(n)) => json!({
                 "key": key,
                 "match": { "value": n }
+            }),
+            (Operator::Eq, Value::Float(f)) if f.is_finite() => json!({
+                "key": key,
+                "match": { "value": f }
             }),
             (Operator::Eq, Value::Bool(b)) => json!({
                 "key": key,
@@ -353,27 +404,14 @@ pub fn encode_conditions_to_filter(
             }
 
             // IsNull / IsNotNull
-            (Operator::IsNull, _) => json!({
+            (Operator::IsNull, Value::Null) => json!({
                 "is_null": { "key": key }
-            }),
-            (Operator::IsNotNull, _) => json!({
-                "is_empty": { "key": key, "is_empty": false }
             }),
 
             // Text/keyword match with contains
             (Operator::Contains | Operator::Like, Value::String(s)) => json!({
                 "key": key,
                 "match": { "text": s }
-            }),
-
-            // Default: try match for other types
-            (_, Value::String(s)) => json!({
-                "key": key,
-                "match": { "value": s }
-            }),
-            (_, Value::Int(n)) => json!({
-                "key": key,
-                "match": { "value": n }
             }),
 
             _ => return impossible_filter(),
@@ -387,6 +425,21 @@ pub fn encode_conditions_to_filter(
         json!({ "should": clauses })
     } else {
         json!({ "must": clauses })
+    }
+}
+
+fn normalize_filter_key(raw: &str) -> String {
+    raw.trim().trim_matches('"').to_string()
+}
+
+fn point_id_value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
+    use qail_core::ast::Value;
+
+    match value {
+        Value::Int(id) if *id >= 0 => Some(json!(*id as u64)),
+        Value::String(id) => Some(json!(id)),
+        Value::Uuid(id) => Some(json!(id.to_string())),
+        _ => None,
     }
 }
 
@@ -652,6 +705,22 @@ mod tests {
     }
 
     #[test]
+    fn encode_search_request_rejects_empty_vector_and_zero_limit_json() {
+        let json_bytes = encode_search_request(&[], 10, None, None, false);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("must not be empty")
+        );
+
+        let json_bytes = encode_search_request(&[0.1], 0, None, None, false);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("limit"));
+    }
+
+    #[test]
     fn encode_search_request_rejects_non_finite_threshold_json() {
         let json_bytes = encode_search_request(&[0.1], 10, None, Some(f32::INFINITY), false);
         let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
@@ -682,6 +751,43 @@ mod tests {
                 .unwrap()
                 .contains("non-finite vector value")
         );
+    }
+
+    #[test]
+    fn encode_multi_vector_request_rejects_empty_named_vector_set_json() {
+        let point = crate::point::MultiVectorPoint::new("test-id");
+        let json_bytes = encode_upsert_multi_vector_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("at least one named vector")
+        );
+    }
+
+    #[test]
+    fn encode_multi_vector_request_rejects_empty_named_vector_name_json() {
+        let point =
+            crate::point::MultiVectorPoint::new("test-id").with_vector("  ", vec![0.1, 0.2]);
+        let json_bytes = encode_upsert_multi_vector_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("vector name must not be empty")
+        );
+    }
+
+    #[test]
+    fn encode_create_collection_request_rejects_zero_vector_size_json() {
+        let json_bytes = encode_create_collection_request(0, "Cosine");
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("vector_size"));
     }
 
     #[test]
@@ -803,6 +909,55 @@ mod tests {
         // Should have "should" instead of "must"
         assert!(filter["should"].is_array());
         assert!(filter["must"].is_null());
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_uses_has_id_for_point_id_json() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::Eq,
+            value: Value::Int(42),
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["has_id"][0], 42);
+        assert!(filter["must"][0]["key"].is_null());
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_fails_closed_on_unsupported_operator_json() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("status".to_string()),
+            op: Operator::Ne,
+            value: Value::String("deleted".to_string()),
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_fails_closed_on_is_not_null_json() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("deleted_at".to_string()),
+            op: Operator::IsNotNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
     }
 
     #[test]
