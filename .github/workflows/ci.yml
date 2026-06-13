@@ -226,3 +226,15 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  github-actions-lint:
+    name: GitHub Actions lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Lint workflows
+        run: |
+          "$(go env GOPATH)/bin/actionlint" -color
