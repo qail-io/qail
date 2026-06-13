@@ -157,6 +157,151 @@ fn extend_f32_le_slice(buf: &mut BytesMut, values: &[f32]) {
     }
 }
 
+fn encode_error(message: impl Into<String>) -> QdrantError {
+    QdrantError::Encode(message.into())
+}
+
+fn ensure_non_empty_name(value: &str, label: &str) -> QdrantResult<()> {
+    if value.trim().is_empty() {
+        return Err(encode_error(format!("Qdrant {label} must not be empty")));
+    }
+    Ok(())
+}
+
+fn ensure_collection_name(collection: &str) -> QdrantResult<()> {
+    ensure_non_empty_name(collection, "collection name")
+}
+
+fn ensure_payload_key(key: &str) -> QdrantResult<()> {
+    ensure_non_empty_name(key, "payload field name")
+}
+
+fn ensure_vector_name(vector_name: Option<&str>) -> QdrantResult<()> {
+    if let Some(name) = vector_name {
+        ensure_non_empty_name(name, "vector name")?;
+    }
+    Ok(())
+}
+
+fn ensure_vector(label: &str, vector: &[f32]) -> QdrantResult<()> {
+    if vector.is_empty() {
+        return Err(encode_error(format!("Qdrant {label} must not be empty")));
+    }
+    if let Some((idx, value)) = vector
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(encode_error(format!(
+            "Qdrant {label} contains non-finite vector value at index {idx}: {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_search_limit(limit: u64) -> QdrantResult<()> {
+    if limit == 0 {
+        return Err(encode_error(
+            "Qdrant search limit must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_scroll_limit(limit: u32) -> QdrantResult<()> {
+    if limit == 0 {
+        return Err(encode_error(
+            "Qdrant scroll limit must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_score_threshold(score_threshold: Option<f32>) -> QdrantResult<()> {
+    if let Some(value) = score_threshold
+        && !value.is_finite()
+    {
+        return Err(encode_error(format!(
+            "Qdrant score threshold must be finite, got {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_search_request(request: &SearchRequest<'_>) -> QdrantResult<()> {
+    ensure_collection_name(request.collection)?;
+    ensure_vector("search vector", request.vector)?;
+    ensure_search_limit(request.limit)?;
+    ensure_score_threshold(request.score_threshold)?;
+    ensure_vector_name(request.vector_name)
+}
+
+fn ensure_point_id(id: &crate::PointId, label: &str) -> QdrantResult<()> {
+    match id {
+        crate::PointId::Num(_) => Ok(()),
+        crate::PointId::Uuid(value) => ensure_non_empty_name(value, label),
+    }
+}
+
+fn ensure_point_ids(ids: &[crate::PointId], label: &str) -> QdrantResult<()> {
+    if ids.is_empty() {
+        return Err(encode_error(format!(
+            "Qdrant {label} point id list must not be empty"
+        )));
+    }
+    for id in ids {
+        ensure_point_id(id, label)?;
+    }
+    Ok(())
+}
+
+fn ensure_payload_value(value: &crate::point::PayloadValue, label: &str) -> QdrantResult<()> {
+    use crate::point::PayloadValue;
+
+    match value {
+        PayloadValue::Float(value) if !value.is_finite() => Err(encode_error(format!(
+            "Qdrant {label} contains non-finite payload float: {value}"
+        ))),
+        PayloadValue::List(items) => {
+            for item in items {
+                ensure_payload_value(item, label)?;
+            }
+            Ok(())
+        }
+        PayloadValue::Object(map) => ensure_payload(map, label),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_payload(payload: &crate::point::Payload, label: &str) -> QdrantResult<()> {
+    for (key, value) in payload {
+        ensure_payload_key(key)?;
+        ensure_payload_value(value, label)?;
+    }
+    Ok(())
+}
+
+fn ensure_points(points: &[crate::Point]) -> QdrantResult<()> {
+    if points.is_empty() {
+        return Err(encode_error("Qdrant upsert point list must not be empty"));
+    }
+    for (idx, point) in points.iter().enumerate() {
+        ensure_point_id(&point.id, "upsert")?;
+        ensure_vector(&format!("upsert point {idx} vector"), &point.vector)?;
+        ensure_payload(&point.payload, &format!("upsert point {idx} payload"))?;
+    }
+    Ok(())
+}
+
+fn ensure_f64_finite(value: f64, label: &str) -> QdrantResult<()> {
+    if !value.is_finite() {
+        return Err(encode_error(format!(
+            "Qdrant {label} must be finite, got {value}"
+        )));
+    }
+    Ok(())
+}
+
 // ============================================================================
 // SearchPoints Encoder
 // ============================================================================
@@ -192,7 +337,16 @@ pub fn encode_search_proto(
     score_threshold: Option<f32>,
     vector_name: Option<&str>,
     with_vectors: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_search_request(&SearchRequest {
+        collection,
+        vector,
+        limit,
+        score_threshold,
+        vector_name,
+        with_vectors,
+    })?;
+
     buf.clear();
 
     // Field 1: collection_name (string)
@@ -232,6 +386,8 @@ pub fn encode_search_proto(
     if with_vectors {
         encode_search_with_vectors_true(buf);
     }
+
+    Ok(())
 }
 
 /// Encode a SearchPoints request with QAIL AST filter conditions.
@@ -265,6 +421,7 @@ pub fn encode_search_with_filter_groups_proto(
     must_conditions: &[qail_core::ast::Condition],
     should_conditions: &[qail_core::ast::Condition],
 ) -> QdrantResult<()> {
+    ensure_search_request(&request)?;
     buf.clear();
 
     // Field 1: collection_name
@@ -325,6 +482,7 @@ pub fn encode_search_with_filter_grouped_cages_proto(
     must_conditions: &[qail_core::ast::Condition],
     should_groups: &[Vec<qail_core::ast::Condition>],
 ) -> QdrantResult<()> {
+    ensure_search_request(&request)?;
     buf.clear();
 
     // Field 1: collection_name
@@ -525,7 +683,10 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
         // Match (equality) conditions
         (Operator::Eq, Value::String(s)) => Ok(encode_field_condition_match_keyword(key, s)),
         (Operator::Eq, Value::Int(n)) => Ok(encode_field_condition_match_integer(key, *n)),
-        (Operator::Eq, Value::Float(f)) => Ok(encode_field_condition_match_float(key, *f)),
+        (Operator::Eq, Value::Float(f)) => {
+            ensure_f64_finite(*f, "filter match float")?;
+            Ok(encode_field_condition_match_float(key, *f))
+        }
         (Operator::Eq, Value::Bool(b)) => Ok(encode_field_condition_match_bool(key, *b)),
 
         // Range conditions
@@ -536,13 +697,16 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             Some(*n as f64),
             None,
         )),
-        (Operator::Gt, Value::Float(f)) => Ok(encode_field_condition_range(
-            key,
-            None,
-            None,
-            Some(*f),
-            None,
-        )),
+        (Operator::Gt, Value::Float(f)) => {
+            ensure_f64_finite(*f, "filter range float")?;
+            Ok(encode_field_condition_range(
+                key,
+                None,
+                None,
+                Some(*f),
+                None,
+            ))
+        }
         (Operator::Gte, Value::Int(n)) => Ok(encode_field_condition_range(
             key,
             None,
@@ -550,13 +714,16 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             None,
             Some(*n as f64),
         )),
-        (Operator::Gte, Value::Float(f)) => Ok(encode_field_condition_range(
-            key,
-            None,
-            None,
-            None,
-            Some(*f),
-        )),
+        (Operator::Gte, Value::Float(f)) => {
+            ensure_f64_finite(*f, "filter range float")?;
+            Ok(encode_field_condition_range(
+                key,
+                None,
+                None,
+                None,
+                Some(*f),
+            ))
+        }
         (Operator::Lt, Value::Int(n)) => Ok(encode_field_condition_range(
             key,
             Some(*n as f64),
@@ -564,13 +731,16 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             None,
             None,
         )),
-        (Operator::Lt, Value::Float(f)) => Ok(encode_field_condition_range(
-            key,
-            Some(*f),
-            None,
-            None,
-            None,
-        )),
+        (Operator::Lt, Value::Float(f)) => {
+            ensure_f64_finite(*f, "filter range float")?;
+            Ok(encode_field_condition_range(
+                key,
+                Some(*f),
+                None,
+                None,
+                None,
+            ))
+        }
         (Operator::Lte, Value::Int(n)) => Ok(encode_field_condition_range(
             key,
             None,
@@ -578,16 +748,22 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             None,
             None,
         )),
-        (Operator::Lte, Value::Float(f)) => Ok(encode_field_condition_range(
-            key,
-            None,
-            Some(*f),
-            None,
-            None,
-        )),
+        (Operator::Lte, Value::Float(f)) => {
+            ensure_f64_finite(*f, "filter range float")?;
+            Ok(encode_field_condition_range(
+                key,
+                None,
+                Some(*f),
+                None,
+                None,
+            ))
+        }
 
         // Text match (contains / like)
         (Operator::Contains | Operator::Like, Value::String(s)) => {
+            if s.is_empty() {
+                return Err(encode_error("Qdrant text filter value must not be empty"));
+            }
             Ok(encode_field_condition_match_text(key, s))
         }
 
@@ -637,6 +813,7 @@ fn encode_has_id_condition_from_value(value: &qail_core::ast::Value) -> QdrantRe
             "Qdrant id filters support only integer, string, or UUID values".to_string(),
         )
     })?;
+    ensure_point_id(&id, "id filter")?;
     Ok(encode_has_id_condition(&id))
 }
 
@@ -859,7 +1036,10 @@ pub fn encode_upsert_proto(
     collection: &str,
     points: &[crate::Point],
     wait: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection)?;
+    ensure_points(points)?;
+
     buf.clear();
 
     // Field 1: collection_name
@@ -875,12 +1055,14 @@ pub fn encode_upsert_proto(
 
     // Field 3: points (repeated PointStruct)
     for point in points {
-        encode_point_struct(buf, point);
+        encode_point_struct(buf, point)?;
     }
+
+    Ok(())
 }
 
 /// Encode a single PointStruct (with payload support).
-fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
+fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) -> QdrantResult<()> {
     // We need to encode into a temp buffer first to get length,
     // since PointStruct is length-delimited
     let mut point_buf = BytesMut::with_capacity(point.vector.len() * 4 + 64);
@@ -890,7 +1072,7 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
 
     // Field 3: payload (map<string, Value>)
     if !point.payload.is_empty() {
-        encode_payload_map(&mut point_buf, &point.payload);
+        encode_payload_map(&mut point_buf, &point.payload)?;
     }
 
     // Field 4: vectors (Vectors -> Vector)
@@ -910,6 +1092,7 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
     buf.put_u8(UPSERT_POINTS);
     encode_varint(buf, point_buf.len());
     buf.extend_from_slice(&point_buf);
+    Ok(())
 }
 
 /// Encode a PointId into a buffer as field 1 of PointStruct.
@@ -923,8 +1106,9 @@ fn encode_point_id_field(buf: &mut BytesMut, id: &crate::PointId) {
 /// Encode a payload map as protobuf map<string, Value>.
 ///
 /// Protobuf maps are encoded as repeated field with key-value pair messages.
-fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) {
+fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) -> QdrantResult<()> {
     for (key, value) in payload {
+        ensure_payload_key(key)?;
         let mut entry_buf = BytesMut::with_capacity(key.len() + 32);
 
         // Map entry field 1: key (string)
@@ -933,7 +1117,7 @@ fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) {
         entry_buf.extend_from_slice(key.as_bytes());
 
         // Map entry field 2: value (Value message)
-        let value_buf = encode_payload_value(value);
+        let value_buf = encode_payload_value(value)?;
         entry_buf.put_u8(0x12);
         encode_varint(&mut entry_buf, value_buf.len());
         entry_buf.extend_from_slice(&value_buf);
@@ -943,6 +1127,7 @@ fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) {
         encode_varint(buf, entry_buf.len());
         buf.extend_from_slice(&entry_buf);
     }
+    Ok(())
 }
 
 /// Encode a single PayloadValue to protobuf Value message.
@@ -960,7 +1145,7 @@ fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) {
 ///   }
 /// }
 /// ```
-fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
+fn encode_payload_value(value: &crate::point::PayloadValue) -> QdrantResult<BytesMut> {
     use crate::point::PayloadValue;
     let mut buf = BytesMut::with_capacity(32);
 
@@ -971,6 +1156,7 @@ fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
             buf.put_u8(0x00);
         }
         PayloadValue::Float(f) => {
+            ensure_f64_finite(*f, "payload float")?;
             // field 2: double_value (double, wire type 1 = fixed64)
             buf.put_u8(0x11); // (2 << 3) | 1 = 0x11
             buf.put_f64_le(*f);
@@ -995,7 +1181,7 @@ fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
             // field 7: list_value (ListValue message)
             let mut list_buf = BytesMut::with_capacity(items.len() * 16);
             for item in items {
-                let val_buf = encode_payload_value(item);
+                let val_buf = encode_payload_value(item)?;
                 // ListValue.values (field 1, repeated Value)
                 list_buf.put_u8(0x0A);
                 encode_varint(&mut list_buf, val_buf.len());
@@ -1010,7 +1196,8 @@ fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
             // Struct.fields is map<string, Value> → repeated MapEntry
             let mut struct_buf = BytesMut::with_capacity(map.len() * 32);
             for (k, v) in map {
-                let val_buf = encode_payload_value(v);
+                ensure_payload_key(k)?;
+                let val_buf = encode_payload_value(v)?;
                 let mut entry_buf = BytesMut::with_capacity(k.len() + val_buf.len() + 8);
                 // key (field 1)
                 entry_buf.put_u8(0x0A);
@@ -1031,7 +1218,7 @@ fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 // ============================================================================
@@ -1053,7 +1240,10 @@ pub fn encode_get_points_proto(
     collection: &str,
     ids: &[crate::PointId],
     with_vectors: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection)?;
+    ensure_point_ids(ids, "get")?;
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1082,6 +1272,7 @@ pub fn encode_get_points_proto(
         buf.put_u8(0x08); // enable = true
         buf.put_u8(0x01);
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -1106,7 +1297,13 @@ pub fn encode_scroll_points_proto(
     limit: u32,
     offset: Option<&crate::PointId>,
     with_vectors: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection)?;
+    ensure_scroll_limit(limit)?;
+    if let Some(id) = offset {
+        ensure_point_id(id, "scroll offset")?;
+    }
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1139,6 +1336,7 @@ pub fn encode_scroll_points_proto(
         buf.put_u8(0x08);
         buf.put_u8(0x01);
     }
+    Ok(())
 }
 
 /// Encode a filtered ScrollPoints request.
@@ -1151,6 +1349,12 @@ pub fn encode_scroll_points_with_filter_grouped_cages_proto(
     must_conditions: &[qail_core::ast::Condition],
     should_groups: &[Vec<qail_core::ast::Condition>],
 ) -> QdrantResult<()> {
+    ensure_collection_name(collection)?;
+    ensure_scroll_limit(limit)?;
+    if let Some(id) = offset {
+        ensure_point_id(id, "scroll offset")?;
+    }
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1215,7 +1419,14 @@ pub fn encode_set_payload_proto(
     point_ids: &[crate::PointId],
     payload: &crate::point::Payload,
     wait: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection)?;
+    ensure_point_ids(point_ids, "payload update")?;
+    if payload.is_empty() {
+        return Err(encode_error("Qdrant payload update must not be empty"));
+    }
+    ensure_payload(payload, "payload update")?;
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1231,12 +1442,13 @@ pub fn encode_set_payload_proto(
 
     // Field 3: payload (map<string, Value>)
     for (key, value) in payload {
+        ensure_payload_key(key)?;
         let mut entry_buf = BytesMut::with_capacity(key.len() + 32);
         entry_buf.put_u8(0x0A); // key (field 1)
         encode_varint(&mut entry_buf, key.len());
         entry_buf.extend_from_slice(key.as_bytes());
 
-        let val_buf = encode_payload_value(value);
+        let val_buf = encode_payload_value(value)?;
         entry_buf.put_u8(0x12); // value (field 2)
         encode_varint(&mut entry_buf, val_buf.len());
         entry_buf.extend_from_slice(&val_buf);
@@ -1251,6 +1463,7 @@ pub fn encode_set_payload_proto(
     buf.put_u8(0x2A); // (5 << 3) | 2 = 0x2A
     encode_varint(buf, selector_buf.len());
     buf.extend_from_slice(&selector_buf);
+    Ok(())
 }
 
 // ============================================================================
@@ -1275,7 +1488,10 @@ pub fn encode_create_field_index_proto(
     field_name: &str,
     field_type: FieldType,
     wait: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection)?;
+    ensure_payload_key(field_name)?;
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1297,6 +1513,7 @@ pub fn encode_create_field_index_proto(
     // Field 4: field_type (optional enum)
     buf.put_u8(0x20); // (4 << 3) | 0 = 0x20
     encode_varint(buf, field_type as usize);
+    Ok(())
 }
 
 /// Qdrant payload index field types.
@@ -1344,7 +1561,14 @@ pub fn encode_create_collection_proto(
     vector_size: u64,
     distance: crate::Distance,
     on_disk: bool,
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection_name)?;
+    if vector_size == 0 {
+        return Err(encode_error(
+            "Qdrant collection vector_size must be greater than zero",
+        ));
+    }
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1389,14 +1613,20 @@ pub fn encode_create_collection_proto(
         buf.put_u8(CREATE_ON_DISK);
         buf.put_u8(0x01);
     }
+    Ok(())
 }
 
 /// Encode DeleteCollection request.
-pub fn encode_delete_collection_proto(buf: &mut BytesMut, collection_name: &str) {
+pub fn encode_delete_collection_proto(
+    buf: &mut BytesMut,
+    collection_name: &str,
+) -> QdrantResult<()> {
+    ensure_collection_name(collection_name)?;
     buf.clear();
     buf.put_u8(DELETE_COLLECTION_NAME);
     encode_varint(buf, collection_name.len());
     buf.extend_from_slice(collection_name.as_bytes());
+    Ok(())
 }
 
 // ============================================================================
@@ -1416,7 +1646,10 @@ pub fn encode_delete_points_mixed_proto(
     buf: &mut BytesMut,
     collection_name: &str,
     point_ids: &[crate::PointId],
-) {
+) -> QdrantResult<()> {
+    ensure_collection_name(collection_name)?;
+    ensure_point_ids(point_ids, "delete")?;
+
     buf.clear();
 
     // Field 1: collection_name
@@ -1433,15 +1666,20 @@ pub fn encode_delete_points_mixed_proto(
     buf.put_u8(0x22);
     encode_varint(buf, selector_buf.len());
     buf.extend_from_slice(&selector_buf);
+    Ok(())
 }
 
 /// Legacy: Encode a DeletePoints request (numeric IDs only).
-pub fn encode_delete_points_proto(buf: &mut BytesMut, collection_name: &str, point_ids: &[u64]) {
+pub fn encode_delete_points_proto(
+    buf: &mut BytesMut,
+    collection_name: &str,
+    point_ids: &[u64],
+) -> QdrantResult<()> {
     let ids: Vec<crate::PointId> = point_ids
         .iter()
         .map(|&id| crate::PointId::Num(id))
         .collect();
-    encode_delete_points_mixed_proto(buf, collection_name, &ids);
+    encode_delete_points_mixed_proto(buf, collection_name, &ids)
 }
 
 /// Encode PointsSelector containing a PointsIdsList.
@@ -1481,11 +1719,13 @@ pub fn encode_list_collections_proto(buf: &mut BytesMut) {
 ///   string collection_name = 1;
 /// }
 /// ```
-pub fn encode_collection_info_proto(buf: &mut BytesMut, collection_name: &str) {
+pub fn encode_collection_info_proto(buf: &mut BytesMut, collection_name: &str) -> QdrantResult<()> {
+    ensure_collection_name(collection_name)?;
     buf.clear();
     buf.put_u8(0x0A);
     encode_varint(buf, collection_name.len());
     buf.extend_from_slice(collection_name.as_bytes());
+    Ok(())
 }
 
 // ============================================================================
@@ -1510,6 +1750,18 @@ pub fn varint_len(value: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_encode_error<T: std::fmt::Debug>(result: QdrantResult<T>, expected: &str) {
+        match result {
+            Err(QdrantError::Encode(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "expected error containing {expected:?}, got {message:?}"
+                );
+            }
+            other => panic!("expected encode error containing {expected:?}, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_varint_encoding() {
@@ -1538,7 +1790,8 @@ mod tests {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![0.1f32, 0.2, 0.3, 0.4];
 
-        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None, false);
+        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None, false)
+            .expect("search request should encode");
 
         // Verify starts with collection name field
         assert_eq!(buf[0], SEARCH_COLLECTION);
@@ -1548,11 +1801,51 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_search_rejects_invalid_request_shape() {
+        let mut buf = BytesMut::with_capacity(1024);
+        let vector = vec![0.1f32, 0.2, 0.3, 0.4];
+
+        assert_encode_error(
+            encode_search_proto(&mut buf, "", &vector, 10, None, None, false),
+            "collection name",
+        );
+        assert_encode_error(
+            encode_search_proto(&mut buf, "products", &[], 10, None, None, false),
+            "search vector",
+        );
+        assert_encode_error(
+            encode_search_proto(&mut buf, "products", &[f32::NAN], 10, None, None, false),
+            "non-finite vector value",
+        );
+        assert_encode_error(
+            encode_search_proto(&mut buf, "products", &vector, 0, None, None, false),
+            "search limit",
+        );
+        assert_encode_error(
+            encode_search_proto(
+                &mut buf,
+                "products",
+                &vector,
+                10,
+                Some(f32::INFINITY),
+                None,
+                false,
+            ),
+            "score threshold",
+        );
+        assert_encode_error(
+            encode_search_proto(&mut buf, "products", &vector, 10, None, Some(" "), false),
+            "vector name",
+        );
+    }
+
+    #[test]
     fn test_encode_search_with_vectors_selector() {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![0.1f32, 0.2, 0.3, 0.4];
 
-        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None, true);
+        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None, true)
+            .expect("search request should encode");
 
         let selector_offset = buf
             .iter()
@@ -1569,7 +1862,8 @@ mod tests {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![1.0f32, 2.0, 3.0, 4.0];
 
-        encode_search_proto(&mut buf, "test", &vector, 5, None, None, false);
+        encode_search_proto(&mut buf, "test", &vector, 5, None, None, false)
+            .expect("search request should encode");
 
         // Find where vector data starts (after collection name + vector tag + length)
         // collection: 0x0A, len(4), "test" = 6 bytes
@@ -1673,6 +1967,78 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_upsert_rejects_invalid_points_and_payload() {
+        let mut buf = BytesMut::with_capacity(1024);
+
+        assert_encode_error(
+            encode_upsert_proto(&mut buf, "", &[crate::Point::new_num(1, vec![1.0])], true),
+            "collection name",
+        );
+        assert_encode_error(
+            encode_upsert_proto(&mut buf, "products", &[], true),
+            "point list",
+        );
+        assert_encode_error(
+            encode_upsert_proto(
+                &mut buf,
+                "products",
+                &[crate::Point::new(
+                    crate::PointId::Uuid(" ".to_string()),
+                    vec![1.0],
+                )],
+                true,
+            ),
+            "upsert",
+        );
+        assert_encode_error(
+            encode_upsert_proto(
+                &mut buf,
+                "products",
+                &[crate::Point::new_num(1, vec![])],
+                true,
+            ),
+            "upsert point 0 vector",
+        );
+        assert_encode_error(
+            encode_upsert_proto(
+                &mut buf,
+                "products",
+                &[crate::Point::new_num(1, vec![f32::INFINITY])],
+                true,
+            ),
+            "non-finite vector value",
+        );
+
+        let point_with_blank_key = crate::Point::new_num(1, vec![1.0])
+            .with_payload(" ", crate::point::PayloadValue::String("bad".to_string()));
+        assert_encode_error(
+            encode_upsert_proto(&mut buf, "products", &[point_with_blank_key], true),
+            "payload field name",
+        );
+
+        let mut nested = crate::point::Payload::new();
+        nested.insert(
+            "".to_string(),
+            crate::point::PayloadValue::String("bad".to_string()),
+        );
+        let point_with_nested_blank_key = crate::Point::new_num(1, vec![1.0])
+            .with_payload("meta", crate::point::PayloadValue::Object(nested));
+        assert_encode_error(
+            encode_upsert_proto(&mut buf, "products", &[point_with_nested_blank_key], true),
+            "payload field name",
+        );
+
+        let point_with_bad_float = crate::Point::new_num(1, vec![1.0]).with_payload(
+            "score",
+            crate::point::PayloadValue::List(vec![crate::point::PayloadValue::Float(f64::NAN)]),
+        );
+        assert_encode_error(
+            encode_upsert_proto(&mut buf, "products", &[point_with_bad_float], true),
+            "payload float",
+        );
+    }
+
+    #[test]
     fn test_encode_get_points() {
         let mut buf = BytesMut::with_capacity(1024);
         let ids = vec![
@@ -1680,17 +2046,70 @@ mod tests {
             crate::PointId::Uuid("abc-123".to_string()),
         ];
 
-        encode_get_points_proto(&mut buf, "my_collection", &ids, true);
+        encode_get_points_proto(&mut buf, "my_collection", &ids, true)
+            .expect("get request should encode");
 
         assert_eq!(buf[0], 0x0A); // collection name tag
         assert!(buf.len() > 20);
     }
 
     #[test]
+    fn test_encode_point_selector_requests_reject_empty_or_blank_ids() {
+        let mut buf = BytesMut::with_capacity(1024);
+        let blank_id = vec![crate::PointId::Uuid(" ".to_string())];
+        let good_id = vec![crate::PointId::Num(1)];
+        let mut payload = crate::point::Payload::new();
+        payload.insert(
+            "name".to_string(),
+            crate::point::PayloadValue::String("x".to_string()),
+        );
+
+        assert_encode_error(
+            encode_get_points_proto(&mut buf, "products", &[], false),
+            "point id list",
+        );
+        assert_encode_error(
+            encode_get_points_proto(&mut buf, "products", &blank_id, false),
+            "get",
+        );
+        assert_encode_error(
+            encode_delete_points_mixed_proto(&mut buf, "products", &[]),
+            "point id list",
+        );
+        assert_encode_error(
+            encode_delete_points_mixed_proto(&mut buf, "products", &blank_id),
+            "delete",
+        );
+        assert_encode_error(
+            encode_set_payload_proto(&mut buf, "products", &[], &payload, true),
+            "point id list",
+        );
+        assert_encode_error(
+            encode_set_payload_proto(
+                &mut buf,
+                "products",
+                &good_id,
+                &crate::point::Payload::new(),
+                true,
+            ),
+            "payload update",
+        );
+        assert_encode_error(
+            encode_scroll_points_proto(&mut buf, "products", 0, None, false),
+            "scroll limit",
+        );
+        assert_encode_error(
+            encode_scroll_points_proto(&mut buf, "products", 10, Some(&blank_id[0]), false),
+            "scroll offset",
+        );
+    }
+
+    #[test]
     fn test_encode_scroll_points() {
         let mut buf = BytesMut::with_capacity(1024);
 
-        encode_scroll_points_proto(&mut buf, "my_collection", 100, None, false);
+        encode_scroll_points_proto(&mut buf, "my_collection", 100, None, false)
+            .expect("scroll request should encode");
 
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 10);
@@ -1734,7 +2153,8 @@ mod tests {
             crate::PointId::Num(99),
         ];
 
-        encode_delete_points_mixed_proto(&mut buf, "products", &ids);
+        encode_delete_points_mixed_proto(&mut buf, "products", &ids)
+            .expect("delete request should encode");
 
         assert_eq!(buf[0], 0x0A); // collection name
         assert!(buf.len() > 20);
@@ -1750,7 +2170,8 @@ mod tests {
             crate::point::PayloadValue::String("updated".to_string()),
         );
 
-        encode_set_payload_proto(&mut buf, "my_col", &ids, &payload, true);
+        encode_set_payload_proto(&mut buf, "my_col", &ids, &payload, true)
+            .expect("set payload request should encode");
 
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 15);
@@ -1871,6 +2292,91 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_search_with_filter_rejects_invalid_values() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let mut buf = BytesMut::with_capacity(512);
+        let vector = vec![0.1f32, 0.2];
+
+        let non_finite_match = vec![Condition {
+            left: Expr::Named("score".to_string()),
+            op: Operator::Eq,
+            value: Value::Float(f64::NAN),
+            is_array_unnest: false,
+        }];
+        assert_encode_error(
+            encode_search_with_filter_proto(
+                &mut buf,
+                SearchRequest {
+                    collection: "products",
+                    vector: &vector,
+                    limit: 5,
+                    score_threshold: None,
+                    vector_name: None,
+                    with_vectors: false,
+                },
+                &non_finite_match,
+                false,
+            ),
+            "filter match float",
+        );
+
+        let non_finite_range = vec![Condition {
+            left: Expr::Named("score".to_string()),
+            op: Operator::Gt,
+            value: Value::Float(f64::INFINITY),
+            is_array_unnest: false,
+        }];
+        assert_encode_error(
+            encode_search_with_filter_proto(
+                &mut buf,
+                SearchRequest {
+                    collection: "products",
+                    vector: &vector,
+                    limit: 5,
+                    score_threshold: None,
+                    vector_name: None,
+                    with_vectors: false,
+                },
+                &non_finite_range,
+                false,
+            ),
+            "filter range float",
+        );
+
+        let empty_text = vec![Condition {
+            left: Expr::Named("description".to_string()),
+            op: Operator::Contains,
+            value: Value::String("".to_string()),
+            is_array_unnest: false,
+        }];
+        assert_encode_error(
+            encode_search_with_filter_proto(
+                &mut buf,
+                SearchRequest {
+                    collection: "products",
+                    vector: &vector,
+                    limit: 5,
+                    score_threshold: None,
+                    vector_name: None,
+                    with_vectors: false,
+                },
+                &empty_text,
+                false,
+            ),
+            "text filter value",
+        );
+
+        let empty_id = Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::Eq,
+            value: Value::String(" ".to_string()),
+            is_array_unnest: false,
+        };
+        assert_encode_error(encode_condition_message(&empty_id), "id filter");
+    }
+
+    #[test]
     fn test_encode_search_with_filter_grouped_cages_includes_nested_filter_conditions() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 
@@ -1939,16 +2445,43 @@ mod tests {
     fn test_encode_create_field_index() {
         let mut buf = BytesMut::with_capacity(256);
 
-        encode_create_field_index_proto(&mut buf, "products", "category", FieldType::Keyword, true);
+        encode_create_field_index_proto(&mut buf, "products", "category", FieldType::Keyword, true)
+            .expect("field index request should encode");
 
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 10);
     }
 
     #[test]
+    fn test_encode_collection_and_index_requests_reject_invalid_shape() {
+        let mut buf = BytesMut::with_capacity(256);
+
+        assert_encode_error(
+            encode_create_collection_proto(&mut buf, "", 128, crate::Distance::Cosine, false),
+            "collection name",
+        );
+        assert_encode_error(
+            encode_create_collection_proto(&mut buf, "products", 0, crate::Distance::Cosine, false),
+            "vector_size",
+        );
+        assert_encode_error(
+            encode_delete_collection_proto(&mut buf, " "),
+            "collection name",
+        );
+        assert_encode_error(
+            encode_collection_info_proto(&mut buf, ""),
+            "collection name",
+        );
+        assert_encode_error(
+            encode_create_field_index_proto(&mut buf, "products", "", FieldType::Keyword, true),
+            "payload field name",
+        );
+    }
+
+    #[test]
     fn test_encode_payload_value_string() {
         let val = crate::point::PayloadValue::String("hello".to_string());
-        let buf = encode_payload_value(&val);
+        let buf = encode_payload_value(&val).expect("payload value should encode");
 
         // field 4 tag (0x22) + length + "hello"
         assert_eq!(buf[0], 0x22);
@@ -1958,7 +2491,7 @@ mod tests {
     #[test]
     fn test_encode_payload_value_integer() {
         let val = crate::point::PayloadValue::Integer(42);
-        let buf = encode_payload_value(&val);
+        let buf = encode_payload_value(&val).expect("payload value should encode");
 
         // field 3 tag (0x18) + varint(42)
         assert_eq!(buf[0], 0x18);

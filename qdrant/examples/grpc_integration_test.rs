@@ -71,7 +71,7 @@ async fn main() -> QdrantResult<()> {
         None, // no score threshold
         None, // no vector name
         false,
-    );
+    )?;
 
     println!("   Encoded {} bytes of protobuf", buf.len());
     println!("   First 20 bytes: {:02x?}", &buf[..20.min(buf.len())]);

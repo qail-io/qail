@@ -322,7 +322,7 @@ impl QdrantDriver {
             score_threshold,
             None,
             false,
-        );
+        )?;
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
         decoder::decode_search_response(&response)
@@ -352,7 +352,7 @@ impl QdrantDriver {
             score_threshold,
             Some(vector_name),
             false,
-        );
+        )?;
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
         decoder::decode_search_response(&response)
@@ -374,7 +374,7 @@ impl QdrantDriver {
             request.score_threshold,
             request.vector_name,
             request.with_vectors,
-        );
+        )?;
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
         decoder::decode_search_response(&response)
@@ -508,7 +508,7 @@ impl QdrantDriver {
                 score_threshold,
                 None,
                 false,
-            );
+            )?;
             encoded_requests.push(self.buffer.split().freeze());
         }
 
@@ -606,7 +606,7 @@ impl QdrantDriver {
         validate_points_finite(points)?;
 
         self.buffer.clear();
-        encoder::encode_upsert_proto(&mut self.buffer, collection, points, wait);
+        encoder::encode_upsert_proto(&mut self.buffer, collection, points, wait)?;
         let request_bytes = self.buffer.split().freeze();
         let _response = self.client.upsert(request_bytes).await?;
         Ok(())
@@ -622,7 +622,7 @@ impl QdrantDriver {
         validate_collection_name(collection)?;
         validate_point_ids_non_empty(ids.len(), "get")?;
         self.buffer.clear();
-        encoder::encode_get_points_proto(&mut self.buffer, collection, ids, with_vectors);
+        encoder::encode_get_points_proto(&mut self.buffer, collection, ids, with_vectors)?;
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.get(request_bytes).await?;
         decoder::decode_get_response(&response)
@@ -646,7 +646,7 @@ impl QdrantDriver {
             limit,
             offset,
             with_vectors,
-        );
+        )?;
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.scroll(request_bytes).await?;
         decoder::decode_scroll_response(&response)
@@ -691,7 +691,7 @@ impl QdrantDriver {
         validate_collection_name(collection_name)?;
         validate_point_ids_non_empty(point_ids.len(), "delete")?;
         self.buffer.clear();
-        encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids);
+        encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids)?;
         let request = self.buffer.split().freeze();
         self.client.delete(request).await?;
         Ok(())
@@ -706,7 +706,7 @@ impl QdrantDriver {
         validate_collection_name(collection_name)?;
         validate_point_ids_non_empty(ids.len(), "delete")?;
         self.buffer.clear();
-        encoder::encode_delete_points_mixed_proto(&mut self.buffer, collection_name, ids);
+        encoder::encode_delete_points_mixed_proto(&mut self.buffer, collection_name, ids)?;
         let request = self.buffer.split().freeze();
         self.client.delete(request).await?;
         Ok(())
@@ -728,7 +728,7 @@ impl QdrantDriver {
         validate_payload_finite(payload, "payload update")?;
 
         self.buffer.clear();
-        encoder::encode_set_payload_proto(&mut self.buffer, collection, point_ids, payload, wait);
+        encoder::encode_set_payload_proto(&mut self.buffer, collection, point_ids, payload, wait)?;
         let request = self.buffer.split().freeze();
         self.client.update_payload(request).await?;
         Ok(())
@@ -756,7 +756,7 @@ impl QdrantDriver {
             vector_size,
             distance,
             on_disk,
-        );
+        )?;
         let request = self.buffer.split().freeze();
         self.client.create_collection(request).await?;
         Ok(())
@@ -766,7 +766,7 @@ impl QdrantDriver {
     pub async fn delete_collection(&mut self, collection_name: &str) -> QdrantResult<()> {
         validate_collection_name(collection_name)?;
         self.buffer.clear();
-        encoder::encode_delete_collection_proto(&mut self.buffer, collection_name);
+        encoder::encode_delete_collection_proto(&mut self.buffer, collection_name)?;
         let request = self.buffer.split().freeze();
         self.client.delete_collection(request).await?;
         Ok(())
@@ -793,7 +793,7 @@ impl QdrantDriver {
             field_name,
             field_type,
             wait,
-        );
+        )?;
         let request = self.buffer.split().freeze();
         self.client.create_field_index(request).await?;
         Ok(())
