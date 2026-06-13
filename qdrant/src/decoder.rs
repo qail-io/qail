@@ -26,6 +26,13 @@ const MAX_DECODE_DEPTH: usize = 32;
 /// Maximum protobuf field number allowed by the wire format.
 const MAX_PROTO_FIELD_NUMBER: u64 = 536_870_911;
 
+fn ensure_non_empty_decoded_name(value: &str, label: &str) -> QdrantResult<()> {
+    if value.trim().is_empty() {
+        return Err(QdrantError::Decode(format!("{label} must not be empty")));
+    }
+    Ok(())
+}
+
 // ============================================================================
 // SearchResponse Field Numbers
 // ============================================================================
@@ -470,6 +477,7 @@ fn decode_map_entry(data: &[u8], depth: usize) -> QdrantResult<(String, PayloadV
     }
 
     let key = key.ok_or_else(|| QdrantError::Decode("Missing payload map key".to_string()))?;
+    ensure_non_empty_decoded_name(&key, "Payload map key")?;
     let value =
         value.ok_or_else(|| QdrantError::Decode("Missing payload map value".to_string()))?;
     Ok((key, value))
@@ -813,6 +821,7 @@ fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
 
                 let uuid_str = std::str::from_utf8(&buf[..len])
                     .map_err(|e| QdrantError::Decode(format!("Invalid UTF-8: {}", e)))?;
+                ensure_non_empty_decoded_name(uuid_str, "Point UUID")?;
                 return Ok(PointId::Uuid(uuid_str.to_string()));
             }
             _ => {
@@ -923,6 +932,17 @@ mod tests {
         let data = &[0x12, 0x03, b'a', b'b', b'c'];
         let id = decode_point_id(data).unwrap();
         assert_eq!(id, PointId::Uuid("abc".to_string()));
+    }
+
+    #[test]
+    fn test_decode_point_id_rejects_empty_uuid() {
+        let empty = &[0x12, 0x00];
+        let err = decode_point_id(empty).unwrap_err();
+        assert!(err.to_string().contains("Point UUID"));
+
+        let blank = &[0x12, 0x01, b' '];
+        let err = decode_point_id(blank).unwrap_err();
+        assert!(err.to_string().contains("Point UUID"));
     }
 
     #[test]
@@ -1134,6 +1154,20 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_scored_point_rejects_empty_payload_key() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x12, 0x08, // payload map entry length
+            0x0A, 0x00, // key = ""
+            0x12, 0x04, // value message length
+            0x22, 0x02, b'o', b'k', // string_value = "ok"
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("Payload map key"));
+    }
+
+    #[test]
     fn test_decode_scored_point_rejects_payload_entry_without_value() {
         let data = &[
             0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
@@ -1165,6 +1199,20 @@ mod tests {
 
         let err = decode_value(data).unwrap_err();
         assert!(err.to_string().contains("Missing payload map value"));
+    }
+
+    #[test]
+    fn test_decode_value_rejects_empty_nested_object_key() {
+        let data = &[
+            0x32, 0x0A, // struct_value length
+            0x0A, 0x08, // Struct.fields map entry length
+            0x0A, 0x00, // key = ""
+            0x12, 0x04, // value message length
+            0x22, 0x02, b'o', b'k', // string_value = "ok"
+        ];
+
+        let err = decode_value(data).unwrap_err();
+        assert!(err.to_string().contains("Payload map key"));
     }
 
     #[test]

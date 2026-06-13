@@ -58,6 +58,25 @@ fn ensure_payload_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_point_id(id: &PointId, label: &str) -> Result<(), String> {
+    match id {
+        PointId::Num(_) => Ok(()),
+        PointId::Uuid(s) if s.trim().is_empty() => {
+            Err(format!("Qdrant {label} point id must not be empty"))
+        }
+        PointId::Uuid(_) => Ok(()),
+    }
+}
+
+fn canonical_distance(distance: &str) -> Result<&'static str, String> {
+    match distance.trim().to_ascii_lowercase().as_str() {
+        "cosine" => Ok("Cosine"),
+        "euclidean" => Ok("Euclidean"),
+        "dot" => Ok("Dot"),
+        _ => Err(format!("Unsupported Qdrant distance metric: {distance}")),
+    }
+}
+
 fn optional_threshold_to_json(value: Option<f32>) -> Result<Option<JsonValue>, String> {
     match value {
         Some(value) if !value.is_finite() => Err(format!(
@@ -177,6 +196,7 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
         .iter()
         .enumerate()
         .map(|(idx, p)| {
+            ensure_point_id(&p.id, &format!("upsert point {idx}"))?;
             let id = match &p.id {
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
@@ -220,6 +240,7 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
                     "Qdrant multi-vector point {idx} must contain at least one named vector"
                 ));
             }
+            ensure_point_id(&p.id, &format!("multi-vector point {idx}"))?;
             let id = match &p.id {
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
@@ -268,13 +289,20 @@ pub fn encode_delete_request(ids: &[PointId]) -> Vec<u8> {
     if ids.is_empty() {
         return encode_error_request("Qdrant delete point id list must not be empty");
     }
-    let ids_json: Vec<JsonValue> = ids
+    let ids_json: Result<Vec<JsonValue>, String> = ids
         .iter()
         .map(|id| match id {
-            PointId::Uuid(s) => json!(s),
-            PointId::Num(n) => json!(n),
+            PointId::Uuid(s) => {
+                ensure_point_id(id, "delete")?;
+                Ok(json!(s))
+            }
+            PointId::Num(n) => Ok(json!(n)),
         })
         .collect();
+    let ids_json = match ids_json {
+        Ok(ids_json) => ids_json,
+        Err(err) => return encode_error_request(&err),
+    };
 
     let request = json!({ "points": ids_json });
     serialize_json_request(&request)
@@ -290,6 +318,10 @@ pub fn encode_create_collection_request(
     if vector_size == 0 {
         return encode_error_request("Qdrant collection vector_size must be greater than zero");
     }
+    let distance = match canonical_distance(distance) {
+        Ok(distance) => distance,
+        Err(err) => return encode_error_request(&err),
+    };
     let request = json!({
         "vectors": {
             "size": vector_size,
@@ -417,10 +449,12 @@ pub fn encode_conditions_to_filter(
             }),
 
             // Text/keyword match with contains
-            (Operator::Contains | Operator::Like, Value::String(s)) => json!({
-                "key": key,
-                "match": { "text": s }
-            }),
+            (Operator::Contains | Operator::Like, Value::String(s)) if !s.trim().is_empty() => {
+                json!({
+                    "key": key,
+                    "match": { "text": s }
+                })
+            }
 
             _ => return impossible_filter(),
         };
@@ -437,7 +471,7 @@ pub fn encode_conditions_to_filter(
 }
 
 fn normalize_filter_key(raw: &str) -> String {
-    raw.trim().trim_matches('"').to_string()
+    raw.trim().trim_matches('"').trim().to_string()
 }
 
 fn point_id_value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
@@ -445,7 +479,7 @@ fn point_id_value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
 
     match value {
         Value::Int(id) if *id >= 0 => Some(json!(*id as u64)),
-        Value::String(id) => Some(json!(id)),
+        Value::String(id) if !id.trim().is_empty() => Some(json!(id)),
         Value::Uuid(id) => Some(json!(id.to_string())),
         _ => None,
     }
@@ -461,6 +495,9 @@ fn impossible_filter() -> JsonValue {
 }
 
 fn values_to_json(values: &[qail_core::ast::Value]) -> Option<Vec<JsonValue>> {
+    if values.is_empty() {
+        return None;
+    }
     values.iter().map(value_to_json).collect()
 }
 
@@ -472,7 +509,6 @@ fn value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
         Value::Int(n) => Some(json!(n)),
         Value::Float(f) if f.is_finite() => Some(json!(f)),
         Value::Bool(b) => Some(json!(b)),
-        Value::Null => Some(JsonValue::Null),
         _ => None,
     }
 }
@@ -502,6 +538,12 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
                         "Invalid score at result index {idx}"
                     ))
                 })?;
+            let score = score as f32;
+            if !score.is_finite() {
+                return Err(crate::error::QdrantError::Decode(format!(
+                    "Invalid score at result index {idx}"
+                )));
+            }
             let payload = match item.get("payload") {
                 Some(payload) => parse_payload_checked(payload, idx)?,
                 None => crate::point::Payload::new(),
@@ -510,7 +552,7 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
 
             Ok(ScoredPoint {
                 id,
-                score: score as f32,
+                score,
                 payload,
                 vector,
             })
@@ -563,7 +605,11 @@ fn decode_result_vector(
 /// Parse a point ID from JSON.
 pub fn parse_point_id(value: &JsonValue) -> Option<PointId> {
     if let Some(s) = value.as_str() {
-        Some(PointId::Uuid(s.to_string()))
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(PointId::Uuid(s.to_string()))
+        }
     } else {
         value.as_u64().map(PointId::Num)
     }
@@ -584,6 +630,7 @@ fn parse_payload_checked(
         JsonValue::Null => Ok(payload),
         JsonValue::Object(obj) => {
             for (key, value) in obj {
+                ensure_payload_key(key).map_err(crate::error::QdrantError::Decode)?;
                 let payload_value = json_to_payload_value_checked(
                     value,
                     &format!("result[{result_idx}].payload.{key}"),
@@ -670,6 +717,7 @@ fn json_to_payload_value_checked(value: &JsonValue, path: &str) -> QdrantResult<
         JsonValue::Object(obj) => {
             let mut map = std::collections::HashMap::with_capacity(obj.len());
             for (key, value) in obj {
+                ensure_payload_key(key).map_err(crate::error::QdrantError::Decode)?;
                 map.insert(
                     key.clone(),
                     json_to_payload_value_checked(value, &format!("{path}.{key}"))?,
@@ -783,6 +831,15 @@ mod tests {
     }
 
     #[test]
+    fn encode_upsert_request_rejects_empty_point_ids_json() {
+        let point = Point::new(PointId::Uuid(" ".to_string()), vec![0.5, 0.5]);
+        let json_bytes = encode_upsert_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("point id"));
+    }
+
+    #[test]
     fn encode_multi_vector_request_rejects_non_finite_vector_json() {
         let point = crate::point::MultiVectorPoint::new("test-id")
             .with_vector("image", vec![0.5, f32::NEG_INFINITY]);
@@ -846,11 +903,32 @@ mod tests {
     }
 
     #[test]
+    fn encode_multi_vector_request_rejects_empty_point_ids_json() {
+        let point = crate::point::MultiVectorPoint::new(PointId::Uuid("".to_string()))
+            .with_vector("image", vec![0.1, 0.2]);
+        let json_bytes = encode_upsert_multi_vector_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("point id"));
+    }
+
+    #[test]
     fn encode_create_collection_request_rejects_zero_vector_size_json() {
         let json_bytes = encode_create_collection_request(0, "Cosine");
         let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
 
         assert!(json["error"].as_str().unwrap().contains("vector_size"));
+    }
+
+    #[test]
+    fn encode_create_collection_request_validates_distance_json() {
+        let json_bytes = encode_create_collection_request(32, "cosine");
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(json["vectors"]["distance"], "Cosine");
+
+        let json_bytes = encode_create_collection_request(32, "bad-distance");
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("distance"));
     }
 
     #[test]
@@ -869,6 +947,10 @@ mod tests {
         let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
 
         assert!(json["error"].as_str().unwrap().contains("point id list"));
+
+        let json_bytes = encode_delete_request(&[PointId::Uuid("  ".to_string())]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("point id"));
     }
 
     #[test]
@@ -915,6 +997,24 @@ mod tests {
         let err = decode_search_response(empty_vector.as_bytes())
             .expect_err("empty vector should fail closed");
         assert!(err.to_string().contains("Empty vector"));
+
+        let empty_id = r#"{
+            "result": [
+                {"id": "", "score": 0.95, "payload": {}}
+            ]
+        }"#;
+        let err =
+            decode_search_response(empty_id.as_bytes()).expect_err("empty id should fail closed");
+        assert!(err.to_string().contains("Missing point id"));
+
+        let huge_score = r#"{
+            "result": [
+                {"id": "abc", "score": 1e100, "payload": {}}
+            ]
+        }"#;
+        let err = decode_search_response(huge_score.as_bytes())
+            .expect_err("score that overflows f32 should fail closed");
+        assert!(err.to_string().contains("Invalid score"));
     }
 
     #[test]
@@ -936,6 +1036,24 @@ mod tests {
         let err = decode_search_response(oversized_integer.as_bytes())
             .expect_err("payload integer overflow should fail closed");
         assert!(err.to_string().contains("Payload integer out of range"));
+
+        let empty_payload_key = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {"": "bad"}}
+            ]
+        }"#;
+        let err = decode_search_response(empty_payload_key.as_bytes())
+            .expect_err("empty payload key should fail closed");
+        assert!(err.to_string().contains("field name"));
+
+        let nested_empty_payload_key = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {"meta": {" ": "bad"}}}
+            ]
+        }"#;
+        let err = decode_search_response(nested_empty_payload_key.as_bytes())
+            .expect_err("nested empty payload key should fail closed");
+        assert!(err.to_string().contains("field name"));
     }
 
     #[test]
@@ -1084,6 +1202,24 @@ mod tests {
 
         assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
         assert!(filter.to_string().contains("\"gt\":1"));
+
+        let conditions = vec![Condition {
+            left: Expr::Named("category".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![]),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+
+        let conditions = vec![Condition {
+            left: Expr::Named("category".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![Value::Null]),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
     }
 
     #[test]
@@ -1101,5 +1237,37 @@ mod tests {
 
         assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
         assert!(!filter.to_string().contains("null"));
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_rejects_empty_id_text_and_quoted_fields() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::Eq,
+            value: Value::String(" ".to_string()),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+
+        let conditions = vec![Condition {
+            left: Expr::Named("\"   \"".to_string()),
+            op: Operator::Eq,
+            value: Value::String("active".to_string()),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+
+        let conditions = vec![Condition {
+            left: Expr::Named("description".to_string()),
+            op: Operator::Contains,
+            value: Value::String("  ".to_string()),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
     }
 }

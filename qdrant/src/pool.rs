@@ -59,15 +59,12 @@ impl PoolConfig {
     ///
     /// Used by the gateway which already has the config extracted.
     pub fn from_qail_config_ref(qdrant: &qail_core::config::QdrantConfig) -> Self {
-        let use_tls = qdrant
-            .tls
-            .unwrap_or_else(|| qdrant.url.starts_with("https://"));
+        let endpoint = qdrant.grpc.as_deref().unwrap_or(&qdrant.url);
+        let use_tls = qdrant.tls.unwrap_or_else(|| {
+            endpoint_tls_hint(endpoint).unwrap_or_else(|| qdrant.url.starts_with("https://"))
+        });
 
-        let (host, mut port) = if let Some(ref grpc) = qdrant.grpc {
-            parse_endpoint_host_port(grpc, 6334)
-        } else {
-            parse_endpoint_host_port(&qdrant.url, 6334)
-        };
+        let (host, mut port) = parse_endpoint_host_port(endpoint, 6334);
         if qdrant.grpc.is_none() && port == 6333 {
             // `qdrant.url` is commonly an HTTP endpoint; when grpc is omitted,
             // avoid accidentally dialing REST port 6333 with the gRPC client.
@@ -80,6 +77,17 @@ impl PoolConfig {
             port,
             tls: use_tls,
         }
+    }
+}
+
+fn endpoint_tls_hint(endpoint: &str) -> Option<bool> {
+    let raw = endpoint.trim();
+    if raw.starts_with("https://") {
+        Some(true)
+    } else if raw.starts_with("http://") {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -384,5 +392,39 @@ mod tests {
         assert_eq!(pool.port, 6334);
         assert_eq!(pool.max_connections, 7);
         assert!(!pool.tls);
+    }
+
+    #[test]
+    fn test_from_qail_config_ref_autodetects_tls_from_explicit_grpc_endpoint() {
+        let cfg = qail_core::config::QdrantConfig {
+            url: "https://cloud.qdrant.io:443".to_string(),
+            grpc: Some("http://localhost:6334".to_string()),
+            max_connections: 7,
+            tls: None,
+        };
+        let pool = PoolConfig::from_qail_config_ref(&cfg);
+        assert_eq!(pool.host, "localhost");
+        assert_eq!(pool.port, 6334);
+        assert!(!pool.tls, "explicit grpc http endpoint should stay plain");
+
+        let cfg = qail_core::config::QdrantConfig {
+            url: "http://localhost:6333".to_string(),
+            grpc: Some("https://cloud.qdrant.io:443".to_string()),
+            max_connections: 7,
+            tls: None,
+        };
+        let pool = PoolConfig::from_qail_config_ref(&cfg);
+        assert_eq!(pool.host, "cloud.qdrant.io");
+        assert_eq!(pool.port, 443);
+        assert!(pool.tls, "explicit grpc https endpoint should enable TLS");
+
+        let cfg = qail_core::config::QdrantConfig {
+            url: "https://cloud.qdrant.io:443".to_string(),
+            grpc: Some("cloud.qdrant.io:6334".to_string()),
+            max_connections: 7,
+            tls: None,
+        };
+        let pool = PoolConfig::from_qail_config_ref(&cfg);
+        assert!(pool.tls, "schemeless grpc endpoint inherits https URL TLS");
     }
 }

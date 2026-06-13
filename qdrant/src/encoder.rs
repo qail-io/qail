@@ -761,7 +761,7 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
 
         // Text match (contains / like)
         (Operator::Contains | Operator::Like, Value::String(s)) => {
-            if s.is_empty() {
+            if s.trim().is_empty() {
                 return Err(encode_error("Qdrant text filter value must not be empty"));
             }
             Ok(encode_field_condition_match_text(key, s))
@@ -777,7 +777,7 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
 }
 
 fn normalize_filter_key(raw: &str) -> &str {
-    raw.trim().trim_matches('"')
+    raw.trim().trim_matches('"').trim()
 }
 
 fn point_id_from_ast_value(value: &qail_core::ast::Value) -> Option<crate::PointId> {

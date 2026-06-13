@@ -50,9 +50,10 @@ fn build_tls_config() -> QdrantResult<Arc<rustls::ClientConfig>> {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let config = rustls::ClientConfig::builder()
+    let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
 
     Ok(Arc::new(config))
 }
@@ -437,6 +438,11 @@ struct ConnectEndpoint {
 }
 
 fn parse_connect_url(url: &str) -> QdrantResult<ConnectEndpoint> {
+    if url.contains('#') {
+        return Err(QdrantError::Connection(
+            "Qdrant URL must not include a path, query, or fragment".to_string(),
+        ));
+    }
     let uri: Uri = url
         .parse()
         .map_err(|e| QdrantError::Connection(format!("Invalid URL: {}", e)))?;
@@ -459,6 +465,11 @@ fn parse_connect_url(url: &str) -> QdrantResult<ConnectEndpoint> {
         .filter(|host| !host.is_empty())
         .ok_or_else(|| QdrantError::Connection("URL host is required".to_string()))?
         .to_string();
+    if uri.path() != "/" || uri.query().is_some() {
+        return Err(QdrantError::Connection(
+            "Qdrant URL must not include a path, query, or fragment".to_string(),
+        ));
+    }
     let port = uri.port_u16().unwrap_or(6334);
 
     Ok(ConnectEndpoint { host, port, tls })
@@ -701,6 +712,9 @@ mod tests {
         assert!(parse_connect_url("ftp://localhost:6334").is_err());
         assert!(parse_connect_url("localhost:6334").is_err());
         assert!(parse_connect_url("https:///collections").is_err());
+        assert!(parse_connect_url("https://cloud.qdrant.io/collections").is_err());
+        assert!(parse_connect_url("https://cloud.qdrant.io?api-key=x").is_err());
+        assert!(parse_connect_url("https://cloud.qdrant.io#frag").is_err());
     }
 
     #[test]
@@ -714,8 +728,13 @@ mod tests {
     fn test_build_tls_config() {
         // Verify TLS config builds successfully with Mozilla roots
         let config = build_tls_config().unwrap();
-        // Should support TLS 1.2 and 1.3
-        assert!(!config.alpn_protocols.is_empty() || config.alpn_protocols.is_empty());
+        assert!(
+            config
+                .alpn_protocols
+                .iter()
+                .any(|protocol| protocol == b"h2"),
+            "gRPC over TLS must advertise h2 via ALPN"
+        );
     }
 
     #[tokio::test]

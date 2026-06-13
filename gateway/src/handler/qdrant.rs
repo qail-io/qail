@@ -1091,7 +1091,7 @@ fn point_id_from_value(value: &qail_core::ast::Value) -> Option<qail_qdrant::Poi
     use qail_core::ast::Value;
     match value {
         Value::Int(n) if *n >= 0 => Some(qail_qdrant::PointId::Num(*n as u64)),
-        Value::String(s) => Some(qail_qdrant::PointId::Uuid(s.clone())),
+        Value::String(s) if !s.trim().is_empty() => Some(qail_qdrant::PointId::Uuid(s.clone())),
         Value::Uuid(u) => Some(qail_qdrant::PointId::Uuid(u.to_string())),
         _ => None,
     }
@@ -1206,7 +1206,15 @@ fn payload_value_from_json(
         serde_json::Value::Object(values) => {
             let values = values
                 .into_iter()
-                .map(|(key, value)| Ok((key, payload_value_from_json(value)?)))
+                .map(|(key, value)| {
+                    if key.trim().is_empty() {
+                        return Err(ApiError::bad_request(
+                            "INVALID_QDRANT_PAYLOAD",
+                            "Qdrant JSON payload object keys must not be empty",
+                        ));
+                    }
+                    Ok((key, payload_value_from_json(value)?))
+                })
                 .collect::<Result<HashMap<_, _>, ApiError>>()?;
             Ok(qail_qdrant::PayloadValue::Object(values))
         }
@@ -1246,7 +1254,7 @@ fn qdrant_request_filter_cages(
 }
 
 fn normalize_qdrant_field_name(raw: &str) -> &str {
-    raw.trim().trim_matches('"')
+    raw.trim().trim_matches('"').trim()
 }
 
 fn qdrant_upsert_filter_target(
@@ -1734,7 +1742,8 @@ mod tests {
         qdrant_scroll_offset_from_cmd, qdrant_should_request_vectors, qdrant_upsert_filter_cages,
         rewrite_tenant_scoped_qdrant_read_id_filters, scored_point_to_json,
         scored_point_to_json_projected, split_filter_conditions, tenant_scoped_qdrant_point_id,
-        validate_qdrant_read_filters, verify_existing_qdrant_points_tenant_boundary,
+        validate_qdrant_read_filters, validate_qdrant_upsert_filter_cages,
+        verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
     use qail_core::ast::{
@@ -2589,6 +2598,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_upsert_point_rejects_empty_json_payload_object_keys() {
+        let cmd = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+            .set_value("metadata", Value::Json(r#"{" ":"bad"}"#.to_string()));
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
+        assert!(err.message.contains("object keys"));
+    }
+
+    #[test]
     fn extract_upsert_point_uses_request_filter_id_only_as_fallback() {
         let cmd = Qail::upsert("embeddings")
             .set_value("vector", Value::Vector(vec![0.1, 0.2]))
@@ -2862,14 +2885,11 @@ mod tests {
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "INVALID_QDRANT_FILTER");
-    }
 
-    #[test]
-    fn qdrant_read_filters_reject_quoted_empty_field_names() {
         let conditions = vec![Condition {
-            left: Expr::Named("\"\"".to_string()),
+            left: Expr::Named("id".to_string()),
             op: Operator::Eq,
-            value: Value::String("value".to_string()),
+            value: Value::String(" ".to_string()),
             is_array_unnest: false,
         }];
 
@@ -2877,6 +2897,54 @@ mod tests {
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+    }
+
+    #[test]
+    fn qdrant_read_filters_reject_quoted_empty_field_names() {
+        for field in ["\"\"", "\"   \""] {
+            let conditions = vec![Condition {
+                left: Expr::Named(field.to_string()),
+                op: Operator::Eq,
+                value: Value::String("value".to_string()),
+                is_array_unnest: false,
+            }];
+
+            let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+            assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+        }
+    }
+
+    #[test]
+    fn qdrant_upsert_filters_reject_quoted_empty_field_names_and_ids() {
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("\"   \"".to_string()),
+                op: Operator::Eq,
+                value: Value::String("value".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = validate_qdrant_upsert_filter_cages(&cages).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::Eq,
+                value: Value::String(" ".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }];
+
+        let err = validate_qdrant_upsert_filter_cages(&cages).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
     #[test]
