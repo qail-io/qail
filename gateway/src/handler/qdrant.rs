@@ -42,6 +42,9 @@ pub(super) async fn execute_qdrant_cmd(
     let tenant_col = state.config.tenant_column.clone();
     if let Some(tenant_id) = auth.tenant_id.as_deref() {
         inject_qdrant_tenant_scope(&mut cmd, &tenant_col, tenant_id);
+        if matches!(cmd.action, Action::Search | Action::Scroll) {
+            rewrite_tenant_scoped_qdrant_read_id_filters(&mut cmd, tenant_id);
+        }
     }
 
     let collection = &cmd.table;
@@ -345,6 +348,35 @@ fn inject_qdrant_tenant_scope(cmd: &mut qail_core::ast::Qail, tenant_col: &str, 
                 logical_op: LogicalOp::And,
             });
         }
+    }
+}
+
+fn rewrite_tenant_scoped_qdrant_read_id_filters(cmd: &mut qail_core::ast::Qail, tenant_id: &str) {
+    use qail_core::ast::{CageKind, Expr, Operator, Value};
+
+    for condition in cmd
+        .cages
+        .iter_mut()
+        .filter(|cage| matches!(cage.kind, CageKind::Filter))
+        .flat_map(|cage| cage.conditions.iter_mut())
+    {
+        if condition.op != Operator::Eq {
+            continue;
+        }
+        let field = match &condition.left {
+            Expr::Named(name) | Expr::Aliased { name, .. } => name.as_str(),
+            _ => continue,
+        };
+        if normalize_qdrant_field_name(field) != "id" {
+            continue;
+        }
+        let Some(original_id) = point_id_from_value(&condition.value) else {
+            continue;
+        };
+        condition.value = match tenant_scoped_qdrant_point_id(&original_id, tenant_id) {
+            qail_qdrant::PointId::Uuid(id) => Value::String(id),
+            qail_qdrant::PointId::Num(id) => Value::Int(id as i64),
+        };
     }
 }
 
@@ -940,6 +972,15 @@ fn validate_qdrant_read_filter_condition(
         return Err(ApiError::bad_request(
             "INVALID_QDRANT_FILTER",
             "Qdrant read filter field cannot be empty",
+        ));
+    }
+    if normalize_qdrant_field_name(field) == "id" {
+        if condition.op == Operator::Eq && point_id_from_value(&condition.value).is_some() {
+            return Ok(());
+        }
+        return Err(ApiError::bad_request(
+            "INVALID_QDRANT_FILTER",
+            "Qdrant id filters support only equality against integer, string, or UUID values",
         ));
     }
 
@@ -1621,9 +1662,9 @@ mod tests {
         qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
         qdrant_response_projection_from_cmd, qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata,
         qdrant_scroll_offset_from_cmd, qdrant_should_request_vectors, qdrant_upsert_filter_cages,
-        scored_point_to_json, scored_point_to_json_projected, split_filter_conditions,
-        tenant_scoped_qdrant_point_id, validate_qdrant_read_filters,
-        verify_existing_qdrant_points_tenant_boundary,
+        rewrite_tenant_scoped_qdrant_read_id_filters, scored_point_to_json,
+        scored_point_to_json_projected, split_filter_conditions, tenant_scoped_qdrant_point_id,
+        validate_qdrant_read_filters, verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
     use qail_core::ast::{
@@ -2421,6 +2462,41 @@ mod tests {
         ]];
 
         validate_qdrant_read_filters(&conditions, &groups).unwrap();
+    }
+
+    #[test]
+    fn qdrant_tenant_read_id_filter_rewrites_to_scoped_physical_id() {
+        let mut cmd =
+            Qail::search("embeddings")
+                .vector(vec![0.1, 0.2])
+                .filter("id", Operator::Eq, 7);
+
+        rewrite_tenant_scoped_qdrant_read_id_filters(&mut cmd, "tenant-a");
+        let (conditions, _) = split_filter_conditions(&cmd);
+
+        let expected = tenant_scoped_qdrant_point_id(&qail_qdrant::PointId::Num(7), "tenant-a");
+        let expected = match expected {
+            qail_qdrant::PointId::Uuid(value) => Value::String(value),
+            qail_qdrant::PointId::Num(value) => Value::Int(value as i64),
+        };
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].left, Expr::Named("id".to_string()));
+        assert_eq!(conditions[0].value, expected);
+    }
+
+    #[test]
+    fn qdrant_read_filters_reject_invalid_point_id_values() {
+        let conditions = vec![Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::Eq,
+            value: Value::Float(1.5),
+            is_array_unnest: false,
+        }];
+
+        let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_FILTER");
     }
 
     #[test]

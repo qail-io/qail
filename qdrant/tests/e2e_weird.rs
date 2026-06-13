@@ -5,6 +5,7 @@
 //! Requires Qdrant on localhost:6334.
 //! Start: podman run -d --name qdrant-test -m 256m -p 6333:6333 -p 6334:6334 qdrant/qdrant
 
+use qail_core::ast::{Operator, Qail};
 use qail_qdrant::prelude::*;
 use std::collections::HashMap;
 
@@ -253,7 +254,44 @@ async fn weird_score_threshold() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 6. Concurrent pool access — 10 searches in parallel
+// 6. QAIL AST id filter — should target point IDs, not payload key "id"
+// ═══════════════════════════════════════════════════════════════════
+#[tokio::test]
+#[ignore = "Requires live Qdrant server"]
+async fn weird_qail_ast_search_filters_by_point_id() {
+    println!("▸ QAIL AST point-id filter...");
+    let mut d = driver().await;
+    ensure_collection(&mut d, "weird_id_filter", 3).await;
+
+    let points = vec![
+        Point::new(1u64, vec![1.0, 0.0, 0.0]).with_payload("label", "wrong"),
+        Point::new(2u64, vec![0.9, 0.1, 0.0]).with_payload("label", "right"),
+    ];
+    d.upsert("weird_id_filter", &points, false).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let cmd = Qail::search("weird_id_filter")
+        .vector(vec![1.0, 0.0, 0.0])
+        .filter("id", Operator::Eq, 2)
+        .limit(10);
+    let results = d
+        .search_ast(&cmd)
+        .await
+        .expect("QAIL AST point-id filter should search");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, PointId::Num(2));
+    assert_eq!(
+        results[0].payload.get("label"),
+        Some(&PayloadValue::String("right".to_string()))
+    );
+    println!("  ✓ QAIL AST id filter targets physical point IDs");
+
+    d.delete_collection("weird_id_filter").await.ok();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. Concurrent pool access — 10 searches in parallel
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
 #[ignore = "Requires live Qdrant server"]

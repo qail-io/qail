@@ -99,6 +99,8 @@ const FILTER_MUST: u8 = 0x0A;
 const FILTER_SHOULD: u8 = 0x12;
 /// Condition.filter (field 4, nested Filter message) -> 0x22
 const CONDITION_FILTER: u8 = 0x22;
+/// Condition.has_id (field 3, HasIdCondition message) -> 0x1A
+const CONDITION_HAS_ID: u8 = 0x1A;
 /// Condition.is_null (field 5, IsNullCondition message) -> 0x2A
 const CONDITION_IS_NULL: u8 = 0x2A;
 
@@ -502,6 +504,22 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             )));
         }
     };
+    let key = normalize_filter_key(key);
+    if key.is_empty() {
+        return Err(QdrantError::Encode(
+            "Qdrant filter key cannot be empty".to_string(),
+        ));
+    }
+
+    if key == "id" {
+        return match (&cond.op, &cond.value) {
+            (Operator::Eq, value) => encode_has_id_condition_from_value(value),
+            _ => Err(QdrantError::Encode(format!(
+                "Qdrant id filters support only equality against integer, string, or UUID values: op={:?}, value={:?}",
+                cond.op, cond.value
+            ))),
+        };
+    }
 
     match (&cond.op, &cond.value) {
         // Match (equality) conditions
@@ -580,6 +598,60 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             cond.op, cond.value
         ))),
     }
+}
+
+fn normalize_filter_key(raw: &str) -> &str {
+    raw.trim().trim_matches('"')
+}
+
+fn point_id_from_ast_value(value: &qail_core::ast::Value) -> Option<crate::PointId> {
+    use qail_core::ast::Value;
+
+    match value {
+        Value::Int(id) if *id >= 0 => Some(crate::PointId::Num(*id as u64)),
+        Value::String(id) => Some(crate::PointId::Uuid(id.clone())),
+        Value::Uuid(id) => Some(crate::PointId::Uuid(id.to_string())),
+        _ => None,
+    }
+}
+
+fn encode_point_id_message(id: &crate::PointId) -> BytesMut {
+    let mut id_buf = BytesMut::with_capacity(40);
+    match id {
+        crate::PointId::Num(n) => {
+            id_buf.put_u8(POINT_ID_NUM);
+            encode_varint_u64(&mut id_buf, *n);
+        }
+        crate::PointId::Uuid(s) => {
+            id_buf.put_u8(POINT_ID_UUID);
+            encode_varint(&mut id_buf, s.len());
+            id_buf.extend_from_slice(s.as_bytes());
+        }
+    }
+    id_buf
+}
+
+fn encode_has_id_condition_from_value(value: &qail_core::ast::Value) -> QdrantResult<BytesMut> {
+    let id = point_id_from_ast_value(value).ok_or_else(|| {
+        QdrantError::Encode(
+            "Qdrant id filters support only integer, string, or UUID values".to_string(),
+        )
+    })?;
+    Ok(encode_has_id_condition(&id))
+}
+
+fn encode_has_id_condition(id: &crate::PointId) -> BytesMut {
+    let id_buf = encode_point_id_message(id);
+    let mut has_id_buf = BytesMut::with_capacity(id_buf.len() + 4);
+    has_id_buf.put_u8(POINT_ID);
+    encode_varint(&mut has_id_buf, id_buf.len());
+    has_id_buf.extend_from_slice(&id_buf);
+
+    let mut cond_buf = BytesMut::with_capacity(has_id_buf.len() + 4);
+    cond_buf.put_u8(CONDITION_HAS_ID);
+    encode_varint(&mut cond_buf, has_id_buf.len());
+    cond_buf.extend_from_slice(&has_id_buf);
+    cond_buf
 }
 
 /// Encode a Condition { is_null: IsNullCondition { key } }.
@@ -842,23 +914,10 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
 
 /// Encode a PointId into a buffer as field 1 of PointStruct.
 fn encode_point_id_field(buf: &mut BytesMut, id: &crate::PointId) {
-    match id {
-        crate::PointId::Num(n) => {
-            buf.put_u8(POINT_ID);
-            let id_len = 1 + varint_len(*n);
-            encode_varint(buf, id_len);
-            buf.put_u8(POINT_ID_NUM);
-            encode_varint_u64(buf, *n);
-        }
-        crate::PointId::Uuid(s) => {
-            buf.put_u8(POINT_ID);
-            let id_len = 1 + varint_len(s.len() as u64) + s.len();
-            encode_varint(buf, id_len);
-            buf.put_u8(POINT_ID_UUID);
-            encode_varint(buf, s.len());
-            buf.extend_from_slice(s.as_bytes());
-        }
-    }
+    let id_buf = encode_point_id_message(id);
+    buf.put_u8(POINT_ID);
+    encode_varint(buf, id_buf.len());
+    buf.extend_from_slice(&id_buf);
 }
 
 /// Encode a payload map as protobuf map<string, Value>.
@@ -1004,18 +1063,7 @@ pub fn encode_get_points_proto(
 
     // Field 2: ids (repeated PointId)
     for id in ids {
-        let mut id_buf = BytesMut::with_capacity(40);
-        match id {
-            crate::PointId::Num(n) => {
-                id_buf.put_u8(POINT_ID_NUM);
-                encode_varint_u64(&mut id_buf, *n);
-            }
-            crate::PointId::Uuid(s) => {
-                id_buf.put_u8(POINT_ID_UUID);
-                encode_varint(&mut id_buf, s.len());
-                id_buf.extend_from_slice(s.as_bytes());
-            }
-        }
+        let id_buf = encode_point_id_message(id);
         buf.put_u8(0x12); // field 2, wire LEN
         encode_varint(buf, id_buf.len());
         buf.extend_from_slice(&id_buf);
@@ -1068,18 +1116,7 @@ pub fn encode_scroll_points_proto(
 
     // Field 3: offset (optional PointId)
     if let Some(id) = offset {
-        let mut id_buf = BytesMut::with_capacity(40);
-        match id {
-            crate::PointId::Num(n) => {
-                id_buf.put_u8(POINT_ID_NUM);
-                encode_varint_u64(&mut id_buf, *n);
-            }
-            crate::PointId::Uuid(s) => {
-                id_buf.put_u8(POINT_ID_UUID);
-                encode_varint(&mut id_buf, s.len());
-                id_buf.extend_from_slice(s.as_bytes());
-            }
-        }
+        let id_buf = encode_point_id_message(id);
         buf.put_u8(SCROLL_OFFSET);
         encode_varint(buf, id_buf.len());
         buf.extend_from_slice(&id_buf);
@@ -1131,18 +1168,7 @@ pub fn encode_scroll_points_with_filter_grouped_cages_proto(
 
     // Field 3: offset (optional PointId)
     if let Some(id) = offset {
-        let mut id_buf = BytesMut::with_capacity(40);
-        match id {
-            crate::PointId::Num(n) => {
-                id_buf.put_u8(POINT_ID_NUM);
-                encode_varint_u64(&mut id_buf, *n);
-            }
-            crate::PointId::Uuid(s) => {
-                id_buf.put_u8(POINT_ID_UUID);
-                encode_varint(&mut id_buf, s.len());
-                id_buf.extend_from_slice(s.as_bytes());
-            }
-        }
+        let id_buf = encode_point_id_message(id);
         buf.put_u8(SCROLL_OFFSET);
         encode_varint(buf, id_buf.len());
         buf.extend_from_slice(&id_buf);
@@ -1423,18 +1449,7 @@ fn encode_points_selector(ids: &[crate::PointId]) -> BytesMut {
     // Build PointsIdsList (field 1: repeated PointId)
     let mut ids_list = BytesMut::with_capacity(ids.len() * 40);
     for id in ids {
-        let mut id_buf = BytesMut::with_capacity(40);
-        match id {
-            crate::PointId::Num(n) => {
-                id_buf.put_u8(POINT_ID_NUM);
-                encode_varint_u64(&mut id_buf, *n);
-            }
-            crate::PointId::Uuid(s) => {
-                id_buf.put_u8(POINT_ID_UUID);
-                encode_varint(&mut id_buf, s.len());
-                id_buf.extend_from_slice(s.as_bytes());
-            }
-        }
+        let id_buf = encode_point_id_message(id);
         ids_list.put_u8(0x0A); // PointId message (field 1, LEN)
         encode_varint(&mut ids_list, id_buf.len());
         ids_list.extend_from_slice(&id_buf);
@@ -1809,6 +1824,50 @@ mod tests {
             buf.contains(&CONDITION_IS_NULL),
             "encoded request should contain an IsNullCondition"
         );
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_uses_has_id_for_point_id() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let condition = Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::Eq,
+            value: Value::Int(42),
+            is_array_unnest: false,
+        };
+
+        let encoded = encode_condition_message(&condition).expect("id filter should encode");
+
+        assert_eq!(encoded[0], CONDITION_HAS_ID);
+        assert!(
+            encoded
+                .windows(2)
+                .any(|window| window == [POINT_ID_NUM, 42]),
+            "encoded HasIdCondition should contain numeric PointId"
+        );
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_rejects_invalid_point_id_filter() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let condition = Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::Eq,
+            value: Value::Float(1.5),
+            is_array_unnest: false,
+        };
+
+        let err = encode_condition_message(&condition)
+            .expect_err("float id filters must not encode as payload filters");
+
+        match err {
+            QdrantError::Encode(message) => {
+                assert!(message.contains("id filters support only"));
+            }
+            other => panic!("expected encode error, got {:?}", other),
+        }
     }
 
     #[test]
