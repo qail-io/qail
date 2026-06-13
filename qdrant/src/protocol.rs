@@ -51,6 +51,13 @@ fn ensure_named_vector_name(name: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_payload_key(key: &str) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("Qdrant payload field name must not be empty".to_string());
+    }
+    Ok(())
+}
+
 fn optional_threshold_to_json(value: Option<f32>) -> Result<Option<JsonValue>, String> {
     match value {
         Some(value) if !value.is_finite() => Err(format!(
@@ -163,6 +170,9 @@ pub fn encode_search_request_with_filter(
 /// }
 /// ```
 pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
+    if points.is_empty() {
+        return encode_error_request("Qdrant upsert point list must not be empty");
+    }
     let points_json: Result<Vec<JsonValue>, String> = points
         .iter()
         .enumerate()
@@ -172,18 +182,14 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
                 PointId::Num(n) => json!(n),
             };
 
-            let payload: Result<serde_json::Map<String, JsonValue>, String> = p
-                .payload
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), payload_value_to_json(v)?)))
-                .collect();
+            let payload = payload_to_json_map(&p.payload)?;
 
             let vector = vector_to_json(&p.vector, &format!("upsert point {idx}"))?;
 
             Ok(json!({
                 "id": id,
                 "vector": vector,
-                "payload": JsonValue::Object(payload?),
+                "payload": JsonValue::Object(payload),
             }))
         })
         .collect();
@@ -202,6 +208,9 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
 pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoint]) -> Vec<u8> {
     use crate::point::MultiVectorPoint;
 
+    if points.is_empty() {
+        return encode_error_request("Qdrant upsert point list must not be empty");
+    }
     let points_json: Result<Vec<JsonValue>, String> = points
         .iter()
         .enumerate()
@@ -216,11 +225,7 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
                 PointId::Num(n) => json!(n),
             };
 
-            let payload: Result<serde_json::Map<String, JsonValue>, String> = p
-                .payload
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), payload_value_to_json(v)?)))
-                .collect();
+            let payload = payload_to_json_map(&p.payload)?;
 
             // Named vectors as object
             let vectors: Result<serde_json::Map<String, JsonValue>, String> = p
@@ -238,7 +243,7 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
             Ok(json!({
                 "id": id,
                 "vector": JsonValue::Object(vectors?),
-                "payload": JsonValue::Object(payload?),
+                "payload": JsonValue::Object(payload),
             }))
         })
         .collect();
@@ -260,6 +265,9 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
 /// { "points": ["id1", "id2"] }
 /// ```
 pub fn encode_delete_request(ids: &[PointId]) -> Vec<u8> {
+    if ids.is_empty() {
+        return encode_error_request("Qdrant delete point id list must not be empty");
+    }
     let ids_json: Vec<JsonValue> = ids
         .iter()
         .map(|id| match id {
@@ -524,6 +532,11 @@ fn decode_result_vector(
     let arr = value.as_array().ok_or_else(|| {
         crate::error::QdrantError::Decode(format!("Invalid vector at result index {result_idx}"))
     })?;
+    if arr.is_empty() {
+        return Err(crate::error::QdrantError::Decode(format!(
+            "Empty vector at result index {result_idx}"
+        )));
+    }
 
     let mut vector = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
@@ -600,15 +613,21 @@ fn payload_value_to_json(value: &PayloadValue) -> Result<JsonValue, String> {
                 arr.iter().map(payload_value_to_json).collect();
             Ok(JsonValue::Array(values?))
         }
-        PayloadValue::Object(obj) => {
-            let values: Result<serde_json::Map<String, JsonValue>, String> = obj
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), payload_value_to_json(v)?)))
-                .collect();
-            Ok(JsonValue::Object(values?))
-        }
+        PayloadValue::Object(obj) => Ok(JsonValue::Object(payload_to_json_map(obj)?)),
         PayloadValue::Null => Ok(JsonValue::Null),
     }
+}
+
+fn payload_to_json_map(
+    payload: &crate::point::Payload,
+) -> Result<serde_json::Map<String, JsonValue>, String> {
+    payload
+        .iter()
+        .map(|(k, v)| {
+            ensure_payload_key(k)?;
+            Ok((k.clone(), payload_value_to_json(v)?))
+        })
+        .collect()
 }
 
 fn json_to_payload_value_checked(value: &JsonValue, path: &str) -> QdrantResult<PayloadValue> {
@@ -739,6 +758,31 @@ mod tests {
     }
 
     #[test]
+    fn encode_upsert_request_rejects_empty_point_list_json() {
+        let json_bytes = encode_upsert_request(&[]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("point list"));
+    }
+
+    #[test]
+    fn encode_upsert_request_rejects_empty_payload_keys_json() {
+        let mut nested = crate::point::Payload::new();
+        nested.insert("".to_string(), PayloadValue::String("bad".to_string()));
+        let point = Point::new("test-id", vec![0.5, 0.5])
+            .with_payload("  ", PayloadValue::String("bad".to_string()));
+        let json_bytes = encode_upsert_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("field name"));
+
+        let point = Point::new("test-id", vec![0.5, 0.5])
+            .with_payload("metadata", PayloadValue::Object(nested));
+        let json_bytes = encode_upsert_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("field name"));
+    }
+
+    #[test]
     fn encode_multi_vector_request_rejects_non_finite_vector_json() {
         let point = crate::point::MultiVectorPoint::new("test-id")
             .with_vector("image", vec![0.5, f32::NEG_INFINITY]);
@@ -765,6 +809,25 @@ mod tests {
                 .unwrap()
                 .contains("at least one named vector")
         );
+    }
+
+    #[test]
+    fn encode_multi_vector_request_rejects_empty_point_list_json() {
+        let json_bytes = encode_upsert_multi_vector_request(&[]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("point list"));
+    }
+
+    #[test]
+    fn encode_multi_vector_request_rejects_empty_payload_keys_json() {
+        let point = crate::point::MultiVectorPoint::new("test-id")
+            .with_vector("image", vec![0.1, 0.2])
+            .with_payload("", PayloadValue::String("bad".to_string()));
+        let json_bytes = encode_upsert_multi_vector_request(&[point]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("field name"));
     }
 
     #[test]
@@ -798,6 +861,14 @@ mod tests {
 
         assert!(json_str.contains("\"id1\""));
         assert!(json_str.contains("42"));
+    }
+
+    #[test]
+    fn encode_delete_request_rejects_empty_id_list_json() {
+        let json_bytes = encode_delete_request(&[]);
+        let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["error"].as_str().unwrap().contains("point id list"));
     }
 
     #[test]
@@ -835,6 +906,15 @@ mod tests {
         let err = decode_search_response(bad_vector.as_bytes())
             .expect_err("bad vector should fail closed");
         assert!(err.to_string().contains("Invalid vector value"));
+
+        let empty_vector = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {}, "vector": []}
+            ]
+        }"#;
+        let err = decode_search_response(empty_vector.as_bytes())
+            .expect_err("empty vector should fail closed");
+        assert!(err.to_string().contains("Empty vector"));
     }
 
     #[test]

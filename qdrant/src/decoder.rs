@@ -745,6 +745,9 @@ fn decode_vector_data(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
                     continue;
                 }
                 let float_data = read_submessage(&mut buf)?;
+                if float_data.is_empty() {
+                    return Err(QdrantError::Decode("Empty vector data".to_string()));
+                }
                 if float_data.len() % 4 != 0 {
                     return Err(QdrantError::Decode(
                         "Invalid vector data length".to_string(),
@@ -981,6 +984,19 @@ mod tests {
 
         let err = decode_scored_point(data).unwrap_err();
         assert!(err.to_string().contains("non-finite vector value"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_empty_vector_data() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x22, 0x04, // vectors message length
+            0x0A, 0x02, // vector message length
+            0x0A, 0x00, // packed float data length = 0
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+        assert!(err.to_string().contains("Empty vector data"));
     }
 
     #[test]

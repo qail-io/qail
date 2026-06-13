@@ -27,6 +27,10 @@ pub(super) async fn execute_qdrant_cmd(
     use qail_core::ast::{Action, Distance as CoreDistance};
 
     ensure_qdrant_collection_management_allowed(auth, &cmd.action)?;
+    ensure_qdrant_collection_name(&cmd.table)?;
+    if matches!(cmd.action, Action::Search) {
+        ensure_qdrant_vector_name(cmd.vector_name.as_deref())?;
+    }
 
     let pool = state.qdrant_pool.as_ref().ok_or_else(|| {
         tracing::error!("Qdrant operation requested but no [qdrant] config");
@@ -571,14 +575,17 @@ fn qdrant_limit_from_cmd(
 ) -> Result<u64, ApiError> {
     use qail_core::ast::CageKind;
 
-    let requested = cmd
-        .cages
-        .iter()
-        .find_map(|c| match c.kind {
-            CageKind::Limit(n) => Some(n),
-            _ => None,
-        })
-        .unwrap_or(10);
+    let mut requested = None;
+    for cage in &cmd.cages {
+        if let CageKind::Limit(n) = cage.kind
+            && requested.replace(n).is_some()
+        {
+            return Err(ApiError::parse_error(
+                "Duplicate Qdrant LIMIT clauses are not supported",
+            ));
+        }
+    }
+    let requested = requested.unwrap_or(10);
     if requested == 0 {
         return Err(ApiError::parse_error(
             "Qdrant limit must be greater than zero",
@@ -601,10 +608,17 @@ fn qdrant_scroll_offset_from_cmd(
 ) -> Result<Option<qail_qdrant::PointId>, ApiError> {
     use qail_core::ast::CageKind;
 
-    let Some(offset) = cmd.cages.iter().find_map(|c| match c.kind {
-        CageKind::Offset(n) => Some(n),
-        _ => None,
-    }) else {
+    let mut offset = None;
+    for cage in &cmd.cages {
+        if let CageKind::Offset(n) = cage.kind
+            && offset.replace(n).is_some()
+        {
+            return Err(ApiError::parse_error(
+                "Duplicate Qdrant OFFSET clauses are not supported",
+            ));
+        }
+    }
+    let Some(offset) = offset else {
         return Ok(None);
     };
     let offset = u64::try_from(offset)
@@ -923,6 +937,28 @@ fn ensure_qdrant_score_threshold_finite(score_threshold: Option<f32>) -> Result<
         return Err(ApiError::bad_request(
             "INVALID_SCORE_THRESHOLD",
             "Qdrant score threshold must be a finite number",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_qdrant_collection_name(collection: &str) -> Result<(), ApiError> {
+    if collection.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "INVALID_QDRANT_COLLECTION",
+            "Qdrant collection name must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_qdrant_vector_name(vector_name: Option<&str>) -> Result<(), ApiError> {
+    if let Some(vector_name) = vector_name
+        && vector_name.trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_VECTOR",
+            "Qdrant vector name must not be empty",
         ));
     }
     Ok(())
@@ -1688,8 +1724,9 @@ mod tests {
     use super::{
         ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
-        ensure_qdrant_conditions_finite, ensure_qdrant_score_threshold_finite,
-        ensure_qdrant_vector_finite, ensure_qdrant_vector_size, extract_upsert_point,
+        ensure_qdrant_collection_name, ensure_qdrant_conditions_finite,
+        ensure_qdrant_score_threshold_finite, ensure_qdrant_vector_finite,
+        ensure_qdrant_vector_name, ensure_qdrant_vector_size, extract_upsert_point,
         extract_upsert_point_with_filter_fallback, inject_qdrant_tenant_scope,
         prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
         qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
@@ -2163,6 +2200,21 @@ mod tests {
     }
 
     #[test]
+    fn qdrant_limit_rejects_duplicate_limit_clauses() {
+        let cmd = Qail::scroll("embeddings").limit(10).limit(20);
+
+        let err = qdrant_limit_from_cmd(&cmd, 1_000).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.details
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Duplicate")
+        );
+    }
+
+    #[test]
     fn qdrant_scroll_limit_caps_at_protocol_max_without_wrapping() {
         let requested = i64::from(u32::MAX) + 100;
         let max_rows = u32::MAX as usize + 100;
@@ -2183,6 +2235,21 @@ mod tests {
             .expect("offset should be present");
 
         assert_eq!(offset, qail_qdrant::PointId::Num(42));
+    }
+
+    #[test]
+    fn qdrant_scroll_offset_rejects_duplicate_offset_clauses() {
+        let cmd = Qail::scroll("embeddings").offset(42).offset(43);
+
+        let err = qdrant_scroll_offset_from_cmd(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.details
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Duplicate")
+        );
     }
 
     #[test]
@@ -2695,6 +2762,22 @@ mod tests {
         }];
         let err = ensure_qdrant_conditions_finite(&conditions).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_gateway_rejects_empty_collection_and_vector_names() {
+        let err = ensure_qdrant_collection_name("  ").unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_COLLECTION");
+
+        ensure_qdrant_collection_name("embeddings").expect("non-empty collection should pass");
+
+        let err = ensure_qdrant_vector_name(Some("")).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_VECTOR");
+
+        ensure_qdrant_vector_name(Some("image")).expect("non-empty vector name should pass");
+        ensure_qdrant_vector_name(None).expect("unnamed vector should pass");
     }
 
     #[test]

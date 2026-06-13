@@ -312,6 +312,7 @@ impl ApiError {
             | "AMBIGUOUS_POINT_ID"
             | "AMBIGUOUS_VECTOR"
             | "INVALID_SCORE_THRESHOLD"
+            | "INVALID_QDRANT_COLLECTION"
             | "INVALID_QDRANT_FILTER"
             | "INVALID_QDRANT_PAYLOAD"
             | "INVALID_QDRANT_PROJECTION"

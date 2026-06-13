@@ -18,7 +18,7 @@ fn encode_error(message: impl Into<String>) -> QdrantError {
 }
 
 fn search_limit_from_ast(cmd: &Qail) -> QdrantResult<u64> {
-    let mut limit = 10u64;
+    let mut limit = None;
     for cage in &cmd.cages {
         if let qail_core::ast::CageKind::Limit(n) = cage.kind {
             if n == 0 {
@@ -26,11 +26,16 @@ fn search_limit_from_ast(cmd: &Qail) -> QdrantResult<u64> {
                     "Qdrant search limit must be positive".to_string(),
                 ));
             }
-            limit = u64::try_from(n)
+            let parsed = u64::try_from(n)
                 .map_err(|_| QdrantError::Encode("Qdrant search limit is too large".to_string()))?;
+            if limit.replace(parsed).is_some() {
+                return Err(QdrantError::Encode(
+                    "Duplicate Qdrant search LIMIT clauses are not supported".to_string(),
+                ));
+            }
         }
     }
-    Ok(limit)
+    Ok(limit.unwrap_or(10))
 }
 
 fn validate_collection_name(collection: &str) -> QdrantResult<()> {
@@ -43,6 +48,15 @@ fn validate_collection_name(collection: &str) -> QdrantResult<()> {
 fn validate_payload_field_name(field_name: &str) -> QdrantResult<()> {
     if field_name.trim().is_empty() {
         return Err(encode_error("Qdrant payload field name must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_point_ids_non_empty(ids_len: usize, label: &str) -> QdrantResult<()> {
+    if ids_len == 0 {
+        return Err(encode_error(format!(
+            "Qdrant {label} point id list must not be empty"
+        )));
     }
     Ok(())
 }
@@ -183,13 +197,17 @@ fn validate_payload_value_finite(
 }
 
 fn validate_payload_finite(payload: &Payload, label: &str) -> QdrantResult<()> {
-    for value in payload.values() {
+    for (key, value) in payload {
+        validate_payload_field_name(key)?;
         validate_payload_value_finite(value, label)?;
     }
     Ok(())
 }
 
 fn validate_points_finite(points: &[Point]) -> QdrantResult<()> {
+    if points.is_empty() {
+        return Err(encode_error("Qdrant upsert point list must not be empty"));
+    }
     for (idx, point) in points.iter().enumerate() {
         validate_vector_finite(&format!("upsert point {idx}"), &point.vector)?;
         validate_payload_finite(&point.payload, &format!("upsert point {idx}"))?;
@@ -470,6 +488,11 @@ impl QdrantDriver {
         use futures_util::future::join_all;
 
         validate_collection_name(collection)?;
+        if vectors.is_empty() {
+            return Err(encode_error(
+                "Qdrant batch search vectors must not be empty",
+            ));
+        }
         validate_search_limit(limit)?;
         validate_score_threshold(score_threshold)?;
 
@@ -597,6 +620,7 @@ impl QdrantDriver {
         with_vectors: bool,
     ) -> QdrantResult<Vec<ScoredPoint>> {
         validate_collection_name(collection)?;
+        validate_point_ids_non_empty(ids.len(), "get")?;
         self.buffer.clear();
         encoder::encode_get_points_proto(&mut self.buffer, collection, ids, with_vectors);
         let request_bytes = self.buffer.split().freeze();
@@ -665,6 +689,7 @@ impl QdrantDriver {
         point_ids: &[u64],
     ) -> QdrantResult<()> {
         validate_collection_name(collection_name)?;
+        validate_point_ids_non_empty(point_ids.len(), "delete")?;
         self.buffer.clear();
         encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids);
         let request = self.buffer.split().freeze();
@@ -679,6 +704,7 @@ impl QdrantDriver {
         ids: &[PointId],
     ) -> QdrantResult<()> {
         validate_collection_name(collection_name)?;
+        validate_point_ids_non_empty(ids.len(), "delete")?;
         self.buffer.clear();
         encoder::encode_delete_points_mixed_proto(&mut self.buffer, collection_name, ids);
         let request = self.buffer.split().freeze();
@@ -695,6 +721,10 @@ impl QdrantDriver {
         wait: bool,
     ) -> QdrantResult<()> {
         validate_collection_name(collection)?;
+        validate_point_ids_non_empty(point_ids.len(), "payload update")?;
+        if payload.is_empty() {
+            return Err(encode_error("Qdrant payload update must not be empty"));
+        }
         validate_payload_finite(payload, "payload update")?;
 
         self.buffer.clear();
@@ -791,6 +821,18 @@ mod ast_limit_tests {
         assert!(matches!(err, QdrantError::Encode(_)));
         assert!(err.to_string().contains("must be positive"));
     }
+
+    #[test]
+    fn search_limit_rejects_duplicate_ast_limits() {
+        let cmd = Qail::search("products")
+            .vector(vec![0.1])
+            .limit(10)
+            .limit(20);
+
+        let err = search_limit_from_ast(&cmd).expect_err("duplicate limits should be rejected");
+        assert!(matches!(err, QdrantError::Encode(_)));
+        assert!(err.to_string().contains("Duplicate"));
+    }
 }
 
 #[cfg(test)]
@@ -804,9 +846,9 @@ mod validation_tests {
     use super::{
         QdrantError, validate_collection_name, validate_condition_groups_finite,
         validate_conditions_finite, validate_payload_field_name, validate_payload_finite,
-        validate_points_finite, validate_score_threshold, validate_scroll_limit,
-        validate_search_limit, validate_search_request, validate_vector_finite,
-        validate_vector_name, validate_vector_size,
+        validate_point_ids_non_empty, validate_points_finite, validate_score_threshold,
+        validate_scroll_limit, validate_search_limit, validate_search_request,
+        validate_vector_finite, validate_vector_name, validate_vector_size,
     };
 
     fn assert_encode_error(result: crate::error::QdrantResult<()>, needle: &str) {
@@ -861,6 +903,12 @@ mod validation_tests {
         assert_encode_error(validate_payload_field_name("  "), "payload field name");
         validate_payload_field_name("tenant_id")
             .expect("non-empty payload field names should pass");
+    }
+
+    #[test]
+    fn rejects_empty_point_id_selectors() {
+        assert_encode_error(validate_point_ids_non_empty(0, "delete"), "point id list");
+        validate_point_ids_non_empty(1, "delete").expect("non-empty point ids should pass");
     }
 
     #[test]
@@ -928,6 +976,26 @@ mod validation_tests {
             validate_payload_finite(&payload, "payload update"),
             "payload float",
         );
+
+        let mut payload = HashMap::new();
+        payload.insert("  ".to_string(), PayloadValue::String("bad".to_string()));
+
+        assert_encode_error(
+            validate_payload_finite(&payload, "payload update"),
+            "payload field name",
+        );
+
+        let mut nested = HashMap::new();
+        nested.insert("".to_string(), PayloadValue::String("bad".to_string()));
+        let mut payload = HashMap::new();
+        payload.insert("metadata".to_string(), PayloadValue::Object(nested));
+
+        assert_encode_error(
+            validate_payload_finite(&payload, "payload update"),
+            "payload field name",
+        );
+
+        assert_encode_error(validate_points_finite(&[]), "point list");
 
         let point = Point {
             id: "p1".into(),
