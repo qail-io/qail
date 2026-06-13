@@ -242,7 +242,7 @@ fn test_qdrant_transpiler_rejects_invalid_json_values() {
         parsed["error"]
             .as_str()
             .expect("error should be a string")
-            .contains("non-finite")
+            .contains("finite")
     );
 }
 
@@ -329,7 +329,7 @@ fn test_qdrant_transpiler_rejects_unsupported_filter_operator() {
 
     let search = Qail::get("points")
         .vector(vec![0.1])
-        .filter("city", Operator::Like, "%Lon%")
+        .filter("city", Operator::NotLike, "%Lon%")
         .to_qdrant_search();
 
     let parsed: serde_json::Value =
@@ -340,6 +340,131 @@ fn test_qdrant_transpiler_rejects_unsupported_filter_operator() {
             .expect("error should be a string")
             .contains("unsupported Qdrant filter operator")
     );
+}
+
+#[test]
+fn test_qdrant_search_encodes_native_filter_contracts() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let search = Qail {
+        table: "points".to_string(),
+        vector: Some(vec![0.1, 0.2]),
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("ID".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Int(7),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("status".to_string()),
+                    op: Operator::In,
+                    value: Value::Array(vec![
+                        Value::String("open".to_string()),
+                        Value::String("closed".to_string()),
+                    ]),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("summary".to_string()),
+                    op: Operator::Contains,
+                    value: Value::String("refund".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("deleted_at".to_string()),
+                    op: Operator::IsNull,
+                    value: Value::NullUuid,
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant search JSON must stay valid");
+    let must = parsed["filter"]["must"].as_array().expect("must clauses");
+
+    assert_eq!(must[0]["has_id"][0], 7);
+    assert_eq!(
+        must[1]["match"]["any"],
+        serde_json::json!(["open", "closed"])
+    );
+    assert_eq!(must[2]["match"]["text"], "refund");
+    assert_eq!(must[3]["is_null"]["key"], "deleted_at");
+}
+
+#[test]
+fn test_qdrant_search_rejects_invalid_filter_value_shapes() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    for (value, expected) in [
+        (Value::Null, "IS NULL"),
+        (
+            Value::Array(vec![Value::String("open".to_string())]),
+            "equality filters",
+        ),
+        (
+            Value::Json(r#"{"status":"open"}"#.to_string()),
+            "equality filters",
+        ),
+    ] {
+        let search = Qail {
+            table: "points".to_string(),
+            vector: Some(vec![0.1]),
+            cages: vec![Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("status".to_string()),
+                    op: Operator::Eq,
+                    value,
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        }
+        .to_qdrant_search();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&search).expect("qdrant error JSON must be valid");
+        assert!(
+            parsed["error"].as_str().unwrap().contains(expected),
+            "{parsed}"
+        );
+    }
+
+    for value in [
+        Value::Array(vec![]),
+        Value::Array(vec![Value::Null]),
+        Value::String("not-array".to_string()),
+    ] {
+        let search = Qail {
+            table: "points".to_string(),
+            vector: Some(vec![0.1]),
+            cages: vec![Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("status".to_string()),
+                    op: Operator::In,
+                    value,
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        }
+        .to_qdrant_search();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&search).expect("qdrant error JSON must be valid");
+        assert!(parsed["error"].as_str().unwrap().contains("IN filters"));
+    }
 }
 
 #[test]
@@ -439,6 +564,90 @@ fn test_qdrant_search_rejects_missing_or_duplicate_vectors_and_limits() {
     let parsed: serde_json::Value = serde_json::from_str(&empty_prompt.to_qdrant_search())
         .expect("qdrant error JSON must be valid");
     assert!(parsed["error"].as_str().unwrap().contains("prompt"));
+}
+
+#[test]
+fn test_qdrant_search_preserves_score_threshold_vector_and_projection_contracts() {
+    use crate::ast::{Expr, Qail};
+
+    let search = Qail::get("points")
+        .vector(vec![0.1, 0.2])
+        .score_threshold(0.8)
+        .with_vectors()
+        .columns(["id", "score", "vector", "title"])
+        .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant search JSON must stay valid");
+    assert_eq!(parsed["score_threshold"], 0.8);
+    assert_eq!(parsed["with_vector"], true);
+    assert_eq!(
+        parsed["with_payload"]["include"],
+        serde_json::json!(["title"])
+    );
+
+    let wildcard = Qail::get("points")
+        .vector(vec![0.1, 0.2])
+        .columns(["points.*"])
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&wildcard).expect("qdrant search JSON must stay valid");
+    assert_eq!(parsed["with_payload"], true);
+
+    let system_only = Qail::get("points")
+        .vector(vec![0.1, 0.2])
+        .columns(["id", "score"])
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&system_only).expect("qdrant search JSON must stay valid");
+    assert_eq!(parsed["with_payload"], false);
+    assert!(parsed.get("with_vector").is_none());
+
+    let quoted_star = Qail {
+        table: "points".to_string(),
+        vector: Some(vec![0.1, 0.2]),
+        columns: vec![Expr::Named("\"points.*\"".to_string())],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&quoted_star).expect("qdrant search JSON must stay valid");
+    assert_eq!(
+        parsed["with_payload"]["include"],
+        serde_json::json!(["points.*"])
+    );
+}
+
+#[test]
+fn test_qdrant_search_rejects_unsupported_or_invalid_vector_options() {
+    use crate::ast::Qail;
+
+    let named = Qail::get("points")
+        .vector(vec![0.1, 0.2])
+        .vector_name("image")
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&named).expect("qdrant error JSON must be valid");
+    assert!(parsed["error"].as_str().unwrap().contains("named vector"));
+
+    let mut blank_name = Qail::get("points").vector(vec![0.1, 0.2]);
+    blank_name.vector_name = Some(" ".to_string());
+    let parsed: serde_json::Value = serde_json::from_str(&blank_name.to_qdrant_search())
+        .expect("qdrant error JSON must be valid");
+    assert!(parsed["error"].as_str().unwrap().contains("vector name"));
+
+    let bad_threshold = Qail::get("points")
+        .vector(vec![0.1, 0.2])
+        .score_threshold(f32::NAN)
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&bad_threshold).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("score threshold")
+    );
 }
 
 #[test]
@@ -622,6 +831,173 @@ fn test_qdrant_upsert_rejects_missing_duplicate_and_invalid_contract_fields() {
 }
 
 #[test]
+fn test_qdrant_upsert_treats_case_variant_reserved_fields_as_control_fields() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let upsert = Qail {
+        action: Action::Add,
+        table: "points".to_string(),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("ID".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Int(7),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("VECTOR".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Vector(vec![0.1, 0.2]),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&upsert).expect("qdrant upsert JSON must stay valid");
+    assert_eq!(parsed["points"][0]["id"], 7);
+    assert_eq!(parsed["points"][0]["vector"], serde_json::json!([0.1, 0.2]));
+    assert_eq!(parsed["points"][0]["payload"], serde_json::json!({}));
+
+    let reserved_payload = Qail {
+        action: Action::Add,
+        table: "points".to_string(),
+        vector: Some(vec![0.1]),
+        cages: vec![Cage {
+            kind: CageKind::Payload,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("id".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Int(7),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("_QAIL_ORIGINAL_POINT_ID".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("spoof".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&reserved_payload).expect("qdrant error JSON must be valid");
+    assert!(parsed["error"].as_str().unwrap().contains("reserved"));
+}
+
+#[test]
+fn test_qdrant_upsert_filter_fallbacks_fail_closed() {
+    use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let ignored_conditional_filter = Qail::add("points")
+        .set_value("id", 7)
+        .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+        .filter("tenant_id", Operator::Eq, "tenant-a")
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&ignored_conditional_filter).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("conditional writes")
+    );
+
+    let ambiguous_or_id = Qail {
+        action: Action::Add,
+        table: "points".to_string(),
+        vector: Some(vec![0.1, 0.2]),
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![
+                Condition {
+                    left: Expr::Named("ID".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Int(7),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("tenant_id".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("tenant-a".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            logical_op: LogicalOp::Or,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&ambiguous_or_id).expect("qdrant error JSON must be valid");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap()
+            .contains("multi-condition OR")
+    );
+
+    let conflicting_id = Qail::add("points")
+        .set_value("id", 7)
+        .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+        .filter("ID", Operator::Eq, 8)
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&conflicting_id).expect("qdrant error JSON must be valid");
+    assert!(parsed["error"].as_str().unwrap().contains("conflicts"));
+
+    let conflicting_vector = Qail {
+        action: Action::Add,
+        table: "points".to_string(),
+        cages: vec![
+            Cage {
+                kind: CageKind::Payload,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("id".to_string()),
+                        op: Operator::Eq,
+                        value: Value::Int(7),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("vector".to_string()),
+                        op: Operator::Eq,
+                        value: Value::Vector(vec![0.1, 0.2]),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::And,
+            },
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("VECTOR".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Vector(vec![0.3, 0.4]),
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            },
+        ],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&conflicting_vector).expect("qdrant error JSON must be valid");
+    assert!(parsed["error"].as_str().unwrap().contains("conflicts"));
+}
+
+#[test]
 fn test_qdrant_upsert_rejects_payload_shape_drift() {
     use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 
@@ -739,6 +1115,16 @@ fn test_qdrant_upsert_rejects_payload_shape_drift() {
 #[test]
 fn test_qdrant_delete_rejects_invalid_id_filters() {
     use crate::ast::{Action, Operator, Qail};
+
+    let uppercase_id = Qail {
+        action: Action::Del,
+        table: "points".to_string(),
+        ..Default::default()
+    }
+    .filter("ID", Operator::Eq, 7);
+    let parsed: serde_json::Value = serde_json::from_str(&uppercase_id.to_qdrant_search())
+        .expect("qdrant delete JSON must be valid");
+    assert_eq!(parsed["points"], serde_json::json!([7]));
 
     let bad_id_operator = Qail {
         action: Action::Del,

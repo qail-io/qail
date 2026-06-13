@@ -1,5 +1,7 @@
 use crate::ast::*;
 
+const ORIGINAL_POINT_ID_PAYLOAD_KEY: &str = "_qail_original_point_id";
+
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
@@ -36,7 +38,19 @@ fn normalize_qdrant_field(raw: &str) -> &str {
     raw.trim().trim_matches('"').trim()
 }
 
-fn named_qdrant_field(expr: &Expr) -> Result<&str, String> {
+fn qdrant_reserved_field_matches(raw: &str, reserved: &str) -> bool {
+    normalize_qdrant_field(raw).eq_ignore_ascii_case(normalize_qdrant_field(reserved))
+}
+
+fn qdrant_projection_is_wildcard(raw: &str, table: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return false;
+    }
+    trimmed == "*" || trimmed.strip_prefix(table).is_some_and(|rest| rest == ".*")
+}
+
+fn raw_named_qdrant_field(expr: &Expr) -> Result<&str, String> {
     let raw = match expr {
         Expr::Named(name) | Expr::Aliased { name, .. } => name.as_str(),
         other => {
@@ -49,7 +63,11 @@ fn named_qdrant_field(expr: &Expr) -> Result<&str, String> {
     if field.is_empty() {
         return Err("Qdrant field name cannot be empty".to_string());
     }
-    Ok(field)
+    Ok(raw)
+}
+
+fn named_qdrant_field(expr: &Expr) -> Result<&str, String> {
+    Ok(normalize_qdrant_field(raw_named_qdrant_field(expr)?))
 }
 
 fn validate_json_payload_value(value: &serde_json::Value) -> Result<(), String> {
@@ -134,17 +152,21 @@ fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
                         );
                     }
                     let name = named_qdrant_field(&cond.left)?;
-                    if name == "id" {
+                    if qdrant_reserved_field_matches(name, "id") {
                         if point_id.replace(point_id_to_json(&cond.value)?).is_some() {
                             return Err(
                                 "Duplicate Qdrant upsert id fields are not supported".to_string()
                             );
                         }
-                    } else if name == "vector" {
+                    } else if qdrant_reserved_field_matches(name, "vector") {
                         if vector.replace(vector_to_json(&cond.value)?).is_some() {
                             return Err("Duplicate Qdrant upsert vector fields are not supported"
                                 .to_string());
                         }
+                    } else if qdrant_reserved_field_matches(name, ORIGINAL_POINT_ID_PAYLOAD_KEY) {
+                        return Err(format!(
+                            "Qdrant upsert payload field `{ORIGINAL_POINT_ID_PAYLOAD_KEY}` is reserved"
+                        ));
                     } else {
                         if !payload_fields.insert(name.to_string()) {
                             return Err(format!(
@@ -160,6 +182,8 @@ fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
                 }
             }
             CageKind::Filter => {
+                let can_infer_identity =
+                    matches!(cage.logical_op, LogicalOp::And) || cage.conditions.len() == 1;
                 for cond in &cage.conditions {
                     let name = named_qdrant_field(&cond.left)?;
                     if cond.op != Operator::Eq {
@@ -167,10 +191,45 @@ fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
                             "Qdrant upsert filter fallbacks require equality values".to_string()
                         );
                     }
-                    if name == "id" && point_id.is_none() {
-                        point_id = Some(point_id_to_json(&cond.value)?);
-                    } else if name == "vector" && vector.is_none() {
-                        vector = Some(vector_to_json(&cond.value)?);
+                    if qdrant_reserved_field_matches(name, "id") {
+                        if !can_infer_identity {
+                            if point_id.is_none() {
+                                return Err(
+                                    "Qdrant upsert id cannot be inferred from a multi-condition OR filter"
+                                        .to_string(),
+                                );
+                            }
+                            continue;
+                        }
+                        let next = point_id_to_json(&cond.value)?;
+                        if point_id.as_ref().is_some_and(|existing| existing != &next) {
+                            return Err(
+                                "Qdrant upsert filter id conflicts with payload id".to_string()
+                            );
+                        }
+                        point_id = Some(next);
+                    } else if qdrant_reserved_field_matches(name, "vector") {
+                        if !can_infer_identity {
+                            if vector.is_none() {
+                                return Err(
+                                    "Qdrant upsert vector cannot be inferred from a multi-condition OR filter"
+                                        .to_string(),
+                                );
+                            }
+                            continue;
+                        }
+                        let next = vector_to_json(&cond.value)?;
+                        if vector.as_ref().is_some_and(|existing| existing != &next) {
+                            return Err(
+                                "Qdrant upsert filter vector conflicts with payload vector"
+                                    .to_string(),
+                            );
+                        }
+                        vector = Some(next);
+                    } else {
+                        return Err(format!(
+                            "Qdrant upsert filters cannot be encoded as conditional writes: `{name}`"
+                        ));
                     }
                 }
             }
@@ -210,7 +269,7 @@ fn build_qdrant_delete(cmd: &Qail) -> Result<String, String> {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
                 let field = named_qdrant_field(&cond.left)?;
-                if field == "id" {
+                if qdrant_reserved_field_matches(field, "id") {
                     if cond.op != Operator::Eq {
                         return Err("Qdrant delete id filters support only equality".to_string());
                     }
@@ -252,7 +311,7 @@ fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
             for cond in &cage.conditions {
                 if cond.op == Operator::Fuzzy {
                     let field = named_qdrant_field(&cond.left)?;
-                    if field != "vector" {
+                    if !qdrant_reserved_field_matches(field, "vector") {
                         return Err(
                             "Qdrant fuzzy search is only supported on the vector field".to_string()
                         );
@@ -286,6 +345,23 @@ fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
         .ok_or_else(|| "Qdrant search requires cmd.vector or a fuzzy vector filter".to_string())?;
     parts.push(format!("\"vector\": {vector_json}"));
 
+    if let Some(threshold) = cmd.score_threshold {
+        if !threshold.is_finite() {
+            return Err("Qdrant score threshold must be finite".to_string());
+        }
+        parts.push(format!("\"score_threshold\": {threshold}"));
+    }
+
+    if let Some(vector_name) = &cmd.vector_name {
+        if vector_name.trim().is_empty() {
+            return Err("Qdrant vector name cannot be empty".to_string());
+        }
+        return Err(
+            "Qdrant JSON transpiler does not support named vector searches; use the qail-qdrant driver"
+                .to_string(),
+        );
+    }
+
     // 2. Filters (Hybrid Search)
     let filter = build_filter(cmd)?;
     if !filter.is_empty() {
@@ -297,17 +373,43 @@ fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
     parts.push(format!("\"limit\": {}", limit));
 
     // 4. With Payload (Projections)
+    let mut wants_vector = cmd.with_vector;
     if !cmd.columns.is_empty() {
-        let mut incl = Vec::new();
+        let mut payload_includes = Vec::new();
+        let mut has_wildcard = false;
         for c in &cmd.columns {
-            incl.push(json_string(named_qdrant_field(c)?));
+            let raw_field = raw_named_qdrant_field(c)?;
+            let field = normalize_qdrant_field(raw_field);
+            if qdrant_projection_is_wildcard(raw_field, &cmd.table) {
+                has_wildcard = true;
+                continue;
+            }
+            if qdrant_reserved_field_matches(field, "vector") {
+                wants_vector = true;
+                continue;
+            }
+            if qdrant_reserved_field_matches(field, "id")
+                || qdrant_reserved_field_matches(field, "score")
+            {
+                continue;
+            }
+            payload_includes.push(json_string(field));
         }
-        parts.push(format!(
-            "\"with_payload\": {{ \"include\": [{}] }}",
-            incl.join(", ")
-        ));
+        if has_wildcard {
+            parts.push("\"with_payload\": true".to_string());
+        } else if payload_includes.is_empty() {
+            parts.push("\"with_payload\": false".to_string());
+        } else {
+            parts.push(format!(
+                "\"with_payload\": {{ \"include\": [{}] }}",
+                payload_includes.join(", ")
+            ));
+        }
     } else {
         parts.push("\"with_payload\": true".to_string());
+    }
+    if wants_vector {
+        parts.push("\"with_vector\": true".to_string());
     }
 
     Ok(format!("{{ {} }}", parts.join(", ")))
@@ -324,11 +426,30 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
             for cond in &cage.conditions {
                 let col_str = named_qdrant_field(&cond.left)?;
 
+                if qdrant_reserved_field_matches(col_str, "id") {
+                    if cond.op != Operator::Eq {
+                        return Err(
+                            "Qdrant id filters support only equality against integer, string, or UUID values"
+                                .to_string(),
+                        );
+                    }
+                    cage_clauses.push(format!(
+                        "{{ \"has_id\": [{}] }}",
+                        point_id_to_json(&cond.value)?
+                    ));
+                    continue;
+                }
+
                 let clause = match cond.op {
                     Operator::Eq => format!(
                         "{{ \"key\": {}, \"match\": {{ \"value\": {} }} }}",
                         json_string(col_str),
-                        value_to_json(&cond.value)?
+                        filter_match_value_to_json(&cond.value)?
+                    ),
+                    Operator::In => format!(
+                        "{{ \"key\": {}, \"match\": {{ \"any\": [{}] }} }}",
+                        json_string(col_str),
+                        filter_array_values_to_json(&cond.value)?
                     ),
                     // Qdrant range: { "key": "price", "range": { "gt": 10.0 } }
                     Operator::Gt => format!(
@@ -358,13 +479,26 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
                         format!("{{ \"is_null\": {{ \"key\": {} }} }}", json_string(col_str))
                     }
                     Operator::Fuzzy => {
-                        if col_str == "vector" {
+                        if qdrant_reserved_field_matches(col_str, "vector") {
                             continue;
                         }
                         return Err(
                             "Qdrant fuzzy filters are only supported on the vector field"
                                 .to_string(),
                         );
+                    }
+                    Operator::Contains | Operator::Like => {
+                        let Value::String(value) = &cond.value else {
+                            return Err("Qdrant text filters require a string value".to_string());
+                        };
+                        if value.trim().is_empty() {
+                            return Err("Qdrant text filter value cannot be empty".to_string());
+                        }
+                        format!(
+                            "{{ \"key\": {}, \"match\": {{ \"text\": {} }} }}",
+                            json_string(col_str),
+                            json_string(value)
+                        )
                     }
                     _ => return Err(format!("unsupported Qdrant filter operator {:?}", cond.op)),
                 };
@@ -399,6 +533,37 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
         parts.push(format!("\"must\": [{}]", musts.join(", ")));
     }
     Ok(format!("{{ {} }}", parts.join(", ")))
+}
+
+fn filter_match_value_to_json(v: &Value) -> Result<String, String> {
+    match v {
+        Value::String(s) => Ok(json_string(s)),
+        Value::Int(n) => Ok(n.to_string()),
+        Value::Float(n) if n.is_finite() => Ok(n.to_string()),
+        Value::Float(_) => Err("Qdrant equality filter values must be finite numbers".to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Null | Value::NullUuid => {
+            Err("Qdrant equality filters cannot match null; use IS NULL".to_string())
+        }
+        other => Err(format!(
+            "Qdrant equality filters support only string, integer, finite float, or bool values, got {other}"
+        )),
+    }
+}
+
+fn filter_array_values_to_json(v: &Value) -> Result<String, String> {
+    let Value::Array(values) = v else {
+        return Err("Qdrant IN filters require an array value".to_string());
+    };
+    if values.is_empty() {
+        return Err("Qdrant IN filters require at least one value".to_string());
+    }
+    let values = values
+        .iter()
+        .map(filter_match_value_to_json)
+        .map(|result| result.map_err(|err| format!("Qdrant IN filters value is invalid: {err}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(values.join(", "))
 }
 
 fn value_to_json(v: &Value) -> Result<String, String> {
