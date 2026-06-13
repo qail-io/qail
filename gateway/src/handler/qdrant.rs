@@ -337,15 +337,24 @@ fn inject_qdrant_tenant_scope(cmd: &mut qail_core::ast::Qail, tenant_col: &str, 
     }
 
     if matches!(cmd.action, Action::Upsert) {
-        if let Some(cage) = cmd
+        let mut inserted = false;
+        for cage in cmd
             .cages
             .iter_mut()
-            .find(|cage| matches!(cage.kind, CageKind::Payload))
+            .filter(|cage| matches!(cage.kind, CageKind::Payload))
         {
-            cage.conditions
-                .retain(|cond| !matches!(&cond.left, Expr::Named(name) if name == tenant_col));
-            cage.conditions.push(condition);
-        } else {
+            cage.conditions.retain(|cond| match &cond.left {
+                Expr::Named(name) | Expr::Aliased { name, .. } => {
+                    !qdrant_reserved_field_matches(name, tenant_col)
+                }
+                _ => true,
+            });
+            if !inserted {
+                cage.conditions.push(condition.clone());
+                inserted = true;
+            }
+        }
+        if !inserted {
             cmd.cages.push(Cage {
                 kind: CageKind::Payload,
                 conditions: vec![condition],
@@ -371,7 +380,7 @@ fn rewrite_tenant_scoped_qdrant_read_id_filters(cmd: &mut qail_core::ast::Qail, 
             Expr::Named(name) | Expr::Aliased { name, .. } => name.as_str(),
             _ => continue,
         };
-        if normalize_qdrant_field_name(field) != "id" {
+        if !qdrant_reserved_field_matches(field, "id") {
             continue;
         }
         let Some(original_id) = point_id_from_value(&condition.value) else {
@@ -429,10 +438,12 @@ fn exact_qdrant_projection_name(raw: &str, table: &str) -> Option<String> {
         .then(|| segment.trim_matches('"').to_string())
 }
 
-fn qdrant_projection_is_wildcard(raw: &str) -> bool {
+fn qdrant_projection_is_wildcard(raw: &str, table: &str) -> bool {
     let trimmed = raw.trim();
-    !(trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"'))
-        && (trimmed == "*" || trimmed.ends_with(".*"))
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return false;
+    }
+    trimmed == "*" || trimmed.strip_prefix(table).is_some_and(|rest| rest == ".*")
 }
 
 fn qdrant_response_projection_from_cmd(
@@ -457,7 +468,7 @@ fn qdrant_response_projection_from_cmd(
                 ));
             }
         };
-        if qdrant_projection_is_wildcard(name) {
+        if qdrant_projection_is_wildcard(name, &cmd.table) {
             has_wildcard = true;
             continue;
         }
@@ -748,6 +759,20 @@ fn set_upsert_point_id(
     Ok(())
 }
 
+fn set_payload_upsert_point_id(
+    id: &mut Option<qail_qdrant::PointId>,
+    next: qail_qdrant::PointId,
+) -> Result<(), ApiError> {
+    if id.is_some() {
+        return Err(ApiError::bad_request(
+            "AMBIGUOUS_POINT_ID",
+            "Qdrant upsert received duplicate point id values",
+        ));
+    }
+    *id = Some(next);
+    Ok(())
+}
+
 fn set_upsert_vector(vector: &mut Option<Vec<f32>>, next: Vec<f32>) -> Result<(), ApiError> {
     if vector.as_ref().is_some_and(|existing| existing != &next) {
         return Err(ApiError::bad_request(
@@ -759,15 +784,30 @@ fn set_upsert_vector(vector: &mut Option<Vec<f32>>, next: Vec<f32>) -> Result<()
     Ok(())
 }
 
+fn set_payload_upsert_vector(
+    vector: &mut Option<Vec<f32>>,
+    next: Vec<f32>,
+) -> Result<(), ApiError> {
+    if vector.is_some() {
+        return Err(ApiError::bad_request(
+            "AMBIGUOUS_VECTOR",
+            "Qdrant upsert received duplicate vector values",
+        ));
+    }
+    *vector = Some(next);
+    Ok(())
+}
+
 fn extract_upsert_point_with_filter_fallback(
     cmd: &qail_core::ast::Qail,
     id_filter_cages: &[qail_core::ast::Cage],
 ) -> Result<qail_qdrant::Point, ApiError> {
-    use qail_core::ast::{CageKind, Expr, LogicalOp};
+    use qail_core::ast::{CageKind, Expr, LogicalOp, Operator};
 
     let mut id = None;
     let mut vector = cmd.vector.clone();
     let mut payload = qail_qdrant::Payload::new();
+    let mut payload_fields = HashSet::new();
 
     for cage in cmd
         .cages
@@ -775,6 +815,13 @@ fn extract_upsert_point_with_filter_fallback(
         .filter(|c| matches!(c.kind, CageKind::Payload))
     {
         for cond in &cage.conditions {
+            if cond.op != Operator::Eq {
+                return Err(ApiError::bad_request(
+                    "INVALID_QDRANT_PAYLOAD",
+                    "Qdrant upsert payload fields require equality values",
+                ));
+            }
+
             let field = match &cond.left {
                 Expr::Named(name) => name.as_str(),
                 Expr::Aliased { name, .. } => name.as_str(),
@@ -794,29 +841,31 @@ fn extract_upsert_point_with_filter_fallback(
                 ));
             }
 
-            match field {
-                "id" => {
-                    let next = point_id_from_value(&cond.value).ok_or_else(|| {
-                        ApiError::bad_request(
-                            "INVALID_POINT_ID",
-                            "Upsert point id must be integer or string UUID",
-                        )
-                    })?;
-                    set_upsert_point_id(&mut id, next)?;
+            if qdrant_reserved_field_matches(field, "id") {
+                let next = point_id_from_value(&cond.value).ok_or_else(|| {
+                    ApiError::bad_request(
+                        "INVALID_POINT_ID",
+                        "Upsert point id must be integer or string UUID",
+                    )
+                })?;
+                set_payload_upsert_point_id(&mut id, next)?;
+            } else if qdrant_reserved_field_matches(field, "vector") {
+                let next = vector_from_value(&cond.value).ok_or_else(|| {
+                    ApiError::bad_request(
+                        "INVALID_VECTOR",
+                        "Upsert vector must be an array of numeric values",
+                    )
+                })?;
+                set_payload_upsert_vector(&mut vector, next)?;
+            } else if qdrant_reserved_field_matches(field, ORIGINAL_POINT_ID_PAYLOAD_KEY) {
+            } else {
+                if !payload_fields.insert(field.to_string()) {
+                    return Err(ApiError::bad_request(
+                        "INVALID_QDRANT_PAYLOAD",
+                        format!("Duplicate Qdrant upsert payload field `{field}` is not supported"),
+                    ));
                 }
-                "vector" => {
-                    let next = vector_from_value(&cond.value).ok_or_else(|| {
-                        ApiError::bad_request(
-                            "INVALID_VECTOR",
-                            "Upsert vector must be an array of numeric values",
-                        )
-                    })?;
-                    set_upsert_vector(&mut vector, next)?;
-                }
-                field if field == ORIGINAL_POINT_ID_PAYLOAD_KEY => {}
-                _ => {
-                    payload.insert(field.to_string(), payload_value_from_ast(&cond.value)?);
-                }
+                payload.insert(field.to_string(), payload_value_from_ast(&cond.value)?);
             }
         }
     }
@@ -830,44 +879,40 @@ fn extract_upsert_point_with_filter_fallback(
                 _ => continue,
             };
 
-            match normalize_qdrant_field_name(field) {
-                "id" => {
-                    if !can_infer_identity {
-                        if id.is_none() {
-                            return Err(ApiError::bad_request(
-                                "AMBIGUOUS_POINT_ID",
-                                "Upsert point id cannot be inferred from a multi-condition OR filter",
-                            ));
-                        }
-                        continue;
+            if qdrant_reserved_field_matches(field, "id") {
+                if !can_infer_identity {
+                    if id.is_none() {
+                        return Err(ApiError::bad_request(
+                            "AMBIGUOUS_POINT_ID",
+                            "Upsert point id cannot be inferred from a multi-condition OR filter",
+                        ));
                     }
-                    let next = point_id_from_value(&cond.value).ok_or_else(|| {
-                        ApiError::bad_request(
-                            "INVALID_POINT_ID",
-                            "Upsert point id filter must be integer or string UUID",
-                        )
-                    })?;
-                    set_upsert_point_id(&mut id, next)?;
+                    continue;
                 }
-                "vector" => {
-                    if !can_infer_identity {
-                        if vector.is_none() {
-                            return Err(ApiError::bad_request(
-                                "AMBIGUOUS_VECTOR",
-                                "Upsert vector cannot be inferred from a multi-condition OR filter",
-                            ));
-                        }
-                        continue;
+                let next = point_id_from_value(&cond.value).ok_or_else(|| {
+                    ApiError::bad_request(
+                        "INVALID_POINT_ID",
+                        "Upsert point id filter must be integer or string UUID",
+                    )
+                })?;
+                set_upsert_point_id(&mut id, next)?;
+            } else if qdrant_reserved_field_matches(field, "vector") {
+                if !can_infer_identity {
+                    if vector.is_none() {
+                        return Err(ApiError::bad_request(
+                            "AMBIGUOUS_VECTOR",
+                            "Upsert vector cannot be inferred from a multi-condition OR filter",
+                        ));
                     }
-                    let next = vector_from_value(&cond.value).ok_or_else(|| {
-                        ApiError::bad_request(
-                            "INVALID_VECTOR",
-                            "Upsert vector filter must be an array of numeric values",
-                        )
-                    })?;
-                    set_upsert_vector(&mut vector, next)?;
+                    continue;
                 }
-                _ => {}
+                let next = vector_from_value(&cond.value).ok_or_else(|| {
+                    ApiError::bad_request(
+                        "INVALID_VECTOR",
+                        "Upsert vector filter must be an array of numeric values",
+                    )
+                })?;
+                set_upsert_vector(&mut vector, next)?;
             }
         }
     }
@@ -1043,7 +1088,7 @@ fn validate_qdrant_read_filter_condition(
             "Qdrant read filter field cannot be empty",
         ));
     }
-    if normalize_qdrant_field_name(field) == "id" {
+    if qdrant_reserved_field_matches(field, "id") {
         if condition.op == Operator::Eq && point_id_from_value(&condition.value).is_some() {
             return Ok(());
         }
@@ -1061,8 +1106,10 @@ fn validate_qdrant_read_filter_condition(
             Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte,
             Value::Int(_) | Value::Float(_),
         ) => Ok(()),
-        (Operator::Contains | Operator::Like, Value::String(_)) => Ok(()),
-        (Operator::IsNull, Value::Null) => Ok(()),
+        (Operator::Contains | Operator::Like, Value::String(value)) if !value.trim().is_empty() => {
+            Ok(())
+        }
+        (Operator::IsNull, Value::Null | Value::NullUuid) => Ok(()),
         _ => Err(ApiError::bad_request(
             "INVALID_QDRANT_FILTER",
             format!(
@@ -1077,7 +1124,7 @@ fn validate_qdrant_read_filter_condition(
 enum QdrantUpsertFilterTarget<'a> {
     Id,
     Vector,
-    Payload(&'a str),
+    Payload { field: &'a str, exact: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1257,6 +1304,15 @@ fn normalize_qdrant_field_name(raw: &str) -> &str {
     raw.trim().trim_matches('"').trim()
 }
 
+fn qdrant_reserved_field_matches(raw: &str, reserved: &str) -> bool {
+    normalize_qdrant_field_name(raw).eq_ignore_ascii_case(normalize_qdrant_field_name(reserved))
+}
+
+fn qdrant_field_is_quoted(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"')
+}
+
 fn qdrant_upsert_filter_target(
     condition: &qail_core::ast::Condition,
 ) -> Result<QdrantUpsertFilterTarget<'_>, ApiError> {
@@ -1277,13 +1333,16 @@ fn qdrant_upsert_filter_target(
             "Qdrant upsert filter cannot be safely enforced for an empty payload field",
         ));
     }
-    if field == "id" {
+    if qdrant_reserved_field_matches(field, "id") {
         return Ok(QdrantUpsertFilterTarget::Id);
     }
-    if field == "vector" {
+    if qdrant_reserved_field_matches(field, "vector") {
         return Ok(QdrantUpsertFilterTarget::Vector);
     }
-    Ok(QdrantUpsertFilterTarget::Payload(field))
+    Ok(QdrantUpsertFilterTarget::Payload {
+        field,
+        exact: qdrant_field_is_quoted(raw),
+    })
 }
 
 fn qdrant_upsert_filter_cages_have_enforceable_conditions(
@@ -1317,10 +1376,13 @@ fn validate_qdrant_upsert_filter_value(value: &qail_core::ast::Value) -> Result<
         | Value::NullUuid
         | Value::Bool(_)
         | Value::Int(_)
-        | Value::Float(_)
         | Value::String(_)
         | Value::Timestamp(_)
         | Value::Uuid(_) => Ok(()),
+        Value::Float(value) if value.is_finite() => Ok(()),
+        Value::Float(_) => Err(ApiError::forbidden(
+            "Qdrant upsert filters support only finite numeric values",
+        )),
         Value::Json(json) => payload_value_from_json_str(json).map(|_| ()),
         Value::Array(items) => {
             for item in items {
@@ -1364,7 +1426,7 @@ fn validate_qdrant_upsert_filter_cages(cages: &[qail_core::ast::Cage]) -> Result
                         ));
                     }
                 }
-                QdrantUpsertFilterTarget::Payload(_) => {
+                QdrantUpsertFilterTarget::Payload { .. } => {
                     validate_qdrant_upsert_filter_value(&condition.value)?;
                 }
             }
@@ -1426,8 +1488,12 @@ fn ast_value_matches_qdrant_payload(
 fn qdrant_payload_get_field<'a>(
     payload: &'a qail_qdrant::Payload,
     field: &str,
+    exact: bool,
 ) -> Option<&'a qail_qdrant::PayloadValue> {
     let field = normalize_qdrant_field_name(field);
+    if exact {
+        return payload.get(field);
+    }
     if !field.contains('.') {
         return payload.get(field);
     }
@@ -1504,9 +1570,9 @@ fn qdrant_point_matches_filter_condition(
             point.vector,
             &condition.value,
         )?)),
-        QdrantUpsertFilterTarget::Payload(field) => {
+        QdrantUpsertFilterTarget::Payload { field, exact } => {
             validate_qdrant_upsert_filter_value(&condition.value)?;
-            let Some(actual) = qdrant_payload_get_field(point.payload, field) else {
+            let Some(actual) = qdrant_payload_get_field(point.payload, field, exact) else {
                 return Ok(Some(false));
             };
             Ok(Some(ast_value_matches_qdrant_payload(
@@ -2087,6 +2153,73 @@ mod tests {
     }
 
     #[test]
+    fn scored_point_projection_does_not_treat_payload_star_suffix_as_wildcard() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata.*".to_string(),
+            qail_qdrant::PayloadValue::String("literal".to_string()),
+        );
+        payload.insert(
+            "secret".to_string(),
+            qail_qdrant::PayloadValue::String("hidden".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: Some(vec![0.1, 0.2, 0.3]),
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .columns(["metadata.*"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("literal star projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(
+            payload.get("metadata.*"),
+            Some(&serde_json::json!("literal"))
+        );
+        assert!(!payload.contains_key("secret"));
+        assert!(json.get("vector").is_none());
+    }
+
+    #[test]
+    fn scored_point_projection_accepts_table_qualified_wildcard_only() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "title".to_string(),
+            qail_qdrant::PayloadValue::String("visible".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: Some(vec![0.1, 0.2, 0.3]),
+        };
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .with_vectors()
+            .columns(["embeddings.*"]);
+
+        assert!(
+            qdrant_response_projection_from_cmd(&cmd)
+                .expect("table wildcard should parse")
+                .is_none()
+        );
+
+        let json = scored_point_to_json_projected(&point, None);
+        assert!(json.get("payload").is_some());
+        assert!(json.get("vector").is_some());
+    }
+
+    #[test]
     fn qdrant_projection_rejects_expression_columns() {
         let mut cmd = Qail::search("embeddings").vector(vec![0.1, 0.2]);
         cmd.columns = vec![Expr::FunctionCall {
@@ -2182,6 +2315,49 @@ mod tests {
             point.payload.get("tenant_id"),
             Some(&qail_qdrant::PayloadValue::String("tenant-a".to_string()))
         );
+    }
+
+    #[test]
+    fn tenant_scoped_qdrant_upsert_removes_quoted_and_aliased_tenant_payloads() {
+        let mut cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            vector: Some(vec![0.1, 0.2]),
+            cages: vec![
+                Cage {
+                    kind: CageKind::Payload,
+                    conditions: vec![
+                        value_cond("id", Value::Int(7)),
+                        cond("\"Tenant_ID\"", "tenant-b"),
+                    ],
+                    logical_op: LogicalOp::And,
+                },
+                Cage {
+                    kind: CageKind::Payload,
+                    conditions: vec![Condition {
+                        left: Expr::Aliased {
+                            name: "Tenant_ID".to_string(),
+                            alias: "tenant_alias".to_string(),
+                        },
+                        op: Operator::Eq,
+                        value: Value::String("tenant-c".to_string()),
+                        is_array_unnest: false,
+                    }],
+                    logical_op: LogicalOp::And,
+                },
+            ],
+            ..Default::default()
+        };
+
+        inject_qdrant_tenant_scope(&mut cmd, "tenant_id", "tenant-a");
+        let point = extract_upsert_point(&cmd).expect("point should extract");
+
+        assert_eq!(
+            point.payload.get("tenant_id"),
+            Some(&qail_qdrant::PayloadValue::String("tenant-a".to_string()))
+        );
+        assert!(!point.payload.contains_key("\"tenant_id\""));
+        assert!(!point.payload.contains_key("Tenant_ID"));
     }
 
     #[test]
@@ -2405,6 +2581,47 @@ mod tests {
     }
 
     #[test]
+    fn extract_upsert_point_treats_case_variant_reserved_fields_as_control_fields() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            cages: vec![Cage {
+                kind: CageKind::Payload,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("ID".to_string()),
+                        op: Operator::Eq,
+                        value: Value::Int(7),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("VECTOR".to_string()),
+                        op: Operator::Eq,
+                        value: Value::Vector(vec![0.1, 0.2]),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("_QAIL_ORIGINAL_POINT_ID".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("spoof".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        };
+
+        let point = extract_upsert_point(&cmd).unwrap();
+
+        assert_eq!(point.id, qail_qdrant::PointId::Num(7));
+        assert_eq!(point.vector, vec![0.1, 0.2]);
+        assert!(!point.payload.contains_key("ID"));
+        assert!(!point.payload.contains_key("VECTOR"));
+        assert!(!point.payload.contains_key("_QAIL_ORIGINAL_POINT_ID"));
+    }
+
+    #[test]
     fn extract_upsert_point_rejects_empty_payload_field_names() {
         let cmd = Qail {
             action: Action::Upsert,
@@ -2430,6 +2647,77 @@ mod tests {
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_non_equality_payload_conditions() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            vector: Some(vec![0.1, 0.2]),
+            cages: vec![Cage {
+                kind: CageKind::Payload,
+                conditions: vec![
+                    value_cond("id", Value::Int(7)),
+                    Condition {
+                        left: Expr::Named("region".to_string()),
+                        op: Operator::Gt,
+                        value: Value::String("west".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        };
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_duplicate_payload_fields() {
+        let cmd = Qail {
+            action: Action::Upsert,
+            table: "embeddings".to_string(),
+            vector: Some(vec![0.1, 0.2]),
+            cages: vec![Cage {
+                kind: CageKind::Payload,
+                conditions: vec![
+                    value_cond("id", Value::Int(7)),
+                    value_cond("region", Value::String("west".to_string())),
+                    value_cond("region", Value::String("east".to_string())),
+                ],
+                logical_op: LogicalOp::And,
+            }],
+            ..Default::default()
+        };
+
+        let err = extract_upsert_point(&cmd).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_PAYLOAD");
+    }
+
+    #[test]
+    fn extract_upsert_point_rejects_duplicate_payload_special_fields() {
+        let duplicate_id = Qail::upsert("embeddings")
+            .set_value("id", 7)
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]));
+        let err = extract_upsert_point(&duplicate_id).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
+
+        let duplicate_vector = Qail::upsert("embeddings")
+            .vector(vec![0.1, 0.2])
+            .set_value("id", 7)
+            .set_value("vector", Value::Vector(vec![0.1, 0.2]));
+        let err = extract_upsert_point(&duplicate_vector).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "AMBIGUOUS_VECTOR");
     }
 
     #[test]
@@ -2565,6 +2853,31 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_payload_filter_preserves_quoted_dotted_top_level_key() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            qail_qdrant::PayloadValue::String("wrong".to_string()),
+        );
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "metadata".to_string(),
+            qail_qdrant::PayloadValue::Object(metadata),
+        );
+        payload.insert(
+            "metadata.source".to_string(),
+            qail_qdrant::PayloadValue::String("web".to_string()),
+        );
+        let cages = vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("\"metadata.source\"", "web")],
+            logical_op: LogicalOp::And,
+        }];
+
+        enforce_qdrant_upsert_payload_filters(&payload, &cages, "embeddings", "outgoing").unwrap();
     }
 
     #[test]
@@ -2853,6 +3166,40 @@ mod tests {
     }
 
     #[test]
+    fn qdrant_read_filters_accept_null_uuid_for_is_null() {
+        let conditions = vec![Condition {
+            left: Expr::Named("deleted_at".to_string()),
+            op: Operator::IsNull,
+            value: Value::NullUuid,
+            is_array_unnest: false,
+        }];
+
+        validate_qdrant_read_filters(&conditions, &[]).unwrap();
+    }
+
+    #[test]
+    fn qdrant_read_filters_reject_empty_text_filters() {
+        for (op, value) in [
+            (Operator::Contains, ""),
+            (Operator::Contains, " "),
+            (Operator::Like, ""),
+            (Operator::Like, "\t"),
+        ] {
+            let conditions = vec![Condition {
+                left: Expr::Named("summary".to_string()),
+                op,
+                value: Value::String(value.to_string()),
+                is_array_unnest: false,
+            }];
+
+            let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+            assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+        }
+    }
+
+    #[test]
     fn qdrant_tenant_read_id_filter_rewrites_to_scoped_physical_id() {
         let mut cmd =
             Qail::search("embeddings")
@@ -2869,6 +3216,26 @@ mod tests {
         };
         assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].left, Expr::Named("id".to_string()));
+        assert_eq!(conditions[0].value, expected);
+    }
+
+    #[test]
+    fn qdrant_tenant_read_id_filter_rewrites_case_variant_id_fields() {
+        let mut cmd =
+            Qail::search("embeddings")
+                .vector(vec![0.1, 0.2])
+                .filter("ID", Operator::Eq, 7);
+
+        rewrite_tenant_scoped_qdrant_read_id_filters(&mut cmd, "tenant-a");
+        let (conditions, _) = split_filter_conditions(&cmd);
+
+        let expected = tenant_scoped_qdrant_point_id(&qail_qdrant::PointId::Num(7), "tenant-a");
+        let expected = match expected {
+            qail_qdrant::PointId::Uuid(value) => Value::String(value),
+            qail_qdrant::PointId::Num(value) => Value::Int(value as i64),
+        };
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].left, Expr::Named("ID".to_string()));
         assert_eq!(conditions[0].value, expected);
     }
 
@@ -2945,6 +3312,28 @@ mod tests {
 
         let err = validate_qdrant_upsert_filter_cages(&cages).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn qdrant_upsert_filters_reject_non_finite_float_values() {
+        for value in [
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+            Value::Array(vec![
+                Value::String("ok".to_string()),
+                Value::Float(f64::NAN),
+            ]),
+        ] {
+            let cages = vec![Cage {
+                kind: CageKind::Filter,
+                conditions: vec![value_cond("rank", value)],
+                logical_op: LogicalOp::And,
+            }];
+
+            let err = validate_qdrant_upsert_filter_cages(&cages).unwrap_err();
+
+            assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+        }
     }
 
     #[test]

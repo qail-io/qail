@@ -767,7 +767,7 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             Ok(encode_field_condition_match_text(key, s))
         }
 
-        (Operator::IsNull, Value::Null) => Ok(encode_is_null_condition(key)),
+        (Operator::IsNull, Value::Null | Value::NullUuid) => Ok(encode_is_null_condition(key)),
 
         _ => Err(QdrantError::Encode(format!(
             "Unsupported Qdrant filter condition: op={:?}, value={:?}",
@@ -2217,34 +2217,36 @@ mod tests {
     fn test_encode_search_with_filter_supports_is_null() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 
-        let mut buf = BytesMut::with_capacity(512);
-        let vector = vec![0.1f32, 0.2];
-        let conditions = vec![Condition {
-            left: Expr::Named("tenant_id".to_string()),
-            op: Operator::IsNull,
-            value: Value::Null,
-            is_array_unnest: false,
-        }];
+        for value in [Value::Null, Value::NullUuid] {
+            let mut buf = BytesMut::with_capacity(512);
+            let vector = vec![0.1f32, 0.2];
+            let conditions = vec![Condition {
+                left: Expr::Named("tenant_id".to_string()),
+                op: Operator::IsNull,
+                value,
+                is_array_unnest: false,
+            }];
 
-        encode_search_with_filter_proto(
-            &mut buf,
-            SearchRequest {
-                collection: "products",
-                vector: &vector,
-                limit: 5,
-                score_threshold: None,
-                vector_name: None,
-                with_vectors: false,
-            },
-            &conditions,
-            false,
-        )
-        .expect("IS NULL filters should encode as Qdrant IsNullCondition");
+            encode_search_with_filter_proto(
+                &mut buf,
+                SearchRequest {
+                    collection: "products",
+                    vector: &vector,
+                    limit: 5,
+                    score_threshold: None,
+                    vector_name: None,
+                    with_vectors: false,
+                },
+                &conditions,
+                false,
+            )
+            .expect("IS NULL filters should encode as Qdrant IsNullCondition");
 
-        assert!(
-            buf.contains(&CONDITION_IS_NULL),
-            "encoded request should contain an IsNullCondition"
-        );
+            assert!(
+                buf.contains(&CONDITION_IS_NULL),
+                "encoded request should contain an IsNullCondition"
+            );
+        }
     }
 
     #[test]

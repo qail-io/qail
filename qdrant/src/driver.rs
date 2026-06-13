@@ -61,6 +61,16 @@ fn validate_point_ids_non_empty(ids_len: usize, label: &str) -> QdrantResult<()>
     Ok(())
 }
 
+fn validate_point_id(id: &PointId, label: &str) -> QdrantResult<()> {
+    match id {
+        PointId::Num(_) => Ok(()),
+        PointId::Uuid(value) if value.trim().is_empty() => Err(encode_error(format!(
+            "Qdrant {label} point id must not be empty"
+        ))),
+        PointId::Uuid(_) => Ok(()),
+    }
+}
+
 fn validate_vector_finite(label: &str, vector: &[f32]) -> QdrantResult<()> {
     if vector.is_empty() {
         return Err(encode_error(format!(
@@ -209,6 +219,7 @@ fn validate_points_finite(points: &[Point]) -> QdrantResult<()> {
         return Err(encode_error("Qdrant upsert point list must not be empty"));
     }
     for (idx, point) in points.iter().enumerate() {
+        validate_point_id(&point.id, &format!("upsert point {idx}"))?;
         validate_vector_finite(&format!("upsert point {idx}"), &point.vector)?;
         validate_payload_finite(&point.payload, &format!("upsert point {idx}"))?;
     }
@@ -846,9 +857,10 @@ mod validation_tests {
     use super::{
         QdrantError, validate_collection_name, validate_condition_groups_finite,
         validate_conditions_finite, validate_payload_field_name, validate_payload_finite,
-        validate_point_ids_non_empty, validate_points_finite, validate_score_threshold,
-        validate_scroll_limit, validate_search_limit, validate_search_request,
-        validate_vector_finite, validate_vector_name, validate_vector_size,
+        validate_point_id, validate_point_ids_non_empty, validate_points_finite,
+        validate_score_threshold, validate_scroll_limit, validate_search_limit,
+        validate_search_request, validate_vector_finite, validate_vector_name,
+        validate_vector_size,
     };
 
     fn assert_encode_error(result: crate::error::QdrantResult<()>, needle: &str) {
@@ -909,6 +921,12 @@ mod validation_tests {
     fn rejects_empty_point_id_selectors() {
         assert_encode_error(validate_point_ids_non_empty(0, "delete"), "point id list");
         validate_point_ids_non_empty(1, "delete").expect("non-empty point ids should pass");
+        assert_encode_error(
+            validate_point_id(&crate::PointId::Uuid("  ".to_string()), "delete"),
+            "point id",
+        );
+        validate_point_id(&crate::PointId::Num(7), "delete")
+            .expect("numeric point ids should pass");
     }
 
     #[test]
@@ -996,6 +1014,14 @@ mod validation_tests {
         );
 
         assert_encode_error(validate_points_finite(&[]), "point list");
+
+        let point = Point {
+            id: crate::PointId::Uuid(" ".to_string()),
+            vector: vec![1.0, 2.0],
+            payload: HashMap::new(),
+        };
+
+        assert_encode_error(validate_points_finite(&[point]), "point id");
 
         let point = Point {
             id: "p1".into(),

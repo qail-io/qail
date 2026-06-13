@@ -444,7 +444,7 @@ pub fn encode_conditions_to_filter(
             }
 
             // IsNull / IsNotNull
-            (Operator::IsNull, Value::Null) => json!({
+            (Operator::IsNull, Value::Null | Value::NullUuid) => json!({
                 "is_null": { "key": key }
             }),
 
@@ -1124,6 +1124,22 @@ mod tests {
 
         assert_eq!(filter["must"][0]["has_id"][0], 42);
         assert!(filter["must"][0]["key"].is_null());
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_supports_null_uuid_as_is_null_json() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![Condition {
+            left: Expr::Named("deleted_at".to_string()),
+            op: Operator::IsNull,
+            value: Value::NullUuid,
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["is_null"]["key"], "deleted_at");
     }
 
     #[test]
