@@ -308,6 +308,7 @@ impl ApiError {
             | "MISSING_POINT_ID"
             | "INVALID_POINT_ID"
             | "INVALID_VECTOR"
+            | "INVALID_VECTOR_SIZE"
             | "AMBIGUOUS_POINT_ID"
             | "AMBIGUOUS_VECTOR"
             | "INVALID_SCORE_THRESHOLD"

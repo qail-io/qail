@@ -245,6 +245,7 @@ pub(super) async fn execute_qdrant_cmd(
                     "CreateCollection requires vector_size",
                 )
             })?;
+            ensure_qdrant_vector_size(vector_size)?;
             let distance = match cmd.distance.unwrap_or(CoreDistance::Cosine) {
                 CoreDistance::Cosine => qail_qdrant::Distance::Cosine,
                 CoreDistance::Euclid => qail_qdrant::Distance::Euclidean,
@@ -349,24 +350,33 @@ fn inject_qdrant_tenant_scope(cmd: &mut qail_core::ast::Qail, tenant_col: &str, 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QdrantResponseProjection {
-    fields: HashSet<String>,
+    folded_fields: HashSet<String>,
+    exact_fields: HashSet<String>,
 }
 
 impl QdrantResponseProjection {
     fn contains(&self, field: &str) -> bool {
-        self.fields
-            .contains(&normalize_qdrant_projection_name(field))
+        self.exact_fields.contains(field)
+            || self
+                .folded_fields
+                .contains(&normalize_qdrant_projection_name(field))
     }
 }
 
+fn qdrant_projection_segment(raw: &str) -> &str {
+    raw.trim().rsplit('.').next().unwrap_or(raw).trim()
+}
+
 fn normalize_qdrant_projection_name(raw: &str) -> String {
-    raw.trim()
-        .trim_matches('"')
-        .rsplit('.')
-        .next()
-        .unwrap_or(raw)
+    qdrant_projection_segment(raw)
         .trim_matches('"')
         .to_ascii_lowercase()
+}
+
+fn exact_qdrant_projection_name(raw: &str) -> Option<String> {
+    let segment = qdrant_projection_segment(raw);
+    (segment.len() >= 2 && segment.starts_with('"') && segment.ends_with('"'))
+        .then(|| segment.trim_matches('"').to_string())
 }
 
 fn qdrant_response_projection_from_cmd(
@@ -378,7 +388,8 @@ fn qdrant_response_projection_from_cmd(
         return Ok(None);
     }
 
-    let mut fields = HashSet::new();
+    let mut folded_fields = HashSet::new();
+    let mut exact_fields = HashSet::new();
     let mut has_wildcard = false;
     for expr in &cmd.columns {
         let name = match expr {
@@ -395,17 +406,24 @@ fn qdrant_response_projection_from_cmd(
             has_wildcard = true;
             continue;
         }
-        let normalized = normalize_qdrant_projection_name(name);
+        let (normalized, exact_match) = match exact_qdrant_projection_name(name) {
+            Some(exact) => (exact, true),
+            None => (normalize_qdrant_projection_name(name), false),
+        };
         if normalized.is_empty() {
             return Err(ApiError::bad_request(
                 "INVALID_QDRANT_PROJECTION",
                 "Qdrant projection field cannot be empty",
             ));
         }
-        fields.insert(normalized);
+        if exact_match {
+            exact_fields.insert(normalized);
+        } else {
+            folded_fields.insert(normalized);
+        }
     }
 
-    if has_wildcard && !fields.is_empty() {
+    if has_wildcard && (!folded_fields.is_empty() || !exact_fields.is_empty()) {
         return Err(ApiError::bad_request(
             "INVALID_QDRANT_PROJECTION",
             "Qdrant wildcard projection cannot be mixed with named payload fields",
@@ -415,7 +433,10 @@ fn qdrant_response_projection_from_cmd(
         return Ok(None);
     }
 
-    Ok(Some(QdrantResponseProjection { fields }))
+    Ok(Some(QdrantResponseProjection {
+        folded_fields,
+        exact_fields,
+    }))
 }
 
 fn qdrant_should_request_vectors(
@@ -811,10 +832,26 @@ fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point
 }
 
 fn ensure_qdrant_vector_finite(vector: &[f32]) -> Result<(), ApiError> {
+    if vector.is_empty() {
+        return Err(ApiError::bad_request(
+            "INVALID_VECTOR",
+            "Qdrant vector must not be empty",
+        ));
+    }
     if vector.iter().any(|value| !value.is_finite()) {
         return Err(ApiError::bad_request(
             "INVALID_VECTOR",
             "Qdrant vector values must be finite numbers",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_qdrant_vector_size(vector_size: u64) -> Result<(), ApiError> {
+    if vector_size == 0 {
+        return Err(ApiError::bad_request(
+            "INVALID_VECTOR_SIZE",
+            "Qdrant collection vector_size must be greater than zero",
         ));
     }
     Ok(())
@@ -1578,7 +1615,7 @@ mod tests {
         ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
         ensure_qdrant_conditions_finite, ensure_qdrant_score_threshold_finite,
-        ensure_qdrant_vector_finite, extract_upsert_point,
+        ensure_qdrant_vector_finite, ensure_qdrant_vector_size, extract_upsert_point,
         extract_upsert_point_with_filter_fallback, inject_qdrant_tenant_scope,
         prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
         qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
@@ -1717,6 +1754,39 @@ mod tests {
 
         let json = scored_point_to_json_projected(&point, Some(&projection));
         assert!(json.get("vector").is_some());
+    }
+
+    #[test]
+    fn scored_point_projection_preserves_quoted_payload_case() {
+        let mut payload = qail_qdrant::Payload::new();
+        payload.insert(
+            "Secret".to_string(),
+            qail_qdrant::PayloadValue::String("exact".to_string()),
+        );
+        payload.insert(
+            "secret".to_string(),
+            qail_qdrant::PayloadValue::String("folded".to_string()),
+        );
+        let point = qail_qdrant::ScoredPoint {
+            id: qail_qdrant::PointId::Num(7),
+            score: 0.95,
+            payload,
+            vector: None,
+        };
+        let mut cmd = Qail::search("embeddings").vector(vec![0.3, 0.2, 0.1]);
+        cmd.columns = vec![Expr::Named("\"Secret\"".to_string())];
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("quoted projection should parse")
+            .expect("projection should be explicit");
+
+        let json = scored_point_to_json_projected(&point, Some(&projection));
+
+        let payload = json
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .expect("projected payload");
+        assert_eq!(payload.get("Secret"), Some(&serde_json::json!("exact")));
+        assert!(!payload.contains_key("secret"));
     }
 
     #[test]
@@ -2284,6 +2354,10 @@ mod tests {
 
     #[test]
     fn qdrant_gateway_rejects_non_finite_vectors_and_thresholds() {
+        let err = ensure_qdrant_vector_finite(&[]).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_VECTOR");
+
         let err = ensure_qdrant_vector_finite(&[0.1, f32::NAN]).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
 
@@ -2298,6 +2372,15 @@ mod tests {
         }];
         let err = ensure_qdrant_conditions_finite(&conditions).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_gateway_rejects_zero_collection_vector_size() {
+        let err = ensure_qdrant_vector_size(0).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_VECTOR_SIZE");
+        ensure_qdrant_vector_size(1).expect("positive vector sizes should pass");
     }
 
     #[test]

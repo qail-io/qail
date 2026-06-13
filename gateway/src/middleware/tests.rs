@@ -188,6 +188,7 @@ fn error_code_bad_request_codes_are_400() {
         "MISSING_POINT_ID",
         "INVALID_POINT_ID",
         "INVALID_VECTOR",
+        "INVALID_VECTOR_SIZE",
         "INVALID_QDRANT_PAYLOAD",
     ] {
         let err = ApiError::bad_request(code, "test");

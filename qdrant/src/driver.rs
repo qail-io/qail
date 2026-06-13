@@ -34,6 +34,11 @@ fn search_limit_from_ast(cmd: &Qail) -> QdrantResult<u64> {
 }
 
 fn validate_vector_finite(label: &str, vector: &[f32]) -> QdrantResult<()> {
+    if vector.is_empty() {
+        return Err(encode_error(format!(
+            "Qdrant {label} vector must not be empty"
+        )));
+    }
     if let Some((idx, value)) = vector
         .iter()
         .enumerate()
@@ -42,6 +47,15 @@ fn validate_vector_finite(label: &str, vector: &[f32]) -> QdrantResult<()> {
         return Err(encode_error(format!(
             "Qdrant {label} contains non-finite vector value at index {idx}: {value}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_vector_size(vector_size: u64) -> QdrantResult<()> {
+    if vector_size == 0 {
+        return Err(encode_error(
+            "Qdrant collection vector_size must be greater than zero",
+        ));
     }
     Ok(())
 }
@@ -642,6 +656,8 @@ impl QdrantDriver {
         distance: crate::Distance,
         on_disk: bool,
     ) -> QdrantResult<()> {
+        validate_vector_size(vector_size)?;
+
         self.buffer.clear();
         encoder::encode_create_collection_proto(
             &mut self.buffer,
@@ -724,7 +740,7 @@ mod validation_tests {
     use super::{
         QdrantError, validate_condition_groups_finite, validate_conditions_finite,
         validate_payload_finite, validate_points_finite, validate_score_threshold,
-        validate_vector_finite,
+        validate_vector_finite, validate_vector_size,
     };
 
     fn assert_encode_error(result: crate::error::QdrantResult<()>, needle: &str) {
@@ -738,6 +754,10 @@ mod validation_tests {
 
     #[test]
     fn rejects_non_finite_search_vectors_and_thresholds() {
+        assert_encode_error(
+            validate_vector_finite("search request", &[]),
+            "must not be empty",
+        );
         assert_encode_error(
             validate_vector_finite("search request", &[0.1, f32::NAN]),
             "non-finite vector value",
@@ -795,6 +815,20 @@ mod validation_tests {
         };
 
         assert_encode_error(validate_points_finite(&[point]), "non-finite vector value");
+
+        let point = Point {
+            id: "p2".into(),
+            vector: Vec::new(),
+            payload: HashMap::new(),
+        };
+
+        assert_encode_error(validate_points_finite(&[point]), "must not be empty");
+    }
+
+    #[test]
+    fn rejects_zero_vector_size_for_collection_create() {
+        assert_encode_error(validate_vector_size(0), "greater than zero");
+        validate_vector_size(1).expect("positive vector sizes should pass");
     }
 }
 
