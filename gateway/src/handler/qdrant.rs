@@ -1094,10 +1094,14 @@ fn validate_qdrant_read_filter_condition(
             Operator::In if qdrant_point_id_array_from_value(&condition.value).is_some() => {
                 return Ok(());
             }
+            Operator::Ne if point_id_from_value(&condition.value).is_some() => return Ok(()),
+            Operator::NotIn if qdrant_point_id_array_from_value(&condition.value).is_some() => {
+                return Ok(());
+            }
             _ => {
                 return Err(ApiError::bad_request(
                     "INVALID_QDRANT_FILTER",
-                    "Qdrant id filters support equality or IN against integer, string, or UUID values",
+                    "Qdrant id filters support equality, inequality, IN, or NOT IN against integer, string, or UUID values",
                 ));
             }
         }
@@ -1105,7 +1109,13 @@ fn validate_qdrant_read_filter_condition(
 
     match (&condition.op, &condition.value) {
         (Operator::Eq, Value::String(_) | Value::Int(_) | Value::Bool(_)) => Ok(()),
+        (Operator::Ne, Value::String(_) | Value::Int(_) | Value::Bool(_)) => Ok(()),
         (Operator::In, Value::Array(values)) if qdrant_match_any_values_are_supported(values) => {
+            Ok(())
+        }
+        (Operator::NotIn, Value::Array(values))
+            if qdrant_match_any_values_are_supported(values) =>
+        {
             Ok(())
         }
         (
@@ -1115,7 +1125,9 @@ fn validate_qdrant_read_filter_condition(
         (Operator::Contains | Operator::Like, Value::String(value)) if !value.trim().is_empty() => {
             Ok(())
         }
+        (Operator::NotLike, Value::String(value)) if !value.trim().is_empty() => Ok(()),
         (Operator::IsNull, Value::Null | Value::NullUuid) => Ok(()),
+        (Operator::IsNotNull, Value::Null | Value::NullUuid) => Ok(()),
         _ => Err(ApiError::bad_request(
             "INVALID_QDRANT_FILTER",
             format!(
@@ -3201,6 +3213,30 @@ mod tests {
                 value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
                 is_array_unnest: false,
             },
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Ne,
+                value: Value::String("deleted".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("priority".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![Value::Int(4), Value::Int(5)]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("deleted_at".to_string()),
+                op: Operator::IsNotNull,
+                value: Value::Null,
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("summary".to_string()),
+                op: Operator::NotLike,
+                value: Value::String("refund".to_string()),
+                is_array_unnest: false,
+            },
         ];
         let groups = vec![vec![
             Condition {
@@ -3215,6 +3251,15 @@ mod tests {
                 value: Value::Array(vec![
                     Value::Int(7),
                     Value::String("uuid-like-id".to_string()),
+                ]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("ID".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![
+                    Value::Int(8),
+                    Value::String("other-uuid-like-id".to_string()),
                 ]),
                 is_array_unnest: false,
             },
@@ -3441,11 +3486,11 @@ mod tests {
     }
 
     #[test]
-    fn qdrant_read_filters_reject_is_not_null_until_transport_supports_it() {
+    fn qdrant_read_filters_reject_invalid_is_not_null_value() {
         let conditions = vec![Condition {
             left: Expr::Named("deleted_at".to_string()),
             op: Operator::IsNotNull,
-            value: Value::Null,
+            value: Value::String("bad".to_string()),
             is_array_unnest: false,
         }];
 

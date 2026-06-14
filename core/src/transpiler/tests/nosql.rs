@@ -329,7 +329,7 @@ fn test_qdrant_transpiler_rejects_unsupported_filter_operator() {
 
     let search = Qail::get("points")
         .vector(vec![0.1])
-        .filter("city", Operator::NotLike, "%Lon%")
+        .filter("city", Operator::NotILike, "%Lon%")
         .to_qdrant_search();
 
     let parsed: serde_json::Value =
@@ -340,6 +340,45 @@ fn test_qdrant_transpiler_rejects_unsupported_filter_operator() {
             .expect("error should be a string")
             .contains("unsupported Qdrant filter operator")
     );
+}
+
+#[test]
+fn test_qdrant_transpiler_encodes_negative_filters() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let search = Qail::get("points")
+        .vector(vec![0.1])
+        .filter("city", Operator::Ne, "London")
+        .filter(
+            "priority",
+            Operator::NotIn,
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        )
+        .filter("deleted_at", Operator::IsNotNull, Value::Null)
+        .filter("summary", Operator::NotLike, "refund")
+        .filter(
+            "id",
+            Operator::NotIn,
+            Value::Array(vec![
+                Value::Int(7),
+                Value::String("uuid-like-id".to_string()),
+            ]),
+        )
+        .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant search JSON must be valid");
+    let filter = &parsed["filter"];
+    let must = filter["must"]
+        .as_array()
+        .expect("negative filters should be nested must clauses");
+
+    assert!(must.iter().all(|clause| clause["must_not"].is_array()));
+    assert!(search.contains("\"match\": { \"value\": \"London\" }"));
+    assert!(search.contains("\"match\": { \"any\": [1, 2] }"));
+    assert!(search.contains("\"is_null\": { \"key\": \"deleted_at\" }"));
+    assert!(search.contains("\"match\": { \"text\": \"refund\" }"));
+    assert!(search.contains("\"has_id\": [7, \"uuid-like-id\"]"));
 }
 
 #[test]

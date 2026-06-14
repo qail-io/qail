@@ -97,6 +97,8 @@ const POINT_ID_UUID: u8 = 0x12;
 const FILTER_SHOULD: u8 = 0x0A;
 /// Filter.must (field 2, repeated Condition) -> 0x12
 const FILTER_MUST: u8 = 0x12;
+/// Filter.must_not (field 3, repeated Condition) -> 0x1A
+const FILTER_MUST_NOT: u8 = 0x1A;
 /// Condition.filter (field 4, nested Filter message) -> 0x22
 const CONDITION_FILTER: u8 = 0x22;
 /// Condition.has_id (field 3, HasIdCondition message) -> 0x1A
@@ -695,8 +697,14 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
         return match (&cond.op, &cond.value) {
             (Operator::Eq, value) => encode_has_id_condition_from_value(value),
             (Operator::In, value) => encode_has_id_condition_from_array(value),
+            (Operator::Ne, value) => {
+                encode_has_id_condition_from_value(value).map(encode_nested_must_not_condition)
+            }
+            (Operator::NotIn, value) => {
+                encode_has_id_condition_from_array(value).map(encode_nested_must_not_condition)
+            }
             _ => Err(QdrantError::Encode(format!(
-                "Qdrant id filters support equality or IN against integer, string, or UUID values: op={:?}, value={:?}",
+                "Qdrant id filters support equality, inequality, IN, or NOT IN against integer, string, or UUID values: op={:?}, value={:?}",
                 cond.op, cond.value
             ))),
         };
@@ -708,6 +716,18 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
         (Operator::Eq, Value::Int(n)) => Ok(encode_field_condition_match_integer(key, *n)),
         (Operator::Eq, Value::Bool(b)) => Ok(encode_field_condition_match_bool(key, *b)),
         (Operator::In, Value::Array(values)) => encode_field_condition_match_any(key, values),
+        (Operator::Ne, Value::String(s)) => Ok(encode_nested_must_not_condition(
+            encode_field_condition_match_keyword(key, s),
+        )),
+        (Operator::Ne, Value::Int(n)) => Ok(encode_nested_must_not_condition(
+            encode_field_condition_match_integer(key, *n),
+        )),
+        (Operator::Ne, Value::Bool(b)) => Ok(encode_nested_must_not_condition(
+            encode_field_condition_match_bool(key, *b),
+        )),
+        (Operator::NotIn, Value::Array(values)) => {
+            encode_field_condition_match_any(key, values).map(encode_nested_must_not_condition)
+        }
 
         // Range conditions
         (Operator::Gt, Value::Int(n)) => Ok(encode_field_condition_range(
@@ -788,6 +808,17 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
         }
 
         (Operator::IsNull, Value::Null | Value::NullUuid) => Ok(encode_is_null_condition(key)),
+        (Operator::IsNotNull, Value::Null | Value::NullUuid) => Ok(
+            encode_nested_must_not_condition(encode_is_null_condition(key)),
+        ),
+        (Operator::NotLike, Value::String(s)) => {
+            if s.trim().is_empty() {
+                return Err(encode_error("Qdrant text filter value must not be empty"));
+            }
+            Ok(encode_nested_must_not_condition(
+                encode_field_condition_match_text(key, s),
+            ))
+        }
 
         _ => Err(QdrantError::Encode(format!(
             "Unsupported Qdrant filter condition: op={:?}, value={:?}",
@@ -885,6 +916,19 @@ fn encode_has_id_conditions(ids: &[crate::PointId]) -> BytesMut {
     cond_buf.put_u8(CONDITION_HAS_ID);
     encode_varint(&mut cond_buf, has_id_buf.len());
     cond_buf.extend_from_slice(&has_id_buf);
+    cond_buf
+}
+
+fn encode_nested_must_not_condition(inner: BytesMut) -> BytesMut {
+    let mut filter_buf = BytesMut::with_capacity(inner.len() + 8);
+    filter_buf.put_u8(FILTER_MUST_NOT);
+    encode_varint(&mut filter_buf, inner.len());
+    filter_buf.extend_from_slice(&inner);
+
+    let mut cond_buf = BytesMut::with_capacity(filter_buf.len() + 8);
+    cond_buf.put_u8(CONDITION_FILTER);
+    encode_varint(&mut cond_buf, filter_buf.len());
+    cond_buf.extend_from_slice(&filter_buf);
     cond_buf
 }
 
@@ -1888,6 +1932,7 @@ mod tests {
     fn test_qdrant_filter_wire_tags_match_current_proto() {
         assert_eq!(FILTER_SHOULD, 0x0A);
         assert_eq!(FILTER_MUST, 0x12);
+        assert_eq!(FILTER_MUST_NOT, 0x1A);
         assert_eq!(CONDITION_HAS_ID, 0x1A);
         assert_eq!(CONDITION_IS_NULL, 0x2A);
     }
@@ -2330,7 +2375,7 @@ mod tests {
         let vector = vec![0.1f32, 0.2];
         let conditions = vec![Condition {
             left: Expr::Named("status".to_string()),
-            op: Operator::NotLike,
+            op: Operator::NotILike,
             value: Value::String("%inactive%".to_string()),
             is_array_unnest: false,
         }];
@@ -2634,6 +2679,56 @@ mod tests {
                 is_array_unnest: false,
             };
             assert_encode_error(encode_condition_message(&condition), "IN filters");
+        }
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_supports_native_negative_filters() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        for condition in [
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Ne,
+                value: Value::String("deleted".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("priority".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("deleted_at".to_string()),
+                op: Operator::IsNotNull,
+                value: Value::Null,
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("summary".to_string()),
+                op: Operator::NotLike,
+                value: Value::String("refund".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![
+                    Value::Int(42),
+                    Value::String("uuid-like-id".to_string()),
+                ]),
+                is_array_unnest: false,
+            },
+        ] {
+            let encoded =
+                encode_condition_message(&condition).expect("negative filter should encode");
+
+            assert_eq!(encoded[0], CONDITION_FILTER);
+            assert!(
+                encoded.contains(&FILTER_MUST_NOT),
+                "negative filter must use Filter.must_not"
+            );
         }
     }
 

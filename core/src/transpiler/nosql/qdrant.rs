@@ -457,17 +457,31 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
                 let col_str = named_qdrant_field(&cond.left)?;
 
                 if qdrant_reserved_field_matches(col_str, "id") {
-                    let ids = match cond.op {
-                        Operator::Eq => point_id_to_json(&cond.value)?,
-                        Operator::In => point_id_array_to_json(&cond.value)?,
+                    let clause = match cond.op {
+                        Operator::Eq => {
+                            let ids = point_id_to_json(&cond.value)?;
+                            format!("{{ \"has_id\": [{ids}] }}")
+                        }
+                        Operator::In => {
+                            let ids = point_id_array_to_json(&cond.value)?;
+                            format!("{{ \"has_id\": [{ids}] }}")
+                        }
+                        Operator::Ne => {
+                            let ids = point_id_to_json(&cond.value)?;
+                            negated_qdrant_clause(format!("{{ \"has_id\": [{ids}] }}"))
+                        }
+                        Operator::NotIn => {
+                            let ids = point_id_array_to_json(&cond.value)?;
+                            negated_qdrant_clause(format!("{{ \"has_id\": [{ids}] }}"))
+                        }
                         _ => {
                             return Err(
-                                "Qdrant id filters support equality or IN against integer, string, or UUID values"
+                                "Qdrant id filters support equality, inequality, IN, or NOT IN against integer, string, or UUID values"
                                     .to_string(),
                             );
                         }
                     };
-                    cage_clauses.push(format!("{{ \"has_id\": [{ids}] }}"));
+                    cage_clauses.push(clause);
                     continue;
                 }
 
@@ -477,11 +491,21 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
                         json_string(col_str),
                         filter_match_value_to_json(&cond.value)?
                     ),
+                    Operator::Ne => negated_qdrant_clause(format!(
+                        "{{ \"key\": {}, \"match\": {{ \"value\": {} }} }}",
+                        json_string(col_str),
+                        filter_match_value_to_json(&cond.value)?
+                    )),
                     Operator::In => format!(
                         "{{ \"key\": {}, \"match\": {{ \"any\": [{}] }} }}",
                         json_string(col_str),
                         filter_array_values_to_json(&cond.value)?
                     ),
+                    Operator::NotIn => negated_qdrant_clause(format!(
+                        "{{ \"key\": {}, \"match\": {{ \"any\": [{}] }} }}",
+                        json_string(col_str),
+                        filter_array_values_to_json(&cond.value)?
+                    )),
                     // Qdrant range: { "key": "price", "range": { "gt": 10.0 } }
                     Operator::Gt => format!(
                         "{{ \"key\": {}, \"range\": {{ \"gt\": {} }} }}",
@@ -509,6 +533,17 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
                         }
                         format!("{{ \"is_null\": {{ \"key\": {} }} }}", json_string(col_str))
                     }
+                    Operator::IsNotNull => {
+                        if !matches!(cond.value, Value::Null | Value::NullUuid) {
+                            return Err(
+                                "Qdrant IS NOT NULL filters require a null value".to_string()
+                            );
+                        }
+                        negated_qdrant_clause(format!(
+                            "{{ \"is_null\": {{ \"key\": {} }} }}",
+                            json_string(col_str)
+                        ))
+                    }
                     Operator::Fuzzy => {
                         if qdrant_reserved_field_matches(col_str, "vector") {
                             continue;
@@ -530,6 +565,19 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
                             json_string(col_str),
                             json_string(value)
                         )
+                    }
+                    Operator::NotLike => {
+                        let Value::String(value) = &cond.value else {
+                            return Err("Qdrant text filters require a string value".to_string());
+                        };
+                        if value.trim().is_empty() {
+                            return Err("Qdrant text filter value cannot be empty".to_string());
+                        }
+                        negated_qdrant_clause(format!(
+                            "{{ \"key\": {}, \"match\": {{ \"text\": {} }} }}",
+                            json_string(col_str),
+                            json_string(value)
+                        ))
                     }
                     _ => return Err(format!("unsupported Qdrant filter operator {:?}", cond.op)),
                 };
@@ -564,6 +612,10 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
         parts.push(format!("\"must\": [{}]", musts.join(", ")));
     }
     Ok(format!("{{ {} }}", parts.join(", ")))
+}
+
+fn negated_qdrant_clause(clause: String) -> String {
+    format!("{{ \"must_not\": [{clause}] }}")
 }
 
 fn filter_match_value_to_json(v: &Value) -> Result<String, String> {

@@ -355,6 +355,7 @@ pub fn encode_conditions_to_filter(
     use qail_core::ast::{Expr, Operator, Value};
 
     let mut clauses = Vec::with_capacity(conditions.len());
+    let mut must_not_clauses = Vec::new();
     for cond in conditions {
         // Extract field name from left expression
         let key = match &cond.left {
@@ -375,6 +376,20 @@ pub fn encode_conditions_to_filter(
                 },
                 Operator::In => match point_id_values_to_json(&cond.value) {
                     Some(ids) => ids,
+                    None => return impossible_filter(),
+                },
+                Operator::Ne => match point_id_value_to_json(&cond.value) {
+                    Some(id) => {
+                        must_not_clauses.push(json!({ "has_id": [id] }));
+                        continue;
+                    }
+                    None => return impossible_filter(),
+                },
+                Operator::NotIn => match point_id_values_to_json(&cond.value) {
+                    Some(ids) => {
+                        must_not_clauses.push(json!({ "has_id": ids }));
+                        continue;
+                    }
                     None => return impossible_filter(),
                 },
                 _ => return impossible_filter(),
@@ -398,6 +413,27 @@ pub fn encode_conditions_to_filter(
                 "key": key,
                 "match": { "value": b }
             }),
+            (Operator::Ne, Value::String(s)) => {
+                must_not_clauses.push(json!({
+                    "key": key,
+                    "match": { "value": s }
+                }));
+                continue;
+            }
+            (Operator::Ne, Value::Int(n)) => {
+                must_not_clauses.push(json!({
+                    "key": key,
+                    "match": { "value": n }
+                }));
+                continue;
+            }
+            (Operator::Ne, Value::Bool(b)) => {
+                must_not_clauses.push(json!({
+                    "key": key,
+                    "match": { "value": b }
+                }));
+                continue;
+            }
 
             // Range operators
             (Operator::Gt, Value::Int(n)) => json!({
@@ -443,11 +479,27 @@ pub fn encode_conditions_to_filter(
                     "match": { "any": values }
                 })
             }
+            (Operator::NotIn, Value::Array(arr)) => {
+                let Some(values) = values_to_json(arr) else {
+                    return impossible_filter();
+                };
+                must_not_clauses.push(json!({
+                    "key": key,
+                    "match": { "any": values }
+                }));
+                continue;
+            }
 
             // IsNull / IsNotNull
             (Operator::IsNull, Value::Null | Value::NullUuid) => json!({
                 "is_null": { "key": key }
             }),
+            (Operator::IsNotNull, Value::Null | Value::NullUuid) => {
+                must_not_clauses.push(json!({
+                    "is_null": { "key": key }
+                }));
+                continue;
+            }
 
             // Text/keyword match with contains
             (Operator::Contains | Operator::Like, Value::String(s)) if !s.trim().is_empty() => {
@@ -455,6 +507,13 @@ pub fn encode_conditions_to_filter(
                     "key": key,
                     "match": { "text": s }
                 })
+            }
+            (Operator::NotLike, Value::String(s)) if !s.trim().is_empty() => {
+                must_not_clauses.push(json!({
+                    "key": key,
+                    "match": { "text": s }
+                }));
+                continue;
             }
 
             _ => return impossible_filter(),
@@ -465,9 +524,19 @@ pub fn encode_conditions_to_filter(
 
     // Use "should" for OR, "must" for AND
     if is_or {
+        clauses.extend(
+            must_not_clauses
+                .into_iter()
+                .map(|clause| json!({ "must_not": [clause] })),
+        );
         json!({ "should": clauses })
     } else {
-        json!({ "must": clauses })
+        let mut filter = serde_json::Map::new();
+        filter.insert("must".to_string(), JsonValue::Array(clauses));
+        if !must_not_clauses.is_empty() {
+            filter.insert("must_not".to_string(), JsonValue::Array(must_not_clauses));
+        }
+        JsonValue::Object(filter)
     }
 }
 
@@ -1255,6 +1324,60 @@ mod tests {
     }
 
     #[test]
+    fn encode_conditions_to_filter_supports_native_negative_filters_json() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Ne,
+                value: Value::String("deleted".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("priority".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("deleted_at".to_string()),
+                op: Operator::IsNotNull,
+                value: Value::Null,
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("summary".to_string()),
+                op: Operator::NotLike,
+                value: Value::String("refund".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::NotIn,
+                value: Value::Array(vec![Value::Int(42), Value::String("uuid-like-id".into())]),
+                is_array_unnest: false,
+            },
+        ];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"], json!([]));
+        assert_eq!(filter["must_not"][0]["match"]["value"], "deleted");
+        assert_eq!(filter["must_not"][1]["match"]["any"], json!([1, 2]));
+        assert_eq!(filter["must_not"][2]["is_null"]["key"], "deleted_at");
+        assert_eq!(filter["must_not"][3]["match"]["text"], "refund");
+        assert_eq!(filter["must_not"][4]["has_id"], json!([42, "uuid-like-id"]));
+
+        let filter = encode_conditions_to_filter(&conditions[..1], true);
+
+        assert_eq!(
+            filter["should"][0]["must_not"][0]["match"]["value"],
+            "deleted"
+        );
+    }
+
+    #[test]
     fn encode_conditions_to_filter_supports_null_uuid_as_is_null_json() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 
@@ -1276,7 +1399,7 @@ mod tests {
 
         let conditions = vec![Condition {
             left: Expr::Named("status".to_string()),
-            op: Operator::Ne,
+            op: Operator::NotILike,
             value: Value::String("deleted".to_string()),
             is_array_unnest: false,
         }];
@@ -1293,7 +1416,7 @@ mod tests {
         let conditions = vec![Condition {
             left: Expr::Named("deleted_at".to_string()),
             op: Operator::IsNotNull,
-            value: Value::Null,
+            value: Value::String("not-null".to_string()),
             is_array_unnest: false,
         }];
 
