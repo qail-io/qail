@@ -92,7 +92,7 @@ jobs:
               echo "::error::internal dependency version drift: $line"
               exit 1
             fi
-          done < <(grep -RInE 'qail-(core|pg|qdrant|gateway|encoder|lsp|workflow)[^=]*=.*version = "' */Cargo.toml || true)
+          done < <(grep -RInE 'qail-(core|pg|qdrant|gateway|encoder|lsp|workflow)[^=]*=.*version = "' ./*/Cargo.toml || true)
 
       - name: Format
         run: cargo fmt --all -- --check
