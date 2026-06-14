@@ -1208,7 +1208,7 @@ fn test_qdrant_upsert_rejects_payload_shape_drift() {
 
 #[test]
 fn test_qdrant_delete_rejects_invalid_id_filters() {
-    use crate::ast::{Action, Operator, Qail};
+    use crate::ast::{Action, Operator, Qail, Value};
 
     let uppercase_id = Qail {
         action: Action::Del,
@@ -1218,7 +1218,44 @@ fn test_qdrant_delete_rejects_invalid_id_filters() {
     .filter("ID", Operator::Eq, 7);
     let parsed: serde_json::Value = serde_json::from_str(&uppercase_id.to_qdrant_search())
         .expect("qdrant delete JSON must be valid");
-    assert_eq!(parsed["points"], serde_json::json!([7]));
+    assert_eq!(
+        parsed["filter"]["must"][0]["has_id"],
+        serde_json::json!([7])
+    );
+
+    let scoped_id_delete = Qail {
+        action: Action::Del,
+        table: "points".to_string(),
+        ..Default::default()
+    }
+    .filter("id", Operator::Eq, 7)
+    .filter("tenant_id", Operator::Eq, "tenant-a");
+    let parsed: serde_json::Value = serde_json::from_str(&scoped_id_delete.to_qdrant_search())
+        .expect("scoped qdrant delete JSON must be valid");
+    assert!(parsed.get("points").is_none());
+    assert_eq!(
+        parsed["filter"]["must"][0]["has_id"],
+        serde_json::json!([7])
+    );
+    assert_eq!(parsed["filter"]["must"][1]["key"], "tenant_id");
+    assert_eq!(parsed["filter"]["must"][1]["match"]["value"], "tenant-a");
+
+    let id_in_delete = Qail {
+        action: Action::Del,
+        table: "points".to_string(),
+        ..Default::default()
+    }
+    .filter(
+        "id",
+        Operator::In,
+        Value::Array(vec![Value::Int(7), Value::String("point-8".to_string())]),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&id_in_delete.to_qdrant_search())
+        .expect("id IN qdrant delete JSON must be valid");
+    assert_eq!(
+        parsed["filter"]["must"][0]["has_id"],
+        serde_json::json!([7, "point-8"])
+    );
 
     let bad_id_operator = Qail {
         action: Action::Del,

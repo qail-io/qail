@@ -290,34 +290,15 @@ fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
 fn build_qdrant_delete(cmd: &Qail) -> Result<String, String> {
     // POST /collections/{name}/points/delete
     // Body: { "points": [1, 2, 3] } OR { "filter": ... }
-
-    // If ID specified, delete by ID. Else delete by filter.
-    let mut ids = Vec::new();
-
-    for cage in &cmd.cages {
-        if let CageKind::Filter = cage.kind {
-            for cond in &cage.conditions {
-                let field = named_qdrant_field(&cond.left)?;
-                if qdrant_reserved_field_matches(field, "id") {
-                    if cond.op != Operator::Eq {
-                        return Err("Qdrant delete id filters support only equality".to_string());
-                    }
-                    ids.push(point_id_to_json(&cond.value)?);
-                }
-            }
-        }
+    //
+    // Use the filter selector even for id predicates. A point-id selector cannot
+    // be combined with tenant/policy payload filters, and extracting ids would
+    // silently drop those additional predicates.
+    let filter = build_filter(cmd)?;
+    if filter.is_empty() {
+        return Err("Qdrant delete requires an id or filter condition".to_string());
     }
-
-    if !ids.is_empty() {
-        Ok(format!("{{ \"points\": [{}] }}", ids.join(", ")))
-    } else {
-        // Delete by filter
-        let filter = build_filter(cmd)?;
-        if filter.is_empty() {
-            return Err("Qdrant delete requires an id or filter condition".to_string());
-        }
-        Ok(format!("{{ \"filter\": {} }}", filter))
-    }
+    Ok(format!("{{ \"filter\": {} }}", filter))
 }
 
 fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
