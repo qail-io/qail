@@ -113,6 +113,21 @@ fn point_id_to_json(value: &Value) -> Result<String, String> {
     }
 }
 
+fn point_id_array_to_json(value: &Value) -> Result<String, String> {
+    let Value::Array(values) = value else {
+        return Err("Qdrant id IN filters require an array value".to_string());
+    };
+    if values.is_empty() {
+        return Err("Qdrant id IN filters require at least one id".to_string());
+    }
+    let values = values
+        .iter()
+        .map(point_id_to_json)
+        .map(|result| result.map_err(|err| format!("Qdrant id IN value is invalid: {err}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(values.join(", "))
+}
+
 fn qdrant_limit(cmd: &Qail) -> Result<usize, String> {
     let mut limit = None;
     for cage in &cmd.cages {
@@ -427,16 +442,17 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
                 let col_str = named_qdrant_field(&cond.left)?;
 
                 if qdrant_reserved_field_matches(col_str, "id") {
-                    if cond.op != Operator::Eq {
-                        return Err(
-                            "Qdrant id filters support only equality against integer, string, or UUID values"
-                                .to_string(),
-                        );
-                    }
-                    cage_clauses.push(format!(
-                        "{{ \"has_id\": [{}] }}",
-                        point_id_to_json(&cond.value)?
-                    ));
+                    let ids = match cond.op {
+                        Operator::Eq => point_id_to_json(&cond.value)?,
+                        Operator::In => point_id_array_to_json(&cond.value)?,
+                        _ => {
+                            return Err(
+                                "Qdrant id filters support equality or IN against integer, string, or UUID values"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    cage_clauses.push(format!("{{ \"has_id\": [{ids}] }}"));
                     continue;
                 }
 
@@ -539,14 +555,12 @@ fn filter_match_value_to_json(v: &Value) -> Result<String, String> {
     match v {
         Value::String(s) => Ok(json_string(s)),
         Value::Int(n) => Ok(n.to_string()),
-        Value::Float(n) if n.is_finite() => Ok(n.to_string()),
-        Value::Float(_) => Err("Qdrant equality filter values must be finite numbers".to_string()),
         Value::Bool(b) => Ok(b.to_string()),
         Value::Null | Value::NullUuid => {
             Err("Qdrant equality filters cannot match null; use IS NULL".to_string())
         }
         other => Err(format!(
-            "Qdrant equality filters support only string, integer, finite float, or bool values, got {other}"
+            "Qdrant equality filters support only string, integer, or bool values, got {other}"
         )),
     }
 }
@@ -558,12 +572,30 @@ fn filter_array_values_to_json(v: &Value) -> Result<String, String> {
     if values.is_empty() {
         return Err("Qdrant IN filters require at least one value".to_string());
     }
-    let values = values
-        .iter()
-        .map(filter_match_value_to_json)
-        .map(|result| result.map_err(|err| format!("Qdrant IN filters value is invalid: {err}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(values.join(", "))
+    if values.iter().all(|value| matches!(value, Value::String(_))) {
+        let values = values
+            .iter()
+            .map(|value| match value {
+                Value::String(value) => Ok(json_string(value)),
+                _ => unreachable!("checked by all()"),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        return Ok(values.join(", "));
+    }
+    if values.iter().all(|value| matches!(value, Value::Int(_))) {
+        let values = values
+            .iter()
+            .map(|value| match value {
+                Value::Int(value) => Ok(value.to_string()),
+                _ => unreachable!("checked by all()"),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        return Ok(values.join(", "));
+    }
+    Err(
+        "Qdrant IN filters support only a non-empty homogeneous string or integer array"
+            .to_string(),
+    )
 }
 
 fn value_to_json(v: &Value) -> Result<String, String> {

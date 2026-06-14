@@ -367,14 +367,19 @@ pub fn encode_conditions_to_filter(
             return impossible_filter();
         }
 
-        if key == "id" {
-            let Some(id) = point_id_value_to_json(&cond.value) else {
-                return impossible_filter();
+        if key.eq_ignore_ascii_case("id") {
+            let ids = match cond.op {
+                Operator::Eq => match point_id_value_to_json(&cond.value) {
+                    Some(id) => vec![id],
+                    None => return impossible_filter(),
+                },
+                Operator::In => match point_id_values_to_json(&cond.value) {
+                    Some(ids) => ids,
+                    None => return impossible_filter(),
+                },
+                _ => return impossible_filter(),
             };
-            if cond.op != Operator::Eq {
-                return impossible_filter();
-            }
-            clauses.push(json!({ "has_id": [id] }));
+            clauses.push(json!({ "has_id": ids }));
             continue;
         }
 
@@ -388,10 +393,6 @@ pub fn encode_conditions_to_filter(
             (Operator::Eq, Value::Int(n)) => json!({
                 "key": key,
                 "match": { "value": n }
-            }),
-            (Operator::Eq, Value::Float(f)) if f.is_finite() => json!({
-                "key": key,
-                "match": { "value": f }
             }),
             (Operator::Eq, Value::Bool(b)) => json!({
                 "key": key,
@@ -485,6 +486,16 @@ fn point_id_value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
     }
 }
 
+fn point_id_values_to_json(value: &qail_core::ast::Value) -> Option<Vec<JsonValue>> {
+    let qail_core::ast::Value::Array(values) = value else {
+        return None;
+    };
+    if values.is_empty() {
+        return None;
+    }
+    values.iter().map(point_id_value_to_json).collect()
+}
+
 fn impossible_filter() -> JsonValue {
     json!({
         "must": [{
@@ -498,17 +509,24 @@ fn values_to_json(values: &[qail_core::ast::Value]) -> Option<Vec<JsonValue>> {
     if values.is_empty() {
         return None;
     }
-    values.iter().map(value_to_json).collect()
+    if values
+        .iter()
+        .all(|value| matches!(value, qail_core::ast::Value::String(_)))
+        || values
+            .iter()
+            .all(|value| matches!(value, qail_core::ast::Value::Int(_)))
+    {
+        return values.iter().map(value_to_json).collect();
+    }
+    None
 }
 
-/// Convert Value to JsonValue for filter encoding.
+/// Convert Value to JsonValue for filter match-any encoding.
 fn value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
     use qail_core::ast::Value;
     match value {
         Value::String(s) => Some(json!(s)),
         Value::Int(n) => Some(json!(n)),
-        Value::Float(f) if f.is_finite() => Some(json!(f)),
-        Value::Bool(b) => Some(json!(b)),
         _ => None,
     }
 }
@@ -1114,7 +1132,7 @@ mod tests {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 
         let conditions = vec![Condition {
-            left: Expr::Named("id".to_string()),
+            left: Expr::Named("ID".to_string()),
             op: Operator::Eq,
             value: Value::Int(42),
             is_array_unnest: false,
@@ -1124,6 +1142,44 @@ mod tests {
 
         assert_eq!(filter["must"][0]["has_id"][0], 42);
         assert!(filter["must"][0]["key"].is_null());
+    }
+
+    #[test]
+    fn encode_conditions_to_filter_supports_native_in_json() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let conditions = vec![
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::String("open".to_string()),
+                    Value::String("closed".to_string()),
+                ]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("priority".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("ID".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::Int(42),
+                    Value::String("uuid-like-id".to_string()),
+                ]),
+                is_array_unnest: false,
+            },
+        ];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["match"]["any"], json!(["open", "closed"]));
+        assert_eq!(filter["must"][1]["match"]["any"], json!([1, 2]));
+        assert_eq!(filter["must"][2]["has_id"], json!([42, "uuid-like-id"]));
     }
 
     #[test]
@@ -1236,6 +1292,24 @@ mod tests {
         }];
         let filter = encode_conditions_to_filter(&conditions, false);
         assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+
+        let conditions = vec![Condition {
+            left: Expr::Named("category".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![Value::String("a".to_string()), Value::Int(1)]),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
+
+        let conditions = vec![Condition {
+            left: Expr::Named("category".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![Value::Bool(true)]),
+            is_array_unnest: false,
+        }];
+        let filter = encode_conditions_to_filter(&conditions, false);
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
     }
 
     #[test]
@@ -1253,6 +1327,17 @@ mod tests {
 
         assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
         assert!(!filter.to_string().contains("null"));
+
+        let conditions = vec![Condition {
+            left: Expr::Named("score".to_string()),
+            op: Operator::Eq,
+            value: Value::Float(1.5),
+            is_array_unnest: false,
+        }];
+
+        let filter = encode_conditions_to_filter(&conditions, false);
+
+        assert_eq!(filter["must"][0]["key"], "__qail_unrepresentable_filter__");
     }
 
     #[test]

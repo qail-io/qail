@@ -93,10 +93,10 @@ const POINT_ID_UUID: u8 = 0x12;
 // Filter Field Tags (qdrant.Filter message)
 // ============================================================================
 
-/// Filter.must (field 1, repeated Condition) -> 0x0A
-const FILTER_MUST: u8 = 0x0A;
-/// Filter.should (field 2, repeated Condition) -> 0x12
-const FILTER_SHOULD: u8 = 0x12;
+/// Filter.should (field 1, repeated Condition) -> 0x0A
+const FILTER_SHOULD: u8 = 0x0A;
+/// Filter.must (field 2, repeated Condition) -> 0x12
+const FILTER_MUST: u8 = 0x12;
 /// Condition.filter (field 4, nested Filter message) -> 0x22
 const CONDITION_FILTER: u8 = 0x22;
 /// Condition.has_id (field 3, HasIdCondition message) -> 0x1A
@@ -561,8 +561,8 @@ pub fn encode_search_with_vectors_true(buf: &mut BytesMut) {
 /// Qdrant's Filter proto:
 /// ```text
 /// message Filter {
-///   repeated Condition must = 1;
-///   repeated Condition should = 2;
+///   repeated Condition should = 1;
+///   repeated Condition must = 2;
 ///   repeated Condition must_not = 3;
 /// }
 /// ```
@@ -669,11 +669,12 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
         ));
     }
 
-    if key == "id" {
+    if key.eq_ignore_ascii_case("id") {
         return match (&cond.op, &cond.value) {
             (Operator::Eq, value) => encode_has_id_condition_from_value(value),
+            (Operator::In, value) => encode_has_id_condition_from_array(value),
             _ => Err(QdrantError::Encode(format!(
-                "Qdrant id filters support only equality against integer, string, or UUID values: op={:?}, value={:?}",
+                "Qdrant id filters support equality or IN against integer, string, or UUID values: op={:?}, value={:?}",
                 cond.op, cond.value
             ))),
         };
@@ -683,11 +684,8 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
         // Match (equality) conditions
         (Operator::Eq, Value::String(s)) => Ok(encode_field_condition_match_keyword(key, s)),
         (Operator::Eq, Value::Int(n)) => Ok(encode_field_condition_match_integer(key, *n)),
-        (Operator::Eq, Value::Float(f)) => {
-            ensure_f64_finite(*f, "filter match float")?;
-            Ok(encode_field_condition_match_float(key, *f))
-        }
         (Operator::Eq, Value::Bool(b)) => Ok(encode_field_condition_match_bool(key, *b)),
+        (Operator::In, Value::Array(values)) => encode_field_condition_match_any(key, values),
 
         // Range conditions
         (Operator::Gt, Value::Int(n)) => Ok(encode_field_condition_range(
@@ -817,12 +815,49 @@ fn encode_has_id_condition_from_value(value: &qail_core::ast::Value) -> QdrantRe
     Ok(encode_has_id_condition(&id))
 }
 
+fn encode_has_id_condition_from_array(value: &qail_core::ast::Value) -> QdrantResult<BytesMut> {
+    let qail_core::ast::Value::Array(values) = value else {
+        return Err(QdrantError::Encode(
+            "Qdrant id IN filters require an array value".to_string(),
+        ));
+    };
+    if values.is_empty() {
+        return Err(QdrantError::Encode(
+            "Qdrant id IN filters require at least one id".to_string(),
+        ));
+    }
+
+    let ids = values
+        .iter()
+        .map(|value| {
+            let id = point_id_from_ast_value(value).ok_or_else(|| {
+                QdrantError::Encode(
+                    "Qdrant id IN filters support only integer, string, or UUID values".to_string(),
+                )
+            })?;
+            ensure_point_id(&id, "id IN filter")?;
+            Ok(id)
+        })
+        .collect::<QdrantResult<Vec<_>>>()?;
+    Ok(encode_has_id_conditions(&ids))
+}
+
 fn encode_has_id_condition(id: &crate::PointId) -> BytesMut {
-    let id_buf = encode_point_id_message(id);
-    let mut has_id_buf = BytesMut::with_capacity(id_buf.len() + 4);
-    has_id_buf.put_u8(POINT_ID);
-    encode_varint(&mut has_id_buf, id_buf.len());
-    has_id_buf.extend_from_slice(&id_buf);
+    encode_has_id_conditions(std::slice::from_ref(id))
+}
+
+fn encode_has_id_conditions(ids: &[crate::PointId]) -> BytesMut {
+    let ids_len: usize = ids
+        .iter()
+        .map(|id| encode_point_id_message(id).len() + 2)
+        .sum();
+    let mut has_id_buf = BytesMut::with_capacity(ids_len);
+    for id in ids {
+        let id_buf = encode_point_id_message(id);
+        has_id_buf.put_u8(POINT_ID);
+        encode_varint(&mut has_id_buf, id_buf.len());
+        has_id_buf.extend_from_slice(&id_buf);
+    }
 
     let mut cond_buf = BytesMut::with_capacity(has_id_buf.len() + 4);
     cond_buf.put_u8(CONDITION_HAS_ID);
@@ -905,34 +940,11 @@ fn encode_field_condition_match_integer(key: &str, value: i64) -> BytesMut {
     cond_buf
 }
 
-/// Encode a FieldCondition with Match { integer } using float payload.
-fn encode_field_condition_match_float(key: &str, value: f64) -> BytesMut {
-    // Match message: field 5 = double (double)
-    let mut match_buf = BytesMut::with_capacity(10);
-    match_buf.put_u8(0x29); // field 5 (double), wire FIXED64
-    match_buf.put_f64_le(value);
-
-    let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
-    fc_buf.put_u8(0x0A);
-    encode_varint(&mut fc_buf, key.len());
-    fc_buf.extend_from_slice(key.as_bytes());
-    fc_buf.put_u8(0x12);
-    encode_varint(&mut fc_buf, match_buf.len());
-    fc_buf.extend_from_slice(&match_buf);
-
-    let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
-    cond_buf.put_u8(0x0A);
-    encode_varint(&mut cond_buf, fc_buf.len());
-    cond_buf.extend_from_slice(&fc_buf);
-
-    cond_buf
-}
-
 /// Encode a FieldCondition with Match { boolean }.
 fn encode_field_condition_match_bool(key: &str, value: bool) -> BytesMut {
-    // Match message: field 4 = boolean (bool)
+    // Match message: field 3 = boolean (bool)
     let mut match_buf = BytesMut::with_capacity(4);
-    match_buf.put_u8(0x20); // field 4 (boolean), wire VARINT
+    match_buf.put_u8(0x18); // field 3 (boolean), wire VARINT
     match_buf.put_u8(if value { 1 } else { 0 });
 
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
@@ -953,12 +965,77 @@ fn encode_field_condition_match_bool(key: &str, value: bool) -> BytesMut {
 
 /// Encode a FieldCondition with Match { text } for full-text search.
 fn encode_field_condition_match_text(key: &str, value: &str) -> BytesMut {
-    // Match message: field 3 = text (string)
+    // Match message: field 4 = text (string)
     let mut match_buf = BytesMut::with_capacity(value.len() + 8);
-    match_buf.put_u8(0x1A); // field 3 (text), wire LEN
+    match_buf.put_u8(0x22); // field 4 (text), wire LEN
     encode_varint(&mut match_buf, value.len());
     match_buf.extend_from_slice(value.as_bytes());
 
+    let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
+    fc_buf.put_u8(0x0A);
+    encode_varint(&mut fc_buf, key.len());
+    fc_buf.extend_from_slice(key.as_bytes());
+    fc_buf.put_u8(0x12);
+    encode_varint(&mut fc_buf, match_buf.len());
+    fc_buf.extend_from_slice(&match_buf);
+
+    let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
+    cond_buf.put_u8(0x0A);
+    encode_varint(&mut cond_buf, fc_buf.len());
+    cond_buf.extend_from_slice(&fc_buf);
+
+    cond_buf
+}
+
+fn encode_field_condition_match_any(
+    key: &str,
+    values: &[qail_core::ast::Value],
+) -> QdrantResult<BytesMut> {
+    use qail_core::ast::Value;
+
+    if values.is_empty() {
+        return Err(encode_error("Qdrant IN filters require at least one value"));
+    }
+    if values.iter().all(|value| matches!(value, Value::String(_))) {
+        let mut repeated = BytesMut::with_capacity(values.len() * 16);
+        for value in values {
+            let Value::String(value) = value else {
+                unreachable!("checked by all()");
+            };
+            repeated.put_u8(0x0A); // RepeatedStrings.strings, field 1
+            encode_varint(&mut repeated, value.len());
+            repeated.extend_from_slice(value.as_bytes());
+        }
+
+        let mut match_buf = BytesMut::with_capacity(repeated.len() + 4);
+        match_buf.put_u8(0x2A); // Match.keywords, field 5
+        encode_varint(&mut match_buf, repeated.len());
+        match_buf.extend_from_slice(&repeated);
+        return Ok(encode_field_condition_match_message(key, match_buf));
+    }
+    if values.iter().all(|value| matches!(value, Value::Int(_))) {
+        let mut repeated = BytesMut::with_capacity(values.len() * 10);
+        for value in values {
+            let Value::Int(value) = value else {
+                unreachable!("checked by all()");
+            };
+            repeated.put_u8(0x08); // RepeatedIntegers.integers, field 1
+            encode_varint_u64(&mut repeated, *value as u64);
+        }
+
+        let mut match_buf = BytesMut::with_capacity(repeated.len() + 4);
+        match_buf.put_u8(0x32); // Match.integers, field 6
+        encode_varint(&mut match_buf, repeated.len());
+        match_buf.extend_from_slice(&repeated);
+        return Ok(encode_field_condition_match_message(key, match_buf));
+    }
+
+    Err(encode_error(
+        "Qdrant IN filters support only a non-empty homogeneous string or integer array",
+    ))
+}
+
+fn encode_field_condition_match_message(key: &str, match_buf: BytesMut) -> BytesMut {
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
     fc_buf.put_u8(0x0A);
     encode_varint(&mut fc_buf, key.len());
@@ -1786,6 +1863,14 @@ mod tests {
     }
 
     #[test]
+    fn test_qdrant_filter_wire_tags_match_current_proto() {
+        assert_eq!(FILTER_SHOULD, 0x0A);
+        assert_eq!(FILTER_MUST, 0x12);
+        assert_eq!(CONDITION_HAS_ID, 0x1A);
+        assert_eq!(CONDITION_IS_NULL, 0x2A);
+    }
+
+    #[test]
     fn test_encode_search_basic() {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -2254,7 +2339,7 @@ mod tests {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 
         let condition = Condition {
-            left: Expr::Named("id".to_string()),
+            left: Expr::Named("ID".to_string()),
             op: Operator::Eq,
             value: Value::Int(42),
             is_array_unnest: false,
@@ -2268,6 +2353,30 @@ mod tests {
                 .windows(2)
                 .any(|window| window == [POINT_ID_NUM, 42]),
             "encoded HasIdCondition should contain numeric PointId"
+        );
+
+        let condition = Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![
+                Value::Int(42),
+                Value::String("uuid-like-id".to_string()),
+            ]),
+            is_array_unnest: false,
+        };
+
+        let encoded = encode_condition_message(&condition).expect("id IN filter should encode");
+
+        assert_eq!(encoded[0], CONDITION_HAS_ID);
+        assert!(
+            encoded
+                .windows(2)
+                .any(|window| window == [POINT_ID_NUM, 42])
+        );
+        assert!(
+            encoded
+                .windows("uuid-like-id".len())
+                .any(|window| window == b"uuid-like-id")
         );
     }
 
@@ -2291,6 +2400,14 @@ mod tests {
             }
             other => panic!("expected encode error, got {:?}", other),
         }
+
+        let condition = Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![]),
+            is_array_unnest: false,
+        };
+        assert_encode_error(encode_condition_message(&condition), "id IN filters");
     }
 
     #[test]
@@ -2300,10 +2417,10 @@ mod tests {
         let mut buf = BytesMut::with_capacity(512);
         let vector = vec![0.1f32, 0.2];
 
-        let non_finite_match = vec![Condition {
+        let unsupported_float_match = vec![Condition {
             left: Expr::Named("score".to_string()),
             op: Operator::Eq,
-            value: Value::Float(f64::NAN),
+            value: Value::Float(1.5),
             is_array_unnest: false,
         }];
         assert_encode_error(
@@ -2317,10 +2434,10 @@ mod tests {
                     vector_name: None,
                     with_vectors: false,
                 },
-                &non_finite_match,
+                &unsupported_float_match,
                 false,
             ),
-            "filter match float",
+            "Unsupported Qdrant filter condition",
         );
 
         let non_finite_range = vec![Condition {
@@ -2376,6 +2493,88 @@ mod tests {
             is_array_unnest: false,
         };
         assert_encode_error(encode_condition_message(&empty_id), "id filter");
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_uses_current_match_wire_tags() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let bool_condition = Condition {
+            left: Expr::Named("archived".to_string()),
+            op: Operator::Eq,
+            value: Value::Bool(false),
+            is_array_unnest: false,
+        };
+        let encoded = encode_condition_message(&bool_condition).expect("bool match should encode");
+        assert!(
+            encoded.windows(2).any(|window| window == [0x18, 0x00]),
+            "bool match should use Match.boolean field 3"
+        );
+
+        let text_condition = Condition {
+            left: Expr::Named("summary".to_string()),
+            op: Operator::Contains,
+            value: Value::String("refund".to_string()),
+            is_array_unnest: false,
+        };
+        let encoded = encode_condition_message(&text_condition).expect("text match should encode");
+        assert!(
+            encoded
+                .windows(8)
+                .any(|window| window == [0x22, 0x06, b'r', b'e', b'f', b'u', b'n', b'd']),
+            "text match should use Match.text field 4"
+        );
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_supports_native_in() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let string_condition = Condition {
+            left: Expr::Named("status".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![
+                Value::String("open".to_string()),
+                Value::String("closed".to_string()),
+            ]),
+            is_array_unnest: false,
+        };
+        let encoded =
+            encode_condition_message(&string_condition).expect("string IN match should encode");
+        assert!(
+            encoded.contains(&0x2A),
+            "string IN should use Match.keywords field 5"
+        );
+        assert!(
+            encoded.windows(4).any(|window| window == b"open"),
+            "string IN should contain first keyword"
+        );
+
+        let int_condition = Condition {
+            left: Expr::Named("priority".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
+            is_array_unnest: false,
+        };
+        let encoded = encode_condition_message(&int_condition).expect("int IN match should encode");
+        assert!(
+            encoded.contains(&0x32),
+            "integer IN should use Match.integers field 6"
+        );
+
+        for bad in [
+            Value::Array(vec![]),
+            Value::Array(vec![Value::String("open".to_string()), Value::Int(1)]),
+            Value::Array(vec![Value::Bool(true)]),
+        ] {
+            let condition = Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::In,
+                value: bad,
+                is_array_unnest: false,
+            };
+            assert_encode_error(encode_condition_message(&condition), "IN filters");
+        }
     }
 
     #[test]

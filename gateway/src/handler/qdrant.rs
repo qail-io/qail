@@ -1089,17 +1089,23 @@ fn validate_qdrant_read_filter_condition(
         ));
     }
     if qdrant_reserved_field_matches(field, "id") {
-        if condition.op == Operator::Eq && point_id_from_value(&condition.value).is_some() {
-            return Ok(());
+        match condition.op {
+            Operator::Eq if point_id_from_value(&condition.value).is_some() => return Ok(()),
+            Operator::In if qdrant_point_id_array_from_value(&condition.value).is_some() => {
+                return Ok(());
+            }
+            _ => {
+                return Err(ApiError::bad_request(
+                    "INVALID_QDRANT_FILTER",
+                    "Qdrant id filters support equality or IN against integer, string, or UUID values",
+                ));
+            }
         }
-        return Err(ApiError::bad_request(
-            "INVALID_QDRANT_FILTER",
-            "Qdrant id filters support only equality against integer, string, or UUID values",
-        ));
     }
 
     match (&condition.op, &condition.value) {
-        (Operator::Eq, Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_)) => {
+        (Operator::Eq, Value::String(_) | Value::Int(_) | Value::Bool(_)) => Ok(()),
+        (Operator::In, Value::Array(values)) if qdrant_match_any_values_are_supported(values) => {
             Ok(())
         }
         (
@@ -1142,6 +1148,28 @@ fn point_id_from_value(value: &qail_core::ast::Value) -> Option<qail_qdrant::Poi
         Value::Uuid(u) => Some(qail_qdrant::PointId::Uuid(u.to_string())),
         _ => None,
     }
+}
+
+fn qdrant_point_id_array_from_value(
+    value: &qail_core::ast::Value,
+) -> Option<Vec<qail_qdrant::PointId>> {
+    let qail_core::ast::Value::Array(values) = value else {
+        return None;
+    };
+    if values.is_empty() {
+        return None;
+    }
+    values.iter().map(point_id_from_value).collect()
+}
+
+fn qdrant_match_any_values_are_supported(values: &[qail_core::ast::Value]) -> bool {
+    !values.is_empty()
+        && (values
+            .iter()
+            .all(|value| matches!(value, qail_core::ast::Value::String(_)))
+            || values
+                .iter()
+                .all(|value| matches!(value, qail_core::ast::Value::Int(_))))
 }
 
 fn vector_from_value(value: &qail_core::ast::Value) -> Option<Vec<f32>> {
@@ -3146,6 +3174,21 @@ mod tests {
                 value: Value::String("refund".to_string()),
                 is_array_unnest: false,
             },
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::String("open".to_string()),
+                    Value::String("closed".to_string()),
+                ]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("priority".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                is_array_unnest: false,
+            },
         ];
         let groups = vec![vec![
             Condition {
@@ -3155,9 +3198,12 @@ mod tests {
                 is_array_unnest: false,
             },
             Condition {
-                left: Expr::Named("deleted_at".to_string()),
-                op: Operator::IsNull,
-                value: Value::Null,
+                left: Expr::Named("ID".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::Int(7),
+                    Value::String("uuid-like-id".to_string()),
+                ]),
                 is_array_unnest: false,
             },
         ]];
@@ -3337,11 +3383,42 @@ mod tests {
     }
 
     #[test]
-    fn qdrant_read_filters_reject_unsupported_in_before_driver() {
+    fn qdrant_read_filters_reject_invalid_in_and_float_equality() {
+        for value in [
+            Value::Array(vec![]),
+            Value::Array(vec![Value::String("open".to_string()), Value::Int(1)]),
+            Value::Array(vec![Value::Bool(true)]),
+            Value::String("not-array".to_string()),
+        ] {
+            let conditions = vec![Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::In,
+                value,
+                is_array_unnest: false,
+            }];
+
+            let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+            assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+        }
+
         let conditions = vec![Condition {
-            left: Expr::Named("status".to_string()),
+            left: Expr::Named("rank".to_string()),
+            op: Operator::Eq,
+            value: Value::Float(1.5),
+            is_array_unnest: false,
+        }];
+
+        let err = validate_qdrant_read_filters(&conditions, &[]).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "INVALID_QDRANT_FILTER");
+
+        let conditions = vec![Condition {
+            left: Expr::Named("id".to_string()),
             op: Operator::In,
-            value: Value::Array(vec![Value::String("open".to_string())]),
+            value: Value::Array(vec![]),
             is_array_unnest: false,
         }];
 

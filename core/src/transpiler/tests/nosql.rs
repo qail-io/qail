@@ -226,7 +226,7 @@ fn test_qdrant_transpiler_rejects_invalid_json_values() {
             kind: CageKind::Filter,
             conditions: vec![Condition {
                 left: Expr::Named("score".to_string()),
-                op: Operator::Eq,
+                op: Operator::Gt,
                 value: Value::Float(f64::NAN),
                 is_array_unnest: false,
             }],
@@ -413,6 +413,7 @@ fn test_qdrant_search_rejects_invalid_filter_value_shapes() {
             Value::Json(r#"{"status":"open"}"#.to_string()),
             "equality filters",
         ),
+        (Value::Float(1.5), "equality filters"),
     ] {
         let search = Qail {
             table: "points".to_string(),
@@ -442,6 +443,8 @@ fn test_qdrant_search_rejects_invalid_filter_value_shapes() {
     for value in [
         Value::Array(vec![]),
         Value::Array(vec![Value::Null]),
+        Value::Array(vec![Value::String("open".to_string()), Value::Int(1)]),
+        Value::Array(vec![Value::Bool(true)]),
         Value::String("not-array".to_string()),
     ] {
         let search = Qail {
@@ -465,6 +468,58 @@ fn test_qdrant_search_rejects_invalid_filter_value_shapes() {
             serde_json::from_str(&search).expect("qdrant error JSON must be valid");
         assert!(parsed["error"].as_str().unwrap().contains("IN filters"));
     }
+}
+
+#[test]
+fn test_qdrant_search_encodes_native_id_in_filter() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let search = Qail {
+        table: "points".to_string(),
+        vector: Some(vec![0.1, 0.2]),
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("ID".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::Int(7),
+                    Value::String("uuid-like-id".to_string()),
+                ]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("qdrant search JSON must stay valid");
+    assert_eq!(
+        parsed["filter"]["must"][0]["has_id"],
+        serde_json::json!([7, "uuid-like-id"])
+    );
+
+    let bad = Qail {
+        table: "points".to_string(),
+        vector: Some(vec![0.1, 0.2]),
+        cages: vec![Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![]),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        }],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&bad).expect("qdrant error JSON must be valid");
+    assert!(parsed["error"].as_str().unwrap().contains("id IN"));
 }
 
 #[test]
