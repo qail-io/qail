@@ -589,12 +589,27 @@ fn decode_result_vector(
         return Ok(None);
     }
 
-    let arr = value.as_array().ok_or_else(|| {
-        crate::error::QdrantError::Decode(format!("Invalid vector at result index {result_idx}"))
-    })?;
+    if let Some(arr) = value.as_array() {
+        return decode_result_vector_array(arr, result_idx, "vector").map(Some);
+    }
+
+    if let Some(named) = value.as_object() {
+        return decode_named_result_vector(named, result_idx);
+    }
+
+    Err(crate::error::QdrantError::Decode(format!(
+        "Invalid vector at result index {result_idx}"
+    )))
+}
+
+fn decode_result_vector_array(
+    arr: &[JsonValue],
+    result_idx: usize,
+    label: &str,
+) -> QdrantResult<Vec<f32>> {
     if arr.is_empty() {
         return Err(crate::error::QdrantError::Decode(format!(
-            "Empty vector at result index {result_idx}"
+            "Empty {label} at result index {result_idx}"
         )));
     }
 
@@ -605,19 +620,48 @@ fn decode_result_vector(
             .filter(|value| value.is_finite())
             .ok_or_else(|| {
                 crate::error::QdrantError::Decode(format!(
-                    "Invalid vector value at result index {result_idx}, vector index {idx}"
+                    "Invalid {label} value at result index {result_idx}, vector index {idx}"
                 ))
             })?;
         let value = value as f32;
         if !value.is_finite() {
             return Err(crate::error::QdrantError::Decode(format!(
-                "Invalid vector value at result index {result_idx}, vector index {idx}"
+                "Invalid {label} value at result index {result_idx}, vector index {idx}"
             )));
         }
         vector.push(value);
     }
 
-    Ok(Some(vector))
+    Ok(vector)
+}
+
+fn decode_named_result_vector(
+    named: &serde_json::Map<String, JsonValue>,
+    result_idx: usize,
+) -> QdrantResult<Option<Vec<f32>>> {
+    if named.is_empty() {
+        return Ok(None);
+    }
+
+    let mut vector = None;
+    for (name, value) in named {
+        ensure_named_vector_name(name, &format!("search result {result_idx}"))
+            .map_err(crate::error::QdrantError::Decode)?;
+        let Some(arr) = value.as_array() else {
+            return Err(crate::error::QdrantError::Decode(format!(
+                "Invalid named vector '{name}' at result index {result_idx}"
+            )));
+        };
+        let next = decode_result_vector_array(arr, result_idx, &format!("named vector '{name}'"))?;
+        if vector.is_some() {
+            return Err(crate::error::QdrantError::Decode(format!(
+                "Multiple named vectors at result index {result_idx} cannot be represented as a single dense vector"
+            )));
+        }
+        vector = Some(next);
+    }
+
+    Ok(vector)
 }
 
 /// Parse a point ID from JSON.
@@ -985,6 +1029,34 @@ mod tests {
         assert_eq!(results[0].score, 0.95);
         assert_eq!(results[1].score, 0.80);
         assert_eq!(results[1].vector.as_deref(), Some(&[0.1, 0.2][..]));
+    }
+
+    #[test]
+    fn decode_search_response_accepts_single_named_vector_json() {
+        let response = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {}, "vector": {"image": [0.1, 0.2]}}
+            ]
+        }"#;
+
+        let results = decode_search_response(response.as_bytes()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vector.as_deref(), Some(&[0.1, 0.2][..]));
+    }
+
+    #[test]
+    fn decode_search_response_rejects_ambiguous_named_vectors_json() {
+        let response = r#"{
+            "result": [
+                {"id": "abc", "score": 0.95, "payload": {}, "vector": {"image": [0.1, 0.2], "text": [0.3, 0.4]}}
+            ]
+        }"#;
+
+        let err = decode_search_response(response.as_bytes())
+            .expect_err("multiple named vectors should fail closed");
+
+        assert!(err.to_string().contains("Multiple named vectors"));
     }
 
     #[test]

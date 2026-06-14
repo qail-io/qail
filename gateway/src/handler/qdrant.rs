@@ -509,7 +509,7 @@ fn qdrant_should_request_vectors(
     cmd: &qail_core::ast::Qail,
     projection: Option<&QdrantResponseProjection>,
 ) -> bool {
-    cmd.with_vector && projection.is_none_or(|projection| projection.contains("vector"))
+    projection.map_or(cmd.with_vector, |projection| projection.contains("vector"))
 }
 
 fn verify_qdrant_points_tenant_boundary(
@@ -1968,6 +1968,18 @@ mod tests {
 
         let json = scored_point_to_json_projected(&point, Some(&projection));
         assert!(json.get("vector").is_some());
+    }
+
+    #[test]
+    fn scored_point_projection_requests_vector_without_with_vectors_flag() {
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.3, 0.2, 0.1])
+            .columns(["id", "vector"]);
+        let projection = qdrant_response_projection_from_cmd(&cmd)
+            .expect("projection should parse")
+            .expect("projection should be explicit");
+
+        assert!(qdrant_should_request_vectors(&cmd, Some(&projection)));
     }
 
     #[test]

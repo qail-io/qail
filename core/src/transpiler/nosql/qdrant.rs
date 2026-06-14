@@ -38,6 +38,20 @@ fn normalize_qdrant_field(raw: &str) -> &str {
     raw.trim().trim_matches('"').trim()
 }
 
+fn qdrant_requested_projection_segment<'a>(raw: &'a str, table: &str) -> &'a str {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed
+    } else if let Some(rest) = trimmed
+        .strip_prefix(table)
+        .and_then(|rest| rest.strip_prefix('.'))
+    {
+        rest.trim()
+    } else {
+        trimmed
+    }
+}
+
 fn qdrant_reserved_field_matches(raw: &str, reserved: &str) -> bool {
     normalize_qdrant_field(raw).eq_ignore_ascii_case(normalize_qdrant_field(reserved))
 }
@@ -394,7 +408,8 @@ fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
         let mut has_wildcard = false;
         for c in &cmd.columns {
             let raw_field = raw_named_qdrant_field(c)?;
-            let field = normalize_qdrant_field(raw_field);
+            let field =
+                normalize_qdrant_field(qdrant_requested_projection_segment(raw_field, &cmd.table));
             if qdrant_projection_is_wildcard(raw_field, &cmd.table) {
                 has_wildcard = true;
                 continue;
@@ -675,4 +690,52 @@ fn vector_to_json(v: &Value) -> Result<String, String> {
         return Err("Qdrant vector cannot be empty".to_string());
     }
     Ok(format!("[{}]", elems.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToQdrant;
+    use crate::ast::{Expr, Qail};
+
+    #[test]
+    fn search_projection_requests_table_qualified_vector() {
+        let body = Qail::get("embeddings")
+            .vector(vec![0.1, 0.2])
+            .columns(["embeddings.vector"])
+            .to_qdrant_search();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["with_vector"], true);
+        assert_eq!(json["with_payload"], false);
+    }
+
+    #[test]
+    fn search_projection_strips_table_qualified_payload_field() {
+        let body = Qail::get("embeddings")
+            .vector(vec![0.1, 0.2])
+            .columns(["embeddings.title"])
+            .to_qdrant_search();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(
+            json["with_payload"]["include"],
+            serde_json::json!(["title"])
+        );
+        assert!(json.get("with_vector").is_none());
+    }
+
+    #[test]
+    fn search_projection_preserves_quoted_dotted_payload_field() {
+        let mut cmd = Qail::get("embeddings").vector(vec![0.1, 0.2]);
+        cmd.columns = vec![Expr::Named("\"embeddings.vector\"".to_string())];
+
+        let body = cmd.to_qdrant_search();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(
+            json["with_payload"]["include"],
+            serde_json::json!(["embeddings.vector"])
+        );
+        assert!(json.get("with_vector").is_none());
+    }
 }

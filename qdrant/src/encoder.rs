@@ -384,7 +384,7 @@ pub fn encode_search_proto(
 
     // Field 11: with_vectors = true (optional)
     if with_vectors {
-        encode_search_with_vectors_true(buf);
+        encode_search_with_vectors_selector(buf, vector_name);
     }
 
     Ok(())
@@ -465,7 +465,7 @@ pub fn encode_search_with_filter_groups_proto(
 
     // Field 11: with_vectors = true (optional)
     if request.with_vectors {
-        encode_search_with_vectors_true(buf);
+        encode_search_with_vectors_selector(buf, request.vector_name);
     }
 
     Ok(())
@@ -526,7 +526,7 @@ pub fn encode_search_with_filter_grouped_cages_proto(
 
     // Field 11: with_vectors = true (optional)
     if request.with_vectors {
-        encode_search_with_vectors_true(buf);
+        encode_search_with_vectors_selector(buf, request.vector_name);
     }
 
     Ok(())
@@ -550,6 +550,28 @@ pub fn encode_search_with_vectors_true(buf: &mut BytesMut) {
     encode_varint(buf, 2); // submessage length
     buf.put_u8(0x08); // field 1, varint
     buf.put_u8(0x01); // true
+}
+
+/// Encode search with_vectors selector.
+///
+/// Named vector searches request only the searched vector, because QAIL's
+/// public result shape stores a single dense vector.
+pub fn encode_search_with_vectors_selector(buf: &mut BytesMut, vector_name: Option<&str>) {
+    let Some(name) = vector_name else {
+        encode_search_with_vectors_true(buf);
+        return;
+    };
+
+    let selector_len = 1 + varint_len(name.len() as u64) + name.len();
+    let include_len = 1 + varint_len(selector_len as u64) + selector_len;
+
+    buf.put_u8(SEARCH_WITH_VECTORS);
+    encode_varint(buf, include_len);
+    buf.put_u8(0x12); // WithVectorsSelector.include
+    encode_varint(buf, selector_len);
+    buf.put_u8(0x0A); // VectorsSelector.names
+    encode_varint(buf, name.len());
+    buf.extend_from_slice(name.as_bytes());
 }
 
 // ============================================================================
@@ -1939,6 +1961,44 @@ mod tests {
         assert_eq!(
             &buf[selector_offset..selector_offset + 4],
             &[SEARCH_WITH_VECTORS, 0x02, 0x08, 0x01]
+        );
+    }
+
+    #[test]
+    fn test_encode_named_search_includes_only_named_vector_selector() {
+        let mut buf = BytesMut::with_capacity(1024);
+        let vector = vec![0.1f32, 0.2, 0.3, 0.4];
+
+        encode_search_proto(
+            &mut buf,
+            "test_collection",
+            &vector,
+            10,
+            None,
+            Some("image"),
+            true,
+        )
+        .expect("named search request should encode");
+
+        let selector_offset = buf
+            .iter()
+            .position(|tag| *tag == SEARCH_WITH_VECTORS)
+            .expect("named search request should include with_vectors field");
+        assert_eq!(
+            &buf[selector_offset..selector_offset + 11],
+            &[
+                SEARCH_WITH_VECTORS,
+                0x09,
+                0x12,
+                0x07,
+                0x0A,
+                0x05,
+                b'i',
+                b'm',
+                b'a',
+                b'g',
+                b'e'
+            ]
         );
     }
 

@@ -46,7 +46,7 @@ const SEARCH_RESULT: u32 = 1;
 const SCORED_POINT_ID: u32 = 1;
 const SCORED_POINT_PAYLOAD: u32 = 2;
 const SCORED_POINT_SCORE: u32 = 3;
-const SCORED_POINT_VECTORS: u32 = 4;
+const SCORED_POINT_VECTORS: u32 = 6;
 
 // ============================================================================
 // PointId Field Numbers
@@ -83,6 +83,19 @@ const VALUE_STRING: u32 = 4;
 const VALUE_BOOL: u32 = 5;
 const VALUE_STRUCT: u32 = 6;
 const VALUE_LIST: u32 = 7;
+
+// ============================================================================
+// Vector output field numbers
+// ============================================================================
+
+const VECTORS_OUTPUT_VECTOR: u32 = 1;
+const VECTORS_OUTPUT_NAMED: u32 = 2;
+const NAMED_VECTORS_OUTPUT_ENTRY: u32 = 1;
+const NAMED_VECTOR_ENTRY_KEY: u32 = 1;
+const NAMED_VECTOR_ENTRY_VALUE: u32 = 2;
+const VECTOR_OUTPUT_DEPRECATED_DATA: u32 = 1;
+const VECTOR_OUTPUT_DENSE: u32 = 101;
+const DENSE_VECTOR_DATA: u32 = 1;
 
 // ============================================================================
 // Varint Decoding
@@ -702,33 +715,117 @@ fn decode_list_values_with_depth(data: &[u8], depth: usize) -> QdrantResult<Vec<
 // Vectors Decoder
 // ============================================================================
 
-/// Decode Vectors message → Vec<f32> (extracts first vector).
+/// Decode VectorsOutput message → Vec<f32>.
 ///
 /// ```text
-/// message Vectors {
+/// message VectorsOutput {
 ///   oneof vectors_options {
-///     Vector vector = 1;
-///     NamedVectors vectors = 2;
+///     VectorOutput vector = 1;
+///     NamedVectorsOutput vectors = 2;
 ///   }
 /// }
-/// message Vector {
-///   repeated float data = 1;
+/// message VectorOutput {
+///   repeated float data = 1 [deprecated = true];
+///   DenseVector dense = 101;
 /// }
 /// ```
 fn decode_vectors(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+    let mut vector = None;
     let mut buf = data;
 
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
-            1 => {
-                // Vector message
+            VECTORS_OUTPUT_VECTOR => {
                 if wire_type != WIRE_LEN {
                     skip_field(&mut buf, wire_type)?;
                     continue;
                 }
                 let vec_data = read_submessage(&mut buf)?;
-                return decode_vector_data(vec_data);
+                if let Some(next) = decode_vector_output(vec_data)? {
+                    set_decoded_vector(&mut vector, next)?;
+                }
+            }
+            VECTORS_OUTPUT_NAMED => {
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
+                let vectors_data = read_submessage(&mut buf)?;
+                if let Some(next) = decode_named_vectors_output(vectors_data)? {
+                    set_decoded_vector(&mut vector, next)?;
+                }
+            }
+            _ => {
+                skip_field(&mut buf, wire_type)?;
+            }
+        }
+    }
+
+    Ok(vector)
+}
+
+fn set_decoded_vector(slot: &mut Option<Vec<f32>>, next: Vec<f32>) -> QdrantResult<()> {
+    if let Some(existing) = slot
+        && existing != &next
+    {
+        return Err(QdrantError::Decode(
+            "Conflicting vector outputs in Qdrant response".to_string(),
+        ));
+    }
+    *slot = Some(next);
+    Ok(())
+}
+
+/// Decode VectorOutput.
+fn decode_vector_output(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+    let mut vector = None;
+    let mut buf = data;
+
+    while !buf.is_empty() {
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
+        match field_number {
+            VECTOR_OUTPUT_DEPRECATED_DATA => {
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
+                let float_data = read_submessage(&mut buf)?;
+                set_decoded_vector(&mut vector, decode_packed_f32_vector(float_data)?)?;
+            }
+            VECTOR_OUTPUT_DENSE => {
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
+                let dense_data = read_submessage(&mut buf)?;
+                if let Some(next) = decode_dense_vector(dense_data)? {
+                    set_decoded_vector(&mut vector, next)?;
+                }
+            }
+            _ => {
+                skip_field(&mut buf, wire_type)?;
+            }
+        }
+    }
+
+    Ok(vector)
+}
+
+/// Decode DenseVector.data (packed repeated float).
+fn decode_dense_vector(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+    let mut buf = data;
+
+    while !buf.is_empty() {
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
+        match field_number {
+            DENSE_VECTOR_DATA => {
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
+                let float_data = read_submessage(&mut buf)?;
+                return Ok(Some(decode_packed_f32_vector(float_data)?));
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -739,46 +836,28 @@ fn decode_vectors(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
     Ok(None)
 }
 
-/// Decode Vector.data (packed repeated float).
-fn decode_vector_data(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+fn decode_named_vectors_output(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+    let mut vector = None;
     let mut buf = data;
 
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
-            1 => {
-                // data (packed repeated float)
+            NAMED_VECTORS_OUTPUT_ENTRY => {
                 if wire_type != WIRE_LEN {
                     skip_field(&mut buf, wire_type)?;
                     continue;
                 }
-                let float_data = read_submessage(&mut buf)?;
-                if float_data.is_empty() {
-                    return Err(QdrantError::Decode("Empty vector data".to_string()));
-                }
-                if float_data.len() % 4 != 0 {
-                    return Err(QdrantError::Decode(
-                        "Invalid vector data length".to_string(),
-                    ));
-                }
-                // Each f32 = 4 bytes, little-endian
-                let count = float_data.len() / 4;
-                let mut result = Vec::with_capacity(count);
-                for i in 0..count {
-                    let offset = i * 4;
-                    let bytes: [u8; 4] =
-                        float_data[offset..offset + 4].try_into().map_err(|_| {
-                            QdrantError::Decode("Invalid vector data length".to_string())
-                        })?;
-                    let value = f32::from_le_bytes(bytes);
-                    if !value.is_finite() {
+                let entry_data = read_submessage(&mut buf)?;
+                if let Some(next) = decode_named_vector_output_entry(entry_data)? {
+                    if vector.is_some() {
                         return Err(QdrantError::Decode(
-                            "Invalid non-finite vector value".to_string(),
+                            "Multiple named vectors cannot be represented as a single dense vector"
+                                .to_string(),
                         ));
                     }
-                    result.push(value);
+                    vector = Some(next);
                 }
-                return Ok(Some(result));
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -786,7 +865,77 @@ fn decode_vector_data(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
         }
     }
 
-    Ok(None)
+    Ok(vector)
+}
+
+fn decode_named_vector_output_entry(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+    let mut key = None;
+    let mut vector = None;
+    let mut buf = data;
+
+    while !buf.is_empty() {
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
+        match field_number {
+            NAMED_VECTOR_ENTRY_KEY => {
+                if wire_type != WIRE_LEN {
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for named vector key".to_string(),
+                    ));
+                }
+                let key_data = read_submessage(&mut buf)?;
+                let decoded_key = std::str::from_utf8(key_data).map_err(|e| {
+                    QdrantError::Decode(format!("Invalid UTF-8 named vector key: {e}"))
+                })?;
+                ensure_non_empty_decoded_name(decoded_key, "Named vector key")?;
+                key = Some(decoded_key.to_string());
+            }
+            NAMED_VECTOR_ENTRY_VALUE => {
+                if wire_type != WIRE_LEN {
+                    return Err(QdrantError::Decode(
+                        "Invalid wire type for named vector value".to_string(),
+                    ));
+                }
+                let value_data = read_submessage(&mut buf)?;
+                vector = decode_vector_output(value_data)?;
+            }
+            _ => {
+                skip_field(&mut buf, wire_type)?;
+            }
+        }
+    }
+
+    if vector.is_some() && key.is_none() {
+        return Err(QdrantError::Decode("Missing named vector key".to_string()));
+    }
+
+    Ok(vector)
+}
+
+fn decode_packed_f32_vector(float_data: &[u8]) -> QdrantResult<Vec<f32>> {
+    if float_data.is_empty() {
+        return Err(QdrantError::Decode("Empty vector data".to_string()));
+    }
+    if !float_data.len().is_multiple_of(4) {
+        return Err(QdrantError::Decode(
+            "Invalid vector data length".to_string(),
+        ));
+    }
+    let count = float_data.len() / 4;
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = i * 4;
+        let bytes: [u8; 4] = float_data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| QdrantError::Decode("Invalid vector data length".to_string()))?;
+        let value = f32::from_le_bytes(bytes);
+        if !value.is_finite() {
+            return Err(QdrantError::Decode(
+                "Invalid non-finite vector value".to_string(),
+            ));
+        }
+        result.push(value);
+    }
+    Ok(result)
 }
 
 // ============================================================================
@@ -965,11 +1114,132 @@ mod tests {
         assert!((point.score - 0.5).abs() < 0.0001);
     }
 
+    fn push_len_field(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
+        assert!(body.len() < 128, "test helper only handles short bodies");
+        out.push(tag);
+        out.push(body.len() as u8);
+        out.extend_from_slice(body);
+    }
+
+    fn packed_f32(values: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn current_dense_vectors_output(values: &[f32]) -> Vec<u8> {
+        let floats = packed_f32(values);
+
+        let mut dense = Vec::new();
+        push_len_field(&mut dense, 0x0A, &floats);
+
+        let mut vector_output = Vec::new();
+        vector_output.extend_from_slice(&[0xAA, 0x06]);
+        vector_output.push(dense.len() as u8);
+        vector_output.extend_from_slice(&dense);
+
+        let mut vectors_output = Vec::new();
+        push_len_field(&mut vectors_output, 0x0A, &vector_output);
+        vectors_output
+    }
+
+    fn deprecated_dense_vectors_output(values: &[f32]) -> Vec<u8> {
+        let floats = packed_f32(values);
+
+        let mut vector_output = Vec::new();
+        push_len_field(&mut vector_output, 0x0A, &floats);
+
+        let mut vectors_output = Vec::new();
+        push_len_field(&mut vectors_output, 0x0A, &vector_output);
+        vectors_output
+    }
+
+    fn named_dense_vectors_output(name: &str, values: &[f32]) -> Vec<u8> {
+        let vectors_output = current_dense_vectors_output(values);
+        let vector_output = &vectors_output[2..];
+
+        let mut entry = Vec::new();
+        push_len_field(&mut entry, 0x0A, name.as_bytes());
+        push_len_field(&mut entry, 0x12, vector_output);
+
+        let mut named = Vec::new();
+        push_len_field(&mut named, 0x0A, &entry);
+
+        let mut output = Vec::new();
+        push_len_field(&mut output, 0x12, &named);
+        output
+    }
+
+    fn scored_point_with_vectors(vectors_output: &[u8]) -> Vec<u8> {
+        let score_bytes = 0.5f32.to_le_bytes();
+        let mut data = vec![
+            0x0A,
+            0x02,
+            0x08,
+            0x01, // id = PointId { num = 1 }
+            0x1D,
+            score_bytes[0],
+            score_bytes[1],
+            score_bytes[2],
+            score_bytes[3],
+        ];
+        push_len_field(&mut data, 0x32, vectors_output);
+        data
+    }
+
+    #[test]
+    fn test_decode_search_response_accepts_current_dense_vector_output() {
+        let scored_point = scored_point_with_vectors(&current_dense_vectors_output(&[0.25, 0.75]));
+        let mut data = Vec::new();
+        push_len_field(&mut data, 0x0A, &scored_point);
+
+        let points = decode_search_response(&data).unwrap();
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].vector, Some(vec![0.25, 0.75]));
+    }
+
+    #[test]
+    fn test_decode_scored_point_accepts_deprecated_dense_vector_output() {
+        let data = scored_point_with_vectors(&deprecated_dense_vectors_output(&[0.25, 0.75]));
+
+        let point = decode_scored_point(&data).unwrap();
+
+        assert_eq!(point.vector, Some(vec![0.25, 0.75]));
+    }
+
+    #[test]
+    fn test_decode_scored_point_accepts_single_named_dense_vector_output() {
+        let data = scored_point_with_vectors(&named_dense_vectors_output("image", &[0.25, 0.75]));
+
+        let point = decode_scored_point(&data).unwrap();
+
+        assert_eq!(point.vector, Some(vec![0.25, 0.75]));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_multiple_named_vectors() {
+        let mut first = named_dense_vectors_output("image", &[0.25, 0.75]);
+        let second = named_dense_vectors_output("text", &[0.5, 0.5]);
+        let second_named_body = &second[2..];
+        let mut named_body = first.split_off(2);
+        named_body.extend_from_slice(second_named_body);
+        let mut output = Vec::new();
+        push_len_field(&mut output, 0x12, &named_body);
+        let data = scored_point_with_vectors(&output);
+
+        let err = decode_scored_point(&data).unwrap_err();
+
+        assert!(err.to_string().contains("Multiple named vectors"));
+    }
+
     #[test]
     fn test_decode_scored_point_rejects_malformed_vector() {
         let data = &[
             0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
-            0x22, 0x07, // vectors message length
+            0x32, 0x07, // vectors message length
             0x0A, 0x05, // vector message length
             0x0A, 0x03, // packed float data length is not divisible by 4
             0x00, 0x00, 0x00,
@@ -996,7 +1266,7 @@ mod tests {
         let nan = f32::NAN.to_le_bytes();
         let data = &[
             0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
-            0x22, 0x08, // vectors message length
+            0x32, 0x08, // vectors message length
             0x0A, 0x06, // vector message length
             0x0A, 0x04, // packed float data length
             nan[0], nan[1], nan[2], nan[3],
@@ -1010,7 +1280,7 @@ mod tests {
     fn test_decode_scored_point_rejects_empty_vector_data() {
         let data = &[
             0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
-            0x22, 0x04, // vectors message length
+            0x32, 0x04, // vectors message length
             0x0A, 0x02, // vector message length
             0x0A, 0x00, // packed float data length = 0
         ];

@@ -38,6 +38,38 @@ fn search_limit_from_ast(cmd: &Qail) -> QdrantResult<u64> {
     Ok(limit.unwrap_or(10))
 }
 
+fn qdrant_requested_projection_segment<'a>(raw: &'a str, table: &str) -> &'a str {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed
+    } else if let Some(rest) = trimmed
+        .strip_prefix(table)
+        .and_then(|rest| rest.strip_prefix('.'))
+    {
+        rest.trim()
+    } else {
+        trimmed
+    }
+}
+
+fn qdrant_ast_projection_requests_vector(cmd: &Qail) -> bool {
+    use qail_core::ast::Expr;
+
+    cmd.columns.iter().any(|expr| {
+        let name = match expr {
+            Expr::Named(name) | Expr::Aliased { name, .. } => name,
+            _ => return false,
+        };
+        qdrant_requested_projection_segment(name, &cmd.table)
+            .trim_matches('"')
+            .eq_ignore_ascii_case("vector")
+    })
+}
+
+fn qdrant_ast_should_request_vectors(cmd: &Qail) -> bool {
+    cmd.with_vector || qdrant_ast_projection_requests_vector(cmd)
+}
+
 fn validate_collection_name(collection: &str) -> QdrantResult<()> {
     if collection.trim().is_empty() {
         return Err(encode_error("Qdrant collection name must not be empty"));
@@ -554,6 +586,7 @@ impl QdrantDriver {
             .ok_or_else(|| QdrantError::Encode("Vector required for search".to_string()))?;
 
         let limit = search_limit_from_ast(cmd)?;
+        let with_vectors = qdrant_ast_should_request_vectors(cmd);
 
         let score_threshold = cmd.score_threshold;
 
@@ -583,7 +616,7 @@ impl QdrantDriver {
                         limit,
                         score_threshold,
                         vector_name: cmd.vector_name.as_deref(),
-                        with_vectors: cmd.with_vector,
+                        with_vectors,
                     },
                     &must_conditions,
                     &should_groups,
@@ -597,7 +630,7 @@ impl QdrantDriver {
             limit,
             score_threshold,
             vector_name: cmd.vector_name.as_deref(),
-            with_vectors: cmd.with_vector,
+            with_vectors,
         })
         .await
     }
@@ -850,17 +883,17 @@ mod ast_limit_tests {
 mod validation_tests {
     use std::collections::HashMap;
 
-    use qail_core::ast::{Condition, Expr, Operator, Value};
+    use qail_core::ast::{Condition, Expr, Operator, Qail, Value};
 
     use crate::point::{PayloadValue, Point};
 
     use super::{
-        QdrantError, validate_collection_name, validate_condition_groups_finite,
-        validate_conditions_finite, validate_payload_field_name, validate_payload_finite,
-        validate_point_id, validate_point_ids_non_empty, validate_points_finite,
-        validate_score_threshold, validate_scroll_limit, validate_search_limit,
-        validate_search_request, validate_vector_finite, validate_vector_name,
-        validate_vector_size,
+        QdrantError, qdrant_ast_should_request_vectors, validate_collection_name,
+        validate_condition_groups_finite, validate_conditions_finite, validate_payload_field_name,
+        validate_payload_finite, validate_point_id, validate_point_ids_non_empty,
+        validate_points_finite, validate_score_threshold, validate_scroll_limit,
+        validate_search_limit, validate_search_request, validate_vector_finite,
+        validate_vector_name, validate_vector_size,
     };
 
     fn assert_encode_error(result: crate::error::QdrantResult<()>, needle: &str) {
@@ -953,6 +986,23 @@ mod validation_tests {
         })
         .expect_err("empty vector name must fail before transport");
         assert!(err.to_string().contains("vector name"));
+    }
+
+    #[test]
+    fn ast_projection_vector_requests_vectors_without_explicit_flag() {
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.1, 0.2])
+            .columns(["id", "vector"]);
+
+        assert!(qdrant_ast_should_request_vectors(&cmd));
+    }
+
+    #[test]
+    fn ast_projection_preserves_quoted_payload_vector_name() {
+        let mut cmd = Qail::search("embeddings").vector(vec![0.1, 0.2]);
+        cmd.columns = vec![Expr::Named("\"embeddings.vector\"".to_string())];
+
+        assert!(!qdrant_ast_should_request_vectors(&cmd));
     }
 
     #[test]
