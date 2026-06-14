@@ -33,6 +33,38 @@ fn ensure_non_empty_decoded_name(value: &str, label: &str) -> QdrantResult<()> {
     Ok(())
 }
 
+fn duplicate_decode_error(label: &str) -> QdrantError {
+    QdrantError::Decode(format!("Duplicate {label} fields in Qdrant response"))
+}
+
+fn set_decoded_point_id(
+    slot: &mut Option<PointId>,
+    next: PointId,
+    label: &str,
+) -> QdrantResult<()> {
+    if slot.is_some() {
+        return Err(duplicate_decode_error(label));
+    }
+    *slot = Some(next);
+    Ok(())
+}
+
+fn set_decoded_score(slot: &mut Option<f32>, next: f32, label: &str) -> QdrantResult<()> {
+    if slot.is_some() {
+        return Err(duplicate_decode_error(label));
+    }
+    *slot = Some(next);
+    Ok(())
+}
+
+fn set_decoded_string(slot: &mut Option<String>, next: String, label: &str) -> QdrantResult<()> {
+    if slot.is_some() {
+        return Err(duplicate_decode_error(label));
+    }
+    *slot = Some(next);
+    Ok(())
+}
+
 // ============================================================================
 // SearchResponse Field Numbers
 // ============================================================================
@@ -193,6 +225,21 @@ fn read_submessage<'a>(buf: &mut &'a [u8]) -> QdrantResult<&'a [u8]> {
     Ok(data)
 }
 
+fn read_fixed32_f32(buf: &mut &[u8], label: &str) -> QdrantResult<f32> {
+    if buf.len() < 4 {
+        return Err(QdrantError::Decode(format!("Truncated {label}")));
+    }
+    let bytes: [u8; 4] = buf[..4]
+        .try_into()
+        .map_err(|_| QdrantError::Decode(format!("Truncated {label}")))?;
+    let value = f32::from_le_bytes(bytes);
+    if !value.is_finite() {
+        return Err(QdrantError::Decode(format!("Invalid non-finite {label}")));
+    }
+    *buf = &buf[4..];
+    Ok(value)
+}
+
 // ============================================================================
 // SearchResponse Decoder
 // ============================================================================
@@ -233,7 +280,7 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
 /// Decode a single ScoredPoint message (with payload support).
 fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
     let mut id = None;
-    let mut score = 0.0f32;
+    let mut score = None;
     let mut payload = Payload::new();
     let mut vector = None;
     let mut buf = data;
@@ -248,7 +295,7 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let id_data = read_submessage(&mut buf)?;
-                id = Some(decode_point_id(id_data)?);
+                set_decoded_point_id(&mut id, decode_point_id(id_data)?, "scored point id")?;
             }
             SCORED_POINT_PAYLOAD => {
                 if wire_type != WIRE_LEN {
@@ -258,24 +305,15 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                 let entry_data = read_submessage(&mut buf)?;
                 // Payload is map<string, Value> — each entry is a MapEntry message
                 let (key, value) = decode_map_entry(entry_data, 0)?;
-                payload.insert(key, value);
+                insert_payload_entry(&mut payload, key, value, "scored point payload")?;
             }
             SCORED_POINT_SCORE => {
                 if wire_type != WIRE_FIXED32 {
                     skip_field(&mut buf, wire_type)?;
                     continue;
                 }
-                if buf.len() < 4 {
-                    return Err(QdrantError::Decode("Truncated score".to_string()));
-                }
-                let bytes = [buf[0], buf[1], buf[2], buf[3]];
-                score = f32::from_le_bytes(bytes);
-                if !score.is_finite() {
-                    return Err(QdrantError::Decode(
-                        "Invalid non-finite score value".to_string(),
-                    ));
-                }
-                buf = &buf[4..];
+                let decoded_score = read_fixed32_f32(&mut buf, "score value")?;
+                set_decoded_score(&mut score, decoded_score, "scored point score")?;
             }
             SCORED_POINT_VECTORS => {
                 if wire_type != WIRE_LEN {
@@ -283,7 +321,9 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let vec_data = read_submessage(&mut buf)?;
-                vector = decode_vectors(vec_data)?;
+                if let Some(next) = decode_vectors(vec_data)? {
+                    set_decoded_vector(&mut vector, next)?;
+                }
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -295,7 +335,7 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
 
     Ok(ScoredPoint {
         id,
-        score,
+        score: score.unwrap_or(0.0),
         payload,
         vector,
     })
@@ -372,7 +412,11 @@ pub fn decode_scroll_response(data: &[u8]) -> QdrantResult<ScrollResult> {
                     continue;
                 }
                 let id_data = read_submessage(&mut buf)?;
-                next_offset = Some(decode_point_id(id_data)?);
+                set_decoded_point_id(
+                    &mut next_offset,
+                    decode_point_id(id_data)?,
+                    "scroll next offset",
+                )?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -403,7 +447,7 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let id_data = read_submessage(&mut buf)?;
-                id = Some(decode_point_id(id_data)?);
+                set_decoded_point_id(&mut id, decode_point_id(id_data)?, "retrieved point id")?;
             }
             RETRIEVED_POINT_PAYLOAD => {
                 if wire_type != WIRE_LEN {
@@ -412,7 +456,7 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                 }
                 let entry_data = read_submessage(&mut buf)?;
                 let (key, value) = decode_map_entry(entry_data, 0)?;
-                payload.insert(key, value);
+                insert_payload_entry(&mut payload, key, value, "retrieved point payload")?;
             }
             RETRIEVED_POINT_VECTORS => {
                 if wire_type != WIRE_LEN {
@@ -420,7 +464,9 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let vec_data = read_submessage(&mut buf)?;
-                vector = decode_vectors(vec_data)?;
+                if let Some(next) = decode_vectors(vec_data)? {
+                    set_decoded_vector(&mut vector, next)?;
+                }
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -471,7 +517,7 @@ fn decode_map_entry(data: &[u8], depth: usize) -> QdrantResult<(String, PayloadV
                 let decoded_key = std::str::from_utf8(s_data).map_err(|e| {
                     QdrantError::Decode(format!("Invalid UTF-8 payload map key: {}", e))
                 })?;
-                key = Some(decoded_key.to_string());
+                set_decoded_string(&mut key, decoded_key.to_string(), "payload map key")?;
             }
             2 => {
                 // value (Value message)
@@ -481,7 +527,11 @@ fn decode_map_entry(data: &[u8], depth: usize) -> QdrantResult<(String, PayloadV
                     ));
                 }
                 let v_data = read_submessage(&mut buf)?;
-                value = Some(decode_value_with_depth(v_data, depth)?);
+                set_decoded_payload_value(
+                    &mut value,
+                    decode_value_with_depth(v_data, depth)?,
+                    "payload map value",
+                )?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -494,6 +544,32 @@ fn decode_map_entry(data: &[u8], depth: usize) -> QdrantResult<(String, PayloadV
     let value =
         value.ok_or_else(|| QdrantError::Decode("Missing payload map value".to_string()))?;
     Ok((key, value))
+}
+
+fn insert_payload_entry(
+    payload: &mut Payload,
+    key: String,
+    value: PayloadValue,
+    label: &str,
+) -> QdrantResult<()> {
+    if payload.insert(key.clone(), value).is_some() {
+        return Err(QdrantError::Decode(format!(
+            "Duplicate payload key in {label}: {key}"
+        )));
+    }
+    Ok(())
+}
+
+fn set_decoded_payload_value(
+    slot: &mut Option<PayloadValue>,
+    next: PayloadValue,
+    label: &str,
+) -> QdrantResult<()> {
+    if slot.is_some() {
+        return Err(duplicate_decode_error(label));
+    }
+    *slot = Some(next);
+    Ok(())
 }
 
 /// Decode a protobuf Value message into PayloadValue.
@@ -524,6 +600,7 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
         ));
     }
 
+    let mut value = None;
     let mut buf = data;
 
     while !buf.is_empty() {
@@ -544,7 +621,7 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                         "Invalid wire type for payload null value".to_string(),
                     ));
                 }
-                return Ok(PayloadValue::Null);
+                set_decoded_payload_value(&mut value, PayloadValue::Null, "payload value kind")?;
             }
             VALUE_DOUBLE => {
                 // double (fixed64)
@@ -561,13 +638,18 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                 let bytes: [u8; 8] = buf[..8].try_into().map_err(|_| {
                     QdrantError::Decode("Truncated payload double value".to_string())
                 })?;
-                let value = f64::from_le_bytes(bytes);
-                if !value.is_finite() {
+                let float_value = f64::from_le_bytes(bytes);
+                buf = &buf[8..];
+                if !float_value.is_finite() {
                     return Err(QdrantError::Decode(
                         "Invalid non-finite payload float value".to_string(),
                     ));
                 }
-                return Ok(PayloadValue::Float(value));
+                set_decoded_payload_value(
+                    &mut value,
+                    PayloadValue::Float(float_value),
+                    "payload value kind",
+                )?;
             }
             VALUE_INTEGER => {
                 // int64 (varint)
@@ -577,7 +659,11 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                     ));
                 }
                 let n = decode_varint(&mut buf)? as i64;
-                return Ok(PayloadValue::Integer(n));
+                set_decoded_payload_value(
+                    &mut value,
+                    PayloadValue::Integer(n),
+                    "payload value kind",
+                )?;
             }
             VALUE_STRING => {
                 // string (len-delimited)
@@ -592,7 +678,11 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                         QdrantError::Decode(format!("Invalid UTF-8 payload string: {}", e))
                     })?
                     .to_string();
-                return Ok(PayloadValue::String(s));
+                set_decoded_payload_value(
+                    &mut value,
+                    PayloadValue::String(s),
+                    "payload value kind",
+                )?;
             }
             VALUE_BOOL => {
                 // bool (varint)
@@ -607,7 +697,11 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                         "Invalid payload bool value: {v}"
                     )));
                 }
-                return Ok(PayloadValue::Bool(v != 0));
+                set_decoded_payload_value(
+                    &mut value,
+                    PayloadValue::Bool(v != 0),
+                    "payload value kind",
+                )?;
             }
             VALUE_STRUCT => {
                 // Struct (len-delimited) — map<string, Value>
@@ -618,7 +712,11 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                 }
                 let struct_data = read_submessage(&mut buf)?;
                 let map = decode_struct_fields_with_depth(struct_data, depth + 1)?;
-                return Ok(PayloadValue::Object(map));
+                set_decoded_payload_value(
+                    &mut value,
+                    PayloadValue::Object(map),
+                    "payload value kind",
+                )?;
             }
             VALUE_LIST => {
                 // ListValue (len-delimited) — repeated Value
@@ -629,7 +727,11 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
                 }
                 let list_data = read_submessage(&mut buf)?;
                 let items = decode_list_values_with_depth(list_data, depth + 1)?;
-                return Ok(PayloadValue::List(items));
+                set_decoded_payload_value(
+                    &mut value,
+                    PayloadValue::List(items),
+                    "payload value kind",
+                )?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -637,9 +739,7 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> QdrantResult<PayloadVal
         }
     }
 
-    Err(QdrantError::Decode(
-        "Missing payload value kind".to_string(),
-    ))
+    value.ok_or_else(|| QdrantError::Decode("Missing payload value kind".to_string()))
 }
 
 /// Decode Struct.fields with depth tracking.
@@ -667,7 +767,7 @@ fn decode_struct_fields_with_depth(
                 }
                 let entry_data = read_submessage(&mut buf)?;
                 let (key, value) = decode_map_entry(entry_data, depth)?;
-                map.insert(key, value);
+                insert_payload_entry(&mut map, key, value, "payload object")?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -777,22 +877,39 @@ fn set_decoded_vector(slot: &mut Option<Vec<f32>>, next: Vec<f32>) -> QdrantResu
     Ok(())
 }
 
+fn append_decoded_vector(slot: &mut Option<Vec<f32>>, mut next: Vec<f32>) {
+    slot.get_or_insert_with(Vec::new).append(&mut next);
+}
+
+fn append_decoded_vector_value(slot: &mut Option<Vec<f32>>, next: f32) {
+    slot.get_or_insert_with(Vec::new).push(next);
+}
+
 /// Decode VectorOutput.
 fn decode_vector_output(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
-    let mut vector = None;
+    let mut deprecated_vector = None;
+    let mut dense_vector = None;
     let mut buf = data;
 
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
         match field_number {
-            VECTOR_OUTPUT_DEPRECATED_DATA => {
-                if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type)?;
-                    continue;
+            VECTOR_OUTPUT_DEPRECATED_DATA => match wire_type {
+                WIRE_LEN => {
+                    let float_data = read_submessage(&mut buf)?;
+                    append_decoded_vector(
+                        &mut deprecated_vector,
+                        decode_packed_f32_vector(float_data)?,
+                    );
                 }
-                let float_data = read_submessage(&mut buf)?;
-                set_decoded_vector(&mut vector, decode_packed_f32_vector(float_data)?)?;
-            }
+                WIRE_FIXED32 => {
+                    let value = read_fixed32_f32(&mut buf, "vector value")?;
+                    append_decoded_vector_value(&mut deprecated_vector, value);
+                }
+                _ => {
+                    skip_field(&mut buf, wire_type)?;
+                }
+            },
             VECTOR_OUTPUT_DENSE => {
                 if wire_type != WIRE_LEN {
                     skip_field(&mut buf, wire_type)?;
@@ -800,9 +917,46 @@ fn decode_vector_output(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
                 }
                 let dense_data = read_submessage(&mut buf)?;
                 if let Some(next) = decode_dense_vector(dense_data)? {
-                    set_decoded_vector(&mut vector, next)?;
+                    set_decoded_vector(&mut dense_vector, next)?;
                 }
             }
+            _ => {
+                skip_field(&mut buf, wire_type)?;
+            }
+        }
+    }
+
+    let mut vector = None;
+    if let Some(next) = deprecated_vector {
+        set_decoded_vector(&mut vector, next)?;
+    }
+    if let Some(next) = dense_vector {
+        set_decoded_vector(&mut vector, next)?;
+    }
+    Ok(vector)
+}
+
+/// Decode DenseVector.data (packed repeated float).
+fn decode_dense_vector(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
+    let mut vector = None;
+    let mut buf = data;
+
+    while !buf.is_empty() {
+        let (field_number, wire_type) = decode_tag(&mut buf)?;
+        match field_number {
+            DENSE_VECTOR_DATA => match wire_type {
+                WIRE_LEN => {
+                    let float_data = read_submessage(&mut buf)?;
+                    append_decoded_vector(&mut vector, decode_packed_f32_vector(float_data)?);
+                }
+                WIRE_FIXED32 => {
+                    let value = read_fixed32_f32(&mut buf, "vector value")?;
+                    append_decoded_vector_value(&mut vector, value);
+                }
+                _ => {
+                    skip_field(&mut buf, wire_type)?;
+                }
+            },
             _ => {
                 skip_field(&mut buf, wire_type)?;
             }
@@ -810,30 +964,6 @@ fn decode_vector_output(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
     }
 
     Ok(vector)
-}
-
-/// Decode DenseVector.data (packed repeated float).
-fn decode_dense_vector(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
-    let mut buf = data;
-
-    while !buf.is_empty() {
-        let (field_number, wire_type) = decode_tag(&mut buf)?;
-        match field_number {
-            DENSE_VECTOR_DATA => {
-                if wire_type != WIRE_LEN {
-                    skip_field(&mut buf, wire_type)?;
-                    continue;
-                }
-                let float_data = read_submessage(&mut buf)?;
-                return Ok(Some(decode_packed_f32_vector(float_data)?));
-            }
-            _ => {
-                skip_field(&mut buf, wire_type)?;
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 fn decode_named_vectors_output(data: &[u8]) -> QdrantResult<Option<Vec<f32>>> {
@@ -887,7 +1017,7 @@ fn decode_named_vector_output_entry(data: &[u8]) -> QdrantResult<Option<Vec<f32>
                     QdrantError::Decode(format!("Invalid UTF-8 named vector key: {e}"))
                 })?;
                 ensure_non_empty_decoded_name(decoded_key, "Named vector key")?;
-                key = Some(decoded_key.to_string());
+                set_decoded_string(&mut key, decoded_key.to_string(), "named vector key")?;
             }
             NAMED_VECTOR_ENTRY_VALUE => {
                 if wire_type != WIRE_LEN {
@@ -896,7 +1026,9 @@ fn decode_named_vector_output_entry(data: &[u8]) -> QdrantResult<Option<Vec<f32>
                     ));
                 }
                 let value_data = read_submessage(&mut buf)?;
-                vector = decode_vector_output(value_data)?;
+                if let Some(next) = decode_vector_output(value_data)? {
+                    set_decoded_vector(&mut vector, next)?;
+                }
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -944,6 +1076,7 @@ fn decode_packed_f32_vector(float_data: &[u8]) -> QdrantResult<Vec<f32>> {
 
 /// Decode a PointId message.
 fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
+    let mut id = None;
     let mut buf = data;
 
     while !buf.is_empty() {
@@ -956,22 +1089,18 @@ fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
                     continue;
                 }
                 let num = decode_varint(&mut buf)?;
-                return Ok(PointId::Num(num));
+                set_decoded_point_id(&mut id, PointId::Num(num), "point id")?;
             }
             POINT_ID_UUID => {
                 if wire_type != WIRE_LEN {
                     skip_field(&mut buf, wire_type)?;
                     continue;
                 }
-                let len = decode_varint(&mut buf)? as usize;
-                if buf.len() < len {
-                    return Err(QdrantError::Decode("Truncated UUID".to_string()));
-                }
-
-                let uuid_str = std::str::from_utf8(&buf[..len])
+                let uuid_data = read_submessage(&mut buf)?;
+                let uuid_str = std::str::from_utf8(uuid_data)
                     .map_err(|e| QdrantError::Decode(format!("Invalid UTF-8: {}", e)))?;
                 ensure_non_empty_decoded_name(uuid_str, "Point UUID")?;
-                return Ok(PointId::Uuid(uuid_str.to_string()));
+                set_decoded_point_id(&mut id, PointId::Uuid(uuid_str.to_string()), "point id")?;
             }
             _ => {
                 skip_field(&mut buf, wire_type)?;
@@ -979,7 +1108,7 @@ fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
         }
     }
 
-    Err(QdrantError::Decode("Missing point id".to_string()))
+    id.ok_or_else(|| QdrantError::Decode("Missing point id".to_string()))
 }
 
 // ============================================================================
@@ -1084,6 +1213,17 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_point_id_rejects_duplicate_fields() {
+        let duplicate_num = &[0x08, 0x01, 0x08, 0x02];
+        let err = decode_point_id(duplicate_num).unwrap_err();
+        assert!(err.to_string().contains("Duplicate point id"));
+
+        let conflicting_oneof = &[0x08, 0x01, 0x12, 0x03, b'a', b'b', b'c'];
+        let err = decode_point_id(conflicting_oneof).unwrap_err();
+        assert!(err.to_string().contains("Duplicate point id"));
+    }
+
+    #[test]
     fn test_decode_point_id_rejects_empty_uuid() {
         let empty = &[0x12, 0x00];
         let err = decode_point_id(empty).unwrap_err();
@@ -1156,6 +1296,35 @@ mod tests {
         vectors_output
     }
 
+    fn current_dense_vectors_output_unpacked(values: &[f32]) -> Vec<u8> {
+        let mut dense = Vec::new();
+        for value in values {
+            dense.push(0x0D);
+            dense.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut vector_output = Vec::new();
+        vector_output.extend_from_slice(&[0xAA, 0x06]);
+        vector_output.push(dense.len() as u8);
+        vector_output.extend_from_slice(&dense);
+
+        let mut vectors_output = Vec::new();
+        push_len_field(&mut vectors_output, 0x0A, &vector_output);
+        vectors_output
+    }
+
+    fn deprecated_dense_vectors_output_unpacked(values: &[f32]) -> Vec<u8> {
+        let mut vector_output = Vec::new();
+        for value in values {
+            vector_output.push(0x0D);
+            vector_output.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut vectors_output = Vec::new();
+        push_len_field(&mut vectors_output, 0x0A, &vector_output);
+        vectors_output
+    }
+
     fn named_dense_vectors_output(name: &str, values: &[f32]) -> Vec<u8> {
         let vectors_output = current_dense_vectors_output(values);
         let vector_output = &vectors_output[2..];
@@ -1189,6 +1358,16 @@ mod tests {
         data
     }
 
+    fn payload_string_entry(key: &str, value: &str) -> Vec<u8> {
+        let mut value_message = Vec::new();
+        push_len_field(&mut value_message, 0x22, value.as_bytes());
+
+        let mut entry = Vec::new();
+        push_len_field(&mut entry, 0x0A, key.as_bytes());
+        push_len_field(&mut entry, 0x12, &value_message);
+        entry
+    }
+
     #[test]
     fn test_decode_search_response_accepts_current_dense_vector_output() {
         let scored_point = scored_point_with_vectors(&current_dense_vectors_output(&[0.25, 0.75]));
@@ -1202,8 +1381,51 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_search_response_accepts_unpacked_current_dense_vector_output() {
+        let scored_point =
+            scored_point_with_vectors(&current_dense_vectors_output_unpacked(&[0.25, 0.75]));
+        let mut data = Vec::new();
+        push_len_field(&mut data, 0x0A, &scored_point);
+
+        let points = decode_search_response(&data).unwrap();
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].vector, Some(vec![0.25, 0.75]));
+    }
+
+    #[test]
     fn test_decode_scored_point_accepts_deprecated_dense_vector_output() {
         let data = scored_point_with_vectors(&deprecated_dense_vectors_output(&[0.25, 0.75]));
+
+        let point = decode_scored_point(&data).unwrap();
+
+        assert_eq!(point.vector, Some(vec![0.25, 0.75]));
+    }
+
+    #[test]
+    fn test_decode_scored_point_accepts_unpacked_deprecated_dense_vector_output() {
+        let data =
+            scored_point_with_vectors(&deprecated_dense_vectors_output_unpacked(&[0.25, 0.75]));
+
+        let point = decode_scored_point(&data).unwrap();
+
+        assert_eq!(point.vector, Some(vec![0.25, 0.75]));
+    }
+
+    #[test]
+    fn test_decode_scored_point_accepts_split_packed_dense_vector_chunks() {
+        let mut dense = Vec::new();
+        push_len_field(&mut dense, 0x0A, &packed_f32(&[0.25]));
+        push_len_field(&mut dense, 0x0A, &packed_f32(&[0.75]));
+
+        let mut vector_output = Vec::new();
+        vector_output.extend_from_slice(&[0xAA, 0x06]);
+        vector_output.push(dense.len() as u8);
+        vector_output.extend_from_slice(&dense);
+
+        let mut vectors_output = Vec::new();
+        push_len_field(&mut vectors_output, 0x0A, &vector_output);
+        let data = scored_point_with_vectors(&vectors_output);
 
         let point = decode_scored_point(&data).unwrap();
 
@@ -1233,6 +1455,117 @@ mod tests {
         let err = decode_scored_point(&data).unwrap_err();
 
         assert!(err.to_string().contains("Multiple named vectors"));
+    }
+
+    #[test]
+    fn test_decode_named_vector_entry_rejects_duplicate_key_fields() {
+        let vector_output = current_dense_vectors_output(&[0.25, 0.75]);
+        let vector_output = &vector_output[2..];
+
+        let mut entry = Vec::new();
+        push_len_field(&mut entry, 0x0A, b"image");
+        push_len_field(&mut entry, 0x0A, b"text");
+        push_len_field(&mut entry, 0x12, vector_output);
+
+        let err = decode_named_vector_output_entry(&entry).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate named vector key"));
+    }
+
+    #[test]
+    fn test_decode_named_vector_entry_rejects_conflicting_value_fields() {
+        let first = current_dense_vectors_output(&[0.25]);
+        let second = current_dense_vectors_output(&[0.75]);
+
+        let mut entry = Vec::new();
+        push_len_field(&mut entry, 0x0A, b"image");
+        push_len_field(&mut entry, 0x12, &first[2..]);
+        push_len_field(&mut entry, 0x12, &second[2..]);
+
+        let err = decode_named_vector_output_entry(&entry).unwrap_err();
+
+        assert!(err.to_string().contains("Conflicting vector outputs"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_conflicting_vector_fields() {
+        let mut data = vec![
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+        ];
+        push_len_field(&mut data, 0x32, &current_dense_vectors_output(&[0.25]));
+        push_len_field(&mut data, 0x32, &current_dense_vectors_output(&[0.75]));
+
+        let err = decode_scored_point(&data).unwrap_err();
+
+        assert!(err.to_string().contains("Conflicting vector outputs"));
+    }
+
+    #[test]
+    fn test_decode_vector_output_rejects_conflicting_deprecated_and_dense_vectors() {
+        let deprecated = deprecated_dense_vectors_output(&[0.25]);
+        let dense = current_dense_vectors_output(&[0.75]);
+
+        let mut vector_output = deprecated[2..].to_vec();
+        vector_output.extend_from_slice(&dense[2..]);
+
+        let err = decode_vector_output(&vector_output).unwrap_err();
+
+        assert!(err.to_string().contains("Conflicting vector outputs"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_duplicate_score_fields() {
+        let first_score = 0.5f32.to_le_bytes();
+        let second_score = 0.75f32.to_le_bytes();
+        let data = &[
+            0x0A,
+            0x02,
+            0x08,
+            0x01, // id = PointId { num = 1 }
+            0x1D,
+            first_score[0],
+            first_score[1],
+            first_score[2],
+            first_score[3],
+            0x1D,
+            second_score[0],
+            second_score[1],
+            second_score[2],
+            second_score[3],
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate scored point score"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_duplicate_id_fields() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x0A, 0x02, 0x08, 0x02, // second id = PointId { num = 2 }
+        ];
+
+        let err = decode_scored_point(data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate scored point id"));
+    }
+
+    #[test]
+    fn test_decode_scored_point_rejects_duplicate_payload_keys() {
+        let mut data = vec![
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+        ];
+        push_len_field(&mut data, 0x12, &payload_string_entry("tenant_id", "first"));
+        push_len_field(
+            &mut data,
+            0x12,
+            &payload_string_entry("tenant_id", "second"),
+        );
+
+        let err = decode_scored_point(&data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload key"));
     }
 
     #[test]
@@ -1315,6 +1648,44 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_get_response_rejects_duplicate_retrieved_id_fields() {
+        let retrieved_point = &[
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+            0x0A, 0x02, 0x08, 0x02, // second id = PointId { num = 2 }
+        ];
+        let mut data = Vec::new();
+        push_len_field(&mut data, 0x0A, retrieved_point);
+
+        let err = decode_get_response(&data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate retrieved point id"));
+    }
+
+    #[test]
+    fn test_decode_get_response_rejects_duplicate_retrieved_payload_keys() {
+        let mut retrieved_point = vec![
+            0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
+        ];
+        push_len_field(
+            &mut retrieved_point,
+            0x12,
+            &payload_string_entry("tenant_id", "first"),
+        );
+        push_len_field(
+            &mut retrieved_point,
+            0x12,
+            &payload_string_entry("tenant_id", "second"),
+        );
+
+        let mut data = Vec::new();
+        push_len_field(&mut data, 0x0A, &retrieved_point);
+
+        let err = decode_get_response(&data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload key"));
+    }
+
+    #[test]
     fn test_decode_scroll_response_rejects_point_without_id() {
         let data = &[0x12, 0x00];
 
@@ -1334,6 +1705,21 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("Missing point id"));
+    }
+
+    #[test]
+    fn test_decode_scroll_response_rejects_duplicate_next_offset() {
+        let data = &[
+            0x0A, 0x02, 0x08, 0x01, // next_page_offset = 1
+            0x0A, 0x02, 0x08, 0x02, // next_page_offset = 2
+        ];
+
+        let err = match decode_scroll_response(data) {
+            Ok(_) => panic!("scroll response with duplicate next offset must fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("Duplicate scroll next offset"));
     }
 
     #[test]
@@ -1410,6 +1796,66 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_value_rejects_duplicate_value_kinds() {
+        let data = &[
+            0x18, 0x2A, // integer_value = 42
+            0x22, 0x02, b'o', b'k', // string_value = "ok"
+        ];
+
+        let err = decode_value(data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload value kind"));
+    }
+
+    #[test]
+    fn test_decode_value_rejects_duplicate_same_value_kind() {
+        let data = &[
+            0x22, 0x05, b'f', b'i', b'r', b's', b't', // string_value = "first"
+            0x22, 0x06, b's', b'e', b'c', b'o', b'n', b'd', // string_value = "second"
+        ];
+
+        let err = decode_value(data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload value kind"));
+    }
+
+    #[test]
+    fn test_decode_map_entry_rejects_duplicate_key_fields() {
+        let mut entry = Vec::new();
+        push_len_field(&mut entry, 0x0A, b"first");
+        push_len_field(&mut entry, 0x0A, b"second");
+        push_len_field(&mut entry, 0x12, &{
+            let mut value = Vec::new();
+            push_len_field(&mut value, 0x22, b"ok");
+            value
+        });
+
+        let err = decode_map_entry(&entry, 0).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload map key"));
+    }
+
+    #[test]
+    fn test_decode_map_entry_rejects_duplicate_value_fields() {
+        let mut entry = Vec::new();
+        push_len_field(&mut entry, 0x0A, b"key");
+        push_len_field(&mut entry, 0x12, &{
+            let mut value = Vec::new();
+            push_len_field(&mut value, 0x22, b"first");
+            value
+        });
+        push_len_field(&mut entry, 0x12, &{
+            let mut value = Vec::new();
+            push_len_field(&mut value, 0x22, b"second");
+            value
+        });
+
+        let err = decode_map_entry(&entry, 0).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload map value"));
+    }
+
+    #[test]
     fn test_decode_scored_point_rejects_invalid_payload_key_utf8() {
         let data = &[
             0x0A, 0x02, 0x08, 0x01, // id = PointId { num = 1 }
@@ -1483,6 +1929,23 @@ mod tests {
 
         let err = decode_value(data).unwrap_err();
         assert!(err.to_string().contains("Payload map key"));
+    }
+
+    #[test]
+    fn test_decode_value_rejects_duplicate_nested_object_key() {
+        let first = payload_string_entry("tenant_id", "first");
+        let second = payload_string_entry("tenant_id", "second");
+
+        let mut struct_value = Vec::new();
+        push_len_field(&mut struct_value, 0x0A, &first);
+        push_len_field(&mut struct_value, 0x0A, &second);
+
+        let mut data = Vec::new();
+        push_len_field(&mut data, 0x32, &struct_value);
+
+        let err = decode_value(&data).unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate payload key"));
     }
 
     #[test]
