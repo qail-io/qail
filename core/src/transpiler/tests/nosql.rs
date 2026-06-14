@@ -38,6 +38,51 @@ fn test_qdrant_search() {
 }
 
 #[test]
+fn test_qdrant_native_vector_builders_are_supported() {
+    use crate::ast::{Operator, Qail, Value};
+
+    let search = Qail::search("points")
+        .vector(vec![0.1, 0.2])
+        .filter("city", Operator::Eq, "London")
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&search).expect("native qdrant search JSON must be valid");
+    assert!(parsed.get("error").is_none(), "{search}");
+    assert_eq!(parsed["vector"], serde_json::json!([0.1, 0.2]));
+    assert_eq!(parsed["filter"]["must"][0]["key"], "city");
+
+    let upsert = Qail::upsert("points")
+        .set_value("id", "point-1")
+        .set_value("vector", Value::Vector(vec![0.3, 0.4]))
+        .set_value("title", "Native builder")
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&upsert).expect("native qdrant upsert JSON must be valid");
+    assert!(parsed.get("error").is_none(), "{upsert}");
+    assert_eq!(parsed["points"][0]["id"], "point-1");
+    assert_eq!(parsed["points"][0]["vector"], serde_json::json!([0.3, 0.4]));
+    assert_eq!(parsed["points"][0]["payload"]["title"], "Native builder");
+
+    let scroll = Qail::scroll("points")
+        .filter("city", Operator::Eq, "London")
+        .limit(25)
+        .offset(42)
+        .columns(["id", "title", "vector"])
+        .to_qdrant_search();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&scroll).expect("native qdrant scroll JSON must be valid");
+    assert!(parsed.get("error").is_none(), "{scroll}");
+    assert_eq!(parsed["filter"]["must"][0]["key"], "city");
+    assert_eq!(parsed["limit"], 25);
+    assert_eq!(parsed["offset"], 42);
+    assert_eq!(
+        parsed["with_payload"]["include"],
+        serde_json::json!(["title"])
+    );
+    assert_eq!(parsed["with_vector"], true);
+}
+
+#[test]
 fn test_qdrant_or_filter_output() {
     use crate::ast::{Operator, Qail};
 
@@ -385,6 +430,8 @@ fn test_qdrant_transpiler_encodes_negative_filters() {
 fn test_qdrant_search_encodes_native_filter_contracts() {
     use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 
+    let owner_id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+    let reviewer_id = uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").unwrap();
     let search = Qail {
         table: "points".to_string(),
         vector: Some(vec![0.1, 0.2]),
@@ -403,6 +450,21 @@ fn test_qdrant_search_encodes_native_filter_contracts() {
                     value: Value::Array(vec![
                         Value::String("open".to_string()),
                         Value::String("closed".to_string()),
+                    ]),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("owner_id".to_string()),
+                    op: Operator::Eq,
+                    value: Value::Uuid(owner_id),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("reviewer_id".to_string()),
+                    op: Operator::In,
+                    value: Value::Array(vec![
+                        Value::Uuid(reviewer_id),
+                        Value::String("external-reviewer".to_string()),
                     ]),
                     is_array_unnest: false,
                 },
@@ -434,8 +496,13 @@ fn test_qdrant_search_encodes_native_filter_contracts() {
         must[1]["match"]["any"],
         serde_json::json!(["open", "closed"])
     );
-    assert_eq!(must[2]["match"]["text"], "refund");
-    assert_eq!(must[3]["is_null"]["key"], "deleted_at");
+    assert_eq!(must[2]["match"]["value"], owner_id.to_string());
+    assert_eq!(
+        must[3]["match"]["any"],
+        serde_json::json!([reviewer_id.to_string(), "external-reviewer"])
+    );
+    assert_eq!(must[4]["match"]["text"], "refund");
+    assert_eq!(must[5]["is_null"]["key"], "deleted_at");
 }
 
 #[test]

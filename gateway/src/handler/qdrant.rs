@@ -1108,8 +1108,12 @@ fn validate_qdrant_read_filter_condition(
     }
 
     match (&condition.op, &condition.value) {
-        (Operator::Eq, Value::String(_) | Value::Int(_) | Value::Bool(_)) => Ok(()),
-        (Operator::Ne, Value::String(_) | Value::Int(_) | Value::Bool(_)) => Ok(()),
+        (Operator::Eq, Value::String(_) | Value::Uuid(_) | Value::Int(_) | Value::Bool(_)) => {
+            Ok(())
+        }
+        (Operator::Ne, Value::String(_) | Value::Uuid(_) | Value::Int(_) | Value::Bool(_)) => {
+            Ok(())
+        }
         (Operator::In, Value::Array(values)) if qdrant_match_any_values_are_supported(values) => {
             Ok(())
         }
@@ -1176,12 +1180,14 @@ fn qdrant_point_id_array_from_value(
 
 fn qdrant_match_any_values_are_supported(values: &[qail_core::ast::Value]) -> bool {
     !values.is_empty()
-        && (values
+        && (values.iter().all(|value| {
+            matches!(
+                value,
+                qail_core::ast::Value::String(_) | qail_core::ast::Value::Uuid(_)
+            )
+        }) || values
             .iter()
-            .all(|value| matches!(value, qail_core::ast::Value::String(_)))
-            || values
-                .iter()
-                .all(|value| matches!(value, qail_core::ast::Value::Int(_))))
+            .all(|value| matches!(value, qail_core::ast::Value::Int(_))))
 }
 
 fn vector_from_value(value: &qail_core::ast::Value) -> Option<Vec<f32>> {
@@ -3179,6 +3185,8 @@ mod tests {
 
     #[test]
     fn qdrant_read_filters_accept_encoder_supported_matrix() {
+        let owner_id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let reviewer_id = uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").unwrap();
         let conditions = vec![
             Condition {
                 left: Expr::Named("status".to_string()),
@@ -3211,6 +3219,21 @@ mod tests {
                 left: Expr::Named("priority".to_string()),
                 op: Operator::In,
                 value: Value::Array(vec![Value::Int(1), Value::Int(2)]),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("owner_id".to_string()),
+                op: Operator::Eq,
+                value: Value::Uuid(owner_id),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("reviewer_id".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::Uuid(reviewer_id),
+                    Value::String("external-reviewer".to_string()),
+                ]),
                 is_array_unnest: false,
             },
             Condition {

@@ -15,8 +15,9 @@ pub trait ToQdrant {
 impl ToQdrant for Qail {
     fn to_qdrant_search(&self) -> String {
         let result = match self.action {
-            Action::Get => build_qdrant_search(self),
-            Action::Put | Action::Add => build_qdrant_upsert(self),
+            Action::Get | Action::Search => build_qdrant_search(self),
+            Action::Put | Action::Add | Action::Upsert => build_qdrant_upsert(self),
+            Action::Scroll => build_qdrant_scroll(self),
             Action::Del => build_qdrant_delete(self),
             _ => {
                 return format!(
@@ -155,6 +156,61 @@ fn qdrant_limit(cmd: &Qail) -> Result<usize, String> {
         }
     }
     Ok(limit.unwrap_or(10))
+}
+
+fn qdrant_offset(cmd: &Qail) -> Result<Option<usize>, String> {
+    let mut offset = None;
+    for cage in &cmd.cages {
+        if let CageKind::Offset(n) = cage.kind
+            && offset.replace(n).is_some()
+        {
+            return Err("Duplicate Qdrant OFFSET clauses are not supported".to_string());
+        }
+    }
+    Ok(offset)
+}
+
+fn append_qdrant_projection_options(cmd: &Qail, parts: &mut Vec<String>) -> Result<(), String> {
+    let mut wants_vector = cmd.with_vector;
+    if !cmd.columns.is_empty() {
+        let mut payload_includes = Vec::new();
+        let mut has_wildcard = false;
+        for c in &cmd.columns {
+            let raw_field = raw_named_qdrant_field(c)?;
+            let field =
+                normalize_qdrant_field(qdrant_requested_projection_segment(raw_field, &cmd.table));
+            if qdrant_projection_is_wildcard(raw_field, &cmd.table) {
+                has_wildcard = true;
+                continue;
+            }
+            if qdrant_reserved_field_matches(field, "vector") {
+                wants_vector = true;
+                continue;
+            }
+            if qdrant_reserved_field_matches(field, "id")
+                || qdrant_reserved_field_matches(field, "score")
+            {
+                continue;
+            }
+            payload_includes.push(json_string(field));
+        }
+        if has_wildcard {
+            parts.push("\"with_payload\": true".to_string());
+        } else if payload_includes.is_empty() {
+            parts.push("\"with_payload\": false".to_string());
+        } else {
+            parts.push(format!(
+                "\"with_payload\": {{ \"include\": [{}] }}",
+                payload_includes.join(", ")
+            ));
+        }
+    } else {
+        parts.push("\"with_payload\": true".to_string());
+    }
+    if wants_vector {
+        parts.push("\"with_vector\": true".to_string());
+    }
+    Ok(())
 }
 
 fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
@@ -383,45 +439,41 @@ fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
     parts.push(format!("\"limit\": {}", limit));
 
     // 4. With Payload (Projections)
-    let mut wants_vector = cmd.with_vector;
-    if !cmd.columns.is_empty() {
-        let mut payload_includes = Vec::new();
-        let mut has_wildcard = false;
-        for c in &cmd.columns {
-            let raw_field = raw_named_qdrant_field(c)?;
-            let field =
-                normalize_qdrant_field(qdrant_requested_projection_segment(raw_field, &cmd.table));
-            if qdrant_projection_is_wildcard(raw_field, &cmd.table) {
-                has_wildcard = true;
-                continue;
-            }
-            if qdrant_reserved_field_matches(field, "vector") {
-                wants_vector = true;
-                continue;
-            }
-            if qdrant_reserved_field_matches(field, "id")
-                || qdrant_reserved_field_matches(field, "score")
-            {
-                continue;
-            }
-            payload_includes.push(json_string(field));
-        }
-        if has_wildcard {
-            parts.push("\"with_payload\": true".to_string());
-        } else if payload_includes.is_empty() {
-            parts.push("\"with_payload\": false".to_string());
-        } else {
-            parts.push(format!(
-                "\"with_payload\": {{ \"include\": [{}] }}",
-                payload_includes.join(", ")
-            ));
-        }
-    } else {
-        parts.push("\"with_payload\": true".to_string());
+    append_qdrant_projection_options(cmd, &mut parts)?;
+
+    Ok(format!("{{ {} }}", parts.join(", ")))
+}
+
+fn build_qdrant_scroll(cmd: &Qail) -> Result<String, String> {
+    // Target endpoint: POST /collections/{collection_name}/points/scroll
+    // Output: JSON Body
+    if cmd.vector.is_some() {
+        return Err("Qdrant scroll does not accept a search vector".to_string());
     }
-    if wants_vector {
-        parts.push("\"with_vector\": true".to_string());
+    if cmd.score_threshold.is_some() {
+        return Err("Qdrant scroll does not accept a score threshold".to_string());
     }
+    if let Some(vector_name) = &cmd.vector_name {
+        if vector_name.trim().is_empty() {
+            return Err("Qdrant vector name cannot be empty".to_string());
+        }
+        return Err("Qdrant JSON transpiler does not support named vector scroll selectors; use the qail-qdrant driver".to_string());
+    }
+
+    let mut parts = Vec::new();
+    let filter = build_filter(cmd)?;
+    if !filter.is_empty() {
+        parts.push(format!("\"filter\": {}", filter));
+    }
+
+    let limit = qdrant_limit(cmd)?;
+    parts.push(format!("\"limit\": {}", limit));
+
+    if let Some(offset) = qdrant_offset(cmd)? {
+        parts.push(format!("\"offset\": {}", offset));
+    }
+
+    append_qdrant_projection_options(cmd, &mut parts)?;
 
     Ok(format!("{{ {} }}", parts.join(", ")))
 }
@@ -602,13 +654,14 @@ fn negated_qdrant_clause(clause: String) -> String {
 fn filter_match_value_to_json(v: &Value) -> Result<String, String> {
     match v {
         Value::String(s) => Ok(json_string(s)),
+        Value::Uuid(u) => Ok(json_string(&u.to_string())),
         Value::Int(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
         Value::Null | Value::NullUuid => {
             Err("Qdrant equality filters cannot match null; use IS NULL".to_string())
         }
         other => Err(format!(
-            "Qdrant equality filters support only string, integer, or bool values, got {other}"
+            "Qdrant equality filters support only string, UUID, integer, or bool values, got {other}"
         )),
     }
 }
@@ -620,11 +673,15 @@ fn filter_array_values_to_json(v: &Value) -> Result<String, String> {
     if values.is_empty() {
         return Err("Qdrant IN filters require at least one value".to_string());
     }
-    if values.iter().all(|value| matches!(value, Value::String(_))) {
+    if values
+        .iter()
+        .all(|value| matches!(value, Value::String(_) | Value::Uuid(_)))
+    {
         let values = values
             .iter()
             .map(|value| match value {
                 Value::String(value) => Ok(json_string(value)),
+                Value::Uuid(value) => Ok(json_string(&value.to_string())),
                 _ => unreachable!("checked by all()"),
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -641,7 +698,7 @@ fn filter_array_values_to_json(v: &Value) -> Result<String, String> {
         return Ok(values.join(", "));
     }
     Err(
-        "Qdrant IN filters support only a non-empty homogeneous string or integer array"
+        "Qdrant IN filters support only a non-empty homogeneous string/UUID or integer array"
             .to_string(),
     )
 }

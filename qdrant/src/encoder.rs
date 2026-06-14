@@ -713,11 +713,17 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
     match (&cond.op, &cond.value) {
         // Match (equality) conditions
         (Operator::Eq, Value::String(s)) => Ok(encode_field_condition_match_keyword(key, s)),
+        (Operator::Eq, Value::Uuid(u)) => {
+            Ok(encode_field_condition_match_keyword(key, &u.to_string()))
+        }
         (Operator::Eq, Value::Int(n)) => Ok(encode_field_condition_match_integer(key, *n)),
         (Operator::Eq, Value::Bool(b)) => Ok(encode_field_condition_match_bool(key, *b)),
         (Operator::In, Value::Array(values)) => encode_field_condition_match_any(key, values),
         (Operator::Ne, Value::String(s)) => Ok(encode_nested_must_not_condition(
             encode_field_condition_match_keyword(key, s),
+        )),
+        (Operator::Ne, Value::Uuid(u)) => Ok(encode_nested_must_not_condition(
+            encode_field_condition_match_keyword(key, &u.to_string()),
         )),
         (Operator::Ne, Value::Int(n)) => Ok(encode_nested_must_not_condition(
             encode_field_condition_match_integer(key, *n),
@@ -1062,11 +1068,16 @@ fn encode_field_condition_match_any(
     if values.is_empty() {
         return Err(encode_error("Qdrant IN filters require at least one value"));
     }
-    if values.iter().all(|value| matches!(value, Value::String(_))) {
+    if values
+        .iter()
+        .all(|value| matches!(value, Value::String(_) | Value::Uuid(_)))
+    {
         let mut repeated = BytesMut::with_capacity(values.len() * 16);
         for value in values {
-            let Value::String(value) = value else {
-                unreachable!("checked by all()");
+            let value = match value {
+                Value::String(value) => value.clone(),
+                Value::Uuid(value) => value.to_string(),
+                _ => unreachable!("checked by all()"),
             };
             repeated.put_u8(0x0A); // RepeatedStrings.strings, field 1
             encode_varint(&mut repeated, value.len());
@@ -1097,7 +1108,7 @@ fn encode_field_condition_match_any(
     }
 
     Err(encode_error(
-        "Qdrant IN filters support only a non-empty homogeneous string or integer array",
+        "Qdrant IN filters support only a non-empty homogeneous string/UUID or integer array",
     ))
 }
 
@@ -2628,6 +2639,58 @@ mod tests {
                 .windows(8)
                 .any(|window| window == [0x22, 0x06, b'r', b'e', b'f', b'u', b'n', b'd']),
             "text match should use Match.text field 4"
+        );
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_supports_uuid_payload_keywords() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let owner_id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let owner_condition = Condition {
+            left: Expr::Named("owner_id".to_string()),
+            op: Operator::Eq,
+            value: Value::Uuid(owner_id),
+            is_array_unnest: false,
+        };
+        let encoded =
+            encode_condition_message(&owner_condition).expect("uuid payload match should encode");
+        let owner_id = owner_id.to_string();
+        assert!(
+            encoded
+                .windows(36)
+                .any(|window| window == owner_id.as_bytes()),
+            "uuid equality should encode as a keyword string"
+        );
+
+        let reviewer_id = uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let reviewer_condition = Condition {
+            left: Expr::Named("reviewer_id".to_string()),
+            op: Operator::In,
+            value: Value::Array(vec![
+                Value::Uuid(reviewer_id),
+                Value::String("external-reviewer".to_string()),
+            ]),
+            is_array_unnest: false,
+        };
+        let encoded =
+            encode_condition_message(&reviewer_condition).expect("uuid IN match should encode");
+        let reviewer_id = reviewer_id.to_string();
+        assert!(
+            encoded.contains(&0x2A),
+            "uuid IN should use Match.keywords field 5"
+        );
+        assert!(
+            encoded
+                .windows(36)
+                .any(|window| window == reviewer_id.as_bytes()),
+            "uuid IN should include the UUID keyword"
+        );
+        assert!(
+            encoded
+                .windows("external-reviewer".len())
+                .any(|window| window == b"external-reviewer"),
+            "uuid IN should allow mixed keyword strings"
         );
     }
 

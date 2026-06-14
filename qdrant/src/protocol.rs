@@ -405,6 +405,10 @@ pub fn encode_conditions_to_filter(
                 "key": key,
                 "match": { "value": s }
             }),
+            (Operator::Eq, Value::Uuid(u)) => json!({
+                "key": key,
+                "match": { "value": u.to_string() }
+            }),
             (Operator::Eq, Value::Int(n)) => json!({
                 "key": key,
                 "match": { "value": n }
@@ -417,6 +421,13 @@ pub fn encode_conditions_to_filter(
                 must_not_clauses.push(json!({
                     "key": key,
                     "match": { "value": s }
+                }));
+                continue;
+            }
+            (Operator::Ne, Value::Uuid(u)) => {
+                must_not_clauses.push(json!({
+                    "key": key,
+                    "match": { "value": u.to_string() }
                 }));
                 continue;
             }
@@ -578,12 +589,14 @@ fn values_to_json(values: &[qail_core::ast::Value]) -> Option<Vec<JsonValue>> {
     if values.is_empty() {
         return None;
     }
-    if values
+    if values.iter().all(|value| {
+        matches!(
+            value,
+            qail_core::ast::Value::String(_) | qail_core::ast::Value::Uuid(_)
+        )
+    }) || values
         .iter()
-        .all(|value| matches!(value, qail_core::ast::Value::String(_)))
-        || values
-            .iter()
-            .all(|value| matches!(value, qail_core::ast::Value::Int(_)))
+        .all(|value| matches!(value, qail_core::ast::Value::Int(_)))
     {
         return values.iter().map(value_to_json).collect();
     }
@@ -595,6 +608,7 @@ fn value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
     use qail_core::ast::Value;
     match value {
         Value::String(s) => Some(json!(s)),
+        Value::Uuid(u) => Some(json!(u.to_string())),
         Value::Int(n) => Some(json!(n)),
         _ => None,
     }
@@ -1289,6 +1303,8 @@ mod tests {
     fn encode_conditions_to_filter_supports_native_in_json() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
 
+        let owner_id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let reviewer_id = uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").unwrap();
         let conditions = vec![
             Condition {
                 left: Expr::Named("status".to_string()),
@@ -1306,6 +1322,21 @@ mod tests {
                 is_array_unnest: false,
             },
             Condition {
+                left: Expr::Named("owner_id".to_string()),
+                op: Operator::Eq,
+                value: Value::Uuid(owner_id),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("reviewer_id".to_string()),
+                op: Operator::In,
+                value: Value::Array(vec![
+                    Value::Uuid(reviewer_id),
+                    Value::String("external-reviewer".to_string()),
+                ]),
+                is_array_unnest: false,
+            },
+            Condition {
                 left: Expr::Named("ID".to_string()),
                 op: Operator::In,
                 value: Value::Array(vec![
@@ -1320,7 +1351,12 @@ mod tests {
 
         assert_eq!(filter["must"][0]["match"]["any"], json!(["open", "closed"]));
         assert_eq!(filter["must"][1]["match"]["any"], json!([1, 2]));
-        assert_eq!(filter["must"][2]["has_id"], json!([42, "uuid-like-id"]));
+        assert_eq!(filter["must"][2]["match"]["value"], owner_id.to_string());
+        assert_eq!(
+            filter["must"][3]["match"]["any"],
+            json!([reviewer_id.to_string(), "external-reviewer"])
+        );
+        assert_eq!(filter["must"][4]["has_id"], json!([42, "uuid-like-id"]));
     }
 
     #[test]
