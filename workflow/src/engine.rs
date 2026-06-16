@@ -13,7 +13,7 @@ use crate::context::{
     WorkflowPendingWait,
 };
 use crate::payment::{ChargeRequest, ChargeResponse, Currency, PaymentKind};
-use crate::registry::WorkflowDefinition;
+use crate::registry::{StateTransition, WorkflowDefinition};
 use crate::step::WorkflowStep;
 
 const WORKFLOW_QUERY_WIRE_MAGIC: &str = "QAIL-CMD/1\n";
@@ -284,6 +284,7 @@ enum StepListCursorKind {
     },
     ForEach {
         item_index: usize,
+        item: Value,
     },
 }
 
@@ -294,7 +295,9 @@ enum RunMode<'a> {
 }
 
 const FOR_EACH_ITEM_KEY: &str = "item";
+const RESUME_EVENT_KEY: &str = "event";
 const TIMEOUT_FALLBACK_KEY: &str = "__qail_timeout_fallback";
+const RESERVED_CONTEXT_KEYS: &[&str] = &[FOR_EACH_ITEM_KEY, RESUME_EVENT_KEY, TIMEOUT_FALLBACK_KEY];
 
 #[derive(Debug, Clone)]
 struct StepExecutionScope<'a> {
@@ -390,6 +393,154 @@ fn ensure_no_child_cursor(
     }
 }
 
+fn ensure_step_position(
+    step: &WorkflowStep,
+    idx: usize,
+    step_count: usize,
+) -> Result<(), WorkflowError> {
+    if matches!(step, WorkflowStep::Transition { .. }) && idx + 1 < step_count {
+        return Err(WorkflowError::Other(
+            "Transition steps must be the final step in their block; move follow-up work before the Transition or into the target state's transition".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_wait_event_name(event: &str) -> Result<(), WorkflowError> {
+    if event.trim().is_empty() {
+        return Err(WorkflowError::Other(
+            "Wait event name must not be empty".to_string(),
+        ));
+    }
+    if event.trim() != event {
+        return Err(WorkflowError::Other(
+            "Wait event name must not have leading or trailing whitespace".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_user_context_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
+    if RESERVED_CONTEXT_KEYS.contains(&key) {
+        return Err(WorkflowError::Other(format!(
+            "Workflow {usage} uses reserved context key '{key}'"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_optional_user_context_key(
+    key: Option<&String>,
+    usage: &str,
+) -> Result<(), WorkflowError> {
+    if let Some(key) = key {
+        ensure_user_context_key(key, usage)?;
+    }
+    Ok(())
+}
+
+fn ensure_cursor_has_frames(cursor: &WorkflowCursor) -> Result<(), WorkflowError> {
+    if cursor.frames.is_empty() {
+        return Err(invalid_cursor("resume cursor has no frames"));
+    }
+    Ok(())
+}
+
+fn ensure_unique_branch_values(
+    condition_key: &str,
+    branches: &[(String, Vec<WorkflowStep>)],
+) -> Result<(), WorkflowError> {
+    let mut seen = std::collections::HashSet::new();
+    for (branch_value, _) in branches {
+        if !seen.insert(branch_value.as_str()) {
+            return Err(WorkflowError::Other(format!(
+                "Ambiguous workflow branch for '{condition_key}': duplicate value '{branch_value}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn find_single_transition<'a>(
+    definition: &'a WorkflowDefinition,
+    state: &str,
+) -> Result<Option<&'a StateTransition>, WorkflowError> {
+    let mut matches = definition.transitions.iter().filter(|t| t.from == state);
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        let count = definition.transitions_from(state).len();
+        return Err(WorkflowError::Other(format!(
+            "Ambiguous workflow definition '{}': state '{state}' has {count} outgoing transitions; use a Branch step or split states explicitly",
+            definition.name
+        )));
+    }
+    Ok(Some(first))
+}
+
+fn validate_workflow_definition(definition: &WorkflowDefinition) -> Result<(), WorkflowError> {
+    let mut seen_states = std::collections::HashMap::<&str, usize>::new();
+    for transition in &definition.transitions {
+        *seen_states.entry(&transition.from).or_default() += 1;
+        validate_workflow_steps(&transition.steps)?;
+    }
+
+    if let Some((state, count)) = seen_states.into_iter().find(|(_, count)| *count > 1) {
+        return Err(WorkflowError::Other(format!(
+            "Ambiguous workflow definition '{}': state '{state}' has {count} outgoing transitions; use a Branch step or split states explicitly",
+            definition.name
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> {
+    for (idx, step) in steps.iter().enumerate() {
+        ensure_step_position(step, idx, steps.len())?;
+        match step {
+            WorkflowStep::Query { cmd_json, store_as } => {
+                normalize_query_wire_for_execution(cmd_json)?;
+                ensure_optional_user_context_key(store_as.as_ref(), "Query store_as")?;
+            }
+            WorkflowStep::Wait {
+                event, on_timeout, ..
+            } => {
+                ensure_wait_event_name(event)?;
+                if steps_contain_wait(on_timeout) {
+                    return Err(WorkflowError::Other(
+                        "Wait steps inside on_timeout fallback are not supported".to_string(),
+                    ));
+                }
+                validate_workflow_steps(on_timeout)?;
+            }
+            WorkflowStep::Branch {
+                condition_key,
+                branches,
+                default,
+            } => {
+                ensure_unique_branch_values(condition_key, branches)?;
+                for (_, branch_steps) in branches {
+                    validate_workflow_steps(branch_steps)?;
+                }
+                validate_workflow_steps(default)?;
+            }
+            WorkflowStep::ForEach { steps, .. } => {
+                validate_workflow_steps(steps)?;
+            }
+            WorkflowStep::Charge { store_as, .. } => {
+                ensure_optional_user_context_key(store_as.as_ref(), "Charge store_as")?;
+            }
+            WorkflowStep::Notify { .. }
+            | WorkflowStep::Transition { .. }
+            | WorkflowStep::Log { .. } => {}
+        }
+    }
+
+    Ok(())
+}
+
 fn deadline_from_timeout(timeout: &std::time::Duration) -> Result<DateTime<Utc>, WorkflowError> {
     let timeout = chrono::Duration::from_std(*timeout).map_err(|_| {
         WorkflowError::Other("Wait timeout duration is too large to represent".to_string())
@@ -406,9 +557,10 @@ fn cursor_frame_for_index(kind: &StepListCursorKind, index: usize) -> WorkflowCu
             selection: selection.clone(),
             index,
         },
-        StepListCursorKind::ForEach { item_index } => WorkflowCursorFrame::ForEach {
+        StepListCursorKind::ForEach { item_index, item } => WorkflowCursorFrame::ForEachItem {
             item_index: *item_index,
             index,
+            item: item.clone(),
         },
     }
 }
@@ -535,6 +687,7 @@ fn execute_steps<'a, E: WorkflowExecutor>(
         }
 
         for (idx, step) in steps.iter().enumerate().skip(start_index) {
+            ensure_step_position(step, idx, steps.len())?;
             let step_cursor = if idx == start_index {
                 cursor_frames
             } else {
@@ -553,6 +706,9 @@ fn execute_steps<'a, E: WorkflowExecutor>(
                             scope.checkpoint_timeout,
                         )
                         .await?;
+                    }
+                    if ctx.current_state != scope.state {
+                        return Ok(None);
                     }
                 }
                 StepOutcome::Paused(pause) => return Ok(Some(pause)),
@@ -627,6 +783,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
         match step {
             WorkflowStep::Query { cmd_json, store_as } => {
                 ensure_no_child_cursor("Query", cursor_frames)?;
+                ensure_optional_user_context_key(store_as.as_ref(), "Query store_as")?;
                 let cmd_wire = normalize_query_wire_for_execution(cmd_json)?;
                 let result = executor.execute_query(&cmd_wire).await?;
                 if let Some(key) = store_as {
@@ -648,7 +805,12 @@ fn execute_step<'a, E: WorkflowExecutor>(
 
                 let params = payload_key
                     .as_ref()
-                    .and_then(|k| ctx.get(k).cloned())
+                    .map(|key| {
+                        ctx.get(key)
+                            .cloned()
+                            .ok_or_else(|| WorkflowError::MissingContextKey(key.clone()))
+                    })
+                    .transpose()?
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
                 executor
@@ -662,6 +824,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 on_timeout,
             } => {
                 ensure_no_child_cursor("Wait", cursor_frames)?;
+                ensure_wait_event_name(event)?;
                 // Wait steps are handled by the outer runner so state can be
                 // persisted before returning to the caller.
                 return Ok(StepOutcome::Paused(StepPause {
@@ -683,6 +846,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 branches,
                 default,
             } => {
+                ensure_unique_branch_values(condition_key, branches)?;
                 let (selection, selected_steps, start_index, nested_cursor) = match cursor_frames
                     .first()
                 {
@@ -759,26 +923,46 @@ fn execute_step<'a, E: WorkflowExecutor>(
                     )));
                 };
 
-                let (start_item_index, start_step_index, nested_cursor) =
-                    match cursor_frames.first() {
-                        Some(WorkflowCursorFrame::ForEach { item_index, index }) => {
-                            if *item_index >= items.len() {
-                                return Err(invalid_cursor(format!(
-                                    "for_each item index {item_index} is past item count {}",
-                                    items.len()
-                                )));
-                            }
-                            (*item_index, *index, &cursor_frames[1..])
+                let (start_item_index, start_step_index, nested_cursor) = match cursor_frames
+                    .first()
+                {
+                    Some(WorkflowCursorFrame::ForEachItem {
+                        item_index,
+                        index,
+                        item,
+                    }) => {
+                        if *item_index >= items.len() {
+                            return Err(invalid_cursor(format!(
+                                "for_each item index {item_index} is past item count {}",
+                                items.len()
+                            )));
                         }
-                        Some(_) => {
-                            return Err(invalid_cursor(
-                                "expected ForEach frame for nested loop resume",
-                            ));
+                        if items.get(*item_index) != Some(item) {
+                            return Err(invalid_cursor(format!(
+                                "for_each cursor item at index {item_index} changed while the workflow was paused"
+                            )));
                         }
-                        None => (0, 0, &[][..]),
-                    };
+                        (*item_index, *index, &cursor_frames[1..])
+                    }
+                    Some(WorkflowCursorFrame::ForEach { item_index, index }) => {
+                        if *item_index >= items.len() {
+                            return Err(invalid_cursor(format!(
+                                "for_each item index {item_index} is past item count {}",
+                                items.len()
+                            )));
+                        }
+                        (*item_index, *index, &cursor_frames[1..])
+                    }
+                    Some(_) => {
+                        return Err(invalid_cursor(
+                            "expected ForEach frame for nested loop resume",
+                        ));
+                    }
+                    None => (0, 0, &[][..]),
+                };
 
                 for (item_index, item) in items.into_iter().enumerate().skip(start_item_index) {
+                    let item_snapshot = item.clone();
                     let previous_item = ctx.data.insert(FOR_EACH_ITEM_KEY.to_string(), item);
                     ctx.updated_at = Utc::now();
                     let item_step_start = if item_index == start_item_index {
@@ -798,7 +982,13 @@ fn execute_step<'a, E: WorkflowExecutor>(
                         ctx,
                         item_step_start,
                         item_cursor,
-                        scope.child(step_index, StepListCursorKind::ForEach { item_index }),
+                        scope.child(
+                            step_index,
+                            StepListCursorKind::ForEach {
+                                item_index,
+                                item: item_snapshot,
+                            },
+                        ),
                     )
                     .await
                     {
@@ -838,6 +1028,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 store_as,
             } => {
                 ensure_no_child_cursor("Charge", cursor_frames)?;
+                ensure_optional_user_context_key(store_as.as_ref(), "Charge store_as")?;
                 let amount = resolve_charge_amount(ctx, amount_key)?;
 
                 let reference_id = ctx
@@ -1010,9 +1201,11 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
     ctx: &mut WorkflowContext,
     mode: RunMode<'a>,
 ) -> Result<String, WorkflowError> {
+    validate_workflow_definition(definition)?;
     let run_start_transition_count = ctx.transition_count();
     let mut pending_cursor_frames = match ctx.cursor.clone() {
         Some(cursor) if cursor.state == ctx.current_state => {
+            ensure_cursor_has_frames(&cursor)?;
             if timeout_fallback_from_context(ctx)?.is_some() {
                 return Err(WorkflowError::Other(
                     "Workflow is executing a timeout fallback; resume with timeout_workflow"
@@ -1052,12 +1245,30 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
                 }
             }
         }
-        Some(_) | None => None,
+        Some(_) => match mode {
+            RunMode::Normal => {
+                ctx.clear_cursor();
+                None
+            }
+            RunMode::EventResume { .. } => {
+                return Err(invalid_cursor(
+                    "resume cursor state does not match current workflow state",
+                ));
+            }
+        },
+        None => match mode {
+            RunMode::Normal => None,
+            RunMode::EventResume { .. } => {
+                return Err(WorkflowError::Other(
+                    "Workflow is not waiting for an external event".to_string(),
+                ));
+            }
+        },
     };
 
     loop {
         // Find transition from current state
-        let transition = definition.find_transition(&ctx.current_state);
+        let transition = find_single_transition(definition, &ctx.current_state)?;
 
         let transition = match transition {
             Some(t) => t,
@@ -1067,6 +1278,17 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
                 return Ok(ctx.current_state.clone());
             }
         };
+
+        // Safety: prevent infinite loops before executing the next transition.
+        if ctx
+            .transition_count()
+            .saturating_sub(run_start_transition_count)
+            >= 50
+        {
+            return Err(WorkflowError::Other(
+                "Maximum transition count exceeded (50)".into(),
+            ));
+        }
 
         let cursor_frames = pending_cursor_frames.take().unwrap_or_default();
         let (start_index, nested_cursor) = match cursor_frames.first() {
@@ -1109,17 +1331,6 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
 
         // Persist after each state change
         executor.save_state(ctx).await?;
-
-        // Safety: prevent infinite loops (max 50 transitions per run).
-        if ctx
-            .transition_count()
-            .saturating_sub(run_start_transition_count)
-            > 50
-        {
-            return Err(WorkflowError::Other(
-                "Maximum transition count exceeded (50)".into(),
-            ));
-        }
     }
 }
 
@@ -1145,6 +1356,8 @@ pub async fn resume_workflow_with_event<E: WorkflowExecutor>(
     event_name: &str,
     event_data: Value,
 ) -> Result<String, WorkflowError> {
+    ensure_wait_event_name(event_name)?;
+
     // Load persisted state
     let mut ctx = executor
         .load_state(workflow_id)
@@ -1152,7 +1365,7 @@ pub async fn resume_workflow_with_event<E: WorkflowExecutor>(
         .ok_or_else(|| WorkflowError::Other(format!("Workflow not found: {}", workflow_id)))?;
 
     // Store the event data in context
-    ctx.set("event", event_data);
+    ctx.set(RESUME_EVENT_KEY, event_data);
 
     // Continue running from current state
     run_workflow_inner(
@@ -1170,6 +1383,7 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
     definition: &WorkflowDefinition,
     workflow_id: &str,
 ) -> Result<String, WorkflowError> {
+    validate_workflow_definition(definition)?;
     let mut ctx = executor
         .load_state(workflow_id)
         .await?
@@ -1179,6 +1393,7 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
         .cursor
         .clone()
         .ok_or_else(|| WorkflowError::Other("Workflow is not paused at a Wait step".to_string()))?;
+    ensure_cursor_has_frames(&cursor)?;
     if cursor.state != ctx.current_state {
         return Err(invalid_cursor(
             "timeout cursor state does not match current workflow state",
@@ -1218,7 +1433,7 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
     set_timeout_fallback(&mut ctx, &wait)?;
     ctx.clear_cursor();
     ctx.set(
-        "event",
+        RESUME_EVENT_KEY,
         serde_json::json!({
             "event": wait.event.clone(),
             "timeout": true,
@@ -1263,15 +1478,16 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
 }
 
 fn extract_resume_event_name(event_data: &Value) -> Result<String, WorkflowError> {
-    ["event", "event_name", "type"]
+    let event = ["event", "event_name", "type"]
         .iter()
         .find_map(|key| event_data.get(*key).and_then(Value::as_str))
-        .map(String::from)
         .ok_or_else(|| {
             WorkflowError::Other(
                 "Resume event data must include a string 'event' field".to_string(),
             )
-        })
+        })?;
+    ensure_wait_event_name(event)?;
+    Ok(event.to_string())
 }
 
 fn steps_contain_wait(steps: &[WorkflowStep]) -> bool {
@@ -1302,6 +1518,7 @@ mod tests {
 
     struct MockExecutor {
         queries: std::sync::Mutex<Vec<String>>,
+        query_failures: std::sync::Mutex<std::collections::HashSet<String>>,
         notifications: std::sync::Mutex<Vec<(String, String)>>,
         charges: std::sync::Mutex<Vec<ChargeRequest>>,
         saved_state: std::sync::Mutex<Option<WorkflowContext>>,
@@ -1311,10 +1528,15 @@ mod tests {
         fn new() -> Self {
             Self {
                 queries: std::sync::Mutex::new(Vec::new()),
+                query_failures: std::sync::Mutex::new(std::collections::HashSet::new()),
                 notifications: std::sync::Mutex::new(Vec::new()),
                 charges: std::sync::Mutex::new(Vec::new()),
                 saved_state: std::sync::Mutex::new(None),
             }
+        }
+
+        fn fail_query(&self, cmd_wire: impl Into<String>) {
+            self.query_failures.lock().unwrap().insert(cmd_wire.into());
         }
     }
 
@@ -1337,6 +1559,11 @@ mod tests {
     impl WorkflowExecutor for MockExecutor {
         async fn execute_query(&self, cmd_json: &str) -> Result<Value, WorkflowError> {
             self.queries.lock().unwrap().push(cmd_json.to_string());
+            if self.query_failures.lock().unwrap().contains(cmd_json) {
+                return Err(WorkflowError::QueryFailed(
+                    "forced query failure".to_string(),
+                ));
+            }
             // Return mock results
             Ok(serde_json::json!([
                 {"id": "op-1", "phone": "+628111"},
@@ -1442,6 +1669,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transition_limit_blocks_next_transition_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let mut wf = WorkflowDefinition::new("runaway_workflow").initial_state("s0");
+        for idx in 0..50 {
+            wf = wf.transition(
+                format!("s{idx}"),
+                format!("s{}", idx + 1),
+                vec![WorkflowStep::transition(&format!("s{}", idx + 1))],
+            );
+        }
+        wf = wf.transition(
+            "s50",
+            "s51",
+            vec![
+                WorkflowStep::notify(ChannelKind::Email, "runaway_side_effect", "ops.email"),
+                WorkflowStep::transition("s51"),
+            ],
+        );
+
+        let mut ctx = WorkflowContext::new("wf-runaway", "s0");
+        ctx.set("ops", serde_json::json!({"email": "ops@example.com"}));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("the 51st transition must be blocked before side effects");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Maximum transition count exceeded"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected transition limit error, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "s50");
+        assert_eq!(ctx.transition_count(), 50);
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "blocked transition side effects must not execute"
+        );
+        let saved = executor
+            .saved_state
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("state after the last allowed transition should be saved");
+        assert_eq!(saved.current_state, "s50");
+    }
+
+    #[tokio::test]
     async fn test_workflow_with_branch() {
         let executor = MockExecutor::new();
 
@@ -1496,6 +1775,242 @@ mod tests {
             other => panic!("expected MissingContextKey, got {other:?}"),
         }
         assert_eq!(ctx.current_state, "pending");
+    }
+
+    #[tokio::test]
+    async fn duplicate_transitions_from_same_state_fail_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("duplicate_transition_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "vendor_a",
+                vec![WorkflowStep::notify(
+                    ChannelKind::WhatsApp,
+                    "vendor_a",
+                    "vendor.phone",
+                )],
+            )
+            .transition(
+                "active",
+                "vendor_b",
+                vec![WorkflowStep::notify(
+                    ChannelKind::WhatsApp,
+                    "vendor_b",
+                    "vendor.phone",
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-duplicate-transition", "active");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("duplicate transitions must fail closed");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Ambiguous workflow definition"), "got: {msg}");
+                assert!(msg.contains("active"), "got: {msg}");
+                assert!(msg.contains("2 outgoing transitions"), "got: {msg}");
+            }
+            other => panic!("expected ambiguous transition error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_future_transitions_fail_before_current_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("future_duplicate_transition_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "routing",
+                vec![
+                    WorkflowStep::notify(ChannelKind::WhatsApp, "before_bad_state", "vendor.phone"),
+                    WorkflowStep::transition("routing"),
+                ],
+            )
+            .transition(
+                "routing",
+                "vendor_a",
+                vec![WorkflowStep::notify(
+                    ChannelKind::WhatsApp,
+                    "vendor_a",
+                    "vendor.phone",
+                )],
+            )
+            .transition(
+                "routing",
+                "vendor_b",
+                vec![WorkflowStep::notify(
+                    ChannelKind::WhatsApp,
+                    "vendor_b",
+                    "vendor.phone",
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-future-duplicate-transition", "active");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("future duplicate transitions must fail before current side effects");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Ambiguous workflow definition"), "got: {msg}");
+                assert!(msg.contains("routing"), "got: {msg}");
+            }
+            other => panic!("expected ambiguous transition error, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "active");
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "definition validation must run before the initial notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_branch_values_fail_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("duplicate_branch_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::branch(
+                    "decision",
+                    vec![
+                        (
+                            "accepted",
+                            vec![WorkflowStep::notify(
+                                ChannelKind::WhatsApp,
+                                "accepted_a",
+                                "vendor.phone",
+                            )],
+                        ),
+                        (
+                            "accepted",
+                            vec![WorkflowStep::notify(
+                                ChannelKind::WhatsApp,
+                                "accepted_b",
+                                "vendor.phone",
+                            )],
+                        ),
+                    ],
+                    vec![],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-duplicate-branch", "active");
+        ctx.set("decision", Value::String("accepted".to_string()));
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("duplicate branch values must fail closed");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Ambiguous workflow branch"), "got: {msg}");
+                assert!(msg.contains("accepted"), "got: {msg}");
+            }
+            other => panic!("expected ambiguous branch error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_timeout_fallback_fails_before_pre_wait_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("invalid_timeout_fallback_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "before_wait", "customer.email"),
+                    WorkflowStep::wait_or(
+                        "payment.success",
+                        std::time::Duration::from_secs(3600),
+                        vec![WorkflowStep::wait(
+                            "manual_review",
+                            std::time::Duration::from_secs(3600),
+                        )],
+                    ),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-invalid-timeout-fallback", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("unsupported timeout fallback must fail before reaching the Wait");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Wait steps inside on_timeout fallback are not supported"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected timeout fallback validation error, got {other:?}"),
+        }
+        assert!(ctx.cursor.is_none());
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "definition validation must run before the pre-wait notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_transition_stops_parent_block_before_follow_up_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("nested_transition_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "fallback",
+                vec![
+                    WorkflowStep::branch(
+                        "decision",
+                        vec![("accepted", vec![WorkflowStep::transition("confirmed")])],
+                        vec![],
+                    ),
+                    WorkflowStep::notify(
+                        ChannelKind::WhatsApp,
+                        "old_state_followup",
+                        "vendor.phone",
+                    ),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-nested-transition", "active");
+        ctx.set("decision", Value::String("accepted".to_string()));
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+
+        let result = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect("nested transition should finish cleanly");
+
+        assert_eq!(result, "confirmed");
+        assert_eq!(ctx.current_state, "confirmed");
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "parent block must stop after nested transition changes state"
+        );
     }
 
     #[test]
@@ -1561,6 +2076,43 @@ mod tests {
         assert_eq!(notifs[0].0, "+628111");
         assert_eq!(notifs[1].0, "+628222");
         assert_eq!(notifs[2].0, "+628333");
+    }
+
+    #[tokio::test]
+    async fn notify_with_missing_payload_key_fails_before_send() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("notify_payload_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::notify_with_payload(
+                    ChannelKind::Email,
+                    "booking_confirmed",
+                    "customer.email",
+                    "booking.template_payload",
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-notify-payload-guard", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("missing explicit notification payload must fail closed");
+
+        match err {
+            WorkflowError::MissingContextKey(key) => assert_eq!(key, "booking.template_payload"),
+            other => panic!("expected MissingContextKey, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "notification provider must not receive an empty payload for a missing explicit payload key"
+        );
     }
 
     #[tokio::test]
@@ -1995,6 +2547,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn for_each_resume_rejects_reordered_items_before_notification() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("for_each_reorder_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "resolved",
+                vec![
+                    WorkflowStep::for_each(
+                        "operators",
+                        vec![
+                            WorkflowStep::wait(
+                                "operator_accept",
+                                std::time::Duration::from_secs(3600),
+                            ),
+                            WorkflowStep::notify(ChannelKind::WhatsApp, "accepted", "item.phone"),
+                        ],
+                    ),
+                    WorkflowStep::transition("resolved"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-for-each-reorder", "active");
+        ctx.set(
+            "operators",
+            serde_json::json!([
+                {"name": "Captain A", "phone": "+628111"},
+                {"name": "Captain B", "phone": "+628222"}
+            ]),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        {
+            let mut saved = executor.saved_state.lock().unwrap();
+            let saved = saved.as_mut().expect("paused state should be saved");
+            saved.set(
+                "operators",
+                serde_json::json!([
+                    {"name": "Captain B", "phone": "+628222"},
+                    {"name": "Captain A", "phone": "+628111"}
+                ]),
+            );
+        }
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-for-each-reorder",
+            serde_json::json!({"event": "operator_accept"}),
+        )
+        .await
+        .expect_err("reordered operator list must not resume on the wrong item");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"), "got: {msg}");
+                assert!(msg.contains("for_each cursor item"), "got: {msg}");
+                assert!(msg.contains("changed"), "got: {msg}");
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "wrong operator must not receive the post-wait notification"
+        );
+    }
+
+    #[tokio::test]
     async fn test_nested_for_each_restores_outer_item_binding() {
         let executor = MockExecutor::new();
 
@@ -2225,6 +2848,343 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_event_rejects_padded_event_name_before_replay() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("wait_event_padding_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("payment.success", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::Email, "paid", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-event-padding-guard", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-event-padding-guard",
+            serde_json::json!({"event": " payment.success "}),
+        )
+        .await
+        .expect_err("padded event name must not resume the workflow");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("leading or trailing whitespace"), "got: {msg}");
+            }
+            other => panic!("expected padded event error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "padded resume event must fail before notification replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_event_without_wait_cursor_does_not_run_transition() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("vendor_callback_guard")
+            .initial_state("awaiting_vendor")
+            .transition(
+                "awaiting_vendor",
+                "notified",
+                vec![
+                    WorkflowStep::notify(ChannelKind::WhatsApp, "vendor_ready", "vendor.phone"),
+                    WorkflowStep::transition("notified"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-no-wait-cursor", "awaiting_vendor");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+        executor.save_state(&ctx).await.unwrap();
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-no-wait-cursor",
+            serde_json::json!({"event": "vendor.ready"}),
+        )
+        .await
+        .expect_err("event resume must not run a workflow with no wait cursor");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("not waiting for an external event"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected not-waiting error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "webhook resume without a wait cursor must not send vendor notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_event_rejects_stale_cursor_state_before_transition() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("stale_cursor_guard")
+            .initial_state("awaiting_vendor")
+            .transition(
+                "awaiting_vendor",
+                "notified",
+                vec![
+                    WorkflowStep::notify(ChannelKind::WhatsApp, "vendor_ready", "vendor.phone"),
+                    WorkflowStep::transition("notified"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-stale-cursor", "awaiting_vendor");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+        ctx.set_cursor(WorkflowCursor {
+            state: "old_state".to_string(),
+            frames: vec![WorkflowCursorFrame::Steps { index: 1 }],
+            wait: Some(WorkflowPendingWait {
+                event: "vendor.ready".to_string(),
+                deadline_at: Utc::now() + chrono::Duration::hours(1),
+                on_timeout: vec![],
+            }),
+        });
+        executor.save_state(&ctx).await.unwrap();
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-stale-cursor",
+            serde_json::json!({"event": "vendor.ready"}),
+        )
+        .await
+        .expect_err("stale cursor state must not resume the current transition");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"), "got: {msg}");
+                assert!(msg.contains("state does not match"), "got: {msg}");
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "stale cursor mismatch must fail before side effects"
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_resume_rejects_empty_cursor_frames_before_replay() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_cursor_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::WhatsApp, "vendor_ready", "vendor.phone"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-empty-cursor", "active");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+        ctx.set_cursor(WorkflowCursor {
+            state: "active".to_string(),
+            frames: vec![],
+            wait: None,
+        });
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("empty cursor frames must not replay the transition from step zero");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"), "got: {msg}");
+                assert!(msg.contains("no frames"), "got: {msg}");
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "empty checkpoint cursor must fail before replaying notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_resume_rejects_empty_wait_cursor_frames_before_replay() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_wait_cursor_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("vendor.ready", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::WhatsApp, "vendor_ready", "vendor.phone"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-empty-wait-cursor", "active");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+        ctx.set_cursor(WorkflowCursor {
+            state: "active".to_string(),
+            frames: vec![],
+            wait: Some(WorkflowPendingWait {
+                event: "vendor.ready".to_string(),
+                deadline_at: Utc::now() + chrono::Duration::hours(1),
+                on_timeout: vec![],
+            }),
+        });
+        executor.save_state(&ctx).await.unwrap();
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-empty-wait-cursor",
+            serde_json::json!({"event": "vendor.ready"}),
+        )
+        .await
+        .expect_err("empty wait cursor frames must not resume from step zero");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"), "got: {msg}");
+                assert!(msg.contains("no frames"), "got: {msg}");
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "empty wait cursor must fail before replaying notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_with_empty_event_name_is_rejected_before_pause() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_wait_event")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::Email, "after_wait", "customer.email"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-empty-wait", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("empty wait event must fail before persisting a pause");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Wait event name must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected empty event error, got {other:?}"),
+        }
+        assert!(ctx.cursor.is_none());
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_with_padded_event_name_is_rejected_before_pause() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("padded_wait_event")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait(" payment.success ", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::Email, "after_wait", "customer.email"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-padded-wait", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("padded wait event must fail before persisting a pause");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("leading or trailing whitespace"), "got: {msg}");
+            }
+            other => panic!("expected padded event error, got {other:?}"),
+        }
+        assert!(ctx.cursor.is_none());
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn transition_must_be_final_to_avoid_lost_follow_up_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("transition_order_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::transition("done"),
+                    WorkflowStep::notify(ChannelKind::WhatsApp, "after_transition", "vendor.phone"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-transition-order", "active");
+        ctx.set("vendor", serde_json::json!({"phone": "+628111"}));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("transition before side effects must fail closed");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Transition steps must be the final step"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected transition order error, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "active");
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_timeout_workflow_executes_on_timeout_fallback() {
         let executor = MockExecutor::new();
 
@@ -2325,6 +3285,9 @@ mod tests {
     #[tokio::test]
     async fn test_step_checkpoint_prevents_side_effect_replay_after_failure() {
         let executor = MockExecutor::new();
+        let failing_query =
+            qail_core::wire::encode_cmd_text(&qail_core::Qail::get("bookings").limit(1));
+        executor.fail_query(failing_query.clone());
 
         let wf = WorkflowDefinition::new("checkpoint_failure")
             .initial_state("active")
@@ -2334,7 +3297,7 @@ mod tests {
                 vec![
                     WorkflowStep::notify(ChannelKind::Email, "charged", "customer.email"),
                     WorkflowStep::Query {
-                        cmd_json: "legacy payload".to_string(),
+                        cmd_json: failing_query,
                         store_as: None,
                     },
                     WorkflowStep::transition("done"),
@@ -2377,6 +3340,9 @@ mod tests {
     #[tokio::test]
     async fn test_timeout_checkpoint_prevents_side_effect_replay_after_failure() {
         let executor = MockExecutor::new();
+        let failing_query =
+            qail_core::wire::encode_cmd_text(&qail_core::Qail::get("bookings").limit(1));
+        executor.fail_query(failing_query.clone());
 
         let wf = WorkflowDefinition::new("timeout_checkpoint_failure")
             .initial_state("active")
@@ -2393,7 +3359,7 @@ mod tests {
                             "customer.email",
                         ),
                         WorkflowStep::Query {
-                            cmd_json: "legacy payload".to_string(),
+                            cmd_json: failing_query,
                             store_as: None,
                         },
                         WorkflowStep::transition("timed_out"),
@@ -2542,6 +3508,48 @@ mod tests {
         let charges = executor.charges.lock().unwrap();
         assert_eq!(charges.len(), 1);
         assert_eq!(charges[0].amount, 150000);
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_reserved_store_key_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("charge_reserved_key")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge(
+                    PaymentKind::Xendit,
+                    "order.total",
+                    "order.id",
+                    Some("item"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-charge-reserved-key", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-reserved",
+                "total": 150000
+            }),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("reserved charge output key must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("reserved context key 'item'"), "got: {msg}");
+            }
+            other => panic!("expected reserved context key error, got {other:?}"),
+        }
+        assert!(
+            executor.charges.lock().unwrap().is_empty(),
+            "charge provider must not be called after reserved key validation fails"
+        );
     }
 
     #[tokio::test]
@@ -2694,6 +3702,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn future_legacy_query_payload_fails_before_current_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("future_legacy_query")
+            .initial_state("active")
+            .transition(
+                "active",
+                "query_state",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "before_bad_query", "customer.email"),
+                    WorkflowStep::transition("query_state"),
+                ],
+            )
+            .transition(
+                "query_state",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: "get users limit 1".to_string(),
+                        store_as: Some("rows".to_string()),
+                    },
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-future-legacy-query", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("future legacy query payload must fail before current side effects");
+
+        match err {
+            WorkflowError::QueryFailed(msg) => {
+                assert!(
+                    msg.contains("QAIL-CMD/1"),
+                    "error should mention required wire magic"
+                );
+            }
+            other => panic!("expected QueryFailed, got: {other}"),
+        }
+        assert_eq!(ctx.current_state, "active");
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "definition validation must run before the current-state notification"
+        );
+        assert!(
+            executor.queries.lock().unwrap().is_empty(),
+            "legacy payload must fail before executor query is invoked"
+        );
+    }
+
+    #[tokio::test]
     async fn test_query_step_accepts_wire_payload_and_executes() {
         let executor = MockExecutor::new();
         let cmd = qail_core::Qail::get("users").columns(["id"]).limit(1);
@@ -2724,6 +3788,46 @@ mod tests {
         assert_eq!(
             queries[0], wire,
             "executor should receive canonical wire payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_rejects_reserved_store_key_before_execution() {
+        let executor = MockExecutor::new();
+        let cmd = qail_core::Qail::get("users").columns(["id"]).limit(1);
+        let wire = qail_core::wire::encode_cmd_text(&cmd);
+
+        let wf = WorkflowDefinition::new("query_reserved_key")
+            .initial_state("start")
+            .transition(
+                "start",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: wire,
+                        store_as: Some("__qail_timeout_fallback".to_string()),
+                    },
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-query-reserved-key", "start");
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("reserved query output key must fail before query execution");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("reserved context key '__qail_timeout_fallback'"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected reserved context key error, got {other:?}"),
+        }
+        assert!(
+            executor.queries.lock().unwrap().is_empty(),
+            "query executor must not be called after reserved key validation fails"
         );
     }
 

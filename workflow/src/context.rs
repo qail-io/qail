@@ -81,6 +81,18 @@ pub enum WorkflowCursorFrame {
         /// Next step index inside the item block.
         index: usize,
     },
+    /// Active ForEach item step list with an item snapshot for drift checks.
+    ///
+    /// New workflow cursors use this variant so a paused workflow cannot resume
+    /// on a different list item if the source array is reordered while waiting.
+    ForEachItem {
+        /// Current array item index.
+        item_index: usize,
+        /// Next step index inside the item block.
+        index: usize,
+        /// JSON item value observed when the cursor was created.
+        item: Value,
+    },
 }
 
 /// Persisted branch arm selection for workflow resume.
