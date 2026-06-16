@@ -800,18 +800,22 @@ pub(crate) async fn list_handler(
     }
 
     let timer = crate::metrics::QueryTimer::new(&table_name, "select");
-    let rows = conn
-        .fetch_all_uncached(&cmd)
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)));
-    timer.finish(rows.is_ok());
+    let rows = match conn.fetch_all_uncached(&cmd).await {
+        Ok(rows) => {
+            timer.finish(true);
+            rows
+        }
+        Err(e) => {
+            timer.finish(false);
+            let api_err = ApiError::from_pg_driver_error(&e, Some(&table_name));
+            let _ = conn.rollback_and_release().await;
+            return Err(api_err);
+        }
+    };
 
     // Release connection early — after this point only JSON processing remains.
     // Branch overlay still needs conn, so we do it before release.
-    let mut data: Vec<Value> = match &rows {
-        Ok(rows) => rows.iter().map(row_to_json).collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut data: Vec<Value> = rows.iter().map(row_to_json).collect();
     let mut branch_base_has_more = false;
     if has_branch {
         let materialization_cap = state.config.max_result_rows.max(1);
@@ -856,10 +860,9 @@ pub(crate) async fn list_handler(
     }
 
     // Deterministic cleanup — connection is no longer needed
-    conn.release().await;
-
-    // Now propagate the error if query failed
-    let _rows = rows?;
+    conn.release_checked()
+        .await
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
     // Skip guard for tables that are cross-tenant by design (e.g.,
@@ -967,7 +970,13 @@ fn branch_sort_keys(
     };
 
     let mut keys = Vec::new();
-    for part in sort.split(',') {
+    for (idx, part) in sort.split(',').enumerate() {
+        if idx >= crate::rest::filters::MAX_SORT_COLUMNS {
+            return Err(ApiError::parse_error(format!(
+                "Sort contains more than {} columns",
+                crate::rest::filters::MAX_SORT_COLUMNS
+            )));
+        }
         let part = part.trim();
         if part.is_empty() {
             return Err(ApiError::parse_error("Sort contains an empty entry"));
@@ -1550,10 +1559,11 @@ mod tests {
     use super::{
         BranchReadConstraintInput, BranchReplayProjectionInput, apply_branch_distinct,
         apply_branch_read_constraints, apply_list_distinct, attach_rest_list_debug_headers,
-        branch_base_fetch_limit, branch_projection_columns_from_cmd, encode_ndjson_rows,
-        ensure_branch_replay_columns_projected, ensure_nested_parent_key_columns_projected,
-        project_rows_to_selected_columns, rest_explain_cache_shape_hash, rest_list_cache_key,
-        row_matches_policy_filter_cages, split_expand_relations,
+        branch_base_fetch_limit, branch_projection_columns_from_cmd, branch_sort_keys,
+        encode_ndjson_rows, ensure_branch_replay_columns_projected,
+        ensure_nested_parent_key_columns_projected, project_rows_to_selected_columns,
+        rest_explain_cache_shape_hash, rest_list_cache_key, row_matches_policy_filter_cages,
+        split_expand_relations,
     };
     use crate::auth::AuthContext;
     use crate::policy::{OperationType, PolicyDef, PolicyEngine};
@@ -1592,6 +1602,32 @@ mod tests {
             materialization_cap: 10_000,
             distinct_columns: &[],
         }
+    }
+
+    #[test]
+    fn branch_sort_keys_rejects_oversized_sort_lists() {
+        let sort = (0..33)
+            .map(|i| format!("col_{i}:asc"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = branch_sort_keys(Some(&sort), "id").unwrap_err();
+
+        assert!(
+            err.details
+                .as_deref()
+                .is_some_and(|details| details.contains("more than 32 columns"))
+        );
+    }
+
+    #[test]
+    fn branch_sort_keys_accepts_sort_list_limit_boundary() {
+        let sort = (0..32)
+            .map(|i| format!("col_{i}:asc"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let keys = branch_sort_keys(Some(&sort), "id").unwrap();
+
+        assert_eq!(keys.len(), 32);
     }
 
     #[test]

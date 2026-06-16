@@ -44,6 +44,16 @@ fn create_request_can_skip_required_validation(
     prefer_wants_upsert || prefer_wants_ignore_duplicates || has_explicit_on_conflict
 }
 
+fn validate_create_batch_size(item_count: usize, max_batch_queries: usize) -> Result<(), ApiError> {
+    if item_count > max_batch_queries {
+        return Err(ApiError::parse_error(format!(
+            "Batch create item count {} exceeds maximum {}",
+            item_count, max_batch_queries
+        )));
+    }
+    Ok(())
+}
+
 fn resolve_prefer_conflict_column(
     prefer_wants_upsert: bool,
     prefer_wants_ignore_duplicates: bool,
@@ -115,11 +125,24 @@ fn upsert_update_assignments<'a>(
     tenant_column: &str,
 ) -> Vec<(&'a str, Expr)> {
     obj.keys()
-        .filter(|k| !conflict_cols.contains(&k.as_str()))
+        .filter(|k| {
+            !conflict_cols
+                .iter()
+                .any(|conflict_col| identifier_matches_column(k, conflict_col))
+        })
         .filter(|k| !enforce_tenant_column || !identifier_matches_column(k, tenant_column))
         .filter(|k| crate::rest::filters::is_safe_identifier(k))
         .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
         .collect()
+}
+
+fn object_value_for_column<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    column: &str,
+) -> Option<&'a Value> {
+    obj.iter()
+        .find(|(key, _)| identifier_matches_column(key, column))
+        .map(|(_, value)| value)
 }
 
 fn parse_explicit_on_conflict_columns(input: &str) -> Result<Vec<String>, ApiError> {
@@ -240,7 +263,7 @@ fn build_upsert_old_row_lookup(
 
     let mut cmd = qail_core::ast::Qail::get(table_name).limit(1);
     for column in conflict_cols {
-        let value = obj.get(column).ok_or_else(|| {
+        let value = object_value_for_column(obj, column).ok_or_else(|| {
             ApiError::bad_request(
                 "VALIDATION_ERROR",
                 format!(
@@ -316,7 +339,8 @@ pub(crate) async fn create_handler(
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let body: Value =
-        serde_json::from_slice(&body).map_err(|e| ApiError::parse_error(e.to_string()))?;
+        crate::json_input::decode_value(&body, crate::json_input::JsonInputLimits::default())
+            .map_err(|e| ApiError::parse_error(e.to_string()))?;
 
     // Detect batch vs single
     let is_batch = body.is_array();
@@ -340,6 +364,9 @@ pub(crate) async fn create_handler(
     if objects.is_empty() {
         return Err(ApiError::parse_error("Empty request body"));
     }
+    if is_batch {
+        validate_create_batch_size(objects.len(), state.config.max_batch_queries)?;
+    }
 
     // Validate required columns for each object
     for (i, obj) in objects.iter().enumerate() {
@@ -355,14 +382,7 @@ pub(crate) async fn create_handler(
     // SECURITY: Fail closed on invalid JSON keys instead of silently skipping.
     // Skipping can produce unintended default-row inserts.
     for obj in &objects {
-        for key in obj.keys() {
-            if !crate::rest::filters::is_safe_identifier(key) {
-                return Err(ApiError::parse_error(format!(
-                    "Invalid field name '{}' in create payload",
-                    key
-                )));
-            }
-        }
+        super::validate_mutation_payload_keys(obj, "create")?;
     }
 
     let normalized_objects: Vec<serde_json::Map<String, Value>> = objects
@@ -760,9 +780,10 @@ mod tests {
         apply_create_probe_returning, apply_on_conflict_update_or_noop, branch_insert_overlay_key,
         build_upsert_old_row_lookup, create_request_can_skip_required_validation,
         guard_upsert_conflict_update_tenant, normalize_create_object_for_tenant,
-        parse_explicit_on_conflict_columns, parse_explicit_on_conflict_param,
-        parse_on_conflict_action, pk_to_overlay_key, resolve_prefer_conflict_column,
-        upsert_update_assignments, zero_row_conflict_disposition,
+        object_value_for_column, parse_explicit_on_conflict_columns,
+        parse_explicit_on_conflict_param, parse_on_conflict_action, pk_to_overlay_key,
+        resolve_prefer_conflict_column, upsert_update_assignments, validate_create_batch_size,
+        zero_row_conflict_disposition,
     };
     use crate::schema::{GatewayColumn, GatewayTable};
     use qail_core::ast::{CageKind, ConflictAction, Expr, Operator, Value as QailValue};
@@ -884,6 +905,18 @@ mod tests {
     }
 
     #[test]
+    fn validate_create_batch_size_rejects_oversized_batches() {
+        let err = validate_create_batch_size(101, 100).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_create_batch_size_accepts_limit_boundary() {
+        validate_create_batch_size(100, 100).unwrap();
+    }
+
+    #[test]
     fn prefer_conflict_resolution_uses_primary_key_when_available() {
         assert_eq!(
             resolve_prefer_conflict_column(true, false, false, Some("id")).unwrap(),
@@ -973,6 +1006,27 @@ mod tests {
 
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].0, "status");
+    }
+
+    #[test]
+    fn upsert_update_assignments_exclude_case_variant_conflict_column() {
+        let mut obj = Map::new();
+        obj.insert("ID".to_string(), json!("order-1"));
+        obj.insert("status".to_string(), json!("paid"));
+        let conflict_cols = vec!["id"];
+
+        let updates = upsert_update_assignments(&obj, &conflict_cols, false, "tenant_id");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "status");
+    }
+
+    #[test]
+    fn object_value_for_column_matches_case_and_qualified_variants() {
+        let mut obj = Map::new();
+        obj.insert("Orders.ID".to_string(), json!("order-1"));
+
+        assert_eq!(object_value_for_column(&obj, "id"), Some(&json!("order-1")));
     }
 
     #[test]

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::GatewayState;
-use crate::auth::ensure_tenant_rate_limit;
 
 use super::{ListenControl, WsClientMessage, WsConnectionState, WsServerMessage};
 
@@ -19,15 +18,6 @@ pub(super) async fn handle_client_message(
     auth: &crate::auth::AuthContext,
     conn_state: &mut WsConnectionState,
 ) {
-    if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), auth).await {
-        let _ = tx
-            .send(WsServerMessage::Error {
-                message: e.message.clone(),
-            })
-            .await;
-        return;
-    }
-
     match msg {
         WsClientMessage::Subscribe { channel } => {
             subscription::handle_subscribe(channel, tx, listener_tx, auth, conn_state).await;

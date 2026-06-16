@@ -63,6 +63,35 @@ fn test_apply_policies_adds_filter() {
 }
 
 #[test]
+fn test_apply_policies_matches_role_case_insensitively() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "operator_tenant_isolation".to_string(),
+        table: "orders".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: Some("operator".to_string()),
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_case".to_string(),
+        role: "Operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("orders").columns(["id"]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(cmd.cages.len(), 1);
+    let condition = &cmd.cages[0].conditions[0];
+    assert_eq!(condition.left, Expr::Named("tenant_id".to_string()));
+    assert_eq!(condition.value, Value::String("tenant-1".to_string()));
+}
+
+#[test]
 fn test_apply_policies_treats_cnt_as_read_operation() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {

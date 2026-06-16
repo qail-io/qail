@@ -109,7 +109,7 @@ impl PolicyEngine {
             }
 
             if let Some(ref required_role) = policy.role
-                && &auth.role != required_role
+                && !auth.role.eq_ignore_ascii_case(required_role)
             {
                 continue;
             }

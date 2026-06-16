@@ -83,6 +83,33 @@ impl RpcFunctionName {
     }
 }
 
+fn normalized_rpc_arg_keys(
+    map: &serde_json::Map<String, Value>,
+) -> Result<Vec<(&String, String)>, ApiError> {
+    let mut keys = Vec::with_capacity(map.len());
+    let mut seen = std::collections::HashSet::new();
+
+    for key in map.keys() {
+        let normalized_key = key.to_ascii_lowercase();
+        if !is_safe_ident_segment(&normalized_key) {
+            return Err(ApiError::parse_error(format!(
+                "Invalid RPC argument name '{}'",
+                key
+            )));
+        }
+        if !seen.insert(normalized_key.clone()) {
+            return Err(ApiError::parse_error(format!(
+                "Duplicate RPC argument name '{}'",
+                normalized_key
+            )));
+        }
+        keys.push((key, normalized_key));
+    }
+
+    keys.sort_by(|(_, left), (_, right)| left.cmp(right));
+    Ok(keys)
+}
+
 #[cfg(test)]
 pub(in super::super) fn json_literal_sql(value: &Value) -> Result<String, ApiError> {
     fn escape_sql_literal(val: &str) -> String {
@@ -164,17 +191,9 @@ pub(in super::super) fn build_rpc_call_target(
     let args_sql = match args {
         None => String::new(),
         Some(Value::Object(map)) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            let keys = normalized_rpc_arg_keys(map)?;
             let mut parts: Vec<String> = Vec::with_capacity(keys.len());
-            for key in keys {
-                let normalized_key = key.to_ascii_lowercase();
-                if !is_safe_ident_segment(&normalized_key) {
-                    return Err(ApiError::parse_error(format!(
-                        "Invalid RPC argument name '{}'",
-                        key
-                    )));
-                }
+            for (key, normalized_key) in keys {
                 let value_sql = json_literal_sql(
                     map.get(key)
                         .ok_or_else(|| ApiError::parse_error("Missing RPC argument value"))?,
@@ -217,18 +236,9 @@ fn build_rpc_bound_call_target(
                 .unwrap_or_default()
         }
         Some(Value::Object(map)) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            let keys = normalized_rpc_arg_keys(map)?;
             let mut parts: Vec<String> = Vec::with_capacity(keys.len());
-            for key in keys {
-                let normalized_key = key.to_ascii_lowercase();
-                if !is_safe_ident_segment(&normalized_key) {
-                    return Err(ApiError::parse_error(format!(
-                        "Invalid RPC argument name '{}'",
-                        key
-                    )));
-                }
-
+            for (key, normalized_key) in keys {
                 let expected =
                     signature.and_then(|sig| signature_named_arg_info(sig, &normalized_key));
                 let expr = build_rpc_param_expr(
@@ -556,5 +566,35 @@ mod tests {
         );
         assert_eq!(query.params[0].as_deref(), Some(b"{}".as_slice()));
         assert_eq!(query.param_type_oids, vec![1007]);
+    }
+
+    #[test]
+    fn named_rpc_args_reject_case_folded_duplicates() {
+        let function = RpcFunctionName::parse("api.search_orders").unwrap();
+        let args = json!({"Limit": 10, "limit": 20});
+
+        let err = build_rpc_bound_sql(&function, Some(&args), None, false)
+            .expect_err("case-folded duplicate RPC args must fail at gateway boundary");
+
+        assert!(
+            err.details
+                .as_deref()
+                .is_some_and(|details| details.contains("Duplicate RPC argument name 'limit'"))
+        );
+    }
+
+    #[test]
+    fn named_rpc_args_are_sorted_by_normalized_name() {
+        let function = RpcFunctionName::parse("api.search_orders").unwrap();
+        let args = json!({"Zed": 1, "alpha": 2});
+
+        let query = build_rpc_bound_sql(&function, Some(&args), None, false).unwrap();
+
+        assert_eq!(
+            query.sql,
+            "SELECT * FROM \"api\".\"search_orders\"(\"alpha\" => $1, \"zed\" => $2)"
+        );
+        assert_eq!(query.params[0].as_deref(), Some(b"2".as_slice()));
+        assert_eq!(query.params[1].as_deref(), Some(b"1".as_slice()));
     }
 }

@@ -2,6 +2,8 @@ use qail_core::ast::{Expr, Operator, Value as QailValue};
 
 use super::{is_safe_identifier, parse_select_columns};
 
+pub(crate) const MAX_SORT_COLUMNS: usize = 32;
+
 /// Apply parsed filters to a Qail command.
 pub(crate) fn apply_filters(
     mut cmd: qail_core::ast::Qail,
@@ -76,7 +78,13 @@ pub(crate) fn apply_sorting(
     mut cmd: qail_core::ast::Qail,
     sort: &str,
 ) -> Result<qail_core::ast::Qail, String> {
-    for part in sort.split(',') {
+    for (idx, part) in sort.split(',').enumerate() {
+        if idx >= MAX_SORT_COLUMNS {
+            return Err(format!(
+                "Sort contains more than {} columns",
+                MAX_SORT_COLUMNS
+            ));
+        }
         let part = part.trim();
         if part.is_empty() {
             return Err("Sort contains an empty entry".to_string());

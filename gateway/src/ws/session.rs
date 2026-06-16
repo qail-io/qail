@@ -5,6 +5,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::GatewayState;
+use crate::auth::ensure_tenant_rate_limit;
 
 use super::listener::{listener_rpc, run_listener_session};
 use super::message::handle_client_message;
@@ -115,6 +116,14 @@ pub(super) async fn handle_socket(
                             send_token_expired(&tx).await;
                             break;
                         }
+                        if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), &auth).await {
+                            let _ = tx
+                                .send(WsServerMessage::Error {
+                                    message: e.message.clone(),
+                                })
+                                .await;
+                            continue;
+                        }
                         if text.len() > WS_MAX_MESSAGE_BYTES {
                             let _ = tx
                                 .send(WsServerMessage::Error {
@@ -126,8 +135,10 @@ pub(super) async fn handle_socket(
                                 .await;
                             continue;
                         }
-                        let text_str = text.to_string();
-                        match serde_json::from_str::<WsClientMessage>(&text_str) {
+                        match crate::json_input::decode_typed::<WsClientMessage>(
+                            text.as_bytes(),
+                            crate::json_input::JsonInputLimits::default(),
+                        ) {
                             Ok(client_msg) => {
                                 handle_client_message(
                                     client_msg,

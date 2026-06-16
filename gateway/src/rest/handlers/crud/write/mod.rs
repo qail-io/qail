@@ -75,6 +75,35 @@ fn ensure_path_mutation_affected(row_count: usize, row_id: &str) -> Result<(), A
     Ok(())
 }
 
+fn validate_mutation_payload_keys(
+    obj: &serde_json::Map<String, Value>,
+    context: &str,
+) -> Result<(), ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    for key in obj.keys() {
+        if !crate::rest::filters::is_safe_identifier(key) {
+            return Err(ApiError::parse_error(format!(
+                "Invalid field name '{}' in {} payload",
+                key, context
+            )));
+        }
+        if key.contains('.') {
+            return Err(ApiError::parse_error(format!(
+                "Qualified field name '{}' is not allowed in {} payload",
+                key, context
+            )));
+        }
+        let normalized = key.to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            return Err(ApiError::parse_error(format!(
+                "Duplicate field assignment '{}' in {} payload",
+                normalized, context
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn branch_overlay_write_needs_base_lookup(
     overlay_state: BranchOverlayRowState,
     row_id: &str,
@@ -99,7 +128,7 @@ mod tests {
     use super::{
         apply_mutation_returning, apply_table_returning, branch_overlay_write_needs_base_lookup,
         ensure_path_mutation_affected, identifier_matches_column, mutation_needs_full_returning,
-        project_mutation_returning_rows,
+        project_mutation_returning_rows, validate_mutation_payload_keys,
     };
     use crate::rest::branch::BranchOverlayRowState;
     use crate::schema::{GatewayColumn, GatewayTable};
@@ -198,6 +227,34 @@ mod tests {
     #[test]
     fn ensure_path_mutation_affected_allows_nonzero_rows() {
         ensure_path_mutation_affected(1, "row-1").unwrap();
+    }
+
+    #[test]
+    fn validate_mutation_payload_keys_rejects_qualified_fields() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("orders.id".to_string(), json!("order-1"));
+
+        let err = validate_mutation_payload_keys(&obj, "update").unwrap_err();
+        assert!(err.details.as_deref().unwrap_or("").contains("Qualified"));
+    }
+
+    #[test]
+    fn validate_mutation_payload_keys_rejects_case_folded_duplicates() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("ID".to_string(), json!("order-2"));
+
+        let err = validate_mutation_payload_keys(&obj, "create").unwrap_err();
+        assert!(err.details.as_deref().unwrap_or("").contains("Duplicate"));
+    }
+
+    #[test]
+    fn validate_mutation_payload_keys_accepts_simple_columns() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("status".to_string(), json!("paid"));
+
+        validate_mutation_payload_keys(&obj, "create").unwrap();
     }
 
     #[test]

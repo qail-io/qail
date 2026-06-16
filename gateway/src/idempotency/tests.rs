@@ -179,14 +179,17 @@ fn extract_idempotency_key_from_header() {
         .header("idempotency-key", "abc-123")
         .body(Body::empty())
         .unwrap();
-    assert_eq!(extract_idempotency_key(&req), Some("abc-123".to_string()));
+    assert_eq!(
+        extract_idempotency_key(&req).unwrap(),
+        Some("abc-123".to_string())
+    );
 
     let req2 = Request::builder()
         .method(Method::POST)
         .uri("/test")
         .body(Body::empty())
         .unwrap();
-    assert_eq!(extract_idempotency_key(&req2), None);
+    assert_eq!(extract_idempotency_key(&req2).unwrap(), None);
 
     let req3 = Request::builder()
         .method(Method::POST)
@@ -194,7 +197,31 @@ fn extract_idempotency_key_from_header() {
         .header("idempotency-key", "  ")
         .body(Body::empty())
         .unwrap();
-    assert_eq!(extract_idempotency_key(&req3), None);
+    assert_eq!(extract_idempotency_key(&req3).unwrap(), None);
+}
+
+#[test]
+fn extract_idempotency_key_rejects_invalid_keys() {
+    let long_key = "a".repeat(256);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/test")
+        .header("idempotency-key", long_key)
+        .body(Body::empty())
+        .unwrap();
+    assert!(extract_idempotency_key(&req).unwrap_err().contains("255"));
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/test")
+        .header("idempotency-key", "abc def")
+        .body(Body::empty())
+        .unwrap();
+    assert!(
+        extract_idempotency_key(&req)
+            .unwrap_err()
+            .contains("visible ASCII")
+    );
 }
 
 #[test]

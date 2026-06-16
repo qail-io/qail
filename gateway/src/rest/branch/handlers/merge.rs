@@ -16,6 +16,14 @@ use crate::rest::filters::json_to_qail_value;
 
 const BRANCH_MERGE_SAVEPOINT: &str = "qail_branch_merge";
 
+fn identifier_leaf(identifier: &str) -> &str {
+    identifier.rsplit('.').next().unwrap_or(identifier)
+}
+
+fn identifier_matches_column(identifier: &str, column: &str) -> bool {
+    identifier_leaf(identifier).eq_ignore_ascii_case(identifier_leaf(column))
+}
+
 fn apply_insert_conflict_target(
     cmd: qail_core::ast::Qail,
     obj: &serde_json::Map<String, Value>,
@@ -25,7 +33,7 @@ fn apply_insert_conflict_target(
         Some(pk_col) => {
             let updates: Vec<(&str, qail_core::ast::Expr)> = obj
                 .keys()
-                .filter(|k| k.as_str() != pk_col)
+                .filter(|k| !identifier_matches_column(k, pk_col))
                 .map(|k| {
                     (
                         k.as_str(),
@@ -47,11 +55,25 @@ fn validate_overlay_object_keys(
     operation: &str,
     obj: &serde_json::Map<String, Value>,
 ) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
     for key in obj.keys() {
         if !crate::rest::filters::is_safe_identifier(key) {
             return Err(format!(
                 "Invalid {} overlay row_data key '{}'",
                 operation, key
+            ));
+        }
+        if key.contains('.') {
+            return Err(format!(
+                "Qualified {} overlay row_data key '{}' is not allowed",
+                operation, key
+            ));
+        }
+        let normalized = key.to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            return Err(format!(
+                "Duplicate {} overlay row_data key '{}'",
+                operation, normalized
             ));
         }
     }
@@ -78,7 +100,7 @@ fn ensure_insert_row_pk_matches(
     let Some(pk_col) = pk_col else {
         return Ok(());
     };
-    let pk_value = obj.get(pk_col).ok_or_else(|| {
+    let pk_value = object_value_for_column(obj, pk_col).ok_or_else(|| {
         format!(
             "{}.{}: insert overlay row_data is missing primary key '{}'",
             table, row_pk, pk_col
@@ -105,7 +127,7 @@ fn ensure_update_row_pk_matches(
     obj: &serde_json::Map<String, Value>,
     pk_col: &str,
 ) -> Result<(), String> {
-    let Some(pk_value) = obj.get(pk_col) else {
+    let Some(pk_value) = object_value_for_column(obj, pk_col) else {
         return Ok(());
     };
     let pk_text = json_pk_value_to_text(pk_value).ok_or_else(|| {
@@ -121,6 +143,15 @@ fn ensure_update_row_pk_matches(
         ));
     }
     Ok(())
+}
+
+fn object_value_for_column<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    column: &str,
+) -> Option<&'a Value> {
+    obj.iter()
+        .find(|(key, _)| identifier_matches_column(key, column))
+        .map(|(_, value)| value)
 }
 
 fn json_pk_value_to_text(value: &Value) -> Option<String> {
@@ -640,6 +671,32 @@ mod tests {
     }
 
     #[test]
+    fn overlay_merge_cmd_rejects_qualified_payload_keys() {
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "insert",
+            r#"{"id":"order-1","orders.status":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("qualified insert overlay keys must fail closed");
+        assert!(err.contains("Qualified insert overlay row_data key"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_case_folded_duplicate_payload_keys() {
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "insert",
+            r#"{"id":"order-1","ID":"order-1"}"#,
+            Some("id"),
+        )
+        .expect_err("case-folded duplicate overlay keys must fail closed");
+        assert!(err.contains("Duplicate insert overlay row_data key"));
+    }
+
+    #[test]
     fn overlay_merge_cmd_rejects_update_pk_drift() {
         let err = build_branch_overlay_merge_cmd(
             "orders",
@@ -662,6 +719,20 @@ mod tests {
         .expect_err("update overlay non-scalar pk must fail closed");
 
         assert!(err.contains("must be a scalar"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_case_variant_update_pk_drift() {
+        let err = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "update",
+            r#"{"ID":"order-2","status":"paid"}"#,
+            Some("id"),
+        )
+        .expect_err("case-variant update pk drift must fail closed");
+
+        assert!(err.contains("does not match"));
     }
 
     #[test]

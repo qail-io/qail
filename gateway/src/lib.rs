@@ -41,6 +41,7 @@ pub mod error;
 pub mod event;
 pub mod handler;
 pub mod idempotency;
+pub(crate) mod json_input;
 pub mod jwks;
 pub mod metrics;
 pub mod middleware;

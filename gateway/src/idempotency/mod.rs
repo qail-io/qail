@@ -32,6 +32,8 @@ pub use middleware::idempotency_middleware;
 pub use store::IdempotencyStore;
 pub(crate) use store::{CachedResponse, lock_in_flight_set};
 
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
+
 fn json_response(status: StatusCode, body: &'static str) -> Response {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
@@ -52,13 +54,32 @@ fn is_transaction_path(uri: &Uri) -> bool {
 }
 
 /// Extract the `Idempotency-Key` header value.
-fn extract_idempotency_key(request: &Request<Body>) -> Option<String> {
-    request
+fn extract_idempotency_key(request: &Request<Body>) -> Result<Option<String>, String> {
+    let Some(raw) = request
         .headers()
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let key = raw.trim();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    if key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        return Err(format!(
+            "Idempotency-Key exceeds {} byte limit",
+            MAX_IDEMPOTENCY_KEY_BYTES
+        ));
+    }
+    if !key.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(
+            "Idempotency-Key must use visible ASCII characters without whitespace".to_string(),
+        );
+    }
+
+    Ok(Some(key.to_string()))
 }
 
 fn canonical_query(query: Option<&str>) -> String {

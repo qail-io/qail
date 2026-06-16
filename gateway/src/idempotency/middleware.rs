@@ -37,8 +37,13 @@ pub async fn idempotency_middleware(
         return next.run(request).await;
     }
 
-    let Some(idempotency_key) = extract_idempotency_key(&request) else {
-        return next.run(request).await;
+    let idempotency_key = match extract_idempotency_key(&request) {
+        Ok(Some(key)) => key,
+        Ok(None) => return next.run(request).await,
+        Err(message) => {
+            return crate::middleware::ApiError::bad_request("INVALID_IDEMPOTENCY_KEY", message)
+                .into_response();
+        }
     };
 
     let auth = crate::auth::extract_auth_for_state(request.headers(), state.as_ref()).await;

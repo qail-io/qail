@@ -9,14 +9,16 @@ use super::*;
 pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,
     extensions: axum::http::Extensions,
-    headers: HeaderMap,
-    body: Bytes,
+    request: axum::extract::Request,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    let headers = request.headers().clone();
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
     if body.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty binary query"));
     }
-
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     tracing::debug!(
         "Executing binary query ({} bytes, user: {})",
@@ -101,16 +103,21 @@ pub async fn execute_query_binary(
 pub async fn execute_query_fast(
     State(state): State<Arc<GatewayState>>,
     extensions: axum::http::Extensions,
-    headers: HeaderMap,
-    body: String,
+    request: axum::extract::Request,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
-    let query_text = body.trim();
+    let headers = request.headers().clone();
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
+    let query_text = std::str::from_utf8(&body)
+        .map_err(|e| ApiError::parse_error(format!("Request body is not valid UTF-8: {}", e)))?
+        .trim();
 
     if query_text.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
     let mut cmd = parse_cached_query(&state, query_text)?;
 
     reject_dangerous_action(&cmd)?;

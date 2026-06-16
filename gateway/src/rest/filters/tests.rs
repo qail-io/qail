@@ -42,6 +42,17 @@ fn test_parse_identifier_csv_rejects_invalid_entries() {
 }
 
 #[test]
+fn test_parse_identifier_csv_rejects_oversized_lists() {
+    let input = (0..129)
+        .map(|i| format!("col_{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let err = parse_identifier_csv(&input).unwrap_err();
+
+    assert!(err.contains("more than 128 entries"));
+}
+
+#[test]
 fn test_parse_select_columns_rejects_fail_open_projection() {
     assert_eq!(
         parse_select_columns("id, name").unwrap(),
@@ -51,6 +62,17 @@ fn test_parse_select_columns_rejects_fail_open_projection() {
     assert!(parse_select_columns("password-hash").is_err());
     assert!(parse_select_columns("id,").is_err());
     assert!(parse_select_columns("*,id").is_err());
+}
+
+#[test]
+fn test_parse_select_columns_rejects_oversized_projection() {
+    let input = (0..129)
+        .map(|i| format!("col_{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let err = parse_select_columns(&input).unwrap_err();
+
+    assert!(err.contains("more than 128 columns"));
 }
 
 #[test]
@@ -96,6 +118,53 @@ fn test_parse_filters_checked_rejects_empty_in_lists() {
 
     let err = parse_filters_checked("status.not_in=()").unwrap_err();
     assert!(err.contains("requires at least one value"));
+}
+
+#[test]
+fn test_parse_filters_checked_rejects_oversized_in_lists() {
+    let values = (0..257)
+        .map(|i| format!("v{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let err = parse_filters_checked(&format!("status.in={values}")).unwrap_err();
+
+    assert!(err.contains("more than 256 values"));
+}
+
+#[test]
+fn test_parse_filters_checked_accepts_in_list_limit_boundary() {
+    let values = (0..256)
+        .map(|i| format!("v{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let filters = parse_filters_checked(&format!("status.in={values}")).unwrap();
+
+    match &filters[0].2 {
+        QailValue::Array(vals) => assert_eq!(vals.len(), 256),
+        _ => panic!("Expected Array value for IN filter"),
+    }
+}
+
+#[test]
+fn test_parse_filters_checked_rejects_oversized_filter_clause_count() {
+    let query = (0..129)
+        .map(|i| format!("col_{i}.eq=v{i}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let err = parse_filters_checked(&query).unwrap_err();
+
+    assert!(err.contains("more than 128 clauses"));
+}
+
+#[test]
+fn test_parse_filters_checked_accepts_filter_clause_limit_boundary() {
+    let query = (0..128)
+        .map(|i| format!("col_{i}.eq=v{i}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let filters = parse_filters_checked(&query).unwrap();
+
+    assert_eq!(filters.len(), 128);
 }
 
 #[test]
@@ -435,6 +504,18 @@ fn test_apply_sorting_rejects_invalid_sort_inputs() {
     assert!(apply_sorting(cmd.clone(), "total,").is_err());
     assert!(apply_sorting(cmd.clone(), "total;drop").is_err());
     assert!(apply_sorting(cmd, "-").is_err());
+}
+
+#[test]
+fn test_apply_sorting_rejects_oversized_sort_lists() {
+    let cmd = qail_core::ast::Qail::get("orders");
+    let sort = (0..33)
+        .map(|i| format!("col_{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let err = apply_sorting(cmd, &sort).unwrap_err();
+    assert!(err.contains("more than 32 columns"));
 }
 
 #[test]

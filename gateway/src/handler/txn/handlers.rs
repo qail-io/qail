@@ -70,6 +70,25 @@ fn validate_savepoint_action(action: &str) -> Result<(), ApiError> {
     }
 }
 
+fn validate_savepoint_name(name: &str) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 63 {
+        return Err(ApiError::bad_request(
+            "INVALID_SAVEPOINT_NAME",
+            "Savepoint name must be 1-63 characters",
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_SAVEPOINT_NAME",
+            "Savepoint name must use ASCII alphanumeric characters or underscores",
+        ));
+    }
+    Ok(())
+}
+
 fn txn_table_name(table_ref: &str) -> String {
     table_ref
         .split_whitespace()
@@ -164,15 +183,24 @@ pub async fn txn_query(
     State(state): State<Arc<GatewayState>>,
     extensions: axum::http::Extensions,
     headers: HeaderMap,
-    body: String,
+    request: axum::extract::Request,
 ) -> Result<Json<crate::handler::QueryResponse>, ApiError> {
     let auth = authenticate_request(&state, &headers).await?;
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
     let auth_fingerprint = auth.transaction_scope_fingerprint();
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
+    let query_text = std::str::from_utf8(&body)
+        .map_err(|e| ApiError::parse_error(format!("Request body is not valid UTF-8: {}", e)))?
+        .trim();
+    if query_text.is_empty() {
+        return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
+    }
 
     // Parse the query
-    let mut cmd = qail_core::parser::parse(&body)
+    let mut cmd = qail_core::parser::parse(query_text)
         .map_err(|e| ApiError::bad_request("PARSE_ERROR", format!("Parse error: {}", e)))?;
 
     // Security: reject dangerous actions
@@ -189,7 +217,7 @@ pub async fn txn_query(
     let allow_list_raw_query = if tenant_guard_plan.is_some() {
         None
     } else {
-        Some(body.as_str())
+        Some(query_text)
     };
     if !crate::handler::is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
         return Err(ApiError::with_code(
@@ -384,31 +412,20 @@ pub async fn txn_rollback(
 pub async fn txn_savepoint(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
-    Json(request): Json<SavepointRequest>,
+    request: axum::extract::Request,
 ) -> Result<Json<SavepointResponse>, ApiError> {
     let auth = authenticate_request(&state, &headers).await?;
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
     let auth_fingerprint = auth.transaction_scope_fingerprint();
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
+    let request: SavepointRequest =
+        crate::json_input::decode_typed(&body, crate::json_input::JsonInputLimits::default())
+            .map_err(|e| ApiError::parse_error(e.to_string()))?;
 
-    // Validate savepoint name (alphanumeric + underscore only)
-    if !request
-        .name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-    {
-        return Err(ApiError::bad_request(
-            "INVALID_SAVEPOINT_NAME",
-            "Savepoint name must be alphanumeric (with underscores)",
-        ));
-    }
-
-    if request.name.is_empty() || request.name.len() > 63 {
-        return Err(ApiError::bad_request(
-            "INVALID_SAVEPOINT_NAME",
-            "Savepoint name must be 1-63 characters",
-        ));
-    }
+    validate_savepoint_name(&request.name)?;
     validate_savepoint_action(&request.action)?;
 
     let action = request.action.clone();
@@ -448,7 +465,7 @@ pub async fn txn_savepoint(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_savepoint_action;
+    use super::{validate_savepoint_action, validate_savepoint_name};
 
     #[test]
     fn savepoint_action_validation_rejects_before_session_access() {
@@ -458,6 +475,22 @@ mod tests {
 
         let err = validate_savepoint_action("drop").unwrap_err();
         assert_eq!(err.code, "TXN_REJECTED");
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn savepoint_name_validation_is_ascii_and_bounded() {
+        assert!(validate_savepoint_name("sp1").is_ok());
+        assert!(validate_savepoint_name("my_savepoint").is_ok());
+
+        for invalid in ["", "sp;DROP", "sp name", "spé"] {
+            let err = validate_savepoint_name(invalid).unwrap_err();
+            assert_eq!(err.code, "INVALID_SAVEPOINT_NAME");
+            assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        }
+
+        let err = validate_savepoint_name(&"a".repeat(64)).unwrap_err();
+        assert_eq!(err.code, "INVALID_SAVEPOINT_NAME");
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

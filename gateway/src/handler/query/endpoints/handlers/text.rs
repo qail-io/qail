@@ -51,16 +51,20 @@ fn export_violation_count(row: &serde_json::Value) -> Result<u64, &'static str> 
 pub async fn execute_query(
     State(state): State<Arc<GatewayState>>,
     extensions: axum::http::Extensions,
-    headers: HeaderMap,
-    body: String,
+    request: axum::extract::Request,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let query_text = body.trim();
+    let headers = request.headers().clone();
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
+    let query_text = std::str::from_utf8(&body)
+        .map_err(|e| ApiError::parse_error(format!("Request body is not valid UTF-8: {}", e)))?
+        .trim();
 
     if query_text.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
-
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     tracing::debug!(
         "Executing text query: {} (user: {})",
@@ -109,15 +113,20 @@ pub async fn execute_query(
 /// COPY TO STDOUT chunks to the HTTP response body.
 pub async fn execute_query_export(
     State(state): State<Arc<GatewayState>>,
-    headers: HeaderMap,
-    body: String,
+    request: axum::extract::Request,
 ) -> Result<Response, ApiError> {
-    let query_text = body.trim();
+    let headers = request.headers().clone();
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
+    let query_text = std::str::from_utf8(&body)
+        .map_err(|e| ApiError::parse_error(format!("Request body is not valid UTF-8: {}", e)))?
+        .trim();
     if query_text.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
     let mut cmd = parse_cached_query(&state, query_text)?;
 
     if cmd.action != Action::Export {

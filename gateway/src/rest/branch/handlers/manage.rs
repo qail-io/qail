@@ -16,7 +16,7 @@ use crate::rest::branch::validate_branch_name;
 pub(crate) async fn branch_create_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     let auth = match authenticate_request(state.as_ref(), &headers).await {
         Ok(auth) => auth,
@@ -36,6 +36,23 @@ pub(crate) async fn branch_create_handler(
         )
             .into_response();
     }
+
+    let body_bytes = match axum::body::to_bytes(
+        request.into_body(),
+        state.config.max_request_body_bytes,
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(e) => return ApiError::parse_error(e.to_string()).into_response(),
+    };
+    let body = match crate::json_input::decode_value(
+        &body_bytes,
+        crate::json_input::JsonInputLimits::default(),
+    ) {
+        Ok(body) => body,
+        Err(e) => return ApiError::parse_error(e.to_string()).into_response(),
+    };
 
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -171,7 +188,14 @@ pub(crate) async fn branch_list_handler(
                 let branches: Vec<Value> = rows.iter().map(row_to_json).collect();
                 Json(json!({"branches": branches})).into_response()
             }
-            Err(_) => Json(json!({"branches": []})).into_response(),
+            Err(e) => {
+                tracing::error!("Failed to list branches: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to list branches"})),
+                )
+                    .into_response()
+            }
         },
         Err(e) => {
             tracing::error!("Branch connection released unexpectedly: {}", e);
@@ -182,7 +206,9 @@ pub(crate) async fn branch_list_handler(
                 .into_response()
         }
     };
-    conn.release().await;
+    if let Err(e) = conn.release_checked().await {
+        return ApiError::from_pg_driver_error(&e, None).into_response();
+    }
     result
 }
 

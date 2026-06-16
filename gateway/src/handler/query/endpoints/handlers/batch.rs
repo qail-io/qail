@@ -49,8 +49,16 @@ pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
     extensions: axum::http::Extensions,
     headers: HeaderMap,
-    Json(request): Json<BatchRequest>,
+    request: axum::extract::Request,
 ) -> Result<Json<BatchResponse>, ApiError> {
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+        .await
+        .map_err(|e| ApiError::parse_error(e.to_string()))?;
+    let request: BatchRequest =
+        crate::json_input::decode_typed(&body, crate::json_input::JsonInputLimits::default())
+            .map_err(|e| ApiError::parse_error(e.to_string()))?;
+
     if request.queries.is_empty() {
         return Err(ApiError::bad_request("EMPTY_BATCH", "Empty query batch"));
     }
@@ -65,8 +73,6 @@ pub async fn execute_batch(
             ),
         ));
     }
-
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     tracing::info!(
         "Executing batch of {} queries (txn={}, user: {})",

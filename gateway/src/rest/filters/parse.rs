@@ -1,6 +1,10 @@
 use qail_core::ast::{Operator, Value as QailValue};
 use uuid::Uuid;
 
+const MAX_FILTER_LIST_VALUES: usize = 256;
+const MAX_FILTER_CLAUSES: usize = 128;
+const MAX_IDENTIFIER_CSV_ITEMS: usize = 128;
+
 /// SECURITY: Validate that a user-provided identifier (column name, sort key, select field)
 /// contains only safe characters. Identifiers are written into SQL in non-parameterized
 /// positions (SELECT list, WHERE left-side, ORDER BY), so they MUST NOT contain SQL syntax.
@@ -41,6 +45,12 @@ pub(crate) fn parse_identifier_csv(input: &str) -> Result<Vec<String>, String> {
             return Err(format!("Invalid identifier '{}'", ident));
         }
         if seen.insert(ident.to_string()) {
+            if out.len() >= MAX_IDENTIFIER_CSV_ITEMS {
+                return Err(format!(
+                    "Identifier list contains more than {} entries",
+                    MAX_IDENTIFIER_CSV_ITEMS
+                ));
+            }
             out.push(ident.to_string());
         }
     }
@@ -76,6 +86,12 @@ pub(crate) fn parse_select_columns(input: &str) -> Result<Vec<String>, String> {
             return Err(format!("Invalid select column '{}'", ident));
         }
         if seen.insert(ident.to_string()) {
+            if out.len() >= MAX_IDENTIFIER_CSV_ITEMS {
+                return Err(format!(
+                    "Select list contains more than {} columns",
+                    MAX_IDENTIFIER_CSV_ITEMS
+                ));
+            }
             out.push(ident.to_string());
         }
     }
@@ -232,14 +248,14 @@ fn parse_filters_impl(
         };
 
         let qail_value = if !key_has_operator {
-            if let Some((value_op, value_val)) = parse_value_style_operator(&decoded_value) {
+            if let Some((value_op, value_val)) = parse_value_style_operator(&decoded_value)? {
                 op = value_op;
                 value_val
             } else {
-                parse_filter_value_for_op(op, &decoded_value)
+                parse_filter_value_for_op(op, &decoded_value)?
             }
         } else {
-            parse_filter_value_for_op(op, &decoded_value)
+            parse_filter_value_for_op(op, &decoded_value)?
         };
 
         if matches!(op, Operator::In | Operator::NotIn)
@@ -265,6 +281,12 @@ fn parse_filters_impl(
             continue;
         }
 
+        if filters.len() >= MAX_FILTER_CLAUSES {
+            return Err(format!(
+                "Filter query contains more than {} clauses",
+                MAX_FILTER_CLAUSES
+            ));
+        }
         filters.push((column.to_string(), op, qail_value));
     }
 
@@ -346,37 +368,44 @@ fn parse_operator_token(op_str: &str) -> Option<Operator> {
 }
 
 /// Parse a filter value according to the resolved operator.
-fn parse_filter_value_for_op(op: Operator, decoded_value: &str) -> QailValue {
-    match op {
+fn parse_filter_value_for_op(op: Operator, decoded_value: &str) -> Result<QailValue, String> {
+    let value = match op {
         Operator::IsNull | Operator::IsNotNull => QailValue::Null,
-        Operator::In | Operator::NotIn => QailValue::Array(parse_csv_values(decoded_value)),
+        Operator::In | Operator::NotIn => QailValue::Array(parse_csv_values(decoded_value)?),
         Operator::Like
         | Operator::ILike
         | Operator::NotLike
         | Operator::NotILike
         | Operator::Fuzzy => QailValue::String(normalize_like_pattern(decoded_value)),
         _ => parse_scalar_value(decoded_value),
-    }
+    };
+    Ok(value)
 }
 
 /// Parse value-style operator syntax (`op.value`) such as `gt.100`, `in.(a,b)`.
-fn parse_value_style_operator(decoded_value: &str) -> Option<(Operator, QailValue)> {
+fn parse_value_style_operator(
+    decoded_value: &str,
+) -> Result<Option<(Operator, QailValue)>, String> {
     let value = decoded_value.trim();
 
     if value == "is_null" {
-        return Some((Operator::IsNull, QailValue::Null));
+        return Ok(Some((Operator::IsNull, QailValue::Null)));
     }
     if value == "is_not_null" {
-        return Some((Operator::IsNotNull, QailValue::Null));
+        return Ok(Some((Operator::IsNotNull, QailValue::Null)));
     }
 
-    let (op_token, raw_val) = value.split_once('.')?;
-    let op = parse_operator_token(op_token)?;
-    Some((op, parse_filter_value_for_op(op, raw_val)))
+    let Some((op_token, raw_val)) = value.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(op) = parse_operator_token(op_token) else {
+        return Ok(None);
+    };
+    Ok(Some((op, parse_filter_value_for_op(op, raw_val)?)))
 }
 
 /// Parse comma-separated list values, accepting optional parenthesized form.
-fn parse_csv_values(raw: &str) -> Vec<QailValue> {
+fn parse_csv_values(raw: &str) -> Result<Vec<QailValue>, String> {
     let trimmed = raw.trim();
     let inner = trimmed
         .strip_prefix('(')
@@ -384,13 +413,20 @@ fn parse_csv_values(raw: &str) -> Vec<QailValue> {
         .unwrap_or(trimmed);
 
     if inner.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    inner
-        .split(',')
-        .map(|v| parse_scalar_value(v.trim()))
-        .collect()
+    let mut values = Vec::new();
+    for raw_value in inner.split(',') {
+        if values.len() >= MAX_FILTER_LIST_VALUES {
+            return Err(format!(
+                "Filter list contains more than {} values",
+                MAX_FILTER_LIST_VALUES
+            ));
+        }
+        values.push(parse_scalar_value(raw_value.trim()));
+    }
+    Ok(values)
 }
 
 /// Normalize wildcard syntax for LIKE/ILIKE.

@@ -95,16 +95,33 @@ fn test_reject_ddl_blocks_nested_unsupported_actions() {
 #[test]
 fn test_savepoint_name_validation() {
     // Valid names
-    assert!("sp1".chars().all(|c| c.is_alphanumeric() || c == '_'));
+    assert!(
+        "sp1"
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    );
     assert!(
         "my_savepoint"
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
     );
 
     // Invalid names
-    assert!(!"sp;DROP".chars().all(|c| c.is_alphanumeric() || c == '_'));
-    assert!(!"sp name".chars().all(|c| c.is_alphanumeric() || c == '_'));
+    assert!(
+        !"sp;DROP"
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    );
+    assert!(
+        !"sp name"
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    );
+    assert!(
+        !"spé"
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    );
 }
 
 async fn build_test_state(config: GatewayConfig) -> Arc<GatewayState> {

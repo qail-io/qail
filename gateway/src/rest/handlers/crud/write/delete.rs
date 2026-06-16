@@ -154,7 +154,7 @@ pub(crate) async fn delete_handler(
     let rows = match conn.fetch_all_uncached(&cmd).await {
         Ok(rows) => rows,
         Err(e) => {
-            conn.release().await;
+            let _ = conn.rollback_and_release().await;
             return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
         }
     };

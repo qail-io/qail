@@ -18,6 +18,25 @@ fn reject_tenant_column_update(
     Ok(())
 }
 
+fn reject_primary_key_update(
+    obj: &serde_json::Map<String, Value>,
+    primary_key: &str,
+) -> Result<(), ApiError> {
+    if obj
+        .keys()
+        .any(|key| identifier_matches_column(key, primary_key))
+    {
+        return Err(ApiError::bad_request(
+            "VALIDATION_ERROR",
+            format!(
+                "Field '{}' is path-managed and cannot be updated",
+                primary_key
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn build_branch_update_overlay_row(
     base_row: Option<Value>,
     obj: &serde_json::Map<String, Value>,
@@ -84,7 +103,8 @@ pub(crate) async fn update_handler(
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let body: Value =
-        serde_json::from_slice(&body).map_err(|e| ApiError::parse_error(e.to_string()))?;
+        crate::json_input::decode_value(&body, crate::json_input::JsonInputLimits::default())
+            .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let obj = body
         .as_object()
         .ok_or_else(|| ApiError::parse_error("Expected JSON object"))?;
@@ -93,14 +113,8 @@ pub(crate) async fn update_handler(
         return Err(ApiError::parse_error("No fields to update"));
     }
     // SECURITY: Fail closed on invalid JSON keys instead of silently skipping.
-    for key in obj.keys() {
-        if !crate::rest::filters::is_safe_identifier(key) {
-            return Err(ApiError::parse_error(format!(
-                "Invalid field name '{}' in update payload",
-                key
-            )));
-        }
-    }
+    super::validate_mutation_payload_keys(obj, "update")?;
+    reject_primary_key_update(obj, &pk)?;
     if let Some(scope_column) = tenant_scope_column.as_deref() {
         reject_tenant_column_update(obj, scope_column, auth.tenant_id.as_deref())?;
     }
@@ -287,7 +301,7 @@ pub(crate) async fn update_handler(
         let rows = match conn.fetch_all_uncached(old_cmd).await {
             Ok(rows) => rows,
             Err(e) => {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
             }
         };
@@ -299,7 +313,7 @@ pub(crate) async fn update_handler(
     let rows = match conn.fetch_all_uncached(&cmd).await {
         Ok(rows) => rows,
         Err(e) => {
-            conn.release().await;
+            let _ = conn.rollback_and_release().await;
             return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
         }
     };
@@ -349,7 +363,9 @@ pub(crate) async fn update_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_branch_update_overlay_row, reject_tenant_column_update};
+    use super::{
+        build_branch_update_overlay_row, reject_primary_key_update, reject_tenant_column_update,
+    };
     use serde_json::{Map, json};
 
     #[test]
@@ -376,6 +392,35 @@ mod tests {
         obj.insert("tenant_id".to_string(), json!("tenant_b"));
 
         assert!(reject_tenant_column_update(&obj, "tenant_id", None).is_ok());
+    }
+
+    #[test]
+    fn reject_primary_key_update_blocks_path_identity_mutation() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("other-id"));
+
+        let err = reject_primary_key_update(&obj, "id").unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_ERROR");
+    }
+
+    #[test]
+    fn reject_primary_key_update_blocks_case_and_qualified_variants() {
+        let mut case_variant = Map::new();
+        case_variant.insert("ID".to_string(), json!("other-id"));
+        assert!(reject_primary_key_update(&case_variant, "id").is_err());
+
+        let mut qualified = Map::new();
+        qualified.insert("orders.id".to_string(), json!("other-id"));
+        assert!(reject_primary_key_update(&qualified, "id").is_err());
+    }
+
+    #[test]
+    fn reject_primary_key_update_allows_other_fields() {
+        let mut obj = Map::new();
+        obj.insert("status".to_string(), json!("paid"));
+
+        assert!(reject_primary_key_update(&obj, "id").is_ok());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use super::*;
 use crate::server::RpcCallableSignature;
 
+const RPC_RESULT_PROBE_SAVEPOINT: &str = "qail_rpc_result_probe";
+
 fn is_rpc_void_context_error(err: &qail_pg::PgError) -> bool {
     let Some(server) = err.server_error() else {
         return false;
@@ -33,6 +35,19 @@ async fn execute_rpc_rows(
         conn.query_rows_with_params_with_format(&query.sql, &query.params, result_format)
             .await
     }
+}
+
+async fn release_rpc_result_probe(
+    conn: &mut qail_pg::PooledConnection,
+) -> Result<(), qail_pg::PgError> {
+    conn.release_savepoint(RPC_RESULT_PROBE_SAVEPOINT).await
+}
+
+async fn rollback_rpc_result_probe(
+    conn: &mut qail_pg::PooledConnection,
+) -> Result<(), qail_pg::PgError> {
+    conn.rollback_to(RPC_RESULT_PROBE_SAVEPOINT).await?;
+    conn.release_savepoint(RPC_RESULT_PROBE_SAVEPOINT).await
 }
 
 fn scalar_arg_matches_tenant(value: &Value, tenant_id: &str) -> bool {
@@ -171,7 +186,7 @@ pub(crate) async fn rpc_handler(
         None
     } else {
         Some(
-            serde_json::from_slice(&body)
+            crate::json_input::decode_value(&body, crate::json_input::JsonInputLimits::default())
                 .map_err(|e| ApiError::parse_error(format!("Invalid RPC JSON body: {}", e)))?,
         )
     };
@@ -209,7 +224,7 @@ pub(crate) async fn rpc_handler(
     {
         Ok(contract) => contract,
         Err(err) => {
-            conn.release().await;
+            let _ = conn.rollback_and_release().await;
             crate::metrics::record_rpc_call(
                 started_at.elapsed().as_secs_f64() * 1000.0,
                 false,
@@ -252,7 +267,7 @@ pub(crate) async fn rpc_handler(
             };
 
         if let Err(e) = execute_rpc_rows(&mut conn, &scalar_query, result_format).await {
-            conn.release().await;
+            let _ = conn.rollback_and_release().await;
             crate::metrics::record_rpc_call(
                 started_at.elapsed().as_secs_f64() * 1000.0,
                 false,
@@ -297,12 +312,45 @@ pub(crate) async fn rpc_handler(
         }
     };
 
+    let row_probe_uses_savepoint =
+        matches!(execution_mode, super::signature::RpcExecutionMode::Unknown);
+    if row_probe_uses_savepoint && let Err(e) = conn.savepoint(RPC_RESULT_PROBE_SAVEPOINT).await {
+        let _ = conn.rollback_and_release().await;
+        crate::metrics::record_rpc_call(
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            false,
+            result_format_label,
+        );
+        return Err(ApiError::from_pg_driver_error(&e, None));
+    }
+
     let rows = match execute_rpc_rows(&mut conn, &row_query, result_format).await {
-        Ok(rows) => rows,
+        Ok(rows) => {
+            if row_probe_uses_savepoint && let Err(e) = release_rpc_result_probe(&mut conn).await {
+                let _ = conn.rollback_and_release().await;
+                crate::metrics::record_rpc_call(
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    false,
+                    result_format_label,
+                );
+                return Err(ApiError::from_pg_driver_error(&e, None));
+            }
+            rows
+        }
         Err(e)
             if matches!(execution_mode, super::signature::RpcExecutionMode::Unknown)
                 && is_rpc_void_context_error(&e) =>
         {
+            if let Err(cleanup_err) = rollback_rpc_result_probe(&mut conn).await {
+                let _ = conn.rollback_and_release().await;
+                crate::metrics::record_rpc_call(
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    false,
+                    result_format_label,
+                );
+                return Err(ApiError::from_pg_driver_error(&cleanup_err, None));
+            }
+
             let scalar_query =
                 match build_rpc_bound_sql(&function, args.as_ref(), signature.as_ref(), true) {
                     Ok(query) => query,
@@ -318,7 +366,7 @@ pub(crate) async fn rpc_handler(
                 };
 
             if let Err(void_err) = execute_rpc_rows(&mut conn, &scalar_query, result_format).await {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 crate::metrics::record_rpc_call(
                     started_at.elapsed().as_secs_f64() * 1000.0,
                     false,
@@ -350,7 +398,10 @@ pub(crate) async fn rpc_handler(
             })));
         }
         Err(e) => {
-            conn.release().await;
+            if row_probe_uses_savepoint {
+                let _ = rollback_rpc_result_probe(&mut conn).await;
+            }
+            let _ = conn.rollback_and_release().await;
             crate::metrics::record_rpc_call(
                 started_at.elapsed().as_secs_f64() * 1000.0,
                 false,
