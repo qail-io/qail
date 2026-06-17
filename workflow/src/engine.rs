@@ -742,6 +742,12 @@ fn ensure_definition_text(value: &str, usage: &str) -> Result<(), WorkflowError>
     Ok(())
 }
 
+fn validate_workflow_context_identity(ctx: &WorkflowContext) -> Result<(), WorkflowError> {
+    ensure_definition_text(&ctx.workflow_id, "Workflow id")?;
+    ensure_definition_text(&ctx.current_state, "Workflow current state")?;
+    Ok(())
+}
+
 fn ensure_user_context_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
     if RESERVED_CONTEXT_KEYS.contains(&key) {
         return Err(WorkflowError::Other(format!(
@@ -1820,6 +1826,7 @@ pub async fn run_workflow_with_options<E: WorkflowExecutor>(
     options: WorkflowRunOptions,
 ) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
+    validate_workflow_context_identity(ctx)?;
     let guard = match RuntimeGuard::enter(
         executor,
         &definition.name,
@@ -1844,6 +1851,7 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
     mode: RunMode<'a>,
 ) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
+    validate_workflow_context_identity(ctx)?;
     ensure_context_definition(ctx, definition)?;
     let run_start_transition_count = ctx.transition_count();
     let mut pending_cursor_frames = match ctx.cursor.clone() {
@@ -2046,6 +2054,7 @@ pub async fn resume_workflow_with_event_and_options<E: WorkflowExecutor>(
     options: WorkflowRunOptions,
 ) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
+    ensure_definition_text(workflow_id, "Workflow id")?;
     ensure_wait_event_name(event_name)?;
 
     let guard = match RuntimeGuard::enter(
@@ -2106,6 +2115,7 @@ pub async fn timeout_workflow_with_options<E: WorkflowExecutor>(
     options: WorkflowRunOptions,
 ) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
+    ensure_definition_text(workflow_id, "Workflow id")?;
     let guard = match RuntimeGuard::enter(
         executor,
         &definition.name,
@@ -2191,6 +2201,7 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
         .load_state(workflow_id)
         .await?
         .ok_or_else(|| WorkflowError::Other(format!("Workflow not found: {}", workflow_id)))?;
+    validate_workflow_context_identity(&ctx)?;
     ensure_context_definition(&mut ctx, definition)?;
 
     let cursor = ctx
@@ -3027,6 +3038,101 @@ mod tests {
                 .is_empty()
         );
         assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_workflow_id_fails_before_runtime_guards() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_workflow_id")
+            .initial_state("active")
+            .transition("active", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new(" ", "active");
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("empty-id-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("empty workflow id must fail before runtime guards");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Workflow id must not be empty"), "got: {msg}");
+            }
+            other => panic!("expected workflow id validation error, got {other:?}"),
+        }
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            executor
+                .failed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_resume_workflow_id_fails_before_runtime_guards() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_resume_id")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("vendor.ready", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let err = resume_workflow_with_options(
+            &executor,
+            &wf,
+            " ",
+            serde_json::json!({"event": "vendor.ready"}),
+            WorkflowRunOptions::default()
+                .with_idempotency_key("empty-resume-id-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("empty workflow id must fail before runtime guards");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Workflow id must not be empty"), "got: {msg}");
+            }
+            other => panic!("expected workflow id validation error, got {other:?}"),
+        }
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            executor
+                .failed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
