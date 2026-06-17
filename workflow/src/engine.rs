@@ -2275,6 +2275,7 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
             "Wait steps inside on_timeout fallback are not supported".to_string(),
         ));
     }
+    validate_workflow_steps(&wait.on_timeout)?;
 
     set_timeout_fallback(&mut ctx, &wait)?;
     ctx.clear_cursor();
@@ -5240,6 +5241,68 @@ mod tests {
                 "guest@example.com".to_string(),
                 "payment_timeout".to_string()
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_timeout_fallback_is_validated_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("persisted_timeout_fallback_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::wait_or(
+                    "payment.success",
+                    std::time::Duration::from_secs(0),
+                    vec![WorkflowStep::transition("timed_out")],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-persisted-timeout-fallback", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        {
+            let mut saved = executor.saved_state.lock().unwrap();
+            let saved = saved
+                .as_mut()
+                .expect("workflow should be saved while waiting for timeout");
+            let cursor = saved
+                .cursor
+                .as_mut()
+                .expect("saved workflow should have a wait cursor");
+            let wait = cursor
+                .wait
+                .as_mut()
+                .expect("saved workflow should be waiting for timeout");
+            wait.on_timeout = vec![
+                WorkflowStep::notify(ChannelKind::Email, "bad_timeout", "customer.email"),
+                WorkflowStep::transition(" "),
+            ];
+        }
+
+        let err = timeout_workflow(&executor, &wf, "wf-persisted-timeout-fallback")
+            .await
+            .expect_err("invalid persisted timeout fallback must fail before side effects");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Transition target state must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected timeout fallback validation error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "persisted timeout fallback validation must run before notification"
         );
     }
 
