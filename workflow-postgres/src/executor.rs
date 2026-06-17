@@ -132,4 +132,12 @@ where
             .complete_workflow_side_effect(operation, result)
             .await
     }
+
+    async fn fail_workflow_side_effect(
+        &self,
+        operation: &WorkflowSideEffect,
+        error: &str,
+    ) -> Result<(), WorkflowError> {
+        self.store.fail_workflow_side_effect(operation, error).await
+    }
 }

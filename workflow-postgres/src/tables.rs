@@ -92,6 +92,7 @@ fn side_effects_schema(table: &str) -> Qail {
         def("kind", "text"),
         def("status", "text"),
         def_nullable("result", "jsonb"),
+        def_nullable("error", "text"),
         def("created_at", "text"),
         def("updated_at", "text"),
     ])

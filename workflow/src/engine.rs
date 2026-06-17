@@ -362,6 +362,20 @@ pub trait WorkflowExecutor: Send + Sync {
         Ok(())
     }
 
+    /// Mark a side effect as failed so a later retry can make a fresh attempt.
+    ///
+    /// Backends that retry failed side effects should only use this for errors
+    /// returned by the app/provider before the workflow engine records a
+    /// completed side-effect result. External providers should still receive
+    /// stable idempotency keys where duplicate delivery/charge risk matters.
+    async fn fail_workflow_side_effect(
+        &self,
+        _operation: &WorkflowSideEffect,
+        _error: &str,
+    ) -> Result<(), WorkflowError> {
+        Ok(())
+    }
+
     /// Execute a QAIL query with a stable workflow side-effect id.
     async fn execute_query_once(
         &self,
@@ -370,7 +384,15 @@ pub trait WorkflowExecutor: Send + Sync {
     ) -> Result<Value, WorkflowError> {
         match self.begin_workflow_side_effect(operation).await? {
             WorkflowSideEffectStatus::Execute => {
-                let result = self.execute_query(cmd_json).await?;
+                let result = match self.execute_query(cmd_json).await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let _ = self
+                            .fail_workflow_side_effect(operation, &err.to_string())
+                            .await;
+                        return Err(err);
+                    }
+                };
                 self.complete_workflow_side_effect(operation, Some(&result))
                     .await?;
                 Ok(result)
@@ -395,8 +417,15 @@ pub trait WorkflowExecutor: Send + Sync {
     ) -> Result<(), WorkflowError> {
         match self.begin_workflow_side_effect(operation).await? {
             WorkflowSideEffectStatus::Execute => {
-                self.send_notification(channel, recipient, template, params)
-                    .await?;
+                if let Err(err) = self
+                    .send_notification(channel, recipient, template, params)
+                    .await
+                {
+                    let _ = self
+                        .fail_workflow_side_effect(operation, &err.to_string())
+                        .await;
+                    return Err(err);
+                }
                 self.complete_workflow_side_effect(operation, None).await
             }
             WorkflowSideEffectStatus::AlreadyCompleted { .. } => Ok(()),
@@ -412,7 +441,15 @@ pub trait WorkflowExecutor: Send + Sync {
     ) -> Result<ChargeResponse, WorkflowError> {
         match self.begin_workflow_side_effect(operation).await? {
             WorkflowSideEffectStatus::Execute => {
-                let response = self.create_charge(provider, request).await?;
+                let response = match self.create_charge(provider, request).await {
+                    Ok(response) => response,
+                    Err(err) => {
+                        let _ = self
+                            .fail_workflow_side_effect(operation, &err.to_string())
+                            .await;
+                        return Err(err);
+                    }
+                };
                 let response_json = serde_json::to_value(&response)
                     .map_err(|e| WorkflowError::Other(e.to_string()))?;
                 self.complete_workflow_side_effect(operation, Some(&response_json))
@@ -2456,6 +2493,7 @@ mod tests {
         due_timeout_workflow_ids: std::sync::Mutex<Vec<String>>,
         skip_notify_side_effects: std::sync::Mutex<bool>,
         completed_side_effects: std::sync::Mutex<Vec<String>>,
+        failed_side_effects: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl MockExecutor {
@@ -2484,6 +2522,7 @@ mod tests {
                 due_timeout_workflow_ids: std::sync::Mutex::new(Vec::new()),
                 skip_notify_side_effects: std::sync::Mutex::new(false),
                 completed_side_effects: std::sync::Mutex::new(Vec::new()),
+                failed_side_effects: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -2737,6 +2776,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(operation.operation_id.clone());
+            Ok(())
+        }
+
+        async fn fail_workflow_side_effect(
+            &self,
+            operation: &WorkflowSideEffect,
+            error: &str,
+        ) -> Result<(), WorkflowError> {
+            self.failed_side_effects
+                .lock()
+                .unwrap()
+                .push((operation.operation_id.clone(), error.to_string()));
             Ok(())
         }
     }
@@ -6008,6 +6059,48 @@ mod tests {
             executor.notifications.lock().unwrap().len(),
             1,
             "retry must resume after the completed notification step"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_query_step_marks_side_effect_failed() {
+        let executor = MockExecutor::new();
+        let failing_query =
+            qail_core::wire::encode_cmd_text(&qail_core::Qail::get("bookings").limit(1));
+        executor.fail_query(failing_query.clone());
+
+        let wf = WorkflowDefinition::new("failed_side_effect")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: failing_query,
+                        store_as: None,
+                    },
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-side-effect-fail", "active");
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("query should fail");
+        assert!(matches!(err, WorkflowError::QueryFailed(_)));
+
+        let expected_operation_id = side_effect_operation_id(
+            "wf-side-effect-fail",
+            "active",
+            WorkflowSideEffectKind::Query,
+            "steps[0]",
+        );
+        let failed_side_effects = executor.failed_side_effects.lock().unwrap();
+        assert_eq!(failed_side_effects.len(), 1);
+        assert_eq!(failed_side_effects[0].0, expected_operation_id);
+        assert!(
+            failed_side_effects[0].1.contains("forced query failure"),
+            "failure hook must preserve the app/provider error"
         );
     }
 

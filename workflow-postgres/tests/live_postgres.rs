@@ -172,6 +172,14 @@ async fn live_postgres_storage_runtime_guarantees() {
         WorkflowExecutor::begin_workflow_operation(&executor, &mismatched_operation).await,
         "previously used for kind",
     );
+    let mismatched_workflow_operation = WorkflowOperation {
+        workflow_name: "other_workflow".to_string(),
+        ..operation.clone()
+    };
+    assert_error_contains(
+        WorkflowExecutor::begin_workflow_operation(&executor, &mismatched_workflow_operation).await,
+        "previously used for workflow",
+    );
 
     let missing_operation = WorkflowOperation {
         idempotency_key: "missing-event".to_string(),
@@ -231,6 +239,66 @@ async fn live_postgres_storage_runtime_guarantees() {
     };
     assert_error_contains(
         WorkflowExecutor::complete_workflow_side_effect(&executor, &missing_side_effect, None)
+            .await,
+        "was not found in started state",
+    );
+
+    let mismatched_side_effect = WorkflowSideEffect {
+        kind: WorkflowSideEffectKind::Query,
+        ..side_effect.clone()
+    };
+    assert_error_contains(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &mismatched_side_effect).await,
+        "previously used for",
+    );
+
+    let retry_side_effect = WorkflowSideEffect {
+        workflow_id: "wf-live".to_string(),
+        state: "awaiting_vendor".to_string(),
+        step_path: "steps[2]".to_string(),
+        kind: WorkflowSideEffectKind::Notify,
+        operation_id: "notify-retry-live".to_string(),
+    };
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &retry_side_effect)
+            .await
+            .unwrap(),
+        WorkflowSideEffectStatus::Execute
+    );
+    let wrong_retry_identity = WorkflowSideEffect {
+        workflow_id: "wf-other".to_string(),
+        ..retry_side_effect.clone()
+    };
+    assert_error_contains(
+        WorkflowExecutor::fail_workflow_side_effect(
+            &executor,
+            &wrong_retry_identity,
+            "wrong identity",
+        )
+        .await,
+        "was not found in started state",
+    );
+    WorkflowExecutor::fail_workflow_side_effect(&executor, &retry_side_effect, "transient failure")
+        .await
+        .unwrap();
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &retry_side_effect)
+            .await
+            .unwrap(),
+        WorkflowSideEffectStatus::Execute,
+        "failed side effect should be retryable"
+    );
+    WorkflowExecutor::complete_workflow_side_effect(&executor, &retry_side_effect, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &retry_side_effect)
+            .await
+            .unwrap(),
+        WorkflowSideEffectStatus::AlreadyCompleted { result: None }
+    );
+    assert_error_contains(
+        WorkflowExecutor::fail_workflow_side_effect(&executor, &retry_side_effect, "late failure")
             .await,
         "was not found in started state",
     );

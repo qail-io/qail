@@ -235,7 +235,7 @@ impl PgWorkflowStore {
     ) -> Result<WorkflowOperationStatus, WorkflowError> {
         let operation_kind = operation_kind_text(&operation.kind);
         let existing = Qail::get(&self.tables.operations)
-            .columns(["status", "state", "kind"])
+            .columns(["status", "state", "kind", "workflow_name"])
             .eq("workflow_id", operation.workflow_id.as_str())
             .eq("idempotency_key", operation.idempotency_key.as_str())
             .for_update()
@@ -249,6 +249,13 @@ impl PgWorkflowStore {
                 return Err(WorkflowError::Other(format!(
                     "Workflow operation idempotency key '{}' was previously used for kind {}, not {}",
                     operation.idempotency_key, stored_kind, operation_kind
+                )));
+            }
+            let stored_workflow_name = required_string(row, 3, "workflow_name")?;
+            if stored_workflow_name != operation.workflow_name {
+                return Err(WorkflowError::Other(format!(
+                    "Workflow operation idempotency key '{}' was previously used for workflow '{}', not '{}'",
+                    operation.idempotency_key, stored_workflow_name, operation.workflow_name
                 )));
             }
 
@@ -306,14 +313,24 @@ impl PgWorkflowStore {
         driver: &mut PgDriver,
         operation: &WorkflowOperation,
     ) -> Result<(), WorkflowError> {
+        let operation_kind = operation_kind_text(&operation.kind);
         let cmd = Qail::set(&self.tables.operations)
             .set_value("status", STATUS_STARTED)
             .set_value("state", QailValue::Null)
             .set_value("error", QailValue::Null)
             .set_value("updated_at", timestamp(Utc::now()))
+            .eq("workflow_name", operation.workflow_name.as_str())
             .eq("workflow_id", operation.workflow_id.as_str())
-            .eq("idempotency_key", operation.idempotency_key.as_str());
-        driver.execute(&cmd).await.map_err(pg_error)?;
+            .eq("idempotency_key", operation.idempotency_key.as_str())
+            .eq("kind", operation_kind.as_str())
+            .eq("status", STATUS_FAILED);
+        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        if affected == 0 {
+            return Err(WorkflowError::Other(format!(
+                "Workflow operation '{}' was not found in failed state",
+                operation.idempotency_key
+            )));
+        }
         Ok(())
     }
 
@@ -322,13 +339,16 @@ impl PgWorkflowStore {
         operation: &WorkflowOperation,
         state: &str,
     ) -> Result<(), WorkflowError> {
+        let operation_kind = operation_kind_text(&operation.kind);
         let cmd = Qail::set(&self.tables.operations)
             .set_value("status", STATUS_COMPLETED)
             .set_value("state", state)
             .set_value("error", QailValue::Null)
             .set_value("updated_at", timestamp(Utc::now()))
+            .eq("workflow_name", operation.workflow_name.as_str())
             .eq("workflow_id", operation.workflow_id.as_str())
             .eq("idempotency_key", operation.idempotency_key.as_str())
+            .eq("kind", operation_kind.as_str())
             .eq("status", STATUS_STARTED);
         let mut driver = self.driver.lock().await;
         let affected = driver.execute(&cmd).await.map_err(pg_error)?;
@@ -346,12 +366,15 @@ impl PgWorkflowStore {
         operation: &WorkflowOperation,
         error: &str,
     ) -> Result<(), WorkflowError> {
+        let operation_kind = operation_kind_text(&operation.kind);
         let cmd = Qail::set(&self.tables.operations)
             .set_value("status", STATUS_FAILED)
             .set_value("error", error)
             .set_value("updated_at", timestamp(Utc::now()))
+            .eq("workflow_name", operation.workflow_name.as_str())
             .eq("workflow_id", operation.workflow_id.as_str())
             .eq("idempotency_key", operation.idempotency_key.as_str())
+            .eq("kind", operation_kind.as_str())
             .eq("status", STATUS_STARTED);
         let mut driver = self.driver.lock().await;
         let affected = driver.execute(&cmd).await.map_err(pg_error)?;
@@ -433,7 +456,14 @@ impl PgWorkflowStore {
         operation: &WorkflowSideEffect,
     ) -> Result<WorkflowSideEffectStatus, WorkflowError> {
         let existing = Qail::get(&self.tables.side_effects)
-            .columns(["status", "result"])
+            .columns([
+                "status",
+                "result",
+                "workflow_id",
+                "state",
+                "step_path",
+                "kind",
+            ])
             .eq("operation_id", operation.operation_id.as_str())
             .for_update()
             .limit(1);
@@ -441,6 +471,7 @@ impl PgWorkflowStore {
 
         if let Some(row) = rows.first() {
             let status = required_string(row, 0, "status")?;
+            self.ensure_side_effect_identity(row, operation)?;
             return match status.as_str() {
                 STATUS_STARTED => Err(WorkflowError::Other(format!(
                     "Workflow side effect '{}' is already in progress",
@@ -449,6 +480,11 @@ impl PgWorkflowStore {
                 STATUS_COMPLETED => Ok(WorkflowSideEffectStatus::AlreadyCompleted {
                     result: optional_json(row, 1)?,
                 }),
+                STATUS_FAILED => {
+                    self.mark_workflow_side_effect_started_tx(driver, operation)
+                        .await?;
+                    Ok(WorkflowSideEffectStatus::Execute)
+                }
                 other => Err(WorkflowError::Other(format!(
                     "Unknown workflow side effect status '{other}'"
                 ))),
@@ -465,6 +501,7 @@ impl PgWorkflowStore {
                 "kind",
                 "status",
                 "result",
+                "error",
                 "created_at",
                 "updated_at",
             ])
@@ -475,6 +512,7 @@ impl PgWorkflowStore {
                 QailValue::String(operation.step_path.clone()),
                 QailValue::String(operation.kind.as_str().to_string()),
                 QailValue::String(STATUS_STARTED.to_string()),
+                QailValue::Null,
                 QailValue::Null,
                 QailValue::String(now.clone()),
                 QailValue::String(now),
@@ -490,6 +528,63 @@ impl PgWorkflowStore {
         }
     }
 
+    fn ensure_side_effect_identity(
+        &self,
+        row: &qail_pg::PgRow,
+        operation: &WorkflowSideEffect,
+    ) -> Result<(), WorkflowError> {
+        let stored_workflow_id = required_string(row, 2, "workflow_id")?;
+        let stored_state = required_string(row, 3, "state")?;
+        let stored_step_path = required_string(row, 4, "step_path")?;
+        let stored_kind = required_string(row, 5, "kind")?;
+        let expected_kind = operation.kind.as_str();
+        if stored_workflow_id != operation.workflow_id
+            || stored_state != operation.state
+            || stored_step_path != operation.step_path
+            || stored_kind != expected_kind
+        {
+            return Err(WorkflowError::Other(format!(
+                "Workflow side effect operation id '{}' was previously used for {}/{}/{}/{}, not {}/{}/{}/{}",
+                operation.operation_id,
+                stored_workflow_id,
+                stored_state,
+                stored_step_path,
+                stored_kind,
+                operation.workflow_id,
+                operation.state,
+                operation.step_path,
+                expected_kind
+            )));
+        }
+        Ok(())
+    }
+
+    async fn mark_workflow_side_effect_started_tx(
+        &self,
+        driver: &mut PgDriver,
+        operation: &WorkflowSideEffect,
+    ) -> Result<(), WorkflowError> {
+        let cmd = Qail::set(&self.tables.side_effects)
+            .set_value("status", STATUS_STARTED)
+            .set_value("result", QailValue::Null)
+            .set_value("error", QailValue::Null)
+            .set_value("updated_at", timestamp(Utc::now()))
+            .eq("operation_id", operation.operation_id.as_str())
+            .eq("workflow_id", operation.workflow_id.as_str())
+            .eq("state", operation.state.as_str())
+            .eq("step_path", operation.step_path.as_str())
+            .eq("kind", operation.kind.as_str())
+            .eq("status", STATUS_FAILED);
+        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        if affected == 0 {
+            return Err(WorkflowError::Other(format!(
+                "Workflow side effect '{}' was not found in failed state",
+                operation.operation_id
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn complete_workflow_side_effect(
         &self,
         operation: &WorkflowSideEffect,
@@ -502,8 +597,39 @@ impl PgWorkflowStore {
         let cmd = Qail::set(&self.tables.side_effects)
             .set_value("status", STATUS_COMPLETED)
             .set_value("result", result)
+            .set_value("error", QailValue::Null)
             .set_value("updated_at", timestamp(Utc::now()))
             .eq("operation_id", operation.operation_id.as_str())
+            .eq("workflow_id", operation.workflow_id.as_str())
+            .eq("state", operation.state.as_str())
+            .eq("step_path", operation.step_path.as_str())
+            .eq("kind", operation.kind.as_str())
+            .eq("status", STATUS_STARTED);
+        let mut driver = self.driver.lock().await;
+        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        if affected == 0 {
+            return Err(missing_started_row(
+                "side effect",
+                operation.operation_id.as_str(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn fail_workflow_side_effect(
+        &self,
+        operation: &WorkflowSideEffect,
+        error: &str,
+    ) -> Result<(), WorkflowError> {
+        let cmd = Qail::set(&self.tables.side_effects)
+            .set_value("status", STATUS_FAILED)
+            .set_value("error", error)
+            .set_value("updated_at", timestamp(Utc::now()))
+            .eq("operation_id", operation.operation_id.as_str())
+            .eq("workflow_id", operation.workflow_id.as_str())
+            .eq("state", operation.state.as_str())
+            .eq("step_path", operation.step_path.as_str())
+            .eq("kind", operation.kind.as_str())
             .eq("status", STATUS_STARTED);
         let mut driver = self.driver.lock().await;
         let affected = driver.execute(&cmd).await.map_err(pg_error)?;
