@@ -9,6 +9,7 @@ members = [
     "qdrant",
     "gateway",
     "workflow",
+    "workflow-postgres",
 ]
 exclude = [
     "pg/fuzz",

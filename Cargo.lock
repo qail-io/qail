@@ -2233,6 +2233,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qail-workflow-postgres"
+version = "1.3.2"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "qail-core",
+ "qail-pg",
+ "qail-workflow",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "quanta"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
