@@ -749,12 +749,17 @@ fn validate_workflow_context_identity(ctx: &WorkflowContext) -> Result<(), Workf
 }
 
 fn ensure_user_context_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
+    ensure_definition_text(key, usage)?;
     if RESERVED_CONTEXT_KEYS.contains(&key) {
         return Err(WorkflowError::Other(format!(
             "Workflow {usage} uses reserved context key '{key}'"
         )));
     }
     Ok(())
+}
+
+fn ensure_context_lookup_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
+    ensure_definition_text(key, usage)
 }
 
 fn ensure_optional_user_context_key(
@@ -960,6 +965,7 @@ fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> 
                 branches,
                 default,
             } => {
+                ensure_context_lookup_key(condition_key, "Branch condition_key")?;
                 ensure_unique_branch_values(condition_key, branches)?;
                 for (_, branch_steps) in branches {
                     validate_workflow_steps(branch_steps)?;
@@ -971,21 +977,51 @@ fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> 
                 branches,
                 default,
             } => {
+                ensure_context_lookup_key(condition_key, "BranchWhen condition_key")?;
                 ensure_unique_branch_conditions(condition_key, branches)?;
                 for (_, branch_steps) in branches {
                     validate_workflow_steps(branch_steps)?;
                 }
                 validate_workflow_steps(default)?;
             }
-            WorkflowStep::ForEach { steps, .. } => {
+            WorkflowStep::ForEach { list_key, steps } => {
+                ensure_context_lookup_key(list_key, "ForEach list_key")?;
                 validate_workflow_steps(steps)?;
             }
-            WorkflowStep::Charge { store_as, .. } => {
+            WorkflowStep::Charge {
+                amount_key,
+                reference_key,
+                description_key,
+                payment_method_key,
+                store_as,
+                ..
+            } => {
+                ensure_context_lookup_key(amount_key, "Charge amount_key")?;
+                ensure_context_lookup_key(reference_key, "Charge reference_key")?;
+                if let Some(description_key) = description_key {
+                    ensure_context_lookup_key(description_key, "Charge description_key")?;
+                }
+                if let Some(payment_method_key) = payment_method_key {
+                    ensure_context_lookup_key(payment_method_key, "Charge payment_method_key")?;
+                }
                 ensure_optional_user_context_key(store_as.as_ref(), "Charge store_as")?;
             }
-            WorkflowStep::Notify { .. }
-            | WorkflowStep::Transition { .. }
-            | WorkflowStep::Log { .. } => {}
+            WorkflowStep::Notify {
+                template,
+                recipient_key,
+                payload_key,
+                ..
+            } => {
+                ensure_definition_text(template, "Notify template")?;
+                ensure_context_lookup_key(recipient_key, "Notify recipient_key")?;
+                if let Some(payload_key) = payload_key {
+                    ensure_context_lookup_key(payload_key, "Notify payload_key")?;
+                }
+            }
+            WorkflowStep::Transition { to } => {
+                ensure_definition_text(to, "Transition target state")?;
+            }
+            WorkflowStep::Log { .. } => {}
         }
     }
 
@@ -3549,6 +3585,110 @@ mod tests {
             other => panic!("expected ambiguous branch error, got {other:?}"),
         }
         assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_transition_target_fails_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("invalid_transition_target")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "before_bad_transition", "ops.email"),
+                    WorkflowStep::transition(" "),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-invalid-transition-target", "active");
+        ctx.set("ops", serde_json::json!({"email": "ops@example.com"}));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("invalid transition target must fail during definition validation");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Transition target state must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected transition target validation error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_notify_recipient_key_fails_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("invalid_notify_recipient")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "bad_notify", " "),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-invalid-notify-recipient", "active");
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("invalid notify recipient key must fail before send");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Notify recipient_key must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected notify recipient validation error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_charge_amount_key_fails_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("invalid_charge_amount_key")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge(
+                    PaymentKind::Xendit,
+                    " ",
+                    "order.id",
+                    Some("charge"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-invalid-charge-amount", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({"id": "booking-1", "total": 125_000}),
+        );
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("invalid charge amount key must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Charge amount_key must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected charge amount key validation error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
