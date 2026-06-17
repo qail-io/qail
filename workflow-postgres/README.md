@@ -46,6 +46,25 @@ The default table names are:
 `PgWorkflowTables` lets applications override the names when a dedicated schema
 or per-app prefix is required.
 
+## Store Construction
+
+Small tools and tests can create a store from a single driver:
+
+```rust
+let store = PgWorkflowStore::connect_url(database_url).await?;
+```
+
+Production services should usually share the app's `qail_pg::PgPool` instead:
+
+```rust
+let pool = qail_pg::PgPool::connect(qail_pg::PoolConfig::from_url(database_url)?).await?;
+let store = PgWorkflowStore::from_pool(pool);
+```
+
+The pooled path still uses QAIL AST operations only. It acquires raw pooled
+connections for the Flow Ledger because these tables are internal runtime
+state, not tenant-scoped application data.
+
 ## Rollout Checklist
 
 - Create the Flow Ledger tables before enabling workflow workers.

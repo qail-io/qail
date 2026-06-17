@@ -119,6 +119,13 @@ store.install_schema().await?;
 let executor = PgWorkflowExecutor::new(app_executor, store);
 ```
 
+For long-running services, reuse the service pool:
+
+```rust
+let pool = qail_pg::PgPool::connect(qail_pg::PoolConfig::from_url(database_url)?).await?;
+let store = PgWorkflowStore::from_pool(pool);
+```
+
 The default tables are:
 
 - `qail_workflow_states`

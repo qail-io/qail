@@ -571,6 +571,20 @@ fn test_parse_pg_url_strips_query_string() {
 }
 
 #[test]
+fn test_pool_config_from_url_applies_auth_and_query_params() {
+    let config =
+        PoolConfig::from_url("postgresql://alice:s%40cret@db.internal:5433/app?sslmode=require")
+            .unwrap();
+
+    assert_eq!(config.host, "db.internal");
+    assert_eq!(config.port, 5433);
+    assert_eq!(config.user, "alice");
+    assert_eq!(config.database, "app");
+    assert_eq!(config.password, Some("s@cret".to_string()));
+    assert_eq!(config.tls_mode, TlsMode::Require);
+}
+
+#[test]
 fn test_parse_pg_url_defaults_port_only_when_omitted() {
     let (host, port, user, db, password) =
         parse_pg_url("postgresql://alice:secret@db.internal/app").unwrap();

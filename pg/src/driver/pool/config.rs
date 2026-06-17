@@ -278,6 +278,26 @@ impl PoolConfig {
 
         Ok(config)
     }
+
+    /// Create a pool configuration directly from a PostgreSQL URL.
+    ///
+    /// This parses the same URL shape and query parameters as
+    /// [`crate::driver::PgDriver::connect_url`], then applies the pool builder
+    /// defaults for connection limits and timeouts.
+    pub fn from_url(url: &str) -> PgResult<Self> {
+        let (host, port, user, database, password) = parse_pg_url(url)?;
+        let mut config = PoolConfig::new(&host, port, &user, &database);
+
+        if let Some(ref pw) = password {
+            config = config.password(pw);
+        }
+
+        if let Some((_, query)) = url.split_once('?') {
+            apply_url_query_params(&mut config, query, &host)?;
+        }
+
+        Ok(config)
+    }
 }
 
 /// Apply enterprise auth/TLS query parameters to a `PoolConfig`.

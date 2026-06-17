@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use qail_core::ast::{Expr, Value as QailValue};
-use qail_pg::{PgDriver, PgError, PgRow};
+use qail_pg::{PgDriver, PgError, PgRow, PooledConnection};
 use qail_workflow::{WorkflowError, WorkflowOperationKind};
 
 pub(crate) const STATUS_STARTED: &str = "started";
@@ -116,6 +116,42 @@ pub(crate) async fn finish_tx<T>(
         }
         Err(err) => {
             let _ = driver.rollback().await;
+            Err(err)
+        }
+    }
+}
+
+pub(crate) async fn finish_pool_connection<T>(
+    conn: PooledConnection,
+    result: Result<T, WorkflowError>,
+) -> Result<T, WorkflowError> {
+    match result {
+        Ok(value) => {
+            conn.release_checked().await.map_err(pg_error)?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = conn.rollback_and_release().await;
+            Err(err)
+        }
+    }
+}
+
+pub(crate) async fn finish_pool_tx<T>(
+    mut conn: PooledConnection,
+    result: Result<T, WorkflowError>,
+) -> Result<T, WorkflowError> {
+    match result {
+        Ok(value) => {
+            if let Err(err) = conn.commit().await.map_err(pg_error) {
+                let _ = conn.rollback_and_release().await;
+                return Err(err);
+            }
+            conn.release_checked().await.map_err(pg_error)?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = conn.rollback_and_release().await;
             Err(err)
         }
     }

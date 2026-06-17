@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use qail_core::ast::{Operator, Qail, Value as QailValue};
-use qail_pg::PgDriver;
+use qail_pg::{PgDriver, PgPool, PgRow, PooledConnection};
 use qail_workflow::{
     WorkflowContext, WorkflowError, WorkflowLease, WorkflowOperation, WorkflowOperationStatus,
     WorkflowSideEffect, WorkflowSideEffectStatus,
@@ -13,14 +14,49 @@ use tokio::sync::Mutex;
 use crate::tables::PgWorkflowTables;
 use crate::util::{
     STATUS_COMPLETED, STATUS_FAILED, STATUS_STARTED, deadline_after, deadline_from_duration,
-    excluded, finish_tx, is_duplicate, is_stale_timestamp, json_error, missing_started_row,
-    operation_kind_text, option_string, optional_json, pg_error, required_string, timestamp,
+    excluded, finish_pool_connection, finish_pool_tx, finish_tx, is_duplicate, is_stale_timestamp,
+    json_error, missing_started_row, operation_kind_text, option_string, optional_json, pg_error,
+    required_string, timestamp,
 };
 
-/// PostgreSQL workflow storage using a single `PgDriver`.
+#[derive(Clone)]
+enum PgWorkflowBackend {
+    Driver(Arc<Mutex<PgDriver>>),
+    Pool(PgPool),
+}
+
+#[async_trait]
+trait PgWorkflowConnection: Send {
+    async fn execute_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<u64>;
+    async fn fetch_all_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<Vec<PgRow>>;
+}
+
+#[async_trait]
+impl PgWorkflowConnection for PgDriver {
+    async fn execute_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<u64> {
+        self.execute(cmd).await
+    }
+
+    async fn fetch_all_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<Vec<PgRow>> {
+        self.fetch_all(cmd).await
+    }
+}
+
+#[async_trait]
+impl PgWorkflowConnection for PooledConnection {
+    async fn execute_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<u64> {
+        self.execute(cmd).await
+    }
+
+    async fn fetch_all_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<Vec<PgRow>> {
+        self.fetch_all_uncached(cmd).await
+    }
+}
+
+/// PostgreSQL workflow storage using either a single `PgDriver` or a `PgPool`.
 #[derive(Clone)]
 pub struct PgWorkflowStore {
-    driver: Arc<Mutex<PgDriver>>,
+    backend: PgWorkflowBackend,
     tables: PgWorkflowTables,
     timeout_claim_ttl: Duration,
     in_progress_ttl: Duration,
@@ -35,7 +71,20 @@ impl PgWorkflowStore {
     /// Create a store around a shared driver handle.
     pub fn from_shared(driver: Arc<Mutex<PgDriver>>) -> Self {
         Self {
-            driver,
+            backend: PgWorkflowBackend::Driver(driver),
+            tables: PgWorkflowTables::default(),
+            timeout_claim_ttl: Duration::from_secs(60),
+            in_progress_ttl: Duration::from_secs(3600),
+        }
+    }
+
+    /// Create a store around an existing PostgreSQL connection pool.
+    ///
+    /// The store uses raw pooled connections because workflow ledger tables are
+    /// internal runtime state, not tenant-scoped application data.
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self {
+            backend: PgWorkflowBackend::Pool(pool),
             tables: PgWorkflowTables::default(),
             timeout_claim_ttl: Duration::from_secs(60),
             in_progress_ttl: Duration::from_secs(3600),
@@ -76,11 +125,53 @@ impl PgWorkflowStore {
         self.tables.schema_commands()
     }
 
+    async fn execute_command(&self, cmd: &Qail) -> Result<u64, WorkflowError> {
+        match &self.backend {
+            PgWorkflowBackend::Driver(driver) => {
+                let mut driver = driver.lock().await;
+                driver.execute_ast(cmd).await.map_err(pg_error)
+            }
+            PgWorkflowBackend::Pool(pool) => {
+                // SAFETY: workflow storage owns internal ledger tables and every
+                // command is generated as QAIL AST, so no tenant app data is read.
+                let mut conn = pool.acquire_raw().await.map_err(pg_error)?;
+                let result = conn.execute_ast(cmd).await.map_err(pg_error);
+                finish_pool_connection(conn, result).await
+            }
+        }
+    }
+
+    async fn fetch_all_command(&self, cmd: &Qail) -> Result<Vec<PgRow>, WorkflowError> {
+        match &self.backend {
+            PgWorkflowBackend::Driver(driver) => {
+                let mut driver = driver.lock().await;
+                driver.fetch_all_ast(cmd).await.map_err(pg_error)
+            }
+            PgWorkflowBackend::Pool(pool) => {
+                // SAFETY: workflow storage owns internal ledger tables and every
+                // command is generated as QAIL AST, so no tenant app data is read.
+                let mut conn = pool.acquire_raw().await.map_err(pg_error)?;
+                let result = conn.fetch_all_ast(cmd).await.map_err(pg_error);
+                finish_pool_connection(conn, result).await
+            }
+        }
+    }
+
+    async fn begin_pool_transaction(pool: &PgPool) -> Result<PooledConnection, WorkflowError> {
+        // SAFETY: workflow storage owns internal ledger tables and every command
+        // is generated as QAIL AST, so no tenant app data is read.
+        let mut conn = pool.acquire_raw().await.map_err(pg_error)?;
+        if let Err(err) = conn.begin().await.map_err(pg_error) {
+            let _ = conn.rollback_and_release().await;
+            return Err(err);
+        }
+        Ok(conn)
+    }
+
     /// Execute the schema commands through the AST driver path.
     pub async fn install_schema(&self) -> Result<(), WorkflowError> {
-        let mut driver = self.driver.lock().await;
         for cmd in self.schema_commands() {
-            driver.execute(&cmd).await.map_err(pg_error)?;
+            self.execute_command(&cmd).await?;
         }
         Ok(())
     }
@@ -131,8 +222,7 @@ impl PgWorkflowStore {
                 ],
             );
 
-        let mut driver = self.driver.lock().await;
-        driver.execute(&cmd).await.map_err(pg_error)?;
+        self.execute_command(&cmd).await?;
         Ok(())
     }
 
@@ -145,8 +235,7 @@ impl PgWorkflowStore {
             .eq("workflow_id", workflow_id)
             .limit(1);
 
-        let mut driver = self.driver.lock().await;
-        let rows = driver.fetch_all(&cmd).await.map_err(pg_error)?;
+        let rows = self.fetch_all_command(&cmd).await?;
         let Some(row) = rows.first() else {
             return Ok(None);
         };
@@ -159,18 +248,30 @@ impl PgWorkflowStore {
         &self,
         lease: &WorkflowLease,
     ) -> Result<bool, WorkflowError> {
-        let mut driver = self.driver.lock().await;
-        driver.begin().await.map_err(pg_error)?;
+        match &self.backend {
+            PgWorkflowBackend::Driver(driver) => {
+                let mut driver = driver.lock().await;
+                driver.begin().await.map_err(pg_error)?;
 
-        let result = self.acquire_workflow_lease_tx(&mut driver, lease).await;
-        finish_tx(&mut driver, result).await
+                let result = self.acquire_workflow_lease_tx(&mut *driver, lease).await;
+                finish_tx(&mut driver, result).await
+            }
+            PgWorkflowBackend::Pool(pool) => {
+                let mut conn = Self::begin_pool_transaction(pool).await?;
+                let result = self.acquire_workflow_lease_tx(&mut conn, lease).await;
+                finish_pool_tx(conn, result).await
+            }
+        }
     }
 
-    async fn acquire_workflow_lease_tx(
+    async fn acquire_workflow_lease_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         lease: &WorkflowLease,
-    ) -> Result<bool, WorkflowError> {
+    ) -> Result<bool, WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
         let now = timestamp(Utc::now());
         let expires_at = timestamp(deadline_from_duration(lease.ttl)?);
         let existing = Qail::get(&self.tables.leases)
@@ -179,7 +280,7 @@ impl PgWorkflowStore {
             .for_update()
             .limit(1);
 
-        let rows = driver.fetch_all(&existing).await.map_err(pg_error)?;
+        let rows = conn.fetch_all_ast(&existing).await.map_err(pg_error)?;
         if let Some(row) = rows.first() {
             let expires = required_string(row, 1, "expires_at")?;
             if expires > now {
@@ -191,7 +292,7 @@ impl PgWorkflowStore {
                 .set_value("expires_at", expires_at)
                 .set_value("updated_at", now)
                 .eq("workflow_id", lease.workflow_id.as_str());
-            driver.execute(&update).await.map_err(pg_error)?;
+            conn.execute_ast(&update).await.map_err(pg_error)?;
             return Ok(true);
         }
 
@@ -204,7 +305,7 @@ impl PgWorkflowStore {
                 QailValue::String(now),
             ]);
 
-        match driver.execute(&insert).await {
+        match conn.execute_ast(&insert).await {
             Ok(_) => Ok(true),
             Err(err) if is_duplicate(&err) => Ok(false),
             Err(err) => Err(pg_error(err)),
@@ -218,8 +319,7 @@ impl PgWorkflowStore {
         let cmd = Qail::del(&self.tables.leases)
             .eq("workflow_id", lease.workflow_id.as_str())
             .eq("owner", lease.owner.as_str());
-        let mut driver = self.driver.lock().await;
-        driver.execute(&cmd).await.map_err(pg_error)?;
+        self.execute_command(&cmd).await?;
         Ok(())
     }
 
@@ -228,20 +328,32 @@ impl PgWorkflowStore {
         operation: &WorkflowOperation,
     ) -> Result<WorkflowOperationStatus, WorkflowError> {
         self.ensure_in_progress_ttl()?;
-        let mut driver = self.driver.lock().await;
-        driver.begin().await.map_err(pg_error)?;
+        match &self.backend {
+            PgWorkflowBackend::Driver(driver) => {
+                let mut driver = driver.lock().await;
+                driver.begin().await.map_err(pg_error)?;
 
-        let result = self
-            .begin_workflow_operation_tx(&mut driver, operation)
-            .await;
-        finish_tx(&mut driver, result).await
+                let result = self
+                    .begin_workflow_operation_tx(&mut *driver, operation)
+                    .await;
+                finish_tx(&mut driver, result).await
+            }
+            PgWorkflowBackend::Pool(pool) => {
+                let mut conn = Self::begin_pool_transaction(pool).await?;
+                let result = self.begin_workflow_operation_tx(&mut conn, operation).await;
+                finish_pool_tx(conn, result).await
+            }
+        }
     }
 
-    async fn begin_workflow_operation_tx(
+    async fn begin_workflow_operation_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowOperation,
-    ) -> Result<WorkflowOperationStatus, WorkflowError> {
+    ) -> Result<WorkflowOperationStatus, WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
         let operation_kind = operation_kind_text(&operation.kind);
         let now = Utc::now();
         let existing = Qail::get(&self.tables.operations)
@@ -250,7 +362,7 @@ impl PgWorkflowStore {
             .eq("idempotency_key", operation.idempotency_key.as_str())
             .for_update()
             .limit(1);
-        let rows = driver.fetch_all(&existing).await.map_err(pg_error)?;
+        let rows = conn.fetch_all_ast(&existing).await.map_err(pg_error)?;
 
         if let Some(row) = rows.first() {
             let status = required_string(row, 0, "status")?;
@@ -278,7 +390,7 @@ impl PgWorkflowStore {
                         self.in_progress_ttl,
                         "workflow operation updated_at",
                     )? {
-                        self.mark_started_workflow_operation_started_tx(driver, operation)
+                        self.mark_started_workflow_operation_started_tx(conn, operation)
                             .await?;
                         Ok(WorkflowOperationStatus::Started)
                     } else {
@@ -290,7 +402,7 @@ impl PgWorkflowStore {
                     Ok(WorkflowOperationStatus::Completed { state })
                 }
                 STATUS_FAILED => {
-                    self.mark_workflow_operation_started_tx(driver, operation)
+                    self.mark_workflow_operation_started_tx(conn, operation)
                         .await?;
                     Ok(WorkflowOperationStatus::Started)
                 }
@@ -325,7 +437,7 @@ impl PgWorkflowStore {
                 QailValue::String(now),
             ]);
 
-        match driver.execute(&insert).await {
+        match conn.execute_ast(&insert).await {
             Ok(_) => Ok(WorkflowOperationStatus::Started),
             Err(err) if is_duplicate(&err) => Ok(WorkflowOperationStatus::InProgress),
             Err(err) => Err(pg_error(err)),
@@ -341,30 +453,39 @@ impl PgWorkflowStore {
         Ok(())
     }
 
-    async fn mark_started_workflow_operation_started_tx(
+    async fn mark_started_workflow_operation_started_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowOperation,
-    ) -> Result<(), WorkflowError> {
-        self.refresh_workflow_operation_started_tx(driver, operation, STATUS_STARTED)
+    ) -> Result<(), WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
+        self.refresh_workflow_operation_started_tx(conn, operation, STATUS_STARTED)
             .await
     }
 
-    async fn mark_workflow_operation_started_tx(
+    async fn mark_workflow_operation_started_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowOperation,
-    ) -> Result<(), WorkflowError> {
-        self.refresh_workflow_operation_started_tx(driver, operation, STATUS_FAILED)
+    ) -> Result<(), WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
+        self.refresh_workflow_operation_started_tx(conn, operation, STATUS_FAILED)
             .await
     }
 
-    async fn refresh_workflow_operation_started_tx(
+    async fn refresh_workflow_operation_started_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowOperation,
         expected_status: &str,
-    ) -> Result<(), WorkflowError> {
+    ) -> Result<(), WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
         let operation_kind = operation_kind_text(&operation.kind);
         let cmd = Qail::set(&self.tables.operations)
             .set_value("status", STATUS_STARTED)
@@ -376,7 +497,7 @@ impl PgWorkflowStore {
             .eq("idempotency_key", operation.idempotency_key.as_str())
             .eq("kind", operation_kind.as_str())
             .eq("status", expected_status);
-        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = conn.execute_ast(&cmd).await.map_err(pg_error)?;
         if affected == 0 {
             return Err(WorkflowError::Other(format!(
                 "Workflow operation '{}' was not found in {expected_status} state",
@@ -402,8 +523,7 @@ impl PgWorkflowStore {
             .eq("idempotency_key", operation.idempotency_key.as_str())
             .eq("kind", operation_kind.as_str())
             .eq("status", STATUS_STARTED);
-        let mut driver = self.driver.lock().await;
-        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = self.execute_command(&cmd).await?;
         if affected == 0 {
             return Err(missing_started_row(
                 "operation",
@@ -428,8 +548,7 @@ impl PgWorkflowStore {
             .eq("idempotency_key", operation.idempotency_key.as_str())
             .eq("kind", operation_kind.as_str())
             .eq("status", STATUS_STARTED);
-        let mut driver = self.driver.lock().await;
-        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = self.execute_command(&cmd).await?;
         if affected == 0 {
             return Err(missing_started_row(
                 "operation",
@@ -454,28 +573,42 @@ impl PgWorkflowStore {
             ));
         }
 
-        let mut driver = self.driver.lock().await;
-        driver.begin().await.map_err(pg_error)?;
+        match &self.backend {
+            PgWorkflowBackend::Driver(driver) => {
+                let mut driver = driver.lock().await;
+                driver.begin().await.map_err(pg_error)?;
 
-        let result = self
-            .load_due_workflow_timeouts_tx(&mut driver, workflow_name, now, limit)
-            .await;
-        finish_tx(&mut driver, result).await
+                let result = self
+                    .load_due_workflow_timeouts_tx(&mut *driver, workflow_name, now, limit)
+                    .await;
+                finish_tx(&mut driver, result).await
+            }
+            PgWorkflowBackend::Pool(pool) => {
+                let mut conn = Self::begin_pool_transaction(pool).await?;
+                let result = self
+                    .load_due_workflow_timeouts_tx(&mut conn, workflow_name, now, limit)
+                    .await;
+                finish_pool_tx(conn, result).await
+            }
+        }
     }
 
-    async fn load_due_workflow_timeouts_tx(
+    async fn load_due_workflow_timeouts_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         workflow_name: &str,
         now: DateTime<Utc>,
         limit: usize,
-    ) -> Result<Vec<String>, WorkflowError> {
+    ) -> Result<Vec<String>, WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
         let claim_until = timestamp(deadline_after(now, self.timeout_claim_ttl)?);
         let now = timestamp(now);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let due = timeout_due_query(&self.tables, workflow_name, now.as_str(), limit);
 
-        let rows = driver.fetch_all(&due).await.map_err(pg_error)?;
+        let rows = conn.fetch_all_ast(&due).await.map_err(pg_error)?;
         let mut ids = Vec::with_capacity(rows.len());
         for row in rows {
             let workflow_id = required_string(&row, 0, "workflow_id")?;
@@ -483,7 +616,7 @@ impl PgWorkflowStore {
                 .set_value("timeout_claimed_until", claim_until.clone())
                 .set_value("updated_at", timestamp(Utc::now()))
                 .eq("workflow_id", workflow_id.as_str());
-            driver.execute(&claim).await.map_err(pg_error)?;
+            conn.execute_ast(&claim).await.map_err(pg_error)?;
             ids.push(workflow_id);
         }
         Ok(ids)
@@ -494,20 +627,34 @@ impl PgWorkflowStore {
         operation: &WorkflowSideEffect,
     ) -> Result<WorkflowSideEffectStatus, WorkflowError> {
         self.ensure_in_progress_ttl()?;
-        let mut driver = self.driver.lock().await;
-        driver.begin().await.map_err(pg_error)?;
+        match &self.backend {
+            PgWorkflowBackend::Driver(driver) => {
+                let mut driver = driver.lock().await;
+                driver.begin().await.map_err(pg_error)?;
 
-        let result = self
-            .begin_workflow_side_effect_tx(&mut driver, operation)
-            .await;
-        finish_tx(&mut driver, result).await
+                let result = self
+                    .begin_workflow_side_effect_tx(&mut *driver, operation)
+                    .await;
+                finish_tx(&mut driver, result).await
+            }
+            PgWorkflowBackend::Pool(pool) => {
+                let mut conn = Self::begin_pool_transaction(pool).await?;
+                let result = self
+                    .begin_workflow_side_effect_tx(&mut conn, operation)
+                    .await;
+                finish_pool_tx(conn, result).await
+            }
+        }
     }
 
-    async fn begin_workflow_side_effect_tx(
+    async fn begin_workflow_side_effect_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowSideEffect,
-    ) -> Result<WorkflowSideEffectStatus, WorkflowError> {
+    ) -> Result<WorkflowSideEffectStatus, WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
         let existing = Qail::get(&self.tables.side_effects)
             .columns([
                 "status",
@@ -521,7 +668,7 @@ impl PgWorkflowStore {
             .eq("operation_id", operation.operation_id.as_str())
             .for_update()
             .limit(1);
-        let rows = driver.fetch_all(&existing).await.map_err(pg_error)?;
+        let rows = conn.fetch_all_ast(&existing).await.map_err(pg_error)?;
 
         if let Some(row) = rows.first() {
             let status = required_string(row, 0, "status")?;
@@ -535,7 +682,7 @@ impl PgWorkflowStore {
                         self.in_progress_ttl,
                         "workflow side effect updated_at",
                     )? {
-                        self.mark_started_workflow_side_effect_started_tx(driver, operation)
+                        self.mark_started_workflow_side_effect_started_tx(conn, operation)
                             .await?;
                         Ok(WorkflowSideEffectStatus::Execute)
                     } else {
@@ -549,7 +696,7 @@ impl PgWorkflowStore {
                     result: optional_json(row, 1)?,
                 }),
                 STATUS_FAILED => {
-                    self.mark_workflow_side_effect_started_tx(driver, operation)
+                    self.mark_workflow_side_effect_started_tx(conn, operation)
                         .await?;
                     Ok(WorkflowSideEffectStatus::Execute)
                 }
@@ -586,7 +733,7 @@ impl PgWorkflowStore {
                 QailValue::String(now),
             ]);
 
-        match driver.execute(&insert).await {
+        match conn.execute_ast(&insert).await {
             Ok(_) => Ok(WorkflowSideEffectStatus::Execute),
             Err(err) if is_duplicate(&err) => Err(WorkflowError::Other(format!(
                 "Workflow side effect '{}' is already in progress",
@@ -627,30 +774,39 @@ impl PgWorkflowStore {
         Ok(())
     }
 
-    async fn mark_workflow_side_effect_started_tx(
+    async fn mark_workflow_side_effect_started_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowSideEffect,
-    ) -> Result<(), WorkflowError> {
-        self.refresh_workflow_side_effect_started_tx(driver, operation, STATUS_FAILED)
+    ) -> Result<(), WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
+        self.refresh_workflow_side_effect_started_tx(conn, operation, STATUS_FAILED)
             .await
     }
 
-    async fn mark_started_workflow_side_effect_started_tx(
+    async fn mark_started_workflow_side_effect_started_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowSideEffect,
-    ) -> Result<(), WorkflowError> {
-        self.refresh_workflow_side_effect_started_tx(driver, operation, STATUS_STARTED)
+    ) -> Result<(), WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
+        self.refresh_workflow_side_effect_started_tx(conn, operation, STATUS_STARTED)
             .await
     }
 
-    async fn refresh_workflow_side_effect_started_tx(
+    async fn refresh_workflow_side_effect_started_tx<C>(
         &self,
-        driver: &mut PgDriver,
+        conn: &mut C,
         operation: &WorkflowSideEffect,
         expected_status: &str,
-    ) -> Result<(), WorkflowError> {
+    ) -> Result<(), WorkflowError>
+    where
+        C: PgWorkflowConnection,
+    {
         let cmd = Qail::set(&self.tables.side_effects)
             .set_value("status", STATUS_STARTED)
             .set_value("result", QailValue::Null)
@@ -662,7 +818,7 @@ impl PgWorkflowStore {
             .eq("step_path", operation.step_path.as_str())
             .eq("kind", operation.kind.as_str())
             .eq("status", expected_status);
-        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = conn.execute_ast(&cmd).await.map_err(pg_error)?;
         if affected == 0 {
             return Err(WorkflowError::Other(format!(
                 "Workflow side effect '{}' was not found in {expected_status} state",
@@ -692,8 +848,7 @@ impl PgWorkflowStore {
             .eq("step_path", operation.step_path.as_str())
             .eq("kind", operation.kind.as_str())
             .eq("status", STATUS_STARTED);
-        let mut driver = self.driver.lock().await;
-        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = self.execute_command(&cmd).await?;
         if affected == 0 {
             return Err(missing_started_row(
                 "side effect",
@@ -718,8 +873,7 @@ impl PgWorkflowStore {
             .eq("step_path", operation.step_path.as_str())
             .eq("kind", operation.kind.as_str())
             .eq("status", STATUS_STARTED);
-        let mut driver = self.driver.lock().await;
-        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = self.execute_command(&cmd).await?;
         if affected == 0 {
             return Err(missing_started_row(
                 "side effect",

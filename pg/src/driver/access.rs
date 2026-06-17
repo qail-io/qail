@@ -401,6 +401,17 @@ impl PooledConnection {
         check_access(access_policy, access_ctx, cmd)
     }
 
+    /// Execute a checked QAIL mutation command and return the affected row count.
+    pub async fn execute_checked(
+        &mut self,
+        cmd: &Qail,
+        access_ctx: &AccessContext,
+        access_policy: &AccessPolicy,
+    ) -> PgResult<u64> {
+        check_access(access_policy, access_ctx, cmd)?;
+        self.execute(cmd).await
+    }
+
     /// Execute a checked QAIL command using the default cached pooled path.
     pub async fn fetch_all_cached_checked(
         &mut self,
