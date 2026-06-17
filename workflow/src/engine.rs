@@ -541,12 +541,6 @@ impl RuntimeGuard {
                     owner: lease_options.owner,
                     ttl: lease_options.ttl,
                 };
-                if !executor.acquire_workflow_lease(&lease).await? {
-                    return Err(WorkflowError::Other(format!(
-                        "Workflow '{}' is already locked",
-                        workflow_id
-                    )));
-                }
                 Some(lease)
             }
             None => None,
@@ -580,22 +574,38 @@ impl RuntimeGuard {
                 match operation_status {
                     WorkflowOperationStatus::Started => Some(operation),
                     WorkflowOperationStatus::InProgress => {
-                        if let Some(lease) = &lease {
-                            executor.release_workflow_lease(lease).await?;
-                        }
                         return Err(WorkflowError::Other(format!(
                             "Workflow operation '{}' is already in progress",
                             operation.idempotency_key
                         )));
                     }
                     WorkflowOperationStatus::Completed { state } => {
-                        if let Some(lease) = &lease {
-                            executor.release_workflow_lease(lease).await?;
-                        }
                         return Ok(RuntimeEntry::Completed(state));
                     }
                 }
             }
+            None => None,
+        };
+
+        let lease = match lease {
+            Some(lease) => match executor.acquire_workflow_lease(&lease).await {
+                Ok(true) => Some(lease),
+                Ok(false) => {
+                    let error = format!("Workflow '{}' is already locked", workflow_id);
+                    if let Some(operation) = &operation {
+                        let _ = executor.fail_workflow_operation(operation, &error).await;
+                    }
+                    return Err(WorkflowError::Other(error));
+                }
+                Err(err) => {
+                    if let Some(operation) = &operation {
+                        let _ = executor
+                            .fail_workflow_operation(operation, &err.to_string())
+                            .await;
+                    }
+                    return Err(err);
+                }
+            },
             None => None,
         };
 
@@ -2751,6 +2761,113 @@ mod tests {
                 .lock()
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_operation_short_circuits_before_rejected_lease() {
+        let executor = MockExecutor::new();
+        executor.reject_workflow_leases();
+        executor.set_workflow_operation_status(
+            "run-replay-1",
+            WorkflowOperationStatus::Completed {
+                state: "done".to_string(),
+            },
+        );
+
+        let wf = WorkflowDefinition::new("completed_before_lease")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "should_not_send", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-completed-before-lease", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let result = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("run-replay-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "done");
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert!(executor.notifications.lock().unwrap().is_empty());
+        assert!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn started_operation_is_failed_when_lease_is_rejected() {
+        let executor = MockExecutor::new();
+        executor.reject_workflow_leases();
+
+        let wf = WorkflowDefinition::new("started_then_lease_rejected")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "should_not_send", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-started-lease-rejected", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("run-lock-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("new idempotent operation must not execute without its lease");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("already locked"), "got: {msg}");
+            }
+            other => panic!("expected lock error, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "active");
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.notifications.lock().unwrap().is_empty());
+        assert_eq!(
+            executor
+                .failed_workflow_operations
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[(
+                "run-lock-1".to_string(),
+                "Workflow 'wf-started-lease-rejected' is already locked".to_string()
+            )]
         );
     }
 
