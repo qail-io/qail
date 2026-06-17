@@ -526,11 +526,7 @@ impl RuntimeGuard {
     ) -> Result<RuntimeEntry, WorkflowError> {
         let lease = match options.lease {
             Some(lease_options) => {
-                if lease_options.owner.trim().is_empty() {
-                    return Err(WorkflowError::Other(
-                        "Workflow lease owner must not be empty".to_string(),
-                    ));
-                }
+                ensure_definition_text(&lease_options.owner, "Workflow lease owner")?;
                 if lease_options.ttl.is_zero() {
                     return Err(WorkflowError::Other(
                         "Workflow lease TTL must be greater than zero".to_string(),
@@ -548,11 +544,7 @@ impl RuntimeGuard {
 
         let operation = match options.idempotency_key {
             Some(idempotency_key) => {
-                if idempotency_key.trim().is_empty() {
-                    return Err(WorkflowError::Other(
-                        "Workflow idempotency key must not be empty".to_string(),
-                    ));
-                }
+                ensure_definition_text(&idempotency_key, "Workflow idempotency key")?;
                 let operation = WorkflowOperation {
                     workflow_name: workflow_name.to_string(),
                     workflow_id: workflow_id.to_string(),
@@ -572,6 +564,7 @@ impl RuntimeGuard {
                         )));
                     }
                     WorkflowOperationStatus::Completed { state } => {
+                        ensure_definition_text(&state, "Workflow completed operation state")?;
                         return Ok(RuntimeEntry::Completed(state));
                     }
                 }
@@ -3028,6 +3021,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn padded_runtime_guard_identity_fails_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("padded_runtime_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "should_not_send", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut padded_key_ctx = WorkflowContext::new("wf-padded-idempotency", "active");
+        padded_key_ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut padded_key_ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key(" run-1 ")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("padded idempotency key must fail before side effects");
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Workflow idempotency key must not have leading"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected idempotency key validation error, got {other:?}"),
+        }
+
+        let mut padded_owner_ctx = WorkflowContext::new("wf-padded-owner", "active");
+        padded_owner_ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut padded_owner_ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("run-2")
+                .with_lease(" worker-a ", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("padded lease owner must fail before side effects");
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Workflow lease owner must not have leading"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected lease owner validation error, got {other:?}"),
+        }
+
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn operation_begin_failure_does_not_release_unacquired_lease() {
         let executor = MockExecutor::new();
         executor.fail_workflow_operation_begin("begin-fails-1");
@@ -3053,6 +3116,46 @@ mod tests {
                 assert!(msg.contains("forced operation begin failure"), "got: {msg}");
             }
             other => panic!("expected operation begin error, got {other:?}"),
+        }
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert_eq!(ctx.current_state, "active");
+    }
+
+    #[tokio::test]
+    async fn completed_operation_with_invalid_state_is_rejected_before_lease() {
+        let executor = MockExecutor::new();
+        executor.set_workflow_operation_status(
+            "completed-invalid-state-1",
+            WorkflowOperationStatus::Completed {
+                state: " ".to_string(),
+            },
+        );
+
+        let wf = WorkflowDefinition::new("completed_invalid_state")
+            .initial_state("active")
+            .transition("active", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-completed-invalid-state", "active");
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("completed-invalid-state-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("invalid completed replay state must be rejected");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Workflow completed operation state must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected completed state validation error, got {other:?}"),
         }
         assert!(executor.acquired_leases.lock().unwrap().is_empty());
         assert!(executor.released_leases.lock().unwrap().is_empty());
