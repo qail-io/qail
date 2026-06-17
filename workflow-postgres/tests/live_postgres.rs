@@ -333,6 +333,44 @@ async fn live_postgres_storage_runtime_guarantees() {
         "claimed timeout row must not be rediscovered until claim TTL expires"
     );
 
+    let mut future_due = WorkflowContext::new("wf-timeout-future-live", "awaiting_vendor");
+    future_due.definition_name = Some("future_booking_recovery".to_string());
+    future_due.set_cursor(WorkflowCursor {
+        state: "awaiting_vendor".to_string(),
+        frames: vec![WorkflowCursorFrame::Steps { index: 1 }],
+        wait: Some(WorkflowPendingWait {
+            event: "vendor.accepted".to_string(),
+            deadline_at: Utc::now() + chrono::Duration::minutes(10),
+            on_timeout: vec![WorkflowStep::transition("expired")],
+        }),
+    });
+    WorkflowExecutor::save_state(&executor, &future_due)
+        .await
+        .unwrap();
+
+    let scheduler_now = Utc::now() + chrono::Duration::minutes(20);
+    let future_due_ids = WorkflowExecutor::load_due_workflow_timeouts(
+        &executor,
+        "future_booking_recovery",
+        scheduler_now,
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(future_due_ids, vec!["wf-timeout-future-live".to_string()]);
+    let future_claimed_again = WorkflowExecutor::load_due_workflow_timeouts(
+        &executor,
+        "future_booking_recovery",
+        scheduler_now,
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(
+        future_claimed_again.is_empty(),
+        "claim TTL must be relative to the scheduler timestamp used for due selection"
+    );
+
     let zero_ttl_executor = PgWorkflowExecutor::new(
         NoopExecutor,
         executor

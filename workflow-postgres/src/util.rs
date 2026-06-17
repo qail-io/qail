@@ -24,9 +24,16 @@ pub(crate) fn timestamp(ts: DateTime<Utc>) -> String {
 }
 
 pub(crate) fn deadline_from_duration(ttl: Duration) -> Result<DateTime<Utc>, WorkflowError> {
+    deadline_after(Utc::now(), ttl)
+}
+
+pub(crate) fn deadline_after(
+    start: DateTime<Utc>,
+    ttl: Duration,
+) -> Result<DateTime<Utc>, WorkflowError> {
     let ttl = chrono::Duration::from_std(ttl)
         .map_err(|_| WorkflowError::Other("Workflow Postgres duration is too large".to_string()))?;
-    Utc::now()
+    start
         .checked_add_signed(ttl)
         .ok_or_else(|| WorkflowError::Other("Workflow Postgres deadline overflowed".to_string()))
 }

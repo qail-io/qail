@@ -2240,6 +2240,16 @@ pub async fn timeout_workflow_with_options<E: WorkflowExecutor>(
     workflow_id: &str,
     options: WorkflowRunOptions,
 ) -> Result<String, WorkflowError> {
+    timeout_workflow_with_options_at(executor, definition, workflow_id, options, Utc::now()).await
+}
+
+async fn timeout_workflow_with_options_at<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    workflow_id: &str,
+    options: WorkflowRunOptions,
+    now: DateTime<Utc>,
+) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
     ensure_definition_text(workflow_id, "Workflow id")?;
     let guard = match RuntimeGuard::enter(
@@ -2255,7 +2265,7 @@ pub async fn timeout_workflow_with_options<E: WorkflowExecutor>(
         RuntimeEntry::Completed(state) => return Ok(state),
     };
 
-    let result = timeout_workflow_inner(executor, definition, workflow_id).await;
+    let result = timeout_workflow_inner(executor, definition, workflow_id, now).await;
     finish_runtime_operation(executor, guard, result).await
 }
 
@@ -2283,21 +2293,26 @@ pub async fn timeout_due_workflows<E: WorkflowExecutor>(
 
     for workflow_id in workflow_ids.into_iter().take(limit) {
         let run_options = timeout_options_for_workflow(&options, definition, &workflow_id);
-        let outcome =
-            match timeout_workflow_with_options(executor, definition, &workflow_id, run_options)
-                .await
-            {
-                Ok(state) => WorkflowTimeoutOutcome {
-                    workflow_id,
-                    state: Some(state),
-                    error: None,
-                },
-                Err(err) => WorkflowTimeoutOutcome {
-                    workflow_id,
-                    state: None,
-                    error: Some(err.to_string()),
-                },
-            };
+        let outcome = match timeout_workflow_with_options_at(
+            executor,
+            definition,
+            &workflow_id,
+            run_options,
+            now,
+        )
+        .await
+        {
+            Ok(state) => WorkflowTimeoutOutcome {
+                workflow_id,
+                state: Some(state),
+                error: None,
+            },
+            Err(err) => WorkflowTimeoutOutcome {
+                workflow_id,
+                state: None,
+                error: Some(err.to_string()),
+            },
+        };
         outcomes.push(outcome);
     }
 
@@ -2329,6 +2344,7 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
     executor: &E,
     definition: &WorkflowDefinition,
     workflow_id: &str,
+    now: DateTime<Utc>,
 ) -> Result<String, WorkflowError> {
     let mut ctx = executor
         .load_state(workflow_id)
@@ -2360,7 +2376,7 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
         let wait = cursor.wait.clone().ok_or_else(|| {
             WorkflowError::Other("Workflow is not waiting for a timeout".to_string())
         })?;
-        if Utc::now() < wait.deadline_at {
+        if now < wait.deadline_at {
             return Err(WorkflowError::Other(format!(
                 "Workflow wait for event '{}' has not timed out",
                 wait.event
@@ -5922,6 +5938,47 @@ mod tests {
                 timeout_operation_idempotency_key("wait_timeout_drain", "wf-timeout-drain"),
                 "timed_out".to_string(),
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_due_workflows_uses_batch_now_for_timeout_execution() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("future_wait_timeout_drain")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::wait_or(
+                    "payment.success",
+                    std::time::Duration::from_secs(3600),
+                    vec![WorkflowStep::transition("timed_out")],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-future-timeout-drain", "active");
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        executor.set_due_timeout_workflow_ids(vec!["wf-future-timeout-drain"]);
+        let outcomes = timeout_due_workflows(
+            &executor,
+            &wf,
+            Utc::now() + chrono::Duration::hours(2),
+            10,
+            WorkflowRunOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcomes,
+            vec![WorkflowTimeoutOutcome {
+                workflow_id: "wf-future-timeout-drain".to_string(),
+                state: Some("timed_out".to_string()),
+                error: None,
+            }]
         );
     }
 

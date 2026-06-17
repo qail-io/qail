@@ -12,9 +12,9 @@ use tokio::sync::Mutex;
 
 use crate::tables::PgWorkflowTables;
 use crate::util::{
-    STATUS_COMPLETED, STATUS_FAILED, STATUS_STARTED, deadline_from_duration, excluded, finish_tx,
-    is_duplicate, json_error, missing_started_row, operation_kind_text, option_string,
-    optional_json, pg_error, required_string, timestamp,
+    STATUS_COMPLETED, STATUS_FAILED, STATUS_STARTED, deadline_after, deadline_from_duration,
+    excluded, finish_tx, is_duplicate, json_error, missing_started_row, operation_kind_text,
+    option_string, optional_json, pg_error, required_string, timestamp,
 };
 
 /// PostgreSQL workflow storage using a single `PgDriver`.
@@ -418,8 +418,8 @@ impl PgWorkflowStore {
         now: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<String>, WorkflowError> {
+        let claim_until = timestamp(deadline_after(now, self.timeout_claim_ttl)?);
         let now = timestamp(now);
-        let claim_until = timestamp(deadline_from_duration(self.timeout_claim_ttl)?);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let due = timeout_due_query(&self.tables, workflow_name, now.as_str(), limit);
 
