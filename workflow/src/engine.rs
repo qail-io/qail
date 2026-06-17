@@ -563,7 +563,7 @@ impl RuntimeGuard {
         kind: WorkflowOperationKind,
         options: WorkflowRunOptions,
     ) -> Result<RuntimeEntry, WorkflowError> {
-        let lease = match options.lease {
+        let lease_options = match options.lease {
             Some(lease_options) => {
                 ensure_definition_text(&lease_options.owner, "Workflow lease owner")?;
                 if lease_options.ttl.is_zero() {
@@ -571,12 +571,7 @@ impl RuntimeGuard {
                         "Workflow lease TTL must be greater than zero".to_string(),
                     ));
                 }
-                let lease = WorkflowLease {
-                    workflow_id: workflow_id.to_string(),
-                    owner: lease_options.owner,
-                    ttl: lease_options.ttl,
-                };
-                Some(lease)
+                Some(lease_options)
             }
             None => None,
         };
@@ -588,7 +583,7 @@ impl RuntimeGuard {
                     workflow_name: workflow_name.to_string(),
                     workflow_id: workflow_id.to_string(),
                     idempotency_key,
-                    kind,
+                    kind: kind.clone(),
                 };
                 let operation_status = match executor.begin_workflow_operation(&operation).await {
                     Ok(status) => status,
@@ -610,6 +605,21 @@ impl RuntimeGuard {
             }
             None => None,
         };
+
+        let lease = lease_options.map(|lease_options| WorkflowLease {
+            workflow_id: workflow_id.to_string(),
+            owner: runtime_lease_owner(
+                &lease_options.owner,
+                workflow_name,
+                workflow_id,
+                &kind,
+                operation
+                    .as_ref()
+                    .map(|operation| operation.idempotency_key.as_str()),
+                Utc::now(),
+            ),
+            ttl: lease_options.ttl,
+        });
 
         let lease = match lease {
             Some(lease) => match executor.acquire_workflow_lease(&lease).await {
@@ -663,6 +673,35 @@ impl RuntimeGuard {
             (Ok(()), Err(err)) => Err(err),
             (Ok(()), Ok(())) => Ok(()),
         }
+    }
+}
+
+fn runtime_lease_owner(
+    owner: &str,
+    workflow_name: &str,
+    workflow_id: &str,
+    kind: &WorkflowOperationKind,
+    idempotency_key: Option<&str>,
+    acquired_at: DateTime<Utc>,
+) -> String {
+    serde_json::json!([
+        "qail-workflow-lease",
+        1,
+        owner,
+        workflow_name,
+        workflow_id,
+        operation_kind_lease_key(kind),
+        idempotency_key,
+        acquired_at.to_rfc3339_opts(SecondsFormat::Micros, true)
+    ])
+    .to_string()
+}
+
+fn operation_kind_lease_key(kind: &WorkflowOperationKind) -> serde_json::Value {
+    match kind {
+        WorkflowOperationKind::Run => serde_json::json!(["run"]),
+        WorkflowOperationKind::Resume { event } => serde_json::json!(["resume", event]),
+        WorkflowOperationKind::Timeout => serde_json::json!(["timeout"]),
     }
 }
 
@@ -2944,8 +2983,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "done");
-        assert_eq!(executor.acquired_leases.lock().unwrap().len(), 1);
-        assert_eq!(executor.released_leases.lock().unwrap().len(), 1);
+        let acquired_leases = executor.acquired_leases.lock().unwrap();
+        let released_leases = executor.released_leases.lock().unwrap();
+        assert_eq!(acquired_leases.len(), 1);
+        assert_eq!(released_leases.len(), 1);
+        assert_eq!(released_leases[0].owner, acquired_leases[0].owner);
+        assert_ne!(
+            acquired_leases[0].owner, "worker-a",
+            "runtime lease owner must include a fencing token"
+        );
+        let lease_owner: serde_json::Value =
+            serde_json::from_str(&acquired_leases[0].owner).unwrap();
+        let lease_owner = lease_owner.as_array().unwrap();
+        assert_eq!(lease_owner[0], "qail-workflow-lease");
+        assert_eq!(lease_owner[2], "worker-a");
+        assert_eq!(lease_owner[3], "runtime_guarded_run");
+        assert_eq!(lease_owner[4], "wf-runtime-run");
+        assert_eq!(lease_owner[6], "run-1");
+        drop(acquired_leases);
+        drop(released_leases);
         assert_eq!(
             executor
                 .completed_workflow_operations
@@ -2953,6 +3009,42 @@ mod tests {
                 .unwrap()
                 .as_slice(),
             &[("run-1".to_string(), "done".to_string())]
+        );
+    }
+
+    #[test]
+    fn runtime_lease_owner_changes_per_acquire_time() {
+        let first_at = DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let second_at = DateTime::parse_from_rfc3339("2026-06-17T12:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = runtime_lease_owner(
+            "worker-a",
+            "booking",
+            "wf-1",
+            &WorkflowOperationKind::Resume {
+                event: "vendor.accepted".to_string(),
+            },
+            Some("event-1"),
+            first_at,
+        );
+        let second = runtime_lease_owner(
+            "worker-a",
+            "booking",
+            "wf-1",
+            &WorkflowOperationKind::Resume {
+                event: "vendor.accepted".to_string(),
+            },
+            Some("event-1"),
+            second_at,
+        );
+
+        assert_ne!(
+            first, second,
+            "stale release calls must not share the same lease owner as later acquisitions"
         );
     }
 
