@@ -248,7 +248,7 @@ GET    /api/{table}/_aggregate  # count, sum, avg, min, max
 - ✅ WebSocket subscriptions + live queries
 - ✅ Event triggers (mutation → webhook with retry)
 - ✅ JWT auth (HS256/RS256) + API key auth
-- ✅ YAML policy engine + column permissions
+- ✅ Native access policy + column permissions
 - ✅ Query allow-listing + complexity limits
 - ✅ Prometheus metrics + request tracing
 - ✅ NDJSON streaming + cursor pagination
@@ -281,7 +281,9 @@ qail.rs/
 | Kotlin | ✅ Supported | Gradle module in `sdk/kotlin` |
 | Node.js native binding | ⏸ Deferred | Not shipped yet |
 
-`tenant_id` is the runtime contract across gateway and RLS paths. Legacy `operator_id` runtime compatibility aliases were removed in `v0.26.0`.
+`tenant_id` is the runtime contract across gateway and RLS paths. Legacy
+`agent_id`/operator-style identity is treated as a secondary scope only when a
+tenant scope is already present.
 
 ---
 

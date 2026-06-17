@@ -182,28 +182,39 @@ curl \
 
 ### Row-Level Security (RLS)
 
-Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.current_tenant_id`, `app.current_user_id`, `app.current_agent_id`, `app.is_super_admin`) before each query — **no manual WHERE clauses needed**.
+Every query is scoped to the authenticated tenant via PostgreSQL's native RLS.
+The gateway sets transaction-local session variables
+(`app.current_tenant_id`, `app.current_user_id`, `app.current_agent_id`,
+`app.is_super_admin`) before each query.
 
-### YAML Policy Engine
+### Native Access Policy
 
-Fine-grained access control per table, per role:
+Fine-grained access control per table, operation, role, scope, and column:
 
-```yaml
-policies:
-  - name: orders_agent_read
-    table: orders
-    role: agent
-    operations: [read]
-    filter: "tenant_id = $tenant_id"
-    allowed_columns: ["id", "status", "total", "created_at"]
-  - name: orders_viewer_read
-    table: orders
-    role: viewer
-    operations: [read]
-    allowed_columns: ["id", "status"]
+```toml
+[access]
+enabled = true
+path = "access-policy.toml"
 ```
 
-> Legacy schemas can still use `operator_id` by setting `tenant_column = "operator_id"` in `qail.toml`.
+```toml
+# access-policy.toml
+default_decision = "deny"
+
+[tables.orders]
+operations = ["read", "update"]
+read_columns = { only = ["id", "status", "total", "created_at"] }
+write_columns = { only = ["status"] }
+require_any_role = ["operator", "administrator"]
+require_scopes = ["orders:read"]
+```
+
+The gateway still supports the older YAML route policy engine for compatibility,
+but new deployments should prefer native access policy because it checks the
+QAIL AST directly.
+
+> `tenant_id` is the primary runtime scope. A legacy `agent_id` claim is only a
+> secondary scope when `tenant_id` is present.
 
 ### Query Allow-Listing
 

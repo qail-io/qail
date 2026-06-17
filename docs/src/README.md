@@ -2,7 +2,7 @@
 
 > **The AST-Native Query Compiler with Built-in Row-Level Security**
 
-QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
+QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via PostgreSQL RLS context setup.
 
 ## Product Map
 
@@ -16,6 +16,10 @@ QAIL compiles typed query ASTs directly to database wire protocols. No applicati
 | Flow Ledger | `qail-workflow-postgres` | PostgreSQL workflow leases, state, idempotency, side effects, timeouts |
 | Vector Bridge | `qail-qdrant` | Qdrant vector search with AST-compatible filters |
 
+For a deeper orientation, read the [Platform Map](./platform-map.md). It
+explains which crate owns each safety boundary and which surface to choose for
+driver, gateway, schema, workflow, or vector workloads.
+
 ## Latest Updates (June 2026)
 
 - QAIL is now on the `v1.3.2` stable line across the Rust workspace crates and CLI.
@@ -27,6 +31,10 @@ QAIL compiles typed query ASTs directly to database wire protocols. No applicati
 - PostgreSQL prepared statement caching, NOTIFY flushing, MERGE/source-query access checks, and strict migration verification were hardened in the latest audit pass.
 - Gateway numeric preservation, Qdrant vector encoding, workflow branch cursors, and SDK route-segment encoding now have focused regression coverage.
 - Migration docs use the expand/backfill/contract apply model instead of presenting up/down as the primary workflow.
+
+Read [Access Policy](./features/access-policy.md) for the vertical permission
+model and [Workflows](./features/workflows.md) for Flow Engine / Flow Ledger
+production semantics.
 
 ## Philosophy: AST = Meaning
 

@@ -7,6 +7,7 @@ This page describes the gateway's internal architecture — the request lifecycl
 Recent hardening:
 - Policy evaluation now avoids premature deny outcomes when later matching policies allow the operation.
 - Handler execution paths consistently run command optimization before DB execution.
+- Native access policy now covers operation and column checks across gateway execution paths.
 
 ---
 
@@ -28,13 +29,13 @@ Every HTTP request flows through a fixed, ordered pipeline:
  │     → 429 Too Many Requests on exhaustion                 │
  ├───────────────────────────────────────────────────────────┤
  │  3. Authentication                                        │
- │     JWT validation (HS256) → extract tenant_id,           │
- │     user_id, role from claims                             │
- │     Fallback: header-based (dev only, no JWT_SECRET)      │
+ │     JWT validation (HS256) -> extract tenant_id,           │
+ │     user_id, role/scope claims                            │
+ │     Dev headers only when QAIL_DEV_MODE=true              │
  ├───────────────────────────────────────────────────────────┤
- │  4. Policy Engine                                         │
- │     YAML-defined per-table, per-role access control       │
- │     Column filtering at AST level                         │
+ │  4. Policy Checks                                         │
+ │     Native TOML/JSON access policy for operation/columns  │
+ │     Legacy gateway policy compatibility when configured   │
  │     → 403 Forbidden on policy violation                   │
  ├───────────────────────────────────────────────────────────┤
  │  5. Tenant Concurrency Gate                               │
@@ -46,10 +47,10 @@ Every HTTP request flows through a fixed, ordered pipeline:
  │     pool.acquire_with_rls(RlsContext) or                  │
  │     pool.acquire_with_rls_timeout(RlsContext, timeout)    │
  │     Sets PostgreSQL GUCs:                                 │
- │       set_config('app.current_tenant_id', '...', false)   │
- │       set_config('app.current_user_id', '...', false)     │
- │       set_config('app.current_agent_id', '...', false)    │
- │       set_config('app.is_super_admin', '...', false)      │
+ │       set_config('app.current_tenant_id', '...', true)    │
+ │       set_config('app.current_user_id', '...', true)      │
+ │       set_config('app.current_agent_id', '...', true)     │
+ │       set_config('app.is_super_admin', '...', true)       │
  ├───────────────────────────────────────────────────────────┤
  │  7. EXPLAIN Pre-Check (reads only)                        │
  │     EXPLAIN on generated SQL before execution             │
@@ -173,7 +174,8 @@ No request is silently dropped. No connection is leaked.
 GatewayState (shared Arc across all handlers)
 ├── pool: PgPool                    — Connection pool with RLS-aware acquisition
 ├── config: GatewayConfig           — All configuration (qail.toml + env overrides)
-├── policy_engine: PolicyEngine     — YAML-defined per-table, per-role policies
+├── policy_engine: PolicyEngine     — legacy gateway per-table/per-role policies
+├── access_policy: Option<AccessPolicy> — native operation/column policy
 ├── schema: SchemaRegistry          — Auto-discovered table/column/FK metadata
 ├── cache: QueryCache               — moka-backed LRU with table-level invalidation
 ├── rate_limiter: RateLimiter       — Token bucket rate limiting
@@ -181,7 +183,7 @@ GatewayState (shared Arc across all handlers)
 ├── explain_config: ExplainConfig   — Cost/row thresholds for EXPLAIN pre-check
 ├── tenant_semaphore: TenantSemaphore — Per-tenant concurrency limiter
 ├── event_engine: EventTriggerEngine  — Webhook triggers on mutations
-└── user_operator_map: HashMap      — JWT user_id → tenant_id resolution cache
+└── user_tenant_map: HashMap        — JWT user_id -> tenant_id resolution cache
 ```
 
 ---

@@ -1,132 +1,146 @@
 # Row-Level Security (RLS)
 
-> **New in v0.15** — The first Rust PostgreSQL driver with built-in multi-tenant data isolation
+QAIL carries tenant/user scope through the AST and driver pipeline, then
+`qail-pg` sets transaction-local PostgreSQL GUCs before executing tenant
+queries. PostgreSQL RLS policies remain the database enforcement boundary.
 
-QAIL injects tenant context at the **AST level**, ensuring every query is automatically scoped to the correct tenant, agent, or user — without manual `WHERE` clauses.
+This gives application code a tenant-first API while keeping row isolation in
+the database:
+
+```rust
+use qail_core::prelude::*;
+
+let ctx = RlsContext::tenant(tenant_id).with_user(user_id);
+
+let query = Qail::get("bookings")
+    .columns(["id", "status", "total"])
+    .eq("status", "confirmed")
+    .with_rls(&ctx)?;
+
+let rows = driver.fetch_all(&query).await?;
+```
 
 ## The Problem
 
-Every multi-tenant SaaS app needs data isolation. Traditional solutions are fragile:
+Multi-tenant apps fail when row ownership is treated as a convention:
 
 ```rust
-// ❌ Manual WHERE clauses — easy to forget, impossible to audit
+// Easy to remember in one handler
 let sql = "SELECT * FROM bookings WHERE tenant_id = $1";
 
-// ❌ Every query must remember to add the filter
-let sql = "SELECT * FROM invoices"; // BUG: leaks ALL tenant data
+// Easy to forget in another handler
+let sql = "SELECT * FROM invoices";
 ```
 
-One missed `WHERE` clause = cross-tenant data leak. In a codebase with 200+ queries, this is a ticking time bomb.
+QAIL does not replace PostgreSQL RLS. It makes the tenant context explicit in
+the query/connection lifecycle so app code does not hand-roll scope setup on
+every call.
 
-## The Solution: AST-Level RLS
+## Context Constructors
 
-QAIL solves this at the driver level:
-
-```rust
-use qail_core::rls::{RlsContext, SuperAdminToken};
-
-// Create context from authenticated session
-let ctx = RlsContext::tenant(tenant_id);
-
-// Every query is automatically scoped
-let query = Qail::get("bookings")
-    .columns(["id", "customer", "status"])
-    .with_rls(&ctx)?;  // ← RLS injected at AST level
-
-// Generated SQL: SELECT ... FROM bookings
-// But the connection sets app.current_tenant_id/app.current_agent_id
-// PostgreSQL RLS policy handles the rest
-```
-
-## RlsContext Constructors
-
-| Constructor | Scope | Use Case |
+| Constructor | Scope | Use case |
 |-------------|-------|----------|
-| `RlsContext::tenant(id)` | Single tenant | Tenant dashboard |
-| `RlsContext::agent(id)` | Single agent | Agent portal |
-| `RlsContext::tenant_and_agent(t, ag)` | Both | Agent within tenant |
-| `RlsContext::global()` | Shared/global rows (`tenant_id IS NULL`) | Public/reference data |
-| `RlsContext::super_admin(token)` | Bypasses RLS | Internal platform-only ops |
+| `RlsContext::tenant(id)` | One tenant | Normal SaaS tenant scope |
+| `RlsContext::tenant(id).with_user(user_id)` | Tenant plus end user | Tenant dashboards with user-owned rows |
+| `RlsContext::tenant_and_agent(tenant, agent)` | Tenant plus secondary agent/reseller | Legacy reseller/operator policies inside a tenant |
+| `RlsContext::agent(id)` | Agent only | Legacy driver-level scope; prefer tenant-based contexts for gateway apps |
+| `RlsContext::user(id)` | User only | Auth flows or user-scoped policies before tenant is known |
+| `RlsContext::global()` | Shared/platform rows | `tenant_id IS NULL` style reference data |
+| `RlsContext::empty()` | No tenant scope | Startup introspection, migrations, health checks |
+| `RlsContext::super_admin(token)` | Full RLS bypass | Internal-only cross-tenant operations |
 
-## Query Methods
+`SuperAdminToken` cannot be fabricated with public fields. It must be created
+through a named constructor such as `for_system_process`, `for_webhook`, or
+`for_auth`, which makes bypass intent visible at the call site.
 
-```rust
-let ctx = RlsContext::tenant_and_agent(tenant_id, agent_id);
+## PostgreSQL Session Context
 
-ctx.has_tenant();     // true
-ctx.has_agent();      // true
-ctx.bypasses_rls();   // false
+`qail-pg` opens a transaction and sets transaction-local context before the
+query runs:
 
-let global = RlsContext::global();
-global.is_global();   // true
-global.bypasses_rls();// false
-
-let token = SuperAdminToken::for_system_process("admin_task");
-let admin = RlsContext::super_admin(token);
-admin.bypasses_rls(); // true
+```sql
+BEGIN;
+SET LOCAL statement_timeout = ...;
+SET LOCAL app.is_global = 'false';
+SELECT
+  set_config('app.current_user_id',   '<user>',   true),
+  set_config('app.current_tenant_id', '<tenant>', true),
+  set_config('app.current_agent_id',  '<agent>',  true),
+  set_config('app.is_super_admin',    'false',    true);
 ```
 
-## How It Works
+On release, the connection commits the transaction. Transaction-local GUCs and
+`SET LOCAL` values reset on `COMMIT`, while prepared statement caches can remain
+hot for reuse.
 
-```
-┌─────────────────────────────────────────────────┐
-│  Application Code                                │
-│                                                   │
-│  Qail::get("bookings").with_rls(&ctx)?           │
-│       ↓                                           │
-│  AST Builder adds RLS context to query            │
-│       ↓                                           │
-│  PgDriver::execute()                              │
-│  ├─ set_config('app.current_tenant_id', '<uuid>', true)    │
-│  ├─ set_config('app.current_user_id', '<uuid>', true)      │
-│  ├─ set_config('app.current_agent_id', '<uuid>', true)     │
-│  ├─ set_config('app.is_super_admin', 'false', true)        │
-│  └─ Execute query on SAME connection                       │
-│       ↓                                           │
-│  PostgreSQL RLS Policy                            │
-│  CREATE POLICY tenant_isolation ON bookings       │
-│    USING (tenant_id = current_setting(            │
-│           'app.current_tenant_id')::uuid)         │
-│       ↓                                           │
-│  Only matching rows returned                      │
-└─────────────────────────────────────────────────┘
+## PostgreSQL Policy Example
+
+```sql
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orders FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY orders_tenant_isolation ON orders
+  FOR ALL
+  USING (
+    tenant_id = current_setting('app.current_tenant_id', true)::uuid
+    OR current_setting('app.is_super_admin', true) = 'true'
+  )
+  WITH CHECK (
+    tenant_id = current_setting('app.current_tenant_id', true)::uuid
+    OR current_setting('app.is_super_admin', true) = 'true'
+  );
 ```
 
-> Migration note: gateway/driver tenant scope is `tenant_id`-first. Legacy `operator_id` JWT claims are not mapped into tenant scope.
+Use a database role that is not a superuser and does not have `BYPASSRLS`.
+Superusers bypass RLS regardless of client-side discipline.
 
-## Why AST-Level?
+## Horizontal And Vertical Access
 
-| Approach | Reliability | Audit | Performance |
-|----------|-------------|-------|-------------|
-| Manual `WHERE` | ❌ Easy to forget | ❌ Grep every query | ✅ Fast |
-| ORM middleware | ⚠️ Can be bypassed | ⚠️ Framework-specific | ⚠️ Overhead |
-| **QAIL RLS** | ✅ Structural | ✅ Single entry point | ✅ Native PG |
+RLS is horizontal: it decides which rows are visible or writable.
 
-QAIL's approach is **structural** — the RLS context is part of the query pipeline, not an afterthought bolted onto SQL strings.
+Native access policy is vertical: it decides which tables, operations, roles,
+scopes, and columns are allowed before the query reaches PostgreSQL.
 
-## Combined with TypedQail
+Use both:
 
-RLS works with the typed API too:
-
-```rust
-use schema::{bookings, users};
-
-let query = Qail::typed(bookings::table)
-    .join_related(users::table)       // Compile-time safe join
-    .typed_column(bookings::id())
-    .typed_column(bookings::status())
-    .with_rls(&ctx)?                  // Multi-tenant isolation
-    .build();
+```toml
+[access]
+enabled = true
+path = "access-policy.toml"
 ```
 
-## Comparison with Other Drivers
+See [Access Policy](./access-policy.md) for operation and column semantics.
 
-| Feature | QAIL | sqlx | Diesel | SeaORM |
-|---------|------|------|--------|--------|
-| Built-in RLS | ✅ | ❌ | ❌ | ❌ |
-| AST-level injection | ✅ | N/A | N/A | N/A |
-| `with_rls()` API | ✅ | N/A | N/A | N/A |
-| Session variable management | ✅ Auto | Manual | Manual | Manual |
-| Connection-scoped context | ✅ | Manual | Manual | Manual |
+## Gateway Behavior
 
-> **QAIL is the only Rust PostgreSQL driver with built-in Row-Level Security support.**
+`qail-gateway` extracts tenant/user/role/scope from JWT claims. `tenant_id` is
+the primary runtime contract. A legacy `agent_id` claim is only used as a
+secondary scope when `tenant_id` is present; it does not create tenant scope by
+itself.
+
+Header-based dev auth can provide the same claims only when `QAIL_DEV_MODE=true`
+and the gateway is bound safely for development.
+
+## Guarantees And Non-Guarantees
+
+| Property | Boundary |
+|----------|----------|
+| Tenant/user context is set before tenant queries | QAIL driver/gateway |
+| Row filtering and write checks | PostgreSQL RLS policies |
+| Operation and column permissions | Native access policy |
+| Cross-tenant internal jobs | Explicit `super_admin` contexts |
+| Provider/app authorization outside PostgreSQL | Application code |
+
+If the database policy is wrong, QAIL cannot infer the correct row rule. If the
+application uses a raw connection outside the RLS-aware path, it owns the risk.
+
+## Operational Checklist
+
+- Use `RlsContext::tenant(...)` as the default runtime scope.
+- Attach `with_user(...)` when database policies need user ownership.
+- Keep `agent_id` as a secondary legacy scope, not the primary tenant identity.
+- Use transaction-local GUCs through `qail-pg` pool/driver APIs.
+- Enable and force PostgreSQL RLS on tenant-owned tables.
+- Run app roles as `NOBYPASSRLS` non-superusers.
+- Use native access policy for vertical permissions.
+- Keep `super_admin` token creation limited to named internal paths.

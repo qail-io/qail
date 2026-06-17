@@ -176,6 +176,8 @@ require_scopes = ["orders:read"]
 ```
 
 Policy files may be TOML or JSON. When `enabled = true`, `path` is required.
+See [Access Policy](./access-policy.md) for the full operation, column, role,
+scope, and fail-closed semantics.
 
 ## Generated Files
 
