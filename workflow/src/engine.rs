@@ -1141,14 +1141,25 @@ fn side_effect_operation(
         state: scope.state.to_string(),
         step_path: step_path.clone(),
         kind,
-        operation_id: format!(
-            "{}:{}:{}:{}",
-            ctx.workflow_id,
-            scope.state,
-            kind.as_str(),
-            step_path
-        ),
+        operation_id: side_effect_operation_id(&ctx.workflow_id, scope.state, kind, &step_path),
     }
+}
+
+fn side_effect_operation_id(
+    workflow_id: &str,
+    state: &str,
+    kind: WorkflowSideEffectKind,
+    step_path: &str,
+) -> String {
+    serde_json::json!([
+        "qail-workflow-side-effect",
+        1,
+        workflow_id,
+        state,
+        kind.as_str(),
+        step_path
+    ])
+    .to_string()
 }
 
 fn render_cursor_path(frames: &[WorkflowCursorFrame]) -> String {
@@ -4128,10 +4139,46 @@ mod tests {
         assert_eq!(
             side_effects.as_slice(),
             &[
-                "wf-003:broadcasting:notify:steps[0]/for_each[0].steps[0]".to_string(),
-                "wf-003:broadcasting:notify:steps[0]/for_each[1].steps[0]".to_string(),
-                "wf-003:broadcasting:notify:steps[0]/for_each[2].steps[0]".to_string(),
+                side_effect_operation_id(
+                    "wf-003",
+                    "broadcasting",
+                    WorkflowSideEffectKind::Notify,
+                    "steps[0]/for_each[0].steps[0]",
+                ),
+                side_effect_operation_id(
+                    "wf-003",
+                    "broadcasting",
+                    WorkflowSideEffectKind::Notify,
+                    "steps[0]/for_each[1].steps[0]",
+                ),
+                side_effect_operation_id(
+                    "wf-003",
+                    "broadcasting",
+                    WorkflowSideEffectKind::Notify,
+                    "steps[0]/for_each[2].steps[0]",
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn side_effect_operation_id_does_not_collide_on_delimiters() {
+        let first = side_effect_operation_id(
+            "tenant:wf",
+            "broadcasting",
+            WorkflowSideEffectKind::Notify,
+            "steps[0]",
+        );
+        let second = side_effect_operation_id(
+            "tenant",
+            "wf:broadcasting",
+            WorkflowSideEffectKind::Notify,
+            "steps[0]",
+        );
+
+        assert_ne!(
+            first, second,
+            "side-effect operation ids must not collide when fields contain delimiters"
         );
     }
 
