@@ -166,11 +166,7 @@ async fn build_router(
 
 async fn row_names(driver: &mut PgDriver, table: &str) -> Vec<(String, String)> {
     driver
-        .fetch_all_uncached(
-            &Qail::get(table)
-                .columns(["id", "name"])
-                .order_asc("id"),
-        )
+        .fetch_all_uncached(&Qail::get(table).columns(["id", "name"]).order_asc("id"))
         .await
         .expect("read rows")
         .into_iter()
@@ -298,7 +294,10 @@ async fn branch_overlay_and_rpc_void_fallback_survive_real_postgres() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "branch update body: {body}");
-    assert_eq!(row_names(&mut driver, &table).await, vec![("one".into(), "main-one".into())]);
+    assert_eq!(
+        row_names(&mut driver, &table).await,
+        vec![("one".into(), "main-one".into())]
+    );
 
     let (status, body) = request_json(
         app.clone(),
