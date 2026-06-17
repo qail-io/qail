@@ -747,6 +747,11 @@ fn validate_workflow_context_identity(ctx: &WorkflowContext) -> Result<(), Workf
 
 fn ensure_user_context_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
     ensure_definition_text(key, usage)?;
+    if key.contains('.') {
+        return Err(WorkflowError::Other(format!(
+            "Workflow {usage} must be a top-level context key; dot notation is only supported for lookups"
+        )));
+    }
     if RESERVED_CONTEXT_KEYS.contains(&key) {
         return Err(WorkflowError::Other(format!(
             "Workflow {usage} uses reserved context key '{key}'"
@@ -5751,6 +5756,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn charge_rejects_dotted_store_key_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("charge_dotted_key")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge(
+                    PaymentKind::Xendit,
+                    "order.total",
+                    "order.id",
+                    Some("payment.charge"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-charge-dotted-key", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-dotted",
+                "total": 150000
+            }),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("dotted charge output key must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("top-level context key"), "got: {msg}");
+            }
+            other => panic!("expected dotted context key error, got {other:?}"),
+        }
+        assert!(
+            executor.charges.lock().unwrap().is_empty(),
+            "charge provider must not be called after dotted key validation fails"
+        );
+    }
+
+    #[tokio::test]
     async fn charge_accepts_safe_integer_float_amount() {
         let executor = MockExecutor::new();
         let wf = charge_only_workflow("booking_payment_float");
@@ -6026,6 +6073,43 @@ mod tests {
         assert!(
             executor.queries.lock().unwrap().is_empty(),
             "query executor must not be called after reserved key validation fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_rejects_dotted_store_key_before_execution() {
+        let executor = MockExecutor::new();
+        let cmd = qail_core::Qail::get("users").columns(["id"]).limit(1);
+        let wire = qail_core::wire::encode_cmd_text(&cmd);
+
+        let wf = WorkflowDefinition::new("query_dotted_key")
+            .initial_state("start")
+            .transition(
+                "start",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: wire,
+                        store_as: Some("query.rows".to_string()),
+                    },
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-query-dotted-key", "start");
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("dotted query output key must fail before query execution");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("top-level context key"), "got: {msg}");
+            }
+            other => panic!("expected dotted context key error, got {other:?}"),
+        }
+        assert!(
+            executor.queries.lock().unwrap().is_empty(),
+            "query executor must not be called after dotted key validation fails"
         );
     }
 
