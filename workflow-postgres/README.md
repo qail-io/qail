@@ -1,6 +1,6 @@
 # qail-workflow-postgres
 
-PostgreSQL storage backend for `qail-workflow`.
+**QAIL Flow Ledger** - PostgreSQL storage backend for `qail-workflow`.
 
 This crate keeps the workflow engine generic while giving Postgres users a
 storage-backed executor for workflow state, leases, operation idempotency,
@@ -33,3 +33,26 @@ rather than the raw logical worker name. This acts as a fencing token: a stale
 worker release cannot delete a later lease acquisition that reused the same
 logical owner name. Custom executors should persist and compare the full owner
 string they receive.
+
+## Tables
+
+The default table names are:
+
+- `qail_workflow_states`
+- `qail_workflow_leases`
+- `qail_workflow_operations`
+- `qail_workflow_side_effects`
+
+`PgWorkflowTables` lets applications override the names when a dedicated schema
+or per-app prefix is required.
+
+## Rollout Checklist
+
+- Create the Flow Ledger tables before enabling workflow workers.
+- Deploy over an empty/drained v1 side-effect ledger, or explicitly accept
+  replay risk for already-running workflows.
+- Configure worker lease TTL and in-progress TTL longer than the expected
+  operation runtime.
+- Pass side-effect operation ids through to external providers as idempotency
+  keys.
+- Keep scheduler invocations stable and unique per timeout batch.

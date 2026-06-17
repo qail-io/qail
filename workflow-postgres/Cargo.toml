@@ -2,9 +2,11 @@
 name = "qail-workflow-postgres"
 version = "1.3.2"
 edition = "2024"
-description = "PostgreSQL storage backend for qail-workflow using QAIL AST operations"
+description = "QAIL Flow Ledger - PostgreSQL workflow state, lease, idempotency, timeout, and side-effect storage"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+homepage = "https://dev.qail.io"
+documentation = "https://docs.rs/qail-workflow-postgres"
 readme = "README.md"
 keywords = ["qail", "workflow", "postgres", "state-machine"]
 categories = ["database", "asynchronous"]

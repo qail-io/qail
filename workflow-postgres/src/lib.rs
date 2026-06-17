@@ -1,9 +1,19 @@
+//! QAIL Flow Ledger.
+//!
 //! PostgreSQL storage backend for `qail-workflow`.
 //!
 //! This crate keeps application side effects in the app executor while backing
 //! workflow state, leases, operation idempotency, side-effect replay, and
 //! timeout discovery with PostgreSQL tables. All database operations are built
-//! as QAIL AST commands and executed through `qail-pg`.
+//! as QAIL AST commands and executed through `qail-pg`; the crate does not use
+//! raw SQL execution paths.
+//!
+//! Default tables:
+//!
+//! - `qail_workflow_states`
+//! - `qail_workflow_leases`
+//! - `qail_workflow_operations`
+//! - `qail_workflow_side_effects`
 
 #![deny(warnings)]
 #![deny(clippy::all)]

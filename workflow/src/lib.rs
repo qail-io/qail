@@ -1,4 +1,4 @@
-//! # QAIL Workflow
+//! # QAIL Flow Engine
 //!
 //! Declarative state machine engine for multi-vertical workflows.
 //!
@@ -10,11 +10,13 @@
 //! ## Architecture
 //!
 //! ```text
-//! your-engine (domain states + executor impl)
+//! your app (domain states + executor impl)
 //!       ↓
-//! qail-workflow (state machine engine)
+//! qail-workflow (Flow Engine)
 //!       ↓
 //! qail-core (AST queries composed into steps)
+//!       ↓
+//! optional qail-workflow-postgres (Flow Ledger)
 //! ```
 //!
 //! ## Quick Start

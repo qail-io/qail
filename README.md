@@ -37,18 +37,24 @@ let rows = driver.fetch_all(&query).await?;
 
 ## Product Map
 
-| Component | Use it for | Primary audience |
+| Concept | Crate | Use it for | Primary audience |
 |---|---|---|
-| `qail-pg` | PostgreSQL driver (wire protocol, pooling, pipeline, COPY) | Backend app code |
-| `qail-core` | Typed AST, parser, validator, RLS model, transpiler | Query/model layer |
-| `qail-gateway` | Optional auto-REST + WebSocket server | API platform teams |
-| `qail` (CLI) | Schema pull/diff, migrations, codegen, lint | DevEx and CI |
+| AST Kernel | `qail-core` | Typed AST, parser, validator, RLS model, native access policy | Query/model layer |
+| Postgres Driver | `qail-pg` | PostgreSQL wire protocol, pooling, pipeline, COPY, LISTEN/NOTIFY | Backend app code |
+| Access Gateway | `qail-gateway` | AutoREST, WebSocket, OpenAPI, auth/RLS/policy enforcement | API platform teams |
+| SchemaOps CLI | `qail` | Schema pull/diff, phased migrations, codegen, lint | DevEx and CI |
+| Flow Engine | `qail-workflow` | Declarative state-machine workflows, waits, retries, side-effect checkpoints | App orchestration |
+| Flow Ledger | `qail-workflow-postgres` | PostgreSQL workflow state, leases, idempotency, side-effect replay, timeouts | Durable workflow execution |
+| Vector Bridge | `qail-qdrant` | Qdrant vector search and AST-compatible filters | AI/vector workloads |
 
 ## Choose Your Mode
 
 1. Driver mode: add `qail-pg` and execute AST queries in your app.
 2. Gateway mode: run `qail-gateway` when you want auto-generated REST/WebSocket.
 3. Tooling mode: use `qail` CLI for schema and migration workflows.
+4. Workflow mode: add `qail-workflow` and optionally `qail-workflow-postgres`
+   when app workflows need durable resume, timeout, lease, and side-effect
+   replay semantics.
 
 ## qail-pg vs tokio-postgres vs sqlx
 

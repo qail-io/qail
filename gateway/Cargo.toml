@@ -2,9 +2,11 @@
 name = "qail-gateway"
 version = "1.3.2"
 edition = "2024"
-description = "QAIL Gateway - Native data layer replacing REST/GraphQL"
+description = "QAIL Access Gateway - schema-driven AutoREST, WebSocket, OpenAPI, RLS, and policy enforcement"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+homepage = "https://dev.qail.io/gateway"
+documentation = "https://docs.rs/qail-gateway"
 readme = "README.md"
 keywords = ["database", "gateway", "api", "binary-protocol"]
 categories = ["database", "web-programming"]

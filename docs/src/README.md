@@ -4,6 +4,18 @@
 
 QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
 
+## Product Map
+
+| Concept | Crate | Purpose |
+|---------|-------|---------|
+| AST Kernel | `qail-core` | Typed AST, parser, expressions, RLS context, native access policy |
+| Postgres Driver | `qail-pg` | Async PostgreSQL wire-protocol execution |
+| Access Gateway | `qail-gateway` | AutoREST, WebSocket, OpenAPI, auth/RLS/policy enforcement |
+| SchemaOps CLI | `qail` | Schema pull, live drift diff, phased migrations, lint, codegen |
+| Flow Engine | `qail-workflow` | Declarative workflow state machines |
+| Flow Ledger | `qail-workflow-postgres` | PostgreSQL workflow leases, state, idempotency, side effects, timeouts |
+| Vector Bridge | `qail-qdrant` | Qdrant vector search with AST-compatible filters |
+
 ## Latest Updates (June 2026)
 
 - QAIL is now on the `v1.3.2` stable line across the Rust workspace crates and CLI.
@@ -72,7 +84,7 @@ let cmd = Qail::get("users")
 
 // Execute with qail-pg driver
 let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
-let rows = driver.query(&cmd).await?;
+let rows = driver.fetch_all(&cmd).await?;
 ```
 
 ## Current Status (Production Ready, Actively Hardened)
@@ -134,7 +146,7 @@ QAIL is **AST-first**, not SQL-string-first. Many traditional SQL "security feat
 // SQL String (vulnerable):
 let sql = format!("SELECT * FROM users WHERE id = {}", user_input);
 
-// QAIL AST (impossible to inject):
+// QAIL AST (structure is not interpolated from user text):
 Qail::get("users").filter("id", Operator::Eq, user_input)
 // user_input becomes Value::Int(123) or Value::Text("...") 
 // — never interpolated into a string

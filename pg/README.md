@@ -1,11 +1,15 @@
 # qail-pg
 
-**Rust PostgreSQL driver for typed AST queries and native wire-protocol execution**
+**QAIL Postgres Driver** - typed AST queries executed through the native
+PostgreSQL wire protocol.
 
 [![Crates.io](https://img.shields.io/crates/v/qail-pg.svg)](https://crates.io/crates/qail-pg)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A high-performance async PostgreSQL driver that speaks the wire protocol directly. `qail-pg` is the driver layer of Qail and is intended for backend code that wants AST-first query construction.
+A high-performance async PostgreSQL driver that speaks the wire protocol
+directly. `qail-pg` is the driver layer of QAIL and is intended for backend
+code that wants AST-first query construction instead of SQL-string-centric app
+code.
 
 ## Positioning
 
@@ -14,6 +18,8 @@ qail-pg is a **Rust PostgreSQL driver** for teams that want:
 - a typed AST query surface instead of SQL-string-centric app code
 - explicit tenant-scoping APIs on query objects
 - direct wire-protocol execution with pipelining and COPY support
+- prepared AST execution, pooling, LISTEN/NOTIFY, COPY, replication helpers,
+  and production protocol failure handling
 
 ## Quick Comparison
 
@@ -35,7 +41,8 @@ qail-pg is a **Rust PostgreSQL driver** for teams that want:
 
 You may still find pre-1.0 search results showing symbolic QAIL strings like `get::users•@id@email@role[active=true][lim=10]` or old macro examples like `qail!("get::users:'id'email [ 'active == true ]")`.
 
-Those are historical docs from older releases. `qail-pg 0.27.x` is documented and optimized around the native AST path:
+Those are historical docs from older releases. `qail-pg 1.3.x` is documented
+and optimized around the native AST path:
 
 ```rust
 let query = Qail::get("users")
@@ -73,46 +80,50 @@ This shows the exact protocol-byte path used by the driver.
 ## Features
 
 - **AST-Native** - Compiles QAIL AST directly to PostgreSQL wire protocol
-- **28% Faster** - Benchmarked at 1.36M rows/s COPY (vs asyncpg at 1.06M rows/s)
-- **Query Pipelining** - 24x faster batch operations via `pipeline_execute_count()`
+- **Query Pipelining** - batch operations via `pipeline_execute_count()`
 - **SSL/TLS** - Production-ready with `tokio-rustls`
 - **Password Auth Modes** - Supports SCRAM-SHA-256, MD5, and cleartext server flows
 - **Protocol 3.2 Ready** - Requests startup protocol 3.2 by default with one-shot fallback to 3.0 on explicit protocol rejection
 - **Cancel-Key Compatibility** - Supports variable-length cancel keys via bytes-native APIs (legacy i32 wrappers retained for 4-byte keys)
 - **Connection Pooling** - Built-in `PgPool`
 - **Transactions** - Full `begin`/`commit`/`rollback` support
+- **Enterprise Auth Hooks** - optional GSS/Kerberos token-provider integration
+  without moving C/FFI auth control into the Rust core
 
 ## Installation
 
 ```toml
 [dependencies]
-qail-pg = "1.2.0"
-qail-core = "1.2.0"
+qail-pg = "1.3.2"
+qail-core = "1.3.2"
 ```
 
-`qail-pg` is AST-only. Raw SQL helper APIs were removed.
+The primary runtime path is AST-native. Use `Qail::get/add/set/del`,
+expression builders, and typed bind values instead of formatting SQL strings in
+application code.
 
 ## Quick Start
 
 ```rust
-use qail_core::ast::{QailCmd, builders::*};
+use qail_core::prelude::*;
 use qail_pg::PgDriver;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect with password
     let mut driver = PgDriver::connect_with_password(
         "localhost", 5432, "postgres", "mydb", "password"
     ).await?;
 
-    // Build a query using QAIL AST
-    let cmd = QailCmd::get("users")
-        .columns([col("id"), col("name"), col("email")])
-        .filter(eq("active", true))
-        .order_by([("created_at", Desc)])
+    let tenant_id = "018f6a60-4d5f-7a9d-9f4c-7dd8c338f1d2";
+    let ctx = RlsContext::tenant(tenant_id);
+
+    let cmd = Qail::get("users")
+        .columns(["id", "name", "email"])
+        .eq("active", true)
+        .order_by("created_at", Desc)
+        .with_rls(&ctx)?
         .limit(10);
 
-    // Execute and fetch rows
     let rows = driver.fetch_all(&cmd).await?;
     
     for row in rows {
@@ -129,10 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 // Execute 10,000 queries in a single network round-trip
 // pipeline_execute_count() uses AstPipelineMode::Auto by default
-let cmds: Vec<QailCmd> = (0..10_000)
-    .map(|i| QailCmd::add("events")
-        .columns(["user_id", "event_type"])
-        .values([Value::Int(i), Value::String("login".to_string())])
+let cmds: Vec<Qail> = (0..10_000)
+    .map(|i| Qail::add("events")
+        .set_value("user_id", i)
+        .set_value("event_type", "login")
     ).collect();
 
 let count = driver.pipeline_execute_count(&cmds).await?;

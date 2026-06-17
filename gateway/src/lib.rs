@@ -1,11 +1,16 @@
-//! # QAIL Gateway
+//! # QAIL Access Gateway
 //!
-//! The native data layer that can replace REST/GraphQL with binary AST protocol.
+//! Schema-driven AutoREST, WebSocket, OpenAPI, RLS, and native access-policy
+//! enforcement for PostgreSQL-backed applications.
+//!
+//! The gateway loads a QAIL schema, builds route metadata, maps auth claims into
+//! tenant/user execution context, validates access policy, and executes through
+//! `qail-pg`.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Client → QAIL AST (binary) → Gateway → Postgres/Qdrant
+//! REST/SDK/WebSocket client -> Gateway -> QAIL AST -> qail-pg -> PostgreSQL
 //! ```
 //!
 //! ## Quick Start

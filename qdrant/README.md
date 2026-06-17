@@ -1,12 +1,11 @@
 # qail-qdrant
 
-QAIL driver for Qdrant vector database.
-
-> ⚠️ **BETA** - This crate is under active development. API may change.
+**QAIL Vector Bridge** - Qdrant vector search driver with AST-compatible
+filters.
 
 ## Overview
 
-AST-native Rust driver for Qdrant vector search over gRPC.
+Rust driver for Qdrant vector search over gRPC.
 
 The driver uses:
 - direct protobuf wire encoding (no tonic-generated request structs)
@@ -17,11 +16,11 @@ The driver uses:
 
 ## Features
 
-- 🔍 **Vector similarity search** with filters
-- 📦 **Upsert points** with payload metadata
-- 🗑️ **Delete points** by ID
-- 📁 **Collection management** (create, delete)
-- 🚀 **Zero-copy protobuf encoding** for gRPC
+- **Vector similarity search** with filters
+- **Upsert points** with payload metadata
+- **Delete points** by ID
+- **Collection management** (create, delete)
+- **Direct protobuf encoding** for gRPC
 
 ## Quick Start
 
@@ -54,6 +53,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - Qdrant server running with gRPC enabled (default gRPC port: 6334)
 - Rust 2024 edition
+
+## Related Crates
+
+| Concept name | Crate | Role |
+|---|---|---|
+| AST Kernel | `qail-core` | shared filter/query semantics |
+| Postgres Driver | `qail-pg` | PostgreSQL AST execution |
+| Access Gateway | `qail-gateway` | API surface that can combine Postgres and vector paths |
 
 ## License
 

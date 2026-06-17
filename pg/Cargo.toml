@@ -5,6 +5,7 @@ edition = "2024"
 description = "Rust PostgreSQL driver for typed AST queries with direct wire-protocol execution"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+homepage = "https://dev.qail.io/rust"
 documentation = "https://docs.rs/qail-pg"
 keywords = ["postgres", "postgresql", "driver", "async", "database"]
 categories = ["database", "asynchronous"]

@@ -2,9 +2,11 @@
 name = "qail-qdrant"
 version = "1.3.2"
 edition = "2024"
-description = "QAIL driver for Qdrant vector database"
+description = "QAIL Vector Bridge - Qdrant vector search driver with AST-compatible filters"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+homepage = "https://dev.qail.io/qdrant"
+documentation = "https://docs.rs/qail-qdrant"
 readme = "README.md"
 keywords = ["qail", "qdrant", "vector", "database", "ai"]
 categories = ["database"]

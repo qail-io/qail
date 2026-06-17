@@ -2,12 +2,14 @@
 name = "qail"
 version = "1.3.2"
 edition = "2024"
-description = "Schema-first database toolkit - migrations, diff, lint, and query generation"
+description = "QAIL SchemaOps CLI - schema pull, drift diff, phased migrations, lint, and AST query tooling"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+homepage = "https://dev.qail.io"
+documentation = "https://docs.rs/qail"
 readme = "README.md"
 categories = ["database", "command-line-utilities", "parser-implementations"]
-keywords = ["db", "sql", "cli", "query", "database"]
+keywords = ["postgres", "migration", "schema", "cli", "database"]
 
 [dependencies]
 qail-core = { path = "../core", version = "1.3.2", features = ["analyzer"] }

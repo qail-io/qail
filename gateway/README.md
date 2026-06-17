@@ -1,6 +1,8 @@
 # qail-gateway
 
-Auto-REST + WebSocket gateway for QAIL with direct PostgreSQL execution via `qail-pg`.
+**QAIL Access Gateway** - schema-driven AutoREST, WebSocket, OpenAPI, RLS, and
+native access-policy enforcement with direct PostgreSQL execution via
+`qail-pg`.
 
 [![Crates.io](https://img.shields.io/crates/v/qail-gateway.svg)](https://crates.io/crates/qail-gateway)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -10,10 +12,11 @@ Auto-REST + WebSocket gateway for QAIL with direct PostgreSQL execution via `qai
 - Auto-REST CRUD routes from loaded schema
 - QAIL text and binary query endpoints
 - WebSocket query + live-query support
-- JWT/API-key auth hooks + policy engine
+- JWT/API-key auth hooks + native table/operation/column policy engine
 - RLS-aware DB acquisition and guard rails
 - Query allow-list + complexity limits
 - EXPLAIN and observability endpoints
+- OpenAPI and typed contract endpoints for SDK/client generation
 
 ## Query Input Modes
 
@@ -25,9 +28,9 @@ Auto-REST + WebSocket gateway for QAIL with direct PostgreSQL execution via `qai
 
 ```toml
 [dependencies]
-qail-gateway = "1.1.1"
-qail-core = "1.1.1"
-qail-pg = "1.1.1"
+qail-gateway = "1.3.2"
+qail-core = "1.3.2"
+qail-pg = "1.3.2"
 ```
 
 ## Quick Start
@@ -68,3 +71,12 @@ async fn main() -> anyhow::Result<()> {
 `production_strict=true` enables fail-closed startup checks for required security configuration.
 
 Set `QAIL_SECURITY_PROFILE=secure` to apply the hardened profile automatically in the example server loader.
+
+## Related Crates
+
+| Concept name | Crate | Role |
+|---|---|---|
+| AST Kernel | `qail-core` | shared typed AST, RLS context, access policy |
+| Postgres Driver | `qail-pg` | wire-protocol execution |
+| SchemaOps CLI | `qail` | schema pull, drift diff, migrations, lint |
+| Flow Engine | `qail-workflow` | app-owned business workflows |

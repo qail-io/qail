@@ -1,6 +1,7 @@
 # qail
 
-**Schema-first database toolkit** — Pull, diff, migrate, validate.
+**QAIL SchemaOps CLI** - schema pull, drift diff, phased migrations, lint,
+typed codegen, and AST query tooling for the QAIL ecosystem.
 
 [![Crates.io](https://img.shields.io/crates/v/qail.svg)](https://crates.io/crates/qail)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -11,19 +12,36 @@
 cargo install qail
 ```
 
-## Commands
+## Where This Fits
+
+QAIL has several crates. The `qail` crate is the command-line tool, not the
+PostgreSQL driver. Start here when you need migration and schema operations:
+
+| Surface | Crate | Use it for |
+|---|---|---|
+| SchemaOps CLI | `qail` | pull, check, diff, migrate, codegen, lint |
+| AST Kernel | `qail-core` | typed AST, expressions, RLS context, access policy |
+| Postgres Driver | `qail-pg` | async PostgreSQL wire-protocol execution |
+| Access Gateway | `qail-gateway` | AutoREST, WebSocket, OpenAPI, policy enforcement |
+| Flow Engine | `qail-workflow` | declarative state-machine workflows |
+| Flow Ledger | `qail-workflow-postgres` | Postgres-backed workflow state/idempotency |
+
+## Primary Workflows
 
 ### Schema Operations
 
 ```bash
 # Extract schema from database
-qail pull postgres://user:pass@host/db -o schema.qail
+qail pull --url postgres://user:pass@host/db > schema.qail
 
-# Compare two schemas
+# Compare desired schema against live database drift
+qail diff _ schema.qail --live --url postgres://user:pass@host/db
+
+# Compare two schema files
 qail diff old.qail new.qail
 
-# Check best practices
-qail lint schema.qail
+# Validate schema and optional source references
+qail check schema.qail --src ./src
 
 # Format QAIL files
 qail fmt schema.qail
@@ -67,7 +85,8 @@ SELECT id, name FROM users WHERE active = true
 
 Old QAIL releases experimented with symbolic text syntax such as `get::users•@id@email@role[active=true][lim=10]` and macro snippets such as `qail!("get::users:'id'email [ 'active == true ]")`.
 
-Those examples are **legacy** and may still appear on old `docs.rs` pages in search results. They are not the current `0.27.x` recommendation.
+Those examples are **legacy** and may still appear on old `docs.rs` pages in
+search results. They are not the current `1.3.x` recommendation.
 
 Current QAIL application code should use the native AST builder API, while the `qail` CLI remains a tooling surface for schema work, REPL inspection, and migration operations.
 
@@ -92,20 +111,25 @@ table orders (
 
 ## Features
 
-- **Schema extraction** — Pull live schemas from PostgreSQL
-- **Smart diffing** — Detect additions, removals, modifications
-- **Impact analysis** — Warn about breaking changes
-- **Foreign key validation** — Ensure referential integrity
-- **Data-safe migrations** — Preview SQL before applying
-- **Type-safe queries** — Transpile QAIL to SQL
+- **Drift Guard** - compare a live PostgreSQL database with `schema.qail`.
+- **Phased migrations** - apply expand, backfill, and contract phases.
+- **Strict receipts** - track applied migrations in `_qail_migrations`.
+- **Source scanner** - catch stale schema references before contract cleanup.
+- **Schema modules** - split, merge, and doctor modular schema directories.
+- **Typed codegen** - generate Rust schema helpers from `schema.qail`.
+- **AST query tooling** - inspect and execute QAIL statements without making
+  SQL string construction the application runtime model.
 
 ## Ecosystem
 
 | Crate | Purpose |
 |-------|---------|
 | **qail** | CLI tool for schema and migration operations |
-| [qail-core](https://crates.io/crates/qail-core) | AST builder, parser, expression helpers |
+| [qail-core](https://crates.io/crates/qail-core) | AST builder, parser, expression helpers, RLS/access policy |
 | [qail-pg](https://crates.io/crates/qail-pg) | PostgreSQL driver (AST → wire protocol) |
+| [qail-gateway](https://crates.io/crates/qail-gateway) | Access Gateway for AutoREST/WebSocket/OpenAPI |
+| [qail-workflow](https://crates.io/crates/qail-workflow) | Flow Engine for business state machines |
+| [qail-workflow-postgres](https://crates.io/crates/qail-workflow-postgres) | Flow Ledger storage backend |
 
 ## License
 

@@ -2,9 +2,11 @@
 name = "qail-encoder"
 version = "1.3.2"
 edition = "2024"
-description = "QAIL Encoder - Lightweight wire protocol encoding (no I/O, no TLS)"
+description = "QAIL Encoder ABI - lightweight protocol/query encoding for non-Rust transports"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+homepage = "https://dev.qail.io"
+documentation = "https://docs.rs/qail-encoder"
 readme = "README.md"
 
 [lib]
