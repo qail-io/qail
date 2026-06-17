@@ -80,7 +80,10 @@ pub enum WorkflowCursorFrame {
         /// Next step index inside the selected branch.
         index: usize,
     },
-    /// Active ForEach item step list.
+    /// Legacy active ForEach item step list.
+    ///
+    /// This variant remains deserializable for old persisted rows, but the
+    /// engine refuses to resume it because it lacks an item snapshot.
     ForEach {
         /// Current array item index.
         item_index: usize,
@@ -294,9 +297,10 @@ mod tests {
             state: "created".to_string(),
             frames: vec![
                 WorkflowCursorFrame::Steps { index: 0 },
-                WorkflowCursorFrame::ForEach {
+                WorkflowCursorFrame::ForEachItem {
                     item_index: 1,
                     index: 2,
+                    item: serde_json::json!({"name": "Captain B"}),
                 },
             ],
             wait: Some(WorkflowPendingWait {

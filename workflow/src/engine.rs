@@ -1650,14 +1650,10 @@ fn execute_step<'a, E: WorkflowExecutor>(
                         }
                         (*item_index, *index, &cursor_frames[1..])
                     }
-                    Some(WorkflowCursorFrame::ForEach { item_index, index }) => {
-                        if *item_index >= items.len() {
-                            return Err(invalid_cursor(format!(
-                                "for_each item index {item_index} is past item count {}",
-                                items.len()
-                            )));
-                        }
-                        (*item_index, *index, &cursor_frames[1..])
+                    Some(WorkflowCursorFrame::ForEach { .. }) => {
+                        return Err(invalid_cursor(
+                            "legacy for_each cursor without item snapshot cannot be resumed safely",
+                        ));
                     }
                     Some(_) => {
                         return Err(invalid_cursor(
@@ -5000,6 +4996,77 @@ mod tests {
         assert!(
             executor.notifications.lock().unwrap().is_empty(),
             "wrong operator must not receive the post-wait notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_for_each_cursor_is_rejected_before_notification() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("legacy_for_each_cursor_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "resolved",
+                vec![
+                    WorkflowStep::for_each(
+                        "operators",
+                        vec![
+                            WorkflowStep::wait(
+                                "operator_accept",
+                                std::time::Duration::from_secs(3600),
+                            ),
+                            WorkflowStep::notify(ChannelKind::WhatsApp, "accepted", "item.phone"),
+                        ],
+                    ),
+                    WorkflowStep::transition("resolved"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-legacy-for-each-cursor", "active");
+        ctx.set(
+            "operators",
+            serde_json::json!([
+                {"name": "Captain A", "phone": "+628111"},
+                {"name": "Captain B", "phone": "+628222"}
+            ]),
+        );
+        ctx.set_cursor(WorkflowCursor {
+            state: "active".to_string(),
+            frames: vec![
+                WorkflowCursorFrame::Steps { index: 0 },
+                WorkflowCursorFrame::ForEach {
+                    item_index: 1,
+                    index: 1,
+                },
+            ],
+            wait: Some(WorkflowPendingWait {
+                event: "operator_accept".to_string(),
+                deadline_at: Utc::now() + chrono::Duration::hours(1),
+                on_timeout: vec![],
+            }),
+        });
+        executor.save_state(&ctx).await.unwrap();
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-legacy-for-each-cursor",
+            serde_json::json!({"event": "operator_accept"}),
+        )
+        .await
+        .expect_err("legacy for_each cursors must fail closed");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"), "got: {msg}");
+                assert!(msg.contains("legacy for_each cursor"), "got: {msg}");
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "legacy cursor must not resume onto an unverified loop item"
         );
     }
 
