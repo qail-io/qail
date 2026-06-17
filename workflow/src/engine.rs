@@ -2439,16 +2439,16 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
         let wait = cursor.wait.clone().ok_or_else(|| {
             WorkflowError::Other("Workflow is not waiting for a timeout".to_string())
         })?;
-        if now < wait.deadline_at {
-            return Err(WorkflowError::Other(format!(
-                "Workflow wait for event '{}' has not timed out",
-                wait.event
-            )));
-        }
         (wait, Vec::new())
     };
 
     ensure_wait_event_name(&wait.event)?;
+    if now < wait.deadline_at {
+        return Err(WorkflowError::Other(format!(
+            "Workflow wait for event '{}' has not timed out",
+            wait.event
+        )));
+    }
     if wait.on_timeout.is_empty() {
         return Err(WorkflowError::Timeout { event: wait.event });
     }
@@ -5991,6 +5991,66 @@ mod tests {
         assert!(
             executor.notifications.lock().unwrap().is_empty(),
             "persisted timeout fallback validation must run before notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_timeout_fallback_before_deadline_does_not_execute() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("future_persisted_timeout_fallback")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::wait_or(
+                    "payment.success",
+                    std::time::Duration::from_secs(3600),
+                    vec![
+                        WorkflowStep::notify(
+                            ChannelKind::Email,
+                            "payment_timeout",
+                            "customer.email",
+                        ),
+                        WorkflowStep::transition("timed_out"),
+                    ],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-future-persisted-timeout", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let wait = WorkflowPendingWait {
+            event: "payment.success".to_string(),
+            deadline_at: Utc::now() + chrono::Duration::hours(1),
+            on_timeout: vec![
+                WorkflowStep::notify(ChannelKind::Email, "payment_timeout", "customer.email"),
+                WorkflowStep::transition("timed_out"),
+            ],
+        };
+        ctx.set_cursor(WorkflowCursor {
+            state: "active".to_string(),
+            frames: vec![WorkflowCursorFrame::Steps { index: 1 }],
+            wait: Some(wait.clone()),
+        });
+        set_timeout_fallback(&mut ctx, &wait).unwrap();
+        executor.save_state(&ctx).await.unwrap();
+
+        let err = timeout_workflow(&executor, &wf, "wf-future-persisted-timeout")
+            .await
+            .expect_err("persisted timeout fallback must still respect the wait deadline");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("has not timed out"), "got: {msg}");
+            }
+            other => panic!("expected not-timed-out error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "future timeout fallback metadata must fail before notification"
         );
     }
 
