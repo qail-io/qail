@@ -38,6 +38,23 @@ pub(crate) fn deadline_after(
         .ok_or_else(|| WorkflowError::Other("Workflow Postgres deadline overflowed".to_string()))
 }
 
+pub(crate) fn is_stale_timestamp(
+    value: &str,
+    now: DateTime<Utc>,
+    ttl: Duration,
+    name: &str,
+) -> Result<bool, WorkflowError> {
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map_err(|err| {
+            WorkflowError::Other(format!(
+                "Workflow Postgres timestamp '{name}' is invalid: {err}"
+            ))
+        })?
+        .with_timezone(&Utc);
+    let stale_at = deadline_after(parsed, ttl)?;
+    Ok(stale_at <= now)
+}
+
 pub(crate) fn operation_kind_text(kind: &WorkflowOperationKind) -> String {
     match kind {
         WorkflowOperationKind::Run => {
@@ -135,6 +152,26 @@ mod tests {
         );
 
         assert!(earlier < later);
+    }
+
+    #[test]
+    fn stale_timestamp_uses_explicit_clock_and_ttl() {
+        let started = "2026-01-01T00:00:00.000000Z";
+        let before_ttl = DateTime::parse_from_rfc3339("2026-01-01T00:59:59Z")
+            .unwrap()
+            .into();
+        let after_ttl = DateTime::parse_from_rfc3339("2026-01-01T01:00:00Z")
+            .unwrap()
+            .into();
+
+        assert!(
+            !is_stale_timestamp(started, before_ttl, Duration::from_secs(3600), "updated_at")
+                .unwrap()
+        );
+        assert!(
+            is_stale_timestamp(started, after_ttl, Duration::from_secs(3600), "updated_at")
+                .unwrap()
+        );
     }
 
     #[test]

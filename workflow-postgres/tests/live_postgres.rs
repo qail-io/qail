@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
+use qail_core::ast::Qail;
+use qail_pg::PgDriver;
 use qail_workflow::{
     ChannelKind, ChargeRequest, ChargeResponse, PaymentKind, WorkflowContext, WorkflowCursor,
     WorkflowCursorFrame, WorkflowError, WorkflowExecutor, WorkflowLease, WorkflowOperation,
@@ -16,6 +18,38 @@ fn assert_error_contains<T: std::fmt::Debug>(result: Result<T, WorkflowError>, e
         err.to_string().contains(expected),
         "expected error to contain {expected:?}, got {err}"
     );
+}
+
+fn live_timestamp(ts: chrono::DateTime<Utc>) -> String {
+    ts.to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+async fn set_operation_updated_at(
+    database_url: &str,
+    tables: &PgWorkflowTables,
+    workflow_id: &str,
+    idempotency_key: &str,
+    updated_at: &str,
+) {
+    let mut driver = PgDriver::connect_url(database_url).await.unwrap();
+    let cmd = Qail::set(&tables.operations)
+        .set_value("updated_at", updated_at.to_string())
+        .eq("workflow_id", workflow_id)
+        .eq("idempotency_key", idempotency_key);
+    assert_eq!(driver.execute(&cmd).await.unwrap(), 1);
+}
+
+async fn set_side_effect_updated_at(
+    database_url: &str,
+    tables: &PgWorkflowTables,
+    operation_id: &str,
+    updated_at: &str,
+) {
+    let mut driver = PgDriver::connect_url(database_url).await.unwrap();
+    let cmd = Qail::set(&tables.side_effects)
+        .set_value("updated_at", updated_at.to_string())
+        .eq("operation_id", operation_id);
+    assert_eq!(driver.execute(&cmd).await.unwrap(), 1);
 }
 
 #[async_trait]
@@ -77,7 +111,7 @@ async fn live_postgres_storage_runtime_guarantees() {
     let store = PgWorkflowStore::connect_url(&database_url)
         .await
         .unwrap()
-        .with_tables(tables);
+        .with_tables(tables.clone());
     store.install_schema().await.unwrap();
     let executor = PgWorkflowExecutor::new(NoopExecutor, store);
 
@@ -138,6 +172,29 @@ async fn live_postgres_storage_runtime_guarantees() {
             .await
             .unwrap(),
         WorkflowOperationStatus::InProgress
+    );
+    let stale_started_at = live_timestamp(Utc::now() - chrono::Duration::hours(2));
+    set_operation_updated_at(
+        &database_url,
+        &tables,
+        "wf-live",
+        "event-1",
+        &stale_started_at,
+    )
+    .await;
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_operation(&executor, &operation)
+            .await
+            .unwrap(),
+        WorkflowOperationStatus::Started,
+        "stale started operations must be retryable after a worker crash"
+    );
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_operation(&executor, &operation)
+            .await
+            .unwrap(),
+        WorkflowOperationStatus::InProgress,
+        "retry refresh must restore the in-progress guard"
     );
     WorkflowExecutor::complete_workflow_operation(&executor, &operation, "confirmed")
         .await
@@ -302,6 +359,41 @@ async fn live_postgres_storage_runtime_guarantees() {
             .await,
         "was not found in started state",
     );
+
+    let stale_side_effect = WorkflowSideEffect {
+        workflow_id: "wf-live".to_string(),
+        state: "awaiting_vendor".to_string(),
+        step_path: "steps[3]".to_string(),
+        kind: WorkflowSideEffectKind::Notify,
+        operation_id: "notify-stale-live".to_string(),
+    };
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &stale_side_effect)
+            .await
+            .unwrap(),
+        WorkflowSideEffectStatus::Execute
+    );
+    assert_error_contains(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &stale_side_effect).await,
+        "already in progress",
+    );
+    set_side_effect_updated_at(
+        &database_url,
+        &tables,
+        "notify-stale-live",
+        &stale_started_at,
+    )
+    .await;
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &stale_side_effect)
+            .await
+            .unwrap(),
+        WorkflowSideEffectStatus::Execute,
+        "stale started side effects must be retryable after a worker crash"
+    );
+    WorkflowExecutor::complete_workflow_side_effect(&executor, &stale_side_effect, None)
+        .await
+        .unwrap();
 
     let mut timed_out = WorkflowContext::new("wf-timeout-live", "awaiting_vendor");
     timed_out.definition_name = Some("booking_recovery".to_string());
