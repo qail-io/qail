@@ -28,9 +28,9 @@ native access-policy enforcement with direct PostgreSQL execution via
 
 ```toml
 [dependencies]
-qail-gateway = "1.3.2"
-qail-core = "1.3.2"
-qail-pg = "1.3.2"
+qail-gateway = "1.3.3"
+qail-core = "1.3.3"
+qail-pg = "1.3.3"
 ```
 
 ## Quick Start

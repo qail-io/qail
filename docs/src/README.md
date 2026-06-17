@@ -22,7 +22,7 @@ driver, gateway, schema, workflow, or vector workloads.
 
 ## Latest Updates (June 2026)
 
-- QAIL is now on the `v1.3.2` stable line across the Rust workspace crates and CLI.
+- QAIL is now on the `v1.3.3` stable line across the Rust workspace crates and CLI.
 - The public API is the AST/DSL path: `Qail::get/add/set/del`, typed expressions, relation helpers, RLS contexts, and driver/pool execution.
 - Compatibility aliases that hid fallible behavior were removed: use `with_rls(&ctx)?` and `join_on(...)?` directly.
 - Legacy raw SQL builder APIs remain out of the normal runtime path; use AST-native commands and session AST helpers instead.
@@ -55,7 +55,7 @@ Some search engines still surface old QAIL pages showing symbolic forms such as 
 
 Those pages are from historical pre-1.0 releases and are not the current API guidance.
 
-Current QAIL `1.3.2` application code should use the native AST/DSL path:
+Current QAIL `1.3.3` application code should use the native AST/DSL path:
 
 ```rust
 let query = Qail::get("users")

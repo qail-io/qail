@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-06-18
+
+### Added
+- **PostgreSQL workflow storage backend:** Added `qail-workflow-postgres` as the Flow Ledger storage layer for persisted workflow state, leases, operation idempotency, side-effect replay, and timeout due-row discovery.
+- **Workflow production documentation:** Expanded public crate and mdBook docs with the platform map, native access-policy semantics, tenant-first RLS boundaries, and Flow Engine/Flow Ledger operational guidance.
+
+### Fixed
+- **Workflow ledger invariants:** Hardened Postgres-backed workflow storage around stale started ledgers, failed side effects, timeout claim clocks, scheduler-scoped timeout operations, lease owner fencing, and timeout fallback checkpoint scheduling.
+- **Side-effect replay identity:** Scoped workflow side-effect operation IDs by state generation so workflows that revisit the same state/step path do not collide with completed work from an older generation.
+- **Timeout fallback execution:** Timeout fallback replay now respects deadline budgeting instead of overrunning caller-provided timeout windows.
+
+### Changed
+- **Repository hygiene:** Removed stale tracked local artifacts from the repository root, including the placeholder `qail.toml`, misplaced Grafana `log` dump, and ignored `.cargo` linker override. Refreshed `PERFORMANCE.md` as a current benchmark entry point instead of stale `v0.14.x` numbers.
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.3`.
+
 ## [1.3.2] - 2026-06-12
 
 ### Fixed
