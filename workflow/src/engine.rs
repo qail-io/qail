@@ -609,26 +609,28 @@ impl RuntimeGuard {
         executor: &E,
         result: &Result<String, WorkflowError>,
     ) -> Result<(), WorkflowError> {
-        if let Some(operation) = &self.operation {
-            match result {
-                Ok(state) => {
-                    executor
-                        .complete_workflow_operation(operation, state)
-                        .await?;
-                }
+        let operation_result = match &self.operation {
+            Some(operation) => match result {
+                Ok(state) => executor.complete_workflow_operation(operation, state).await,
                 Err(err) => {
                     executor
                         .fail_workflow_operation(operation, &err.to_string())
-                        .await?;
+                        .await
                 }
-            }
-        }
+            },
+            None => Ok(()),
+        };
 
-        if let Some(lease) = &self.lease {
-            executor.release_workflow_lease(lease).await?;
-        }
+        let release_result = match &self.lease {
+            Some(lease) => executor.release_workflow_lease(lease).await,
+            None => Ok(()),
+        };
 
-        Ok(())
+        match (operation_result, release_result) {
+            (Err(err), _) => Err(err),
+            (Ok(()), Err(err)) => Err(err),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 }
 
@@ -2387,6 +2389,8 @@ mod tests {
         workflow_operations:
             std::sync::Mutex<std::collections::HashMap<String, WorkflowOperationStatus>>,
         workflow_operation_begin_failures: std::sync::Mutex<std::collections::HashSet<String>>,
+        workflow_operation_complete_failures: std::sync::Mutex<std::collections::HashSet<String>>,
+        workflow_operation_fail_failures: std::sync::Mutex<std::collections::HashSet<String>>,
         completed_workflow_operations: std::sync::Mutex<Vec<(String, String)>>,
         failed_workflow_operations: std::sync::Mutex<Vec<(String, String)>>,
         due_timeout_workflow_ids: std::sync::Mutex<Vec<String>>,
@@ -2407,6 +2411,12 @@ mod tests {
                 released_leases: std::sync::Mutex::new(Vec::new()),
                 workflow_operations: std::sync::Mutex::new(std::collections::HashMap::new()),
                 workflow_operation_begin_failures: std::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                ),
+                workflow_operation_complete_failures: std::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                ),
+                workflow_operation_fail_failures: std::sync::Mutex::new(
                     std::collections::HashSet::new(),
                 ),
                 completed_workflow_operations: std::sync::Mutex::new(Vec::new()),
@@ -2438,6 +2448,20 @@ mod tests {
 
         fn fail_workflow_operation_begin(&self, idempotency_key: impl Into<String>) {
             self.workflow_operation_begin_failures
+                .lock()
+                .unwrap()
+                .insert(idempotency_key.into());
+        }
+
+        fn fail_workflow_operation_complete(&self, idempotency_key: impl Into<String>) {
+            self.workflow_operation_complete_failures
+                .lock()
+                .unwrap()
+                .insert(idempotency_key.into());
+        }
+
+        fn fail_workflow_operation_fail(&self, idempotency_key: impl Into<String>) {
+            self.workflow_operation_fail_failures
                 .lock()
                 .unwrap()
                 .insert(idempotency_key.into());
@@ -2577,6 +2601,16 @@ mod tests {
             operation: &WorkflowOperation,
             state: &str,
         ) -> Result<(), WorkflowError> {
+            if self
+                .workflow_operation_complete_failures
+                .lock()
+                .unwrap()
+                .contains(&operation.idempotency_key)
+            {
+                return Err(WorkflowError::Other(
+                    "forced operation complete failure".to_string(),
+                ));
+            }
             self.completed_workflow_operations
                 .lock()
                 .unwrap()
@@ -2589,6 +2623,16 @@ mod tests {
             operation: &WorkflowOperation,
             error: &str,
         ) -> Result<(), WorkflowError> {
+            if self
+                .workflow_operation_fail_failures
+                .lock()
+                .unwrap()
+                .contains(&operation.idempotency_key)
+            {
+                return Err(WorkflowError::Other(
+                    "forced operation fail failure".to_string(),
+                ));
+            }
             self.failed_workflow_operations
                 .lock()
                 .unwrap()
@@ -3169,6 +3213,80 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn operation_complete_failure_still_releases_lease() {
+        let executor = MockExecutor::new();
+        executor.fail_workflow_operation_complete("complete-fails-1");
+
+        let wf = WorkflowDefinition::new("complete_failure_release")
+            .initial_state("active")
+            .transition("active", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-complete-failure-release", "active");
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("complete-fails-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("operation completion failure should be returned");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("forced operation complete failure"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected completion failure, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "done");
+        assert_eq!(executor.acquired_leases.lock().unwrap().len(), 1);
+        assert_eq!(executor.released_leases.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn operation_fail_failure_still_releases_lease() {
+        let executor = MockExecutor::new();
+        executor.fail_workflow_operation_fail("fail-fails-1");
+
+        let wf = WorkflowDefinition::new("fail_failure_release")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "missing_recipient", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-fail-failure-release", "active");
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("fail-fails-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("original workflow error should be returned");
+
+        match err {
+            WorkflowError::MissingContextKey(key) => {
+                assert_eq!(key, "customer.email");
+            }
+            other => panic!("expected original workflow error, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "active");
+        assert_eq!(executor.acquired_leases.lock().unwrap().len(), 1);
+        assert_eq!(executor.released_leases.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
