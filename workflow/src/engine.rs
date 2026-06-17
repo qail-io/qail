@@ -549,9 +549,6 @@ impl RuntimeGuard {
         let operation = match options.idempotency_key {
             Some(idempotency_key) => {
                 if idempotency_key.trim().is_empty() {
-                    if let Some(lease) = &lease {
-                        executor.release_workflow_lease(lease).await?;
-                    }
                     return Err(WorkflowError::Other(
                         "Workflow idempotency key must not be empty".to_string(),
                     ));
@@ -564,12 +561,7 @@ impl RuntimeGuard {
                 };
                 let operation_status = match executor.begin_workflow_operation(&operation).await {
                     Ok(status) => status,
-                    Err(err) => {
-                        if let Some(lease) = &lease {
-                            executor.release_workflow_lease(lease).await?;
-                        }
-                        return Err(err);
-                    }
+                    Err(err) => return Err(err),
                 };
                 match operation_status {
                     WorkflowOperationStatus::Started => Some(operation),
@@ -2347,6 +2339,7 @@ mod tests {
         released_leases: std::sync::Mutex<Vec<WorkflowLease>>,
         workflow_operations:
             std::sync::Mutex<std::collections::HashMap<String, WorkflowOperationStatus>>,
+        workflow_operation_begin_failures: std::sync::Mutex<std::collections::HashSet<String>>,
         completed_workflow_operations: std::sync::Mutex<Vec<(String, String)>>,
         failed_workflow_operations: std::sync::Mutex<Vec<(String, String)>>,
         due_timeout_workflow_ids: std::sync::Mutex<Vec<String>>,
@@ -2366,6 +2359,9 @@ mod tests {
                 acquired_leases: std::sync::Mutex::new(Vec::new()),
                 released_leases: std::sync::Mutex::new(Vec::new()),
                 workflow_operations: std::sync::Mutex::new(std::collections::HashMap::new()),
+                workflow_operation_begin_failures: std::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                ),
                 completed_workflow_operations: std::sync::Mutex::new(Vec::new()),
                 failed_workflow_operations: std::sync::Mutex::new(Vec::new()),
                 due_timeout_workflow_ids: std::sync::Mutex::new(Vec::new()),
@@ -2391,6 +2387,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(idempotency_key.into(), status);
+        }
+
+        fn fail_workflow_operation_begin(&self, idempotency_key: impl Into<String>) {
+            self.workflow_operation_begin_failures
+                .lock()
+                .unwrap()
+                .insert(idempotency_key.into());
         }
 
         fn skip_notify_side_effects(&self) {
@@ -2503,6 +2506,16 @@ mod tests {
             &self,
             operation: &WorkflowOperation,
         ) -> Result<WorkflowOperationStatus, WorkflowError> {
+            if self
+                .workflow_operation_begin_failures
+                .lock()
+                .unwrap()
+                .contains(&operation.idempotency_key)
+            {
+                return Err(WorkflowError::Other(
+                    "forced operation begin failure".to_string(),
+                ));
+            }
             Ok(self
                 .workflow_operations
                 .lock()
@@ -2887,6 +2900,72 @@ mod tests {
                 "Workflow 'wf-started-lease-rejected' is already locked".to_string()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn empty_idempotency_key_does_not_release_unacquired_lease() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_idempotency_key")
+            .initial_state("active")
+            .transition("active", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-empty-idempotency", "active");
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key(" ")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("empty idempotency key must fail before lease acquisition");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("idempotency key must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected idempotency validation error, got {other:?}"),
+        }
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert_eq!(ctx.current_state, "active");
+    }
+
+    #[tokio::test]
+    async fn operation_begin_failure_does_not_release_unacquired_lease() {
+        let executor = MockExecutor::new();
+        executor.fail_workflow_operation_begin("begin-fails-1");
+
+        let wf = WorkflowDefinition::new("operation_begin_failure")
+            .initial_state("active")
+            .transition("active", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-begin-failure", "active");
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("begin-fails-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("operation begin failure must happen before lease acquisition");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("forced operation begin failure"), "got: {msg}");
+            }
+            other => panic!("expected operation begin error, got {other:?}"),
+        }
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert_eq!(ctx.current_state, "active");
     }
 
     #[tokio::test]
