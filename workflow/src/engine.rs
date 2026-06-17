@@ -2279,10 +2279,17 @@ fn timeout_options_for_workflow(
     let mut run_options = options.clone();
     run_options.idempotency_key = match &options.idempotency_key {
         Some(prefix) if prefix.trim().is_empty() => Some(prefix.clone()),
-        Some(prefix) => Some(format!("{prefix}:{workflow_id}")),
-        None => Some(format!("timeout:{}:{workflow_id}", definition.name)),
+        Some(prefix) => Some(timeout_operation_idempotency_key(prefix, workflow_id)),
+        None => Some(timeout_operation_idempotency_key(
+            &definition.name,
+            workflow_id,
+        )),
     };
     run_options
+}
+
+fn timeout_operation_idempotency_key(scope: &str, workflow_id: &str) -> String {
+    serde_json::json!(["qail-workflow-timeout", 1, scope, workflow_id]).to_string()
 }
 
 async fn timeout_workflow_inner<E: WorkflowExecutor>(
@@ -5794,7 +5801,7 @@ mod tests {
                 .unwrap()
                 .as_slice(),
             &[(
-                "timeout:wait_timeout_drain:wf-timeout-drain".to_string(),
+                timeout_operation_idempotency_key("wait_timeout_drain", "wf-timeout-drain"),
                 "timed_out".to_string(),
             )]
         );
@@ -5809,16 +5816,29 @@ mod tests {
 
         let first = timeout_options_for_workflow(&options, &wf, "wf-a");
         let second = timeout_options_for_workflow(&options, &wf, "wf-b");
+        let first_key = first.idempotency_key.clone();
+        let second_key = second.idempotency_key.clone();
 
         assert_eq!(
-            first.idempotency_key.as_deref(),
-            Some("batch-20260617:wf-a")
+            first_key,
+            Some(timeout_operation_idempotency_key("batch-20260617", "wf-a"))
         );
         assert_eq!(
-            second.idempotency_key.as_deref(),
-            Some("batch-20260617:wf-b")
+            second_key,
+            Some(timeout_operation_idempotency_key("batch-20260617", "wf-b"))
         );
         assert_ne!(first.idempotency_key, second.idempotency_key);
+    }
+
+    #[test]
+    fn timeout_batch_idempotency_key_does_not_collide_on_delimiters() {
+        let first = timeout_operation_idempotency_key("tenant:batch", "wf-a");
+        let second = timeout_operation_idempotency_key("tenant", "batch:wf-a");
+
+        assert_ne!(
+            first, second,
+            "timeout operation idempotency keys must not collide when fields contain delimiters"
+        );
     }
 
     #[tokio::test]
