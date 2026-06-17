@@ -1151,6 +1151,11 @@ async fn checkpoint_cursor<E: WorkflowExecutor>(
     if !timeout_fallback {
         clear_timeout_fallback(ctx);
     }
+    let wait = if timeout_fallback && wait.is_none() {
+        timeout_fallback_from_context(ctx)?
+    } else {
+        wait
+    };
     if ctx.current_state == state {
         ctx.set_cursor(WorkflowCursor {
             state: state.to_string(),
@@ -2364,9 +2369,11 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
         ));
     }
     let timeout_fallback = timeout_fallback_from_context(&ctx)?;
-    if cursor.wait.is_some() && timeout_fallback.is_some() {
+    if let (Some(cursor_wait), Some(timeout)) = (&cursor.wait, &timeout_fallback)
+        && cursor_wait != timeout
+    {
         return Err(invalid_cursor(
-            "timeout cursor cannot also be waiting for an event",
+            "timeout cursor wait metadata does not match timeout fallback metadata",
         ));
     }
 
@@ -6213,7 +6220,12 @@ mod tests {
             .expect("timeout checkpoint should be saved after notification");
         let cursor = saved.cursor.as_ref().expect("timeout checkpoint cursor");
         assert_eq!(cursor.frames, vec![WorkflowCursorFrame::Steps { index: 1 }]);
-        assert!(cursor.wait.is_none());
+        let wait = cursor
+            .wait
+            .as_ref()
+            .expect("timeout fallback checkpoint must remain scheduler-visible");
+        assert_eq!(wait.event, "payment.success");
+        assert_eq!(wait.on_timeout.len(), 3);
         assert!(
             saved.get(TIMEOUT_FALLBACK_KEY).is_some(),
             "timeout fallback cursor must retain internal on_timeout metadata"

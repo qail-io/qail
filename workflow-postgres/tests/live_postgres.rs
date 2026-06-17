@@ -4,9 +4,10 @@ use qail_core::ast::Qail;
 use qail_pg::PgDriver;
 use qail_workflow::{
     ChannelKind, ChargeRequest, ChargeResponse, PaymentKind, WorkflowContext, WorkflowCursor,
-    WorkflowCursorFrame, WorkflowError, WorkflowExecutor, WorkflowLease, WorkflowOperation,
-    WorkflowOperationKind, WorkflowOperationStatus, WorkflowPendingWait, WorkflowSideEffect,
-    WorkflowSideEffectKind, WorkflowSideEffectStatus, WorkflowStep,
+    WorkflowCursorFrame, WorkflowDefinition, WorkflowError, WorkflowExecutor, WorkflowLease,
+    WorkflowOperation, WorkflowOperationKind, WorkflowOperationStatus, WorkflowPendingWait,
+    WorkflowRunOptions, WorkflowSideEffect, WorkflowSideEffectKind, WorkflowSideEffectStatus,
+    WorkflowStep, timeout_due_workflows,
 };
 use qail_workflow_postgres::{PgWorkflowExecutor, PgWorkflowStore, PgWorkflowTables};
 
@@ -461,6 +462,69 @@ async fn live_postgres_storage_runtime_guarantees() {
     assert!(
         future_claimed_again.is_empty(),
         "claim TTL must be relative to the scheduler timestamp used for due selection"
+    );
+
+    let failing_query = qail_core::wire::encode_cmd_text(&Qail::get("bookings").limit(1));
+    let timeout_checkpoint_workflow = WorkflowDefinition::new("timeout_checkpoint_live")
+        .initial_state("active")
+        .transition(
+            "active",
+            "done",
+            vec![WorkflowStep::wait_or(
+                "vendor.accepted",
+                std::time::Duration::from_secs(0),
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "vendor_timeout", "customer.email"),
+                    WorkflowStep::Query {
+                        cmd_json: failing_query,
+                        store_as: None,
+                    },
+                    WorkflowStep::transition("expired"),
+                ],
+            )],
+        );
+    let mut timeout_checkpoint = WorkflowContext::new("wf-timeout-checkpoint-live", "active");
+    timeout_checkpoint.set(
+        "customer",
+        serde_json::json!({"email": "guest@example.com"}),
+    );
+    qail_workflow::run_workflow(
+        &executor,
+        &timeout_checkpoint_workflow,
+        &mut timeout_checkpoint,
+    )
+    .await
+    .unwrap();
+    let outcomes = timeout_due_workflows(
+        &executor,
+        &timeout_checkpoint_workflow,
+        Utc::now() + chrono::Duration::seconds(1),
+        10,
+        WorkflowRunOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].workflow_id, "wf-timeout-checkpoint-live");
+    assert!(
+        outcomes[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("live storage test does not execute app queries")),
+        "timeout fallback query failure must be recorded, got {outcomes:?}"
+    );
+    let due_after_checkpoint = WorkflowExecutor::load_due_workflow_timeouts(
+        &executor,
+        "timeout_checkpoint_live",
+        Utc::now() + chrono::Duration::seconds(2),
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        due_after_checkpoint,
+        vec!["wf-timeout-checkpoint-live".to_string()],
+        "timeout fallback checkpoints must remain visible to the due-timeout scheduler"
     );
 
     let zero_ttl_executor = PgWorkflowExecutor::new(
