@@ -761,7 +761,13 @@ fn ensure_user_context_key(key: &str, usage: &str) -> Result<(), WorkflowError> 
 }
 
 fn ensure_context_lookup_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
-    ensure_definition_text(key, usage)
+    ensure_definition_text(key, usage)?;
+    if key.split('.').any(str::is_empty) {
+        return Err(WorkflowError::Other(format!(
+            "{usage} must not contain empty dot-notation path segments"
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_optional_user_context_key(
@@ -3934,6 +3940,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_lookup_key_fails_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("malformed_lookup_key_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "before_bad_lookup", "ops.email"),
+                    WorkflowStep::notify(ChannelKind::Email, "bad_lookup", "customer."),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-malformed-lookup-key", "active");
+        ctx.set("ops", serde_json::json!({"email": "ops@example.com"}));
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("malformed lookup key must fail before first notification");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("empty dot-notation path segments"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected malformed lookup key error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "definition validation must fail before earlier notification side effects"
+        );
+    }
+
+    #[tokio::test]
     async fn invalid_charge_amount_key_fails_before_provider_call() {
         let executor = MockExecutor::new();
 
@@ -3967,6 +4015,44 @@ mod tests {
                 );
             }
             other => panic!("expected charge amount key validation error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_charge_lookup_key_fails_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("malformed_charge_lookup_key")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge(
+                    PaymentKind::Xendit,
+                    "order..total",
+                    "order.id",
+                    Some("charge"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-malformed-charge-lookup", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({"id": "booking-1", "total": 125_000}),
+        );
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("malformed charge lookup key must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("empty dot-notation path segments"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected malformed lookup key error, got {other:?}"),
         }
         assert!(executor.charges.lock().unwrap().is_empty());
     }
