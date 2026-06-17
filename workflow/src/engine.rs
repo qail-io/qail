@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use std::cmp::Ordering;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
 
 use crate::channel::ChannelKind;
@@ -2305,7 +2305,7 @@ pub async fn timeout_due_workflows<E: WorkflowExecutor>(
     let mut outcomes = Vec::with_capacity(workflow_ids.len().min(limit));
 
     for workflow_id in workflow_ids.into_iter().take(limit) {
-        let run_options = timeout_options_for_workflow(&options, definition, &workflow_id);
+        let run_options = timeout_options_for_workflow(&options, definition, &workflow_id, now);
         let outcome = match timeout_workflow_with_options_at(
             executor,
             definition,
@@ -2336,21 +2336,30 @@ fn timeout_options_for_workflow(
     options: &WorkflowRunOptions,
     definition: &WorkflowDefinition,
     workflow_id: &str,
+    now: DateTime<Utc>,
 ) -> WorkflowRunOptions {
     let mut run_options = options.clone();
     run_options.idempotency_key = match &options.idempotency_key {
         Some(prefix) if prefix.trim().is_empty() => Some(prefix.clone()),
-        Some(prefix) => Some(timeout_operation_idempotency_key(prefix, workflow_id)),
+        Some(prefix) => Some(timeout_operation_idempotency_key(prefix, workflow_id, now)),
         None => Some(timeout_operation_idempotency_key(
             &definition.name,
             workflow_id,
+            now,
         )),
     };
     run_options
 }
 
-fn timeout_operation_idempotency_key(scope: &str, workflow_id: &str) -> String {
-    serde_json::json!(["qail-workflow-timeout", 1, scope, workflow_id]).to_string()
+fn timeout_operation_idempotency_key(scope: &str, workflow_id: &str, now: DateTime<Utc>) -> String {
+    serde_json::json!([
+        "qail-workflow-timeout",
+        2,
+        scope,
+        workflow_id,
+        now.to_rfc3339_opts(SecondsFormat::Micros, true)
+    ])
+    .to_string()
 }
 
 async fn timeout_workflow_inner<E: WorkflowExecutor>(
@@ -5987,15 +5996,11 @@ mod tests {
         assert_eq!(result, "active");
 
         executor.set_due_timeout_workflow_ids(vec!["wf-timeout-drain"]);
-        let outcomes = timeout_due_workflows(
-            &executor,
-            &wf,
-            Utc::now(),
-            10,
-            WorkflowRunOptions::default(),
-        )
-        .await
-        .unwrap();
+        let now = Utc::now();
+        let outcomes =
+            timeout_due_workflows(&executor, &wf, now, 10, WorkflowRunOptions::default())
+                .await
+                .unwrap();
 
         assert_eq!(
             outcomes,
@@ -6012,7 +6017,7 @@ mod tests {
                 .unwrap()
                 .as_slice(),
             &[(
-                timeout_operation_idempotency_key("wait_timeout_drain", "wf-timeout-drain"),
+                timeout_operation_idempotency_key("wait_timeout_drain", "wf-timeout-drain", now),
                 "timed_out".to_string(),
             )]
         );
@@ -6065,31 +6070,61 @@ mod tests {
             .initial_state("active")
             .transition("active", "done", vec![]);
         let options = WorkflowRunOptions::default().with_idempotency_key("batch-20260617");
+        let now = DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
 
-        let first = timeout_options_for_workflow(&options, &wf, "wf-a");
-        let second = timeout_options_for_workflow(&options, &wf, "wf-b");
+        let first = timeout_options_for_workflow(&options, &wf, "wf-a", now);
+        let second = timeout_options_for_workflow(&options, &wf, "wf-b", now);
         let first_key = first.idempotency_key.clone();
         let second_key = second.idempotency_key.clone();
 
         assert_eq!(
             first_key,
-            Some(timeout_operation_idempotency_key("batch-20260617", "wf-a"))
+            Some(timeout_operation_idempotency_key(
+                "batch-20260617",
+                "wf-a",
+                now
+            ))
         );
         assert_eq!(
             second_key,
-            Some(timeout_operation_idempotency_key("batch-20260617", "wf-b"))
+            Some(timeout_operation_idempotency_key(
+                "batch-20260617",
+                "wf-b",
+                now
+            ))
         );
         assert_ne!(first.idempotency_key, second.idempotency_key);
     }
 
     #[test]
     fn timeout_batch_idempotency_key_does_not_collide_on_delimiters() {
-        let first = timeout_operation_idempotency_key("tenant:batch", "wf-a");
-        let second = timeout_operation_idempotency_key("tenant", "batch:wf-a");
+        let now = DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first = timeout_operation_idempotency_key("tenant:batch", "wf-a", now);
+        let second = timeout_operation_idempotency_key("tenant", "batch:wf-a", now);
 
         assert_ne!(
             first, second,
             "timeout operation idempotency keys must not collide when fields contain delimiters"
+        );
+    }
+
+    #[test]
+    fn timeout_batch_idempotency_key_changes_between_scheduler_runs() {
+        let first_run = DateTime::parse_from_rfc3339("2026-06-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let second_run = DateTime::parse_from_rfc3339("2026-06-17T12:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_ne!(
+            timeout_operation_idempotency_key("batch", "wf-a", first_run),
+            timeout_operation_idempotency_key("batch", "wf-a", second_run),
+            "later timeout attempts for the same workflow must not collide with an old completed timeout operation"
         );
     }
 
