@@ -14,6 +14,11 @@ use crate::context::{
 };
 use crate::payment::{ChargeRequest, ChargeResponse, Currency, PaymentKind};
 use crate::registry::{StateTransition, WorkflowDefinition};
+use crate::runtime::{
+    WorkflowLease, WorkflowOperation, WorkflowOperationKind, WorkflowOperationStatus,
+    WorkflowRunOptions, WorkflowSideEffect, WorkflowSideEffectKind, WorkflowSideEffectStatus,
+    WorkflowTimeoutOutcome,
+};
 use crate::step::WorkflowStep;
 
 const WORKFLOW_QUERY_WIRE_MAGIC: &str = "QAIL-CMD/1\n";
@@ -262,6 +267,152 @@ pub trait WorkflowExecutor: Send + Sync {
         provider: &PaymentKind,
         request: ChargeRequest,
     ) -> Result<ChargeResponse, WorkflowError>;
+
+    /// Acquire a per-workflow lease before executing a workflow operation.
+    ///
+    /// The default implementation allows execution. Production executors should
+    /// back this with a DB/advisory lock or lease row keyed by `workflow_id`.
+    async fn acquire_workflow_lease(&self, _lease: &WorkflowLease) -> Result<bool, WorkflowError> {
+        Ok(true)
+    }
+
+    /// Release a per-workflow lease after a workflow operation finishes.
+    async fn release_workflow_lease(&self, _lease: &WorkflowLease) -> Result<(), WorkflowError> {
+        Ok(())
+    }
+
+    /// Begin or replay-detect an idempotent workflow operation.
+    ///
+    /// Production executors should key this by `(workflow_id, idempotency_key)`.
+    async fn begin_workflow_operation(
+        &self,
+        _operation: &WorkflowOperation,
+    ) -> Result<WorkflowOperationStatus, WorkflowError> {
+        Ok(WorkflowOperationStatus::Started)
+    }
+
+    /// Mark an idempotent workflow operation as completed.
+    async fn complete_workflow_operation(
+        &self,
+        _operation: &WorkflowOperation,
+        _state: &str,
+    ) -> Result<(), WorkflowError> {
+        Ok(())
+    }
+
+    /// Mark an idempotent workflow operation as failed.
+    async fn fail_workflow_operation(
+        &self,
+        _operation: &WorkflowOperation,
+        _error: &str,
+    ) -> Result<(), WorkflowError> {
+        Ok(())
+    }
+
+    /// Return workflow ids whose wait deadlines are due for timeout handling.
+    ///
+    /// The workflow crate does not spawn a background worker. Apps can expose
+    /// their own scheduler by implementing this hook and calling
+    /// [`timeout_due_workflows`].
+    async fn load_due_workflow_timeouts(
+        &self,
+        _workflow_name: &str,
+        _now: DateTime<Utc>,
+        _limit: usize,
+    ) -> Result<Vec<String>, WorkflowError> {
+        Ok(Vec::new())
+    }
+
+    /// Begin or replay-detect an idempotent side-effect operation.
+    async fn begin_workflow_side_effect(
+        &self,
+        _operation: &WorkflowSideEffect,
+    ) -> Result<WorkflowSideEffectStatus, WorkflowError> {
+        Ok(WorkflowSideEffectStatus::Execute)
+    }
+
+    /// Mark a side effect as completed, optionally storing its result.
+    async fn complete_workflow_side_effect(
+        &self,
+        _operation: &WorkflowSideEffect,
+        _result: Option<&Value>,
+    ) -> Result<(), WorkflowError> {
+        Ok(())
+    }
+
+    /// Execute a QAIL query with a stable workflow side-effect id.
+    async fn execute_query_once(
+        &self,
+        operation: &WorkflowSideEffect,
+        cmd_json: &str,
+    ) -> Result<Value, WorkflowError> {
+        match self.begin_workflow_side_effect(operation).await? {
+            WorkflowSideEffectStatus::Execute => {
+                let result = self.execute_query(cmd_json).await?;
+                self.complete_workflow_side_effect(operation, Some(&result))
+                    .await?;
+                Ok(result)
+            }
+            WorkflowSideEffectStatus::AlreadyCompleted { result } => result.ok_or_else(|| {
+                WorkflowError::Other(format!(
+                    "Workflow side effect '{}' completed without a stored query result",
+                    operation.operation_id
+                ))
+            }),
+        }
+    }
+
+    /// Send a notification with a stable workflow side-effect id.
+    async fn send_notification_once(
+        &self,
+        operation: &WorkflowSideEffect,
+        channel: &ChannelKind,
+        recipient: &str,
+        template: &str,
+        params: &Value,
+    ) -> Result<(), WorkflowError> {
+        match self.begin_workflow_side_effect(operation).await? {
+            WorkflowSideEffectStatus::Execute => {
+                self.send_notification(channel, recipient, template, params)
+                    .await?;
+                self.complete_workflow_side_effect(operation, None).await
+            }
+            WorkflowSideEffectStatus::AlreadyCompleted { .. } => Ok(()),
+        }
+    }
+
+    /// Create a payment charge with a stable workflow side-effect id.
+    async fn create_charge_once(
+        &self,
+        operation: &WorkflowSideEffect,
+        provider: &PaymentKind,
+        request: ChargeRequest,
+    ) -> Result<ChargeResponse, WorkflowError> {
+        match self.begin_workflow_side_effect(operation).await? {
+            WorkflowSideEffectStatus::Execute => {
+                let response = self.create_charge(provider, request).await?;
+                let response_json = serde_json::to_value(&response)
+                    .map_err(|e| WorkflowError::Other(e.to_string()))?;
+                self.complete_workflow_side_effect(operation, Some(&response_json))
+                    .await?;
+                Ok(response)
+            }
+            WorkflowSideEffectStatus::AlreadyCompleted {
+                result: Some(result),
+            } => serde_json::from_value(result).map_err(|e| {
+                WorkflowError::Other(format!(
+                    "Workflow side effect '{}' stored an invalid charge result: {e}",
+                    operation.operation_id
+                ))
+            }),
+            WorkflowSideEffectStatus::AlreadyCompleted { result: None } => {
+                Err(WorkflowError::Other(format!(
+                    "Workflow side effect '{}' completed without a stored charge result",
+                    operation.operation_id
+                )))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +425,16 @@ enum StepOutcome {
 struct StepPause {
     frames: Vec<WorkflowCursorFrame>,
     wait: WorkflowPendingWait,
+}
+
+struct RuntimeGuard {
+    lease: Option<WorkflowLease>,
+    operation: Option<WorkflowOperation>,
+}
+
+enum RuntimeEntry {
+    Active(RuntimeGuard),
+    Completed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +493,133 @@ impl<'a> StepExecutionScope<'a> {
             checkpoint_steps: self.checkpoint_steps,
             checkpoint_timeout: self.checkpoint_timeout,
         }
+    }
+}
+
+impl RuntimeGuard {
+    async fn enter<E: WorkflowExecutor>(
+        executor: &E,
+        workflow_name: &str,
+        workflow_id: &str,
+        kind: WorkflowOperationKind,
+        options: WorkflowRunOptions,
+    ) -> Result<RuntimeEntry, WorkflowError> {
+        let lease = match options.lease {
+            Some(lease_options) => {
+                if lease_options.owner.trim().is_empty() {
+                    return Err(WorkflowError::Other(
+                        "Workflow lease owner must not be empty".to_string(),
+                    ));
+                }
+                if lease_options.ttl.is_zero() {
+                    return Err(WorkflowError::Other(
+                        "Workflow lease TTL must be greater than zero".to_string(),
+                    ));
+                }
+                let lease = WorkflowLease {
+                    workflow_id: workflow_id.to_string(),
+                    owner: lease_options.owner,
+                    ttl: lease_options.ttl,
+                };
+                if !executor.acquire_workflow_lease(&lease).await? {
+                    return Err(WorkflowError::Other(format!(
+                        "Workflow '{}' is already locked",
+                        workflow_id
+                    )));
+                }
+                Some(lease)
+            }
+            None => None,
+        };
+
+        let operation = match options.idempotency_key {
+            Some(idempotency_key) => {
+                if idempotency_key.trim().is_empty() {
+                    if let Some(lease) = &lease {
+                        executor.release_workflow_lease(lease).await?;
+                    }
+                    return Err(WorkflowError::Other(
+                        "Workflow idempotency key must not be empty".to_string(),
+                    ));
+                }
+                let operation = WorkflowOperation {
+                    workflow_name: workflow_name.to_string(),
+                    workflow_id: workflow_id.to_string(),
+                    idempotency_key,
+                    kind,
+                };
+                let operation_status = match executor.begin_workflow_operation(&operation).await {
+                    Ok(status) => status,
+                    Err(err) => {
+                        if let Some(lease) = &lease {
+                            executor.release_workflow_lease(lease).await?;
+                        }
+                        return Err(err);
+                    }
+                };
+                match operation_status {
+                    WorkflowOperationStatus::Started => Some(operation),
+                    WorkflowOperationStatus::InProgress => {
+                        if let Some(lease) = &lease {
+                            executor.release_workflow_lease(lease).await?;
+                        }
+                        return Err(WorkflowError::Other(format!(
+                            "Workflow operation '{}' is already in progress",
+                            operation.idempotency_key
+                        )));
+                    }
+                    WorkflowOperationStatus::Completed { state } => {
+                        if let Some(lease) = &lease {
+                            executor.release_workflow_lease(lease).await?;
+                        }
+                        return Ok(RuntimeEntry::Completed(state));
+                    }
+                }
+            }
+            None => None,
+        };
+
+        Ok(RuntimeEntry::Active(Self { lease, operation }))
+    }
+
+    async fn finish<E: WorkflowExecutor>(
+        self,
+        executor: &E,
+        result: &Result<String, WorkflowError>,
+    ) -> Result<(), WorkflowError> {
+        if let Some(operation) = &self.operation {
+            match result {
+                Ok(state) => {
+                    executor
+                        .complete_workflow_operation(operation, state)
+                        .await?;
+                }
+                Err(err) => {
+                    executor
+                        .fail_workflow_operation(operation, &err.to_string())
+                        .await?;
+                }
+            }
+        }
+
+        if let Some(lease) = &self.lease {
+            executor.release_workflow_lease(lease).await?;
+        }
+
+        Ok(())
+    }
+}
+
+async fn finish_runtime_operation<E: WorkflowExecutor>(
+    executor: &E,
+    guard: RuntimeGuard,
+    result: Result<String, WorkflowError>,
+) -> Result<String, WorkflowError> {
+    let finish_result = guard.finish(executor, &result).await;
+    match (result, finish_result) {
+        (Ok(state), Ok(())) => Ok(state),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Ok(())) | (Err(err), Err(_)) => Err(err),
     }
 }
 
@@ -627,6 +915,66 @@ fn restore_for_each_item(ctx: &mut WorkflowContext, previous_item: Option<Value>
     ctx.updated_at = Utc::now();
 }
 
+fn side_effect_operation(
+    ctx: &WorkflowContext,
+    scope: &StepExecutionScope<'_>,
+    step_index: usize,
+    kind: WorkflowSideEffectKind,
+) -> WorkflowSideEffect {
+    let frames = cursor_frames_for_index(&scope.path_prefix, &scope.list_kind, step_index);
+    let step_path = render_cursor_path(&frames);
+    WorkflowSideEffect {
+        workflow_id: ctx.workflow_id.clone(),
+        state: scope.state.to_string(),
+        step_path: step_path.clone(),
+        kind,
+        operation_id: format!(
+            "{}:{}:{}:{}",
+            ctx.workflow_id,
+            scope.state,
+            kind.as_str(),
+            step_path
+        ),
+    }
+}
+
+fn render_cursor_path(frames: &[WorkflowCursorFrame]) -> String {
+    frames
+        .iter()
+        .map(render_cursor_frame)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn render_cursor_frame(frame: &WorkflowCursorFrame) -> String {
+    match frame {
+        WorkflowCursorFrame::Steps { index } => format!("steps[{index}]"),
+        WorkflowCursorFrame::Branch { selection, index } => {
+            format!(
+                "branch[{}].steps[{index}]",
+                render_branch_selection(selection)
+            )
+        }
+        WorkflowCursorFrame::ForEach { item_index, index } => {
+            format!("for_each[{item_index}].steps[{index}]")
+        }
+        WorkflowCursorFrame::ForEachItem {
+            item_index,
+            index,
+            item,
+        } => {
+            format!("for_each[{item_index}:{}].steps[{index}]", item)
+        }
+    }
+}
+
+fn render_branch_selection(selection: &WorkflowBranchCursorSelection) -> String {
+    match selection {
+        WorkflowBranchCursorSelection::Branch(index) => index.to_string(),
+        WorkflowBranchCursorSelection::Default => "default".to_string(),
+    }
+}
+
 fn log_value_to_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -785,7 +1133,9 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 ensure_no_child_cursor("Query", cursor_frames)?;
                 ensure_optional_user_context_key(store_as.as_ref(), "Query store_as")?;
                 let cmd_wire = normalize_query_wire_for_execution(cmd_json)?;
-                let result = executor.execute_query(&cmd_wire).await?;
+                let operation =
+                    side_effect_operation(ctx, scope, step_index, WorkflowSideEffectKind::Query);
+                let result = executor.execute_query_once(&operation, &cmd_wire).await?;
                 if let Some(key) = store_as {
                     ctx.set(key, result);
                 }
@@ -813,8 +1163,10 @@ fn execute_step<'a, E: WorkflowExecutor>(
                     .transpose()?
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
+                let operation =
+                    side_effect_operation(ctx, scope, step_index, WorkflowSideEffectKind::Notify);
                 executor
-                    .send_notification(channel, &recipient, template, &params)
+                    .send_notification_once(&operation, channel, &recipient, template, &params)
                     .await?;
             }
 
@@ -1056,7 +1408,11 @@ fn execute_step<'a, E: WorkflowExecutor>(
                     metadata: None,
                 };
 
-                let response = executor.create_charge(provider, request).await?;
+                let operation =
+                    side_effect_operation(ctx, scope, step_index, WorkflowSideEffectKind::Charge);
+                let response = executor
+                    .create_charge_once(&operation, provider, request)
+                    .await?;
 
                 if let Some(key) = store_as {
                     let response_json = serde_json::to_value(&response)
@@ -1192,7 +1548,31 @@ pub async fn run_workflow<E: WorkflowExecutor>(
     definition: &WorkflowDefinition,
     ctx: &mut WorkflowContext,
 ) -> Result<String, WorkflowError> {
-    run_workflow_inner(executor, definition, ctx, RunMode::Normal).await
+    run_workflow_with_options(executor, definition, ctx, WorkflowRunOptions::default()).await
+}
+
+/// Run a workflow with optional lease and idempotency controls.
+pub async fn run_workflow_with_options<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    ctx: &mut WorkflowContext,
+    options: WorkflowRunOptions,
+) -> Result<String, WorkflowError> {
+    let guard = match RuntimeGuard::enter(
+        executor,
+        &definition.name,
+        &ctx.workflow_id,
+        WorkflowOperationKind::Run,
+        options,
+    )
+    .await?
+    {
+        RuntimeEntry::Active(guard) => guard,
+        RuntimeEntry::Completed(state) => return Ok(state),
+    };
+
+    let result = run_workflow_inner(executor, definition, ctx, RunMode::Normal).await;
+    finish_runtime_operation(executor, guard, result).await
 }
 
 async fn run_workflow_inner<'a, E: WorkflowExecutor>(
@@ -1344,8 +1724,34 @@ pub async fn resume_workflow<E: WorkflowExecutor>(
     workflow_id: &str,
     event_data: Value,
 ) -> Result<String, WorkflowError> {
+    resume_workflow_with_options(
+        executor,
+        definition,
+        workflow_id,
+        event_data,
+        WorkflowRunOptions::default(),
+    )
+    .await
+}
+
+/// Resume a workflow after a Wait event with optional lease/idempotency controls.
+pub async fn resume_workflow_with_options<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    workflow_id: &str,
+    event_data: Value,
+    options: WorkflowRunOptions,
+) -> Result<String, WorkflowError> {
     let event_name = extract_resume_event_name(&event_data)?;
-    resume_workflow_with_event(executor, definition, workflow_id, &event_name, event_data).await
+    resume_workflow_with_event_and_options(
+        executor,
+        definition,
+        workflow_id,
+        &event_name,
+        event_data,
+        options,
+    )
+    .await
 }
 
 /// Resume a workflow after a named Wait event was received.
@@ -1356,7 +1762,42 @@ pub async fn resume_workflow_with_event<E: WorkflowExecutor>(
     event_name: &str,
     event_data: Value,
 ) -> Result<String, WorkflowError> {
+    resume_workflow_with_event_and_options(
+        executor,
+        definition,
+        workflow_id,
+        event_name,
+        event_data,
+        WorkflowRunOptions::default(),
+    )
+    .await
+}
+
+/// Resume a workflow after a named Wait event with optional lease/idempotency controls.
+pub async fn resume_workflow_with_event_and_options<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    workflow_id: &str,
+    event_name: &str,
+    event_data: Value,
+    options: WorkflowRunOptions,
+) -> Result<String, WorkflowError> {
     ensure_wait_event_name(event_name)?;
+
+    let guard = match RuntimeGuard::enter(
+        executor,
+        &definition.name,
+        workflow_id,
+        WorkflowOperationKind::Resume {
+            event: event_name.to_string(),
+        },
+        options,
+    )
+    .await?
+    {
+        RuntimeEntry::Active(guard) => guard,
+        RuntimeEntry::Completed(state) => return Ok(state),
+    };
 
     // Load persisted state
     let mut ctx = executor
@@ -1368,13 +1809,14 @@ pub async fn resume_workflow_with_event<E: WorkflowExecutor>(
     ctx.set(RESUME_EVENT_KEY, event_data);
 
     // Continue running from current state
-    run_workflow_inner(
+    let result = run_workflow_inner(
         executor,
         definition,
         &mut ctx,
         RunMode::EventResume { event: event_name },
     )
-    .await
+    .await;
+    finish_runtime_operation(executor, guard, result).await
 }
 
 /// Execute the timeout fallback for a workflow currently paused at a Wait step.
@@ -1383,7 +1825,104 @@ pub async fn timeout_workflow<E: WorkflowExecutor>(
     definition: &WorkflowDefinition,
     workflow_id: &str,
 ) -> Result<String, WorkflowError> {
+    timeout_workflow_with_options(
+        executor,
+        definition,
+        workflow_id,
+        WorkflowRunOptions::default(),
+    )
+    .await
+}
+
+/// Execute a timeout fallback with optional lease/idempotency controls.
+pub async fn timeout_workflow_with_options<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    workflow_id: &str,
+    options: WorkflowRunOptions,
+) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
+    let guard = match RuntimeGuard::enter(
+        executor,
+        &definition.name,
+        workflow_id,
+        WorkflowOperationKind::Timeout,
+        options,
+    )
+    .await?
+    {
+        RuntimeEntry::Active(guard) => guard,
+        RuntimeEntry::Completed(state) => return Ok(state),
+    };
+
+    let result = timeout_workflow_inner(executor, definition, workflow_id).await;
+    finish_runtime_operation(executor, guard, result).await
+}
+
+/// Execute timeout fallbacks for workflows whose wait deadlines are due.
+///
+/// Apps provide due workflow ids by implementing
+/// [`WorkflowExecutor::load_due_workflow_timeouts`]. Each workflow is executed
+/// independently so one bad row does not stop the whole drain batch.
+pub async fn timeout_due_workflows<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    now: DateTime<Utc>,
+    limit: usize,
+    options: WorkflowRunOptions,
+) -> Result<Vec<WorkflowTimeoutOutcome>, WorkflowError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    validate_workflow_definition(definition)?;
+
+    let workflow_ids = executor
+        .load_due_workflow_timeouts(&definition.name, now, limit)
+        .await?;
+    let mut outcomes = Vec::with_capacity(workflow_ids.len().min(limit));
+
+    for workflow_id in workflow_ids.into_iter().take(limit) {
+        let run_options = timeout_options_for_workflow(&options, definition, &workflow_id);
+        let outcome =
+            match timeout_workflow_with_options(executor, definition, &workflow_id, run_options)
+                .await
+            {
+                Ok(state) => WorkflowTimeoutOutcome {
+                    workflow_id,
+                    state: Some(state),
+                    error: None,
+                },
+                Err(err) => WorkflowTimeoutOutcome {
+                    workflow_id,
+                    state: None,
+                    error: Some(err.to_string()),
+                },
+            };
+        outcomes.push(outcome);
+    }
+
+    Ok(outcomes)
+}
+
+fn timeout_options_for_workflow(
+    options: &WorkflowRunOptions,
+    definition: &WorkflowDefinition,
+    workflow_id: &str,
+) -> WorkflowRunOptions {
+    let mut run_options = options.clone();
+    run_options.idempotency_key = match &options.idempotency_key {
+        Some(prefix) if prefix.trim().is_empty() => Some(prefix.clone()),
+        Some(prefix) => Some(format!("{prefix}:{workflow_id}")),
+        None => Some(format!("timeout:{}:{workflow_id}", definition.name)),
+    };
+    run_options
+}
+
+async fn timeout_workflow_inner<E: WorkflowExecutor>(
+    executor: &E,
+    definition: &WorkflowDefinition,
+    workflow_id: &str,
+) -> Result<String, WorkflowError> {
     let mut ctx = executor
         .load_state(workflow_id)
         .await?
@@ -1522,6 +2061,16 @@ mod tests {
         notifications: std::sync::Mutex<Vec<(String, String)>>,
         charges: std::sync::Mutex<Vec<ChargeRequest>>,
         saved_state: std::sync::Mutex<Option<WorkflowContext>>,
+        reject_leases: std::sync::Mutex<bool>,
+        acquired_leases: std::sync::Mutex<Vec<WorkflowLease>>,
+        released_leases: std::sync::Mutex<Vec<WorkflowLease>>,
+        workflow_operations:
+            std::sync::Mutex<std::collections::HashMap<String, WorkflowOperationStatus>>,
+        completed_workflow_operations: std::sync::Mutex<Vec<(String, String)>>,
+        failed_workflow_operations: std::sync::Mutex<Vec<(String, String)>>,
+        due_timeout_workflow_ids: std::sync::Mutex<Vec<String>>,
+        skip_notify_side_effects: std::sync::Mutex<bool>,
+        completed_side_effects: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockExecutor {
@@ -1532,11 +2081,44 @@ mod tests {
                 notifications: std::sync::Mutex::new(Vec::new()),
                 charges: std::sync::Mutex::new(Vec::new()),
                 saved_state: std::sync::Mutex::new(None),
+                reject_leases: std::sync::Mutex::new(false),
+                acquired_leases: std::sync::Mutex::new(Vec::new()),
+                released_leases: std::sync::Mutex::new(Vec::new()),
+                workflow_operations: std::sync::Mutex::new(std::collections::HashMap::new()),
+                completed_workflow_operations: std::sync::Mutex::new(Vec::new()),
+                failed_workflow_operations: std::sync::Mutex::new(Vec::new()),
+                due_timeout_workflow_ids: std::sync::Mutex::new(Vec::new()),
+                skip_notify_side_effects: std::sync::Mutex::new(false),
+                completed_side_effects: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn fail_query(&self, cmd_wire: impl Into<String>) {
             self.query_failures.lock().unwrap().insert(cmd_wire.into());
+        }
+
+        fn reject_workflow_leases(&self) {
+            *self.reject_leases.lock().unwrap() = true;
+        }
+
+        fn set_workflow_operation_status(
+            &self,
+            idempotency_key: impl Into<String>,
+            status: WorkflowOperationStatus,
+        ) {
+            self.workflow_operations
+                .lock()
+                .unwrap()
+                .insert(idempotency_key.into(), status);
+        }
+
+        fn skip_notify_side_effects(&self) {
+            *self.skip_notify_side_effects.lock().unwrap() = true;
+        }
+
+        fn set_due_timeout_workflow_ids(&self, workflow_ids: Vec<&str>) {
+            *self.due_timeout_workflow_ids.lock().unwrap() =
+                workflow_ids.into_iter().map(ToString::to_string).collect();
         }
     }
 
@@ -1619,6 +2201,99 @@ mod tests {
                 raw: None,
             })
         }
+
+        async fn acquire_workflow_lease(
+            &self,
+            lease: &WorkflowLease,
+        ) -> Result<bool, WorkflowError> {
+            if *self.reject_leases.lock().unwrap() {
+                return Ok(false);
+            }
+            self.acquired_leases.lock().unwrap().push(lease.clone());
+            Ok(true)
+        }
+
+        async fn release_workflow_lease(&self, lease: &WorkflowLease) -> Result<(), WorkflowError> {
+            self.released_leases.lock().unwrap().push(lease.clone());
+            Ok(())
+        }
+
+        async fn begin_workflow_operation(
+            &self,
+            operation: &WorkflowOperation,
+        ) -> Result<WorkflowOperationStatus, WorkflowError> {
+            Ok(self
+                .workflow_operations
+                .lock()
+                .unwrap()
+                .get(&operation.idempotency_key)
+                .cloned()
+                .unwrap_or(WorkflowOperationStatus::Started))
+        }
+
+        async fn complete_workflow_operation(
+            &self,
+            operation: &WorkflowOperation,
+            state: &str,
+        ) -> Result<(), WorkflowError> {
+            self.completed_workflow_operations
+                .lock()
+                .unwrap()
+                .push((operation.idempotency_key.clone(), state.to_string()));
+            Ok(())
+        }
+
+        async fn fail_workflow_operation(
+            &self,
+            operation: &WorkflowOperation,
+            error: &str,
+        ) -> Result<(), WorkflowError> {
+            self.failed_workflow_operations
+                .lock()
+                .unwrap()
+                .push((operation.idempotency_key.clone(), error.to_string()));
+            Ok(())
+        }
+
+        async fn load_due_workflow_timeouts(
+            &self,
+            _workflow_name: &str,
+            _now: DateTime<Utc>,
+            limit: usize,
+        ) -> Result<Vec<String>, WorkflowError> {
+            Ok(self
+                .due_timeout_workflow_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        async fn begin_workflow_side_effect(
+            &self,
+            operation: &WorkflowSideEffect,
+        ) -> Result<WorkflowSideEffectStatus, WorkflowError> {
+            if operation.kind == WorkflowSideEffectKind::Notify
+                && *self.skip_notify_side_effects.lock().unwrap()
+            {
+                return Ok(WorkflowSideEffectStatus::AlreadyCompleted { result: None });
+            }
+            Ok(WorkflowSideEffectStatus::Execute)
+        }
+
+        async fn complete_workflow_side_effect(
+            &self,
+            operation: &WorkflowSideEffect,
+            _result: Option<&Value>,
+        ) -> Result<(), WorkflowError> {
+            self.completed_side_effects
+                .lock()
+                .unwrap()
+                .push(operation.operation_id.clone());
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -1640,6 +2315,148 @@ mod tests {
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "done");
         assert_eq!(ctx.transition_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_options_acquires_lease_and_completes_operation() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("runtime_guarded_run")
+            .initial_state("start")
+            .transition("start", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-runtime-run", "start");
+        let options = WorkflowRunOptions::default()
+            .with_lease("worker-a", std::time::Duration::from_secs(30))
+            .with_idempotency_key("run-1");
+
+        let result = run_workflow_with_options(&executor, &wf, &mut ctx, options)
+            .await
+            .unwrap();
+
+        assert_eq!(result, "done");
+        assert_eq!(executor.acquired_leases.lock().unwrap().len(), 1);
+        assert_eq!(executor.released_leases.lock().unwrap().len(), 1);
+        assert_eq!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[("run-1".to_string(), "done".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_rejection_stops_workflow_before_side_effects() {
+        let executor = MockExecutor::new();
+        executor.reject_workflow_leases();
+
+        let wf = WorkflowDefinition::new("lease_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "should_not_send", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-lease-guard", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let options = WorkflowRunOptions::default()
+            .with_lease("worker-a", std::time::Duration::from_secs(30));
+
+        let err = run_workflow_with_options(&executor, &wf, &mut ctx, options)
+            .await
+            .expect_err("lease rejection must fail before executing steps");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("already locked"), "got: {msg}");
+            }
+            other => panic!("expected lock error, got {other:?}"),
+        }
+        assert_eq!(ctx.current_state, "active");
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_idempotency_completion_short_circuits_before_load_and_side_effects() {
+        let executor = MockExecutor::new();
+        executor.set_workflow_operation_status(
+            "event-1",
+            WorkflowOperationStatus::Completed {
+                state: "done".to_string(),
+            },
+        );
+
+        let wf = WorkflowDefinition::new("resume_idempotency_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("payment.success", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::Email, "paid", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let result = resume_workflow_with_options(
+            &executor,
+            &wf,
+            "missing-workflow",
+            serde_json::json!({"event": "payment.success"}),
+            WorkflowRunOptions::default().with_idempotency_key("event-1"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "done");
+        assert!(executor.notifications.lock().unwrap().is_empty());
+        assert!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_notify_side_effect_skips_provider_call() {
+        let executor = MockExecutor::new();
+        executor.skip_notify_side_effects();
+
+        let wf = WorkflowDefinition::new("notify_side_effect_replay")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "booking_confirmed", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-notify-side-effect", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+
+        assert_eq!(result, "done");
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "completed notify side effect must not call the provider again"
+        );
     }
 
     #[tokio::test]
@@ -3230,6 +4047,69 @@ mod tests {
             &[(
                 "guest@example.com".to_string(),
                 "payment_timeout".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_due_workflows_drains_due_waits_with_generated_idempotency() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("wait_timeout_drain")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::wait_or(
+                    "payment.success",
+                    std::time::Duration::from_secs(0),
+                    vec![
+                        WorkflowStep::notify(
+                            ChannelKind::Email,
+                            "payment_timeout",
+                            "customer.email",
+                        ),
+                        WorkflowStep::transition("timed_out"),
+                    ],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-timeout-drain", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        executor.set_due_timeout_workflow_ids(vec!["wf-timeout-drain"]);
+        let outcomes = timeout_due_workflows(
+            &executor,
+            &wf,
+            Utc::now(),
+            10,
+            WorkflowRunOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcomes,
+            vec![WorkflowTimeoutOutcome {
+                workflow_id: "wf-timeout-drain".to_string(),
+                state: Some("timed_out".to_string()),
+                error: None,
+            }]
+        );
+        assert_eq!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[(
+                "timeout:wait_timeout_drain:wf-timeout-drain".to_string(),
+                "timed_out".to_string(),
             )]
         );
     }
