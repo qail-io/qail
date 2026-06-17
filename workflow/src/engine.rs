@@ -4742,6 +4742,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn timeout_batch_idempotency_key_is_scoped_per_workflow() {
+        let wf = WorkflowDefinition::new("wait_timeout_drain")
+            .initial_state("active")
+            .transition("active", "done", vec![]);
+        let options = WorkflowRunOptions::default().with_idempotency_key("batch-20260617");
+
+        let first = timeout_options_for_workflow(&options, &wf, "wf-a");
+        let second = timeout_options_for_workflow(&options, &wf, "wf-b");
+
+        assert_eq!(
+            first.idempotency_key.as_deref(),
+            Some("batch-20260617:wf-a")
+        );
+        assert_eq!(
+            second.idempotency_key.as_deref(),
+            Some("batch-20260617:wf-b")
+        );
+        assert_ne!(first.idempotency_key, second.idempotency_key);
+    }
+
     #[tokio::test]
     async fn test_timeout_fallback_without_transition_does_not_run_success_path() {
         let executor = MockExecutor::new();
