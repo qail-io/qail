@@ -2329,6 +2329,7 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
         (wait, Vec::new())
     };
 
+    ensure_wait_event_name(&wait.event)?;
     if wait.on_timeout.is_empty() {
         return Err(WorkflowError::Timeout { event: wait.event });
     }
@@ -5671,6 +5672,68 @@ mod tests {
         assert!(
             executor.notifications.lock().unwrap().is_empty(),
             "persisted timeout fallback validation must run before notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_timeout_wait_event_is_validated_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("persisted_timeout_event_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::wait_or(
+                    "payment.success",
+                    std::time::Duration::from_secs(0),
+                    vec![
+                        WorkflowStep::notify(ChannelKind::Email, "bad_timeout", "customer.email"),
+                        WorkflowStep::transition("timed_out"),
+                    ],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-persisted-timeout-event", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        {
+            let mut saved = executor.saved_state.lock().unwrap();
+            let saved = saved
+                .as_mut()
+                .expect("workflow should be saved while waiting for timeout");
+            let cursor = saved
+                .cursor
+                .as_mut()
+                .expect("saved workflow should have a wait cursor");
+            let wait = cursor
+                .wait
+                .as_mut()
+                .expect("saved workflow should be waiting for timeout");
+            wait.event = " payment.success ".to_string();
+        }
+
+        let err = timeout_workflow(&executor, &wf, "wf-persisted-timeout-event")
+            .await
+            .expect_err("invalid persisted wait event must fail before side effects");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Wait event name must not have leading or trailing whitespace"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected wait event validation error, got {other:?}"),
+        }
+        assert!(
+            executor.notifications.lock().unwrap().is_empty(),
+            "persisted timeout wait validation must run before notification"
         );
     }
 
