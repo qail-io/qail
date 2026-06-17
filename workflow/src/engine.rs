@@ -1124,12 +1124,8 @@ fn render_cursor_frame(frame: &WorkflowCursorFrame) -> String {
             format!("for_each[{item_index}].steps[{index}]")
         }
         WorkflowCursorFrame::ForEachItem {
-            item_index,
-            index,
-            item,
-        } => {
-            format!("for_each[{item_index}:{}].steps[{index}]", item)
-        }
+            item_index, index, ..
+        } => format!("for_each[{item_index}].steps[{index}]"),
     }
 }
 
@@ -3521,6 +3517,28 @@ mod tests {
         assert_eq!(notifs[0].0, "+628111");
         assert_eq!(notifs[1].0, "+628222");
         assert_eq!(notifs[2].0, "+628333");
+        drop(notifs);
+
+        let side_effects = executor.completed_side_effects.lock().unwrap();
+        assert_eq!(side_effects.len(), 3);
+        for operation_id in side_effects.iter() {
+            assert!(
+                !operation_id.contains("+628"),
+                "side-effect operation id must not leak item payload: {operation_id}"
+            );
+            assert!(
+                !operation_id.contains("Captain"),
+                "side-effect operation id must not leak item payload: {operation_id}"
+            );
+        }
+        assert_eq!(
+            side_effects.as_slice(),
+            &[
+                "wf-003:broadcasting:notify:steps[0]/for_each[0].steps[0]".to_string(),
+                "wf-003:broadcasting:notify:steps[0]/for_each[1].steps[0]".to_string(),
+                "wf-003:broadcasting:notify:steps[0]/for_each[2].steps[0]".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
