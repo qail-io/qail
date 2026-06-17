@@ -738,6 +738,18 @@ fn ensure_wait_event_name(event: &str) -> Result<(), WorkflowError> {
     Ok(())
 }
 
+fn ensure_definition_text(value: &str, usage: &str) -> Result<(), WorkflowError> {
+    if value.trim().is_empty() {
+        return Err(WorkflowError::Other(format!("{usage} must not be empty")));
+    }
+    if value.trim() != value {
+        return Err(WorkflowError::Other(format!(
+            "{usage} must not have leading or trailing whitespace"
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_user_context_key(key: &str, usage: &str) -> Result<(), WorkflowError> {
     if RESERVED_CONTEXT_KEYS.contains(&key) {
         return Err(WorkflowError::Other(format!(
@@ -864,8 +876,16 @@ fn find_single_transition<'a>(
 }
 
 fn validate_workflow_definition(definition: &WorkflowDefinition) -> Result<(), WorkflowError> {
+    ensure_definition_text(&definition.name, "Workflow definition name")?;
+    ensure_definition_text(&definition.initial_state, "Workflow initial state")?;
+    if let Some(version) = &definition.version {
+        ensure_definition_text(version, "Workflow definition version")?;
+    }
+
     let mut seen_states = std::collections::HashMap::<&str, usize>::new();
     for transition in &definition.transitions {
+        ensure_definition_text(&transition.from, "Workflow transition source state")?;
+        ensure_definition_text(&transition.to, "Workflow transition target state")?;
         *seen_states.entry(&transition.from).or_default() += 1;
         validate_workflow_steps(&transition.steps)?;
     }
@@ -1811,6 +1831,7 @@ pub async fn run_workflow_with_options<E: WorkflowExecutor>(
     ctx: &mut WorkflowContext,
     options: WorkflowRunOptions,
 ) -> Result<String, WorkflowError> {
+    validate_workflow_definition(definition)?;
     let guard = match RuntimeGuard::enter(
         executor,
         &definition.name,
@@ -2036,6 +2057,7 @@ pub async fn resume_workflow_with_event_and_options<E: WorkflowExecutor>(
     event_data: Value,
     options: WorkflowRunOptions,
 ) -> Result<String, WorkflowError> {
+    validate_workflow_definition(definition)?;
     ensure_wait_event_name(event_name)?;
 
     let guard = match RuntimeGuard::enter(
@@ -2869,6 +2891,67 @@ mod tests {
                 "Workflow 'wf-started-lease-rejected' is already locked".to_string()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_definition_fails_before_runtime_guards() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("invalid_definition")
+            .version(" v2")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "should_not_send", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-invalid-definition", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let err = run_workflow_with_options(
+            &executor,
+            &wf,
+            &mut ctx,
+            WorkflowRunOptions::default()
+                .with_idempotency_key("invalid-run-1")
+                .with_lease("worker-a", std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("invalid definition must fail before runtime guards");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Workflow definition version must not have leading"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected definition validation error, got {other:?}"),
+        }
+        assert!(executor.acquired_leases.lock().unwrap().is_empty());
+        assert!(executor.released_leases.lock().unwrap().is_empty());
+        assert!(
+            executor
+                .completed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            executor
+                .failed_workflow_operations
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(executor.notifications.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
