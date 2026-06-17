@@ -1722,15 +1722,9 @@ fn execute_step<'a, E: WorkflowExecutor>(
                     .ok_or_else(|| WorkflowError::MissingContextKey(reference_key.clone()))?
                     .to_string();
 
-                let description = description_key
-                    .as_ref()
-                    .and_then(|k| ctx.get_str(k))
-                    .map(String::from);
-
-                let payment_method = payment_method_key
-                    .as_ref()
-                    .and_then(|k| ctx.get_str(k))
-                    .map(String::from);
+                let description = resolve_optional_charge_string(ctx, description_key.as_ref())?;
+                let payment_method =
+                    resolve_optional_charge_string(ctx, payment_method_key.as_ref())?;
 
                 let request = ChargeRequest {
                     amount,
@@ -1782,6 +1776,18 @@ fn resolve_charge_amount(ctx: &WorkflowContext, amount_key: &str) -> Result<i64,
     }
 
     Ok(amount)
+}
+
+fn resolve_optional_charge_string(
+    ctx: &WorkflowContext,
+    key: Option<&String>,
+) -> Result<Option<String>, WorkflowError> {
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    ctx.get_str(key)
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| WorkflowError::MissingContextKey(format!("{key} (expected string)")))
 }
 
 fn charge_amount_from_number(
@@ -4053,6 +4059,84 @@ mod tests {
                 );
             }
             other => panic!("expected malformed lookup key error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_missing_optional_string_key_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("charge_missing_optional_string_key")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge_with(
+                    PaymentKind::Xendit,
+                    "order.total",
+                    "order.id",
+                    Some("order.description"),
+                    Some("order.payment_method"),
+                    Some("charge"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-charge-missing-optional-string", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({"id": "booking-1", "total": 125_000}),
+        );
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("missing configured charge string key must fail before provider call");
+
+        match err {
+            WorkflowError::MissingContextKey(key) => {
+                assert_eq!(key, "order.description (expected string)");
+            }
+            other => panic!("expected missing context key error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_non_string_optional_key_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("charge_non_string_optional_key")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge_with(
+                    PaymentKind::Xendit,
+                    "order.total",
+                    "order.id",
+                    None,
+                    Some("order.payment_method"),
+                    Some("charge"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-charge-non-string-optional", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-1",
+                "total": 125_000,
+                "payment_method": 100
+            }),
+        );
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("non-string configured charge key must fail before provider call");
+
+        match err {
+            WorkflowError::MissingContextKey(key) => {
+                assert_eq!(key, "order.payment_method (expected string)");
+            }
+            other => panic!("expected missing context key error, got {other:?}"),
         }
         assert!(executor.charges.lock().unwrap().is_empty());
     }
