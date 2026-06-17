@@ -4,6 +4,8 @@
 //! to their database driver and notification channels.
 
 use async_trait::async_trait;
+use std::cmp::Ordering;
+
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -822,17 +824,17 @@ fn branch_condition_matches(condition: &WorkflowBranchCondition, value: Option<&
             .map(branch_condition_text)
             .is_some_and(|actual| expected_values.iter().any(|expected| expected == &actual)),
         WorkflowBranchCondition::NumberGt(expected) => value
-            .and_then(branch_condition_i64)
-            .is_some_and(|actual| actual > *expected),
+            .and_then(|value| branch_condition_number_cmp(value, *expected))
+            .is_some_and(|ordering| ordering == Ordering::Greater),
         WorkflowBranchCondition::NumberGte(expected) => value
-            .and_then(branch_condition_i64)
-            .is_some_and(|actual| actual >= *expected),
+            .and_then(|value| branch_condition_number_cmp(value, *expected))
+            .is_some_and(|ordering| ordering != Ordering::Less),
         WorkflowBranchCondition::NumberLt(expected) => value
-            .and_then(branch_condition_i64)
-            .is_some_and(|actual| actual < *expected),
+            .and_then(|value| branch_condition_number_cmp(value, *expected))
+            .is_some_and(|ordering| ordering == Ordering::Less),
         WorkflowBranchCondition::NumberLte(expected) => value
-            .and_then(branch_condition_i64)
-            .is_some_and(|actual| actual <= *expected),
+            .and_then(|value| branch_condition_number_cmp(value, *expected))
+            .is_some_and(|ordering| ordering != Ordering::Greater),
         WorkflowBranchCondition::StringContains(needle) => value
             .map(branch_condition_text)
             .is_some_and(|actual| actual.contains(needle)),
@@ -846,13 +848,25 @@ fn branch_condition_text(value: &Value) -> String {
     }
 }
 
-fn branch_condition_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok())),
-        _ => None,
+fn branch_condition_number_cmp(value: &Value, expected: i64) -> Option<Ordering> {
+    let Value::Number(number) = value else {
+        return None;
+    };
+
+    if let Some(actual) = number.as_i64() {
+        return Some(actual.cmp(&expected));
     }
+
+    if let Some(actual) = number.as_u64() {
+        return Some(if expected < 0 {
+            Ordering::Greater
+        } else {
+            actual.cmp(&(expected as u64))
+        });
+    }
+
+    let actual = number.as_f64()?;
+    actual.partial_cmp(&(expected as f64))
 }
 
 fn find_single_transition<'a>(
@@ -3552,6 +3566,34 @@ mod tests {
 
         let mut ctx = WorkflowContext::new("wf-typed-branch", "pending");
         ctx.set("payment", serde_json::json!({"attempts": 3}));
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+
+        assert_eq!(result, "manual_review");
+        assert_eq!(ctx.current_state, "manual_review");
+    }
+
+    #[tokio::test]
+    async fn branch_when_routes_by_decimal_numeric_condition() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("decimal_branching")
+            .initial_state("pending")
+            .transition(
+                "pending",
+                "resolved",
+                vec![WorkflowStep::branch_when(
+                    "payment.risk_score",
+                    vec![(
+                        WorkflowBranchCondition::NumberGt(10),
+                        vec![WorkflowStep::transition("manual_review")],
+                    )],
+                    vec![WorkflowStep::transition("retry")],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-decimal-branch", "pending");
+        ctx.set("payment", serde_json::json!({"risk_score": 10.5}));
 
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
 
