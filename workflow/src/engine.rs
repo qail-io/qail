@@ -808,6 +808,7 @@ fn ensure_unique_branch_conditions(
 ) -> Result<(), WorkflowError> {
     let mut seen = std::collections::HashSet::new();
     for (condition, _) in branches {
+        validate_branch_condition(condition_key, condition)?;
         if !seen.insert(condition) {
             return Err(WorkflowError::Other(format!(
                 "Ambiguous workflow branch for '{condition_key}': duplicate condition '{condition:?}'"
@@ -815,6 +816,25 @@ fn ensure_unique_branch_conditions(
         }
     }
     Ok(())
+}
+
+fn validate_branch_condition(
+    condition_key: &str,
+    condition: &WorkflowBranchCondition,
+) -> Result<(), WorkflowError> {
+    match condition {
+        WorkflowBranchCondition::OneOf(expected_values) if expected_values.is_empty() => {
+            Err(WorkflowError::Other(format!(
+                "Ambiguous workflow branch for '{condition_key}': OneOf condition must include at least one value"
+            )))
+        }
+        WorkflowBranchCondition::StringContains(needle) if needle.is_empty() => {
+            Err(WorkflowError::Other(format!(
+                "Ambiguous workflow branch for '{condition_key}': StringContains condition must not be empty"
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn branch_condition_matches(condition: &WorkflowBranchCondition, value: Option<&Value>) -> bool {
@@ -3875,6 +3895,90 @@ mod tests {
                 assert!(msg.contains("accepted"), "got: {msg}");
             }
             other => panic!("expected ambiguous branch error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn branch_when_rejects_empty_string_contains_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_string_contains_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "before_bad_branch", "ops.email"),
+                    WorkflowStep::branch_when(
+                        "decision",
+                        vec![(
+                            WorkflowBranchCondition::StringContains(String::new()),
+                            vec![WorkflowStep::transition("catch_all")],
+                        )],
+                        vec![WorkflowStep::transition("done")],
+                    ),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-empty-string-contains", "active");
+        ctx.set("ops", serde_json::json!({"email": "ops@example.com"}));
+        ctx.set("decision", Value::String("accepted".to_string()));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("empty StringContains predicate must fail before notification");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("StringContains condition must not be empty"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected branch condition validation error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn branch_when_rejects_empty_one_of_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("empty_one_of_guard")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "before_bad_branch", "ops.email"),
+                    WorkflowStep::branch_when(
+                        "decision",
+                        vec![(
+                            WorkflowBranchCondition::OneOf(Vec::new()),
+                            vec![WorkflowStep::transition("impossible")],
+                        )],
+                        vec![WorkflowStep::transition("done")],
+                    ),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-empty-one-of", "active");
+        ctx.set("ops", serde_json::json!({"email": "ops@example.com"}));
+        ctx.set("decision", Value::String("accepted".to_string()));
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("empty OneOf predicate must fail before notification");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("OneOf condition must include at least one value"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected branch condition validation error, got {other:?}"),
         }
         assert!(executor.notifications.lock().unwrap().is_empty());
     }
