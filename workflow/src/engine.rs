@@ -1209,21 +1209,29 @@ fn side_effect_operation(
         state: scope.state.to_string(),
         step_path: step_path.clone(),
         kind,
-        operation_id: side_effect_operation_id(&ctx.workflow_id, scope.state, kind, &step_path),
+        operation_id: side_effect_operation_id(
+            &ctx.workflow_id,
+            scope.state,
+            ctx.transition_count(),
+            kind,
+            &step_path,
+        ),
     }
 }
 
 fn side_effect_operation_id(
     workflow_id: &str,
     state: &str,
+    state_generation: usize,
     kind: WorkflowSideEffectKind,
     step_path: &str,
 ) -> String {
     serde_json::json!([
         "qail-workflow-side-effect",
-        1,
+        2,
         workflow_id,
         state,
+        state_generation,
         kind.as_str(),
         step_path
     ])
@@ -4494,18 +4502,21 @@ mod tests {
                 side_effect_operation_id(
                     "wf-003",
                     "broadcasting",
+                    0,
                     WorkflowSideEffectKind::Notify,
                     "steps[0]/for_each[0].steps[0]",
                 ),
                 side_effect_operation_id(
                     "wf-003",
                     "broadcasting",
+                    0,
                     WorkflowSideEffectKind::Notify,
                     "steps[0]/for_each[1].steps[0]",
                 ),
                 side_effect_operation_id(
                     "wf-003",
                     "broadcasting",
+                    0,
                     WorkflowSideEffectKind::Notify,
                     "steps[0]/for_each[2].steps[0]",
                 ),
@@ -4518,12 +4529,14 @@ mod tests {
         let first = side_effect_operation_id(
             "tenant:wf",
             "broadcasting",
+            7,
             WorkflowSideEffectKind::Notify,
             "steps[0]",
         );
         let second = side_effect_operation_id(
             "tenant",
             "wf:broadcasting",
+            7,
             WorkflowSideEffectKind::Notify,
             "steps[0]",
         );
@@ -4531,6 +4544,63 @@ mod tests {
         assert_ne!(
             first, second,
             "side-effect operation ids must not collide when fields contain delimiters"
+        );
+    }
+
+    #[tokio::test]
+    async fn side_effect_operation_id_changes_when_state_is_reentered() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("reentered_state_side_effect")
+            .initial_state("active")
+            .transition(
+                "active",
+                "idle",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "active_notice", "customer.email"),
+                    WorkflowStep::transition("idle"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-reentered-state", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let first = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(first, "idle");
+        ctx.transition_to("active", Some("manual requeue".to_string()));
+        let second = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(second, "idle");
+
+        let notifications = executor.notifications.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            2,
+            "same state re-entry must execute the side effect again"
+        );
+        drop(notifications);
+
+        let side_effects = executor.completed_side_effects.lock().unwrap();
+        assert_eq!(
+            side_effects.as_slice(),
+            &[
+                side_effect_operation_id(
+                    "wf-reentered-state",
+                    "active",
+                    0,
+                    WorkflowSideEffectKind::Notify,
+                    "steps[0]",
+                ),
+                side_effect_operation_id(
+                    "wf-reentered-state",
+                    "active",
+                    2,
+                    WorkflowSideEffectKind::Notify,
+                    "steps[0]",
+                ),
+            ]
         );
     }
 
@@ -6156,6 +6226,7 @@ mod tests {
         let expected_operation_id = side_effect_operation_id(
             "wf-side-effect-fail",
             "active",
+            0,
             WorkflowSideEffectKind::Query,
             "steps[0]",
         );
