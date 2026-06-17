@@ -10,6 +10,14 @@ use qail_workflow_postgres::{PgWorkflowExecutor, PgWorkflowStore, PgWorkflowTabl
 
 struct NoopExecutor;
 
+fn assert_error_contains<T: std::fmt::Debug>(result: Result<T, WorkflowError>, expected: &str) {
+    let err = result.expect_err("operation should fail");
+    assert!(
+        err.to_string().contains(expected),
+        "expected error to contain {expected:?}, got {err}"
+    );
+}
+
 #[async_trait]
 impl WorkflowExecutor for NoopExecutor {
     async fn execute_query(&self, _cmd_json: &str) -> Result<serde_json::Value, WorkflowError> {
@@ -142,6 +150,38 @@ async fn live_postgres_storage_runtime_guarantees() {
             state: "confirmed".to_string()
         }
     );
+    assert_error_contains(
+        WorkflowExecutor::fail_workflow_operation(&executor, &operation, "late failure").await,
+        "was not found in started state",
+    );
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_operation(&executor, &operation)
+            .await
+            .unwrap(),
+        WorkflowOperationStatus::Completed {
+            state: "confirmed".to_string()
+        },
+        "late failure must not overwrite a completed operation"
+    );
+
+    let mismatched_operation = WorkflowOperation {
+        kind: WorkflowOperationKind::Timeout,
+        ..operation.clone()
+    };
+    assert_error_contains(
+        WorkflowExecutor::begin_workflow_operation(&executor, &mismatched_operation).await,
+        "previously used for kind",
+    );
+
+    let missing_operation = WorkflowOperation {
+        idempotency_key: "missing-event".to_string(),
+        ..operation.clone()
+    };
+    assert_error_contains(
+        WorkflowExecutor::complete_workflow_operation(&executor, &missing_operation, "confirmed")
+            .await,
+        "was not found in started state",
+    );
 
     let side_effect = WorkflowSideEffect {
         workflow_id: "wf-live".to_string(),
@@ -170,6 +210,29 @@ async fn live_postgres_storage_runtime_guarantees() {
         WorkflowSideEffectStatus::AlreadyCompleted {
             result: Some(serde_json::json!({"provider_id": "msg-1"}))
         }
+    );
+    assert_error_contains(
+        WorkflowExecutor::complete_workflow_side_effect(&executor, &side_effect, None).await,
+        "was not found in started state",
+    );
+    assert_eq!(
+        WorkflowExecutor::begin_workflow_side_effect(&executor, &side_effect)
+            .await
+            .unwrap(),
+        WorkflowSideEffectStatus::AlreadyCompleted {
+            result: Some(serde_json::json!({"provider_id": "msg-1"}))
+        },
+        "late side-effect completion must not overwrite the stored result"
+    );
+
+    let missing_side_effect = WorkflowSideEffect {
+        operation_id: "missing-notify-live".to_string(),
+        ..side_effect.clone()
+    };
+    assert_error_contains(
+        WorkflowExecutor::complete_workflow_side_effect(&executor, &missing_side_effect, None)
+            .await,
+        "was not found in started state",
     );
 
     let mut timed_out = WorkflowContext::new("wf-timeout-live", "awaiting_vendor");
@@ -200,5 +263,23 @@ async fn live_postgres_storage_runtime_guarantees() {
     assert!(
         claimed_again.is_empty(),
         "claimed timeout row must not be rediscovered until claim TTL expires"
+    );
+
+    let zero_ttl_executor = PgWorkflowExecutor::new(
+        NoopExecutor,
+        executor
+            .store()
+            .clone()
+            .with_timeout_claim_ttl(std::time::Duration::ZERO),
+    );
+    assert_error_contains(
+        WorkflowExecutor::load_due_workflow_timeouts(
+            &zero_ttl_executor,
+            "booking_recovery",
+            Utc::now(),
+            10,
+        )
+        .await,
+        "claim TTL",
     );
 }

@@ -13,8 +13,8 @@ use tokio::sync::Mutex;
 use crate::tables::PgWorkflowTables;
 use crate::util::{
     STATUS_COMPLETED, STATUS_FAILED, STATUS_STARTED, deadline_from_duration, excluded, finish_tx,
-    is_duplicate, json_error, operation_kind_text, option_string, optional_json, pg_error,
-    required_string, timestamp,
+    is_duplicate, json_error, missing_started_row, operation_kind_text, option_string,
+    optional_json, pg_error, required_string, timestamp,
 };
 
 /// PostgreSQL workflow storage using a single `PgDriver`.
@@ -233,8 +233,9 @@ impl PgWorkflowStore {
         driver: &mut PgDriver,
         operation: &WorkflowOperation,
     ) -> Result<WorkflowOperationStatus, WorkflowError> {
+        let operation_kind = operation_kind_text(&operation.kind);
         let existing = Qail::get(&self.tables.operations)
-            .columns(["status", "state"])
+            .columns(["status", "state", "kind"])
             .eq("workflow_id", operation.workflow_id.as_str())
             .eq("idempotency_key", operation.idempotency_key.as_str())
             .for_update()
@@ -243,6 +244,14 @@ impl PgWorkflowStore {
 
         if let Some(row) = rows.first() {
             let status = required_string(row, 0, "status")?;
+            let stored_kind = required_string(row, 2, "kind")?;
+            if stored_kind != operation_kind {
+                return Err(WorkflowError::Other(format!(
+                    "Workflow operation idempotency key '{}' was previously used for kind {}, not {}",
+                    operation.idempotency_key, stored_kind, operation_kind
+                )));
+            }
+
             return match status.as_str() {
                 STATUS_STARTED => Ok(WorkflowOperationStatus::InProgress),
                 STATUS_COMPLETED => {
@@ -277,7 +286,7 @@ impl PgWorkflowStore {
                 QailValue::String(operation.workflow_name.clone()),
                 QailValue::String(operation.workflow_id.clone()),
                 QailValue::String(operation.idempotency_key.clone()),
-                QailValue::String(operation_kind_text(&operation.kind)),
+                QailValue::String(operation_kind),
                 QailValue::String(STATUS_STARTED.to_string()),
                 QailValue::Null,
                 QailValue::Null,
@@ -319,9 +328,16 @@ impl PgWorkflowStore {
             .set_value("error", QailValue::Null)
             .set_value("updated_at", timestamp(Utc::now()))
             .eq("workflow_id", operation.workflow_id.as_str())
-            .eq("idempotency_key", operation.idempotency_key.as_str());
+            .eq("idempotency_key", operation.idempotency_key.as_str())
+            .eq("status", STATUS_STARTED);
         let mut driver = self.driver.lock().await;
-        driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        if affected == 0 {
+            return Err(missing_started_row(
+                "operation",
+                operation.idempotency_key.as_str(),
+            ));
+        }
         Ok(())
     }
 
@@ -335,9 +351,16 @@ impl PgWorkflowStore {
             .set_value("error", error)
             .set_value("updated_at", timestamp(Utc::now()))
             .eq("workflow_id", operation.workflow_id.as_str())
-            .eq("idempotency_key", operation.idempotency_key.as_str());
+            .eq("idempotency_key", operation.idempotency_key.as_str())
+            .eq("status", STATUS_STARTED);
         let mut driver = self.driver.lock().await;
-        driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        if affected == 0 {
+            return Err(missing_started_row(
+                "operation",
+                operation.idempotency_key.as_str(),
+            ));
+        }
         Ok(())
     }
 
@@ -349,6 +372,11 @@ impl PgWorkflowStore {
     ) -> Result<Vec<String>, WorkflowError> {
         if limit == 0 {
             return Ok(Vec::new());
+        }
+        if self.timeout_claim_ttl.is_zero() {
+            return Err(WorkflowError::Other(
+                "Workflow timeout claim TTL must be greater than zero".to_string(),
+            ));
         }
 
         let mut driver = self.driver.lock().await;
@@ -475,9 +503,16 @@ impl PgWorkflowStore {
             .set_value("status", STATUS_COMPLETED)
             .set_value("result", result)
             .set_value("updated_at", timestamp(Utc::now()))
-            .eq("operation_id", operation.operation_id.as_str());
+            .eq("operation_id", operation.operation_id.as_str())
+            .eq("status", STATUS_STARTED);
         let mut driver = self.driver.lock().await;
-        driver.execute(&cmd).await.map_err(pg_error)?;
+        let affected = driver.execute(&cmd).await.map_err(pg_error)?;
+        if affected == 0 {
+            return Err(missing_started_row(
+                "side effect",
+                operation.operation_id.as_str(),
+            ));
+        }
         Ok(())
     }
 }

@@ -71,6 +71,12 @@ pub(crate) fn pg_error(err: PgError) -> WorkflowError {
     WorkflowError::Other(format!("Workflow Postgres error: {err}"))
 }
 
+pub(crate) fn missing_started_row(kind: &str, id: &str) -> WorkflowError {
+    WorkflowError::Other(format!(
+        "Workflow {kind} '{id}' was not found in started state"
+    ))
+}
+
 pub(crate) fn is_duplicate(err: &PgError) -> bool {
     err.sqlstate() == Some(DUPLICATE_SQLSTATE)
 }
