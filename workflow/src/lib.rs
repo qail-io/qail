@@ -78,4 +78,4 @@ pub use runtime::{
     WorkflowSideEffectStatus, WorkflowTimeoutOutcome,
 };
 pub use state::State;
-pub use step::WorkflowStep;
+pub use step::{WorkflowBranchCondition, WorkflowStep};

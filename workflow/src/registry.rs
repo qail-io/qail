@@ -13,6 +13,8 @@ use crate::step::WorkflowStep;
 pub struct WorkflowDefinition {
     /// Workflow name (e.g., "booking_recovery", "inventory_sync")
     pub name: String,
+    /// Optional definition version for strict resume/migration checks.
+    pub version: Option<String>,
     /// The state a new workflow instance starts in
     pub initial_state: String,
     /// All state transitions
@@ -35,9 +37,16 @@ impl WorkflowDefinition {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            version: None,
             initial_state: String::new(),
             transitions: Vec::new(),
         }
+    }
+
+    /// Set a version for this workflow definition.
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
     }
 
     /// Set the initial state.
@@ -100,11 +109,13 @@ mod tests {
     #[test]
     fn test_workflow_builder() {
         let wf = WorkflowDefinition::new("test_flow")
+            .version("v1")
             .initial_state("created")
             .transition("created", "pending", vec![WorkflowStep::log("Starting")])
             .transition("pending", "fulfilled", vec![WorkflowStep::log("Complete")]);
 
         assert_eq!(wf.name, "test_flow");
+        assert_eq!(wf.version.as_deref(), Some("v1"));
         assert_eq!(wf.initial_state, "created");
         assert_eq!(wf.transitions.len(), 2);
     }

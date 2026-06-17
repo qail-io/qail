@@ -22,6 +22,12 @@ pub struct WorkflowContext {
     pub workflow_id: String,
     /// Current state name
     pub current_state: String,
+    /// Workflow definition name used by this context, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_name: Option<String>,
+    /// Workflow definition version used by this context, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_version: Option<String>,
     /// Key-value data bag (query results, user inputs, etc.)
     pub data: HashMap<String, Value>,
     /// When this workflow instance was created
@@ -124,6 +130,8 @@ impl WorkflowContext {
         Self {
             workflow_id: workflow_id.into(),
             current_state: initial_state.into(),
+            definition_name: None,
+            definition_version: None,
             data: HashMap::new(),
             created_at: now,
             updated_at: now,
@@ -223,6 +231,8 @@ mod tests {
         let ctx = WorkflowContext::new("wf-001", "created");
         assert_eq!(ctx.workflow_id, "wf-001");
         assert_eq!(ctx.current_state, "created");
+        assert!(ctx.definition_name.is_none());
+        assert!(ctx.definition_version.is_none());
         assert!(ctx.data.is_empty());
         assert!(ctx.history.is_empty());
         assert!(ctx.cursor.is_none());

@@ -10,6 +10,35 @@ use serde::{Deserialize, Serialize};
 use crate::channel::ChannelKind;
 use crate::payment::PaymentKind;
 
+/// A branch predicate evaluated against one workflow context key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkflowBranchCondition {
+    /// Text equality. Strings compare directly; other JSON values compare by JSON text.
+    Equals(String),
+    /// Text inequality. Missing context does not match.
+    NotEquals(String),
+    /// Text membership. Strings compare directly; other JSON values compare by JSON text.
+    OneOf(Vec<String>),
+    /// Context key exists.
+    Exists,
+    /// Context key does not exist.
+    Missing,
+    /// Context key is JSON null.
+    Null,
+    /// Context key is a boolean with this value.
+    Bool(bool),
+    /// Numeric comparison.
+    NumberGt(i64),
+    /// Numeric comparison.
+    NumberGte(i64),
+    /// Numeric comparison.
+    NumberLt(i64),
+    /// Numeric comparison.
+    NumberLte(i64),
+    /// Text contains a substring.
+    StringContains(String),
+}
+
 /// A single step in a workflow execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowStep {
@@ -52,6 +81,16 @@ pub enum WorkflowStep {
         /// Map of value → steps to execute
         branches: Vec<(String, Vec<WorkflowStep>)>,
         /// Default steps if no branch matches
+        default: Vec<WorkflowStep>,
+    },
+
+    /// Conditional branching with richer predicates.
+    BranchWhen {
+        /// Context key to evaluate
+        condition_key: String,
+        /// Ordered predicates and steps. The first matching predicate is selected.
+        branches: Vec<(WorkflowBranchCondition, Vec<WorkflowStep>)>,
+        /// Default steps if no predicate matches
         default: Vec<WorkflowStep>,
     },
 
@@ -220,6 +259,19 @@ impl WorkflowStep {
             default,
         }
     }
+
+    /// Create a BranchWhen step with richer predicates.
+    pub fn branch_when(
+        condition_key: &str,
+        branches: Vec<(WorkflowBranchCondition, Vec<WorkflowStep>)>,
+        default: Vec<WorkflowStep>,
+    ) -> Self {
+        WorkflowStep::BranchWhen {
+            condition_key: condition_key.into(),
+            branches,
+            default,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +342,31 @@ mod tests {
                 assert_eq!(default.len(), 1);
             }
             _ => panic!("Expected Branch step"),
+        }
+    }
+
+    #[test]
+    fn test_branch_when_step() {
+        let step = WorkflowStep::branch_when(
+            "payment.attempts",
+            vec![(
+                WorkflowBranchCondition::NumberGte(3),
+                vec![WorkflowStep::log("Manual review")],
+            )],
+            vec![WorkflowStep::log("Retry")],
+        );
+        match step {
+            WorkflowStep::BranchWhen {
+                condition_key,
+                branches,
+                default,
+            } => {
+                assert_eq!(condition_key, "payment.attempts");
+                assert_eq!(branches.len(), 1);
+                assert_eq!(branches[0].0, WorkflowBranchCondition::NumberGte(3));
+                assert_eq!(default.len(), 1);
+            }
+            _ => panic!("Expected BranchWhen step"),
         }
     }
 

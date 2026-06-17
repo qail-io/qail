@@ -19,7 +19,7 @@ use crate::runtime::{
     WorkflowRunOptions, WorkflowSideEffect, WorkflowSideEffectKind, WorkflowSideEffectStatus,
     WorkflowTimeoutOutcome,
 };
-use crate::step::WorkflowStep;
+use crate::step::{WorkflowBranchCondition, WorkflowStep};
 
 const WORKFLOW_QUERY_WIRE_MAGIC: &str = "QAIL-CMD/1\n";
 
@@ -102,6 +102,26 @@ fn collect_legacy_query_payload_issues_in_steps(
                         transition_to,
                         branch_steps,
                         &format!("{step_path}.branches[{branch_idx}:{branch_value}]"),
+                        out,
+                    );
+                }
+                collect_legacy_query_payload_issues_in_steps(
+                    transition_from,
+                    transition_to,
+                    default,
+                    &format!("{step_path}.default"),
+                    out,
+                );
+            }
+            WorkflowStep::BranchWhen {
+                branches, default, ..
+            } => {
+                for (branch_idx, (condition, branch_steps)) in branches.iter().enumerate() {
+                    collect_legacy_query_payload_issues_in_steps(
+                        transition_from,
+                        transition_to,
+                        branch_steps,
+                        &format!("{step_path}.branch_when[{branch_idx}:{condition:?}]"),
                         out,
                     );
                 }
@@ -749,6 +769,72 @@ fn ensure_unique_branch_values(
     Ok(())
 }
 
+fn ensure_unique_branch_conditions(
+    condition_key: &str,
+    branches: &[(WorkflowBranchCondition, Vec<WorkflowStep>)],
+) -> Result<(), WorkflowError> {
+    let mut seen = std::collections::HashSet::new();
+    for (condition, _) in branches {
+        if !seen.insert(condition) {
+            return Err(WorkflowError::Other(format!(
+                "Ambiguous workflow branch for '{condition_key}': duplicate condition '{condition:?}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn branch_condition_matches(condition: &WorkflowBranchCondition, value: Option<&Value>) -> bool {
+    match condition {
+        WorkflowBranchCondition::Exists => value.is_some(),
+        WorkflowBranchCondition::Missing => value.is_none(),
+        WorkflowBranchCondition::Null => matches!(value, Some(Value::Null)),
+        WorkflowBranchCondition::Bool(expected) => {
+            value.and_then(Value::as_bool) == Some(*expected)
+        }
+        WorkflowBranchCondition::Equals(expected) => {
+            value.map(branch_condition_text).as_deref() == Some(expected.as_str())
+        }
+        WorkflowBranchCondition::NotEquals(expected) => value
+            .map(branch_condition_text)
+            .is_some_and(|actual| actual != *expected),
+        WorkflowBranchCondition::OneOf(expected_values) => value
+            .map(branch_condition_text)
+            .is_some_and(|actual| expected_values.iter().any(|expected| expected == &actual)),
+        WorkflowBranchCondition::NumberGt(expected) => value
+            .and_then(branch_condition_i64)
+            .is_some_and(|actual| actual > *expected),
+        WorkflowBranchCondition::NumberGte(expected) => value
+            .and_then(branch_condition_i64)
+            .is_some_and(|actual| actual >= *expected),
+        WorkflowBranchCondition::NumberLt(expected) => value
+            .and_then(branch_condition_i64)
+            .is_some_and(|actual| actual < *expected),
+        WorkflowBranchCondition::NumberLte(expected) => value
+            .and_then(branch_condition_i64)
+            .is_some_and(|actual| actual <= *expected),
+        WorkflowBranchCondition::StringContains(needle) => value
+            .map(branch_condition_text)
+            .is_some_and(|actual| actual.contains(needle)),
+    }
+}
+
+fn branch_condition_text(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn branch_condition_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok())),
+        _ => None,
+    }
+}
+
 fn find_single_transition<'a>(
     definition: &'a WorkflowDefinition,
     state: &str,
@@ -784,6 +870,44 @@ fn validate_workflow_definition(definition: &WorkflowDefinition) -> Result<(), W
     Ok(())
 }
 
+fn ensure_context_definition(
+    ctx: &mut WorkflowContext,
+    definition: &WorkflowDefinition,
+) -> Result<(), WorkflowError> {
+    if let Some(context_name) = &ctx.definition_name
+        && context_name != &definition.name
+    {
+        return Err(WorkflowError::Other(format!(
+            "Workflow context '{}' belongs to definition '{context_name}', not '{}'",
+            ctx.workflow_id, definition.name
+        )));
+    }
+
+    if let Some(context_version) = &ctx.definition_version
+        && Some(context_version) != definition.version.as_ref()
+    {
+        return Err(WorkflowError::Other(format!(
+            "Workflow context '{}' uses definition version '{}', not '{}'",
+            ctx.workflow_id,
+            context_version,
+            definition.version.as_deref().unwrap_or("<unversioned>")
+        )));
+    }
+
+    if ctx.definition_name.is_none() {
+        ctx.definition_name = Some(definition.name.clone());
+        ctx.updated_at = Utc::now();
+    }
+    if ctx.definition_version.is_none()
+        && let Some(version) = &definition.version
+    {
+        ctx.definition_version = Some(version.clone());
+        ctx.updated_at = Utc::now();
+    }
+
+    Ok(())
+}
+
 fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> {
     for (idx, step) in steps.iter().enumerate() {
         ensure_step_position(step, idx, steps.len())?;
@@ -809,6 +933,17 @@ fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> 
                 default,
             } => {
                 ensure_unique_branch_values(condition_key, branches)?;
+                for (_, branch_steps) in branches {
+                    validate_workflow_steps(branch_steps)?;
+                }
+                validate_workflow_steps(default)?;
+            }
+            WorkflowStep::BranchWhen {
+                condition_key,
+                branches,
+                default,
+            } => {
+                ensure_unique_branch_conditions(condition_key, branches)?;
                 for (_, branch_steps) in branches {
                     validate_workflow_steps(branch_steps)?;
                 }
@@ -1081,6 +1216,20 @@ fn selected_branch_steps<'a>(
     }
 }
 
+fn selected_branch_when_steps<'a>(
+    branches: &'a [(WorkflowBranchCondition, Vec<WorkflowStep>)],
+    default: &'a [WorkflowStep],
+    selection: &WorkflowBranchCursorSelection,
+) -> Result<&'a [WorkflowStep], WorkflowError> {
+    match selection {
+        WorkflowBranchCursorSelection::Branch(idx) => branches
+            .get(*idx)
+            .map(|(_, steps)| steps.as_slice())
+            .ok_or_else(|| invalid_cursor(format!("branch index {idx} no longer exists"))),
+        WorkflowBranchCursorSelection::Default => Ok(default),
+    }
+}
+
 fn validate_branch_resume_selection(
     branches: &[(String, Vec<WorkflowStep>)],
     selection: &WorkflowBranchCursorSelection,
@@ -1109,6 +1258,40 @@ fn validate_branch_resume_selection(
                 return Err(invalid_cursor(format!(
                     "default branch cursor no longer matches condition '{condition_key}' \
                      value '{condition_value}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_branch_when_resume_selection(
+    branches: &[(WorkflowBranchCondition, Vec<WorkflowStep>)],
+    selection: &WorkflowBranchCursorSelection,
+    condition_key: &str,
+    condition_value: Option<&Value>,
+) -> Result<(), WorkflowError> {
+    match selection {
+        WorkflowBranchCursorSelection::Branch(idx) => {
+            let Some((condition, _)) = branches.get(*idx) else {
+                return Err(invalid_cursor(format!(
+                    "branch index {idx} no longer exists"
+                )));
+            };
+            if !branch_condition_matches(condition, condition_value) {
+                return Err(invalid_cursor(format!(
+                    "branch cursor selected index {idx} for condition '{condition:?}', \
+                     but current condition '{condition_key}' no longer matches"
+                )));
+            }
+        }
+        WorkflowBranchCursorSelection::Default => {
+            if branches
+                .iter()
+                .any(|(condition, _)| branch_condition_matches(condition, condition_value))
+            {
+                return Err(invalid_cursor(format!(
+                    "default branch cursor no longer matches condition '{condition_key}'"
                 )));
             }
         }
@@ -1246,6 +1429,66 @@ fn execute_step<'a, E: WorkflowExecutor>(
                         }
                     }
                 };
+
+                if let Some(pause) = execute_steps(
+                    executor,
+                    selected_steps,
+                    ctx,
+                    start_index,
+                    nested_cursor,
+                    scope.child(step_index, StepListCursorKind::Branch { selection }),
+                )
+                .await?
+                {
+                    return Ok(StepOutcome::Paused(pause));
+                }
+            }
+
+            WorkflowStep::BranchWhen {
+                condition_key,
+                branches,
+                default,
+            } => {
+                ensure_unique_branch_conditions(condition_key, branches)?;
+                let condition_value = ctx.get(condition_key).cloned();
+                let (selection, selected_steps, start_index, nested_cursor) =
+                    match cursor_frames.first() {
+                        Some(WorkflowCursorFrame::Branch { selection, index }) => {
+                            validate_branch_when_resume_selection(
+                                branches,
+                                selection,
+                                condition_key,
+                                condition_value.as_ref(),
+                            )?;
+                            (
+                                selection.clone(),
+                                selected_branch_when_steps(branches, default, selection)?,
+                                *index,
+                                &cursor_frames[1..],
+                            )
+                        }
+                        Some(_) => {
+                            return Err(invalid_cursor(
+                                "expected Branch frame for nested branch resume",
+                            ));
+                        }
+                        None => match branches.iter().enumerate().find(|(_, (condition, _))| {
+                            branch_condition_matches(condition, condition_value.as_ref())
+                        }) {
+                            Some((idx, (_, steps))) => (
+                                WorkflowBranchCursorSelection::Branch(idx),
+                                steps.as_slice(),
+                                0,
+                                &[][..],
+                            ),
+                            None => (
+                                WorkflowBranchCursorSelection::Default,
+                                default.as_slice(),
+                                0,
+                                &[][..],
+                            ),
+                        },
+                    };
 
                 if let Some(pause) = execute_steps(
                     executor,
@@ -1582,6 +1825,7 @@ async fn run_workflow_inner<'a, E: WorkflowExecutor>(
     mode: RunMode<'a>,
 ) -> Result<String, WorkflowError> {
     validate_workflow_definition(definition)?;
+    ensure_context_definition(ctx, definition)?;
     let run_start_transition_count = ctx.transition_count();
     let mut pending_cursor_frames = match ctx.cursor.clone() {
         Some(cursor) if cursor.state == ctx.current_state => {
@@ -1927,6 +2171,7 @@ async fn timeout_workflow_inner<E: WorkflowExecutor>(
         .load_state(workflow_id)
         .await?
         .ok_or_else(|| WorkflowError::Other(format!("Workflow not found: {}", workflow_id)))?;
+    ensure_context_definition(&mut ctx, definition)?;
 
     let cursor = ctx
         .cursor
@@ -2033,6 +2278,14 @@ fn steps_contain_wait(steps: &[WorkflowStep]) -> bool {
     steps.iter().any(|step| match step {
         WorkflowStep::Wait { .. } => true,
         WorkflowStep::Branch {
+            branches, default, ..
+        } => {
+            branches
+                .iter()
+                .any(|(_, branch_steps)| steps_contain_wait(branch_steps))
+                || steps_contain_wait(default)
+        }
+        WorkflowStep::BranchWhen {
             branches, default, ..
         } => {
             branches
@@ -2318,6 +2571,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn versioned_workflow_stamps_context_metadata() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("versioned_booking")
+            .version("v1")
+            .initial_state("start")
+            .transition("start", "done", vec![WorkflowStep::transition("done")]);
+
+        let mut ctx = WorkflowContext::new("wf-versioned", "start");
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+
+        assert_eq!(result, "done");
+        assert_eq!(ctx.definition_name.as_deref(), Some("versioned_booking"));
+        assert_eq!(ctx.definition_version.as_deref(), Some("v1"));
+    }
+
+    #[tokio::test]
+    async fn versioned_resume_rejects_definition_version_drift() {
+        let executor = MockExecutor::new();
+
+        let wf_v1 = WorkflowDefinition::new("versioned_resume")
+            .version("v1")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("operator.accepted", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::Email, "accepted", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+        let wf_v2 = WorkflowDefinition::new("versioned_resume")
+            .version("v2")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![
+                    WorkflowStep::wait("operator.accepted", std::time::Duration::from_secs(3600)),
+                    WorkflowStep::notify(ChannelKind::Email, "accepted", "customer.email"),
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-version-drift", "active");
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+        let result = run_workflow(&executor, &wf_v1, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        let err = resume_workflow(
+            &executor,
+            &wf_v2,
+            "wf-version-drift",
+            serde_json::json!({"event": "operator.accepted"}),
+        )
+        .await
+        .expect_err("version drift must fail before replay");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("definition version 'v1'"), "got: {msg}");
+                assert!(msg.contains("not 'v2'"), "got: {msg}");
+            }
+            other => panic!("expected version drift error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn run_with_options_acquires_lease_and_completes_operation() {
         let executor = MockExecutor::new();
 
@@ -2564,6 +2890,108 @@ mod tests {
 
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "resolved");
+    }
+
+    #[tokio::test]
+    async fn branch_when_routes_by_typed_numeric_condition() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("typed_branching")
+            .initial_state("pending")
+            .transition(
+                "pending",
+                "resolved",
+                vec![WorkflowStep::branch_when(
+                    "payment.attempts",
+                    vec![(
+                        WorkflowBranchCondition::NumberGte(3),
+                        vec![WorkflowStep::transition("manual_review")],
+                    )],
+                    vec![WorkflowStep::transition("retry")],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-typed-branch", "pending");
+        ctx.set("payment", serde_json::json!({"attempts": 3}));
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+
+        assert_eq!(result, "manual_review");
+        assert_eq!(ctx.current_state, "manual_review");
+    }
+
+    #[tokio::test]
+    async fn branch_when_resume_rejects_condition_drift_before_side_effects() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("branch_when_drift_source")
+            .initial_state("active")
+            .transition(
+                "active",
+                "done",
+                vec![WorkflowStep::branch_when(
+                    "payment.attempts",
+                    vec![(
+                        WorkflowBranchCondition::NumberGte(3),
+                        vec![
+                            WorkflowStep::wait(
+                                "manual.approved",
+                                std::time::Duration::from_secs(3600),
+                            ),
+                            WorkflowStep::notify(
+                                ChannelKind::Email,
+                                "manual_review_approved",
+                                "customer.email",
+                            ),
+                        ],
+                    )],
+                    vec![],
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-branch-when-drift", "active");
+        ctx.set(
+            "payment",
+            serde_json::json!({
+                "attempts": 3
+            }),
+        );
+        ctx.set(
+            "customer",
+            serde_json::json!({"email": "guest@example.com"}),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+        assert_eq!(result, "active");
+
+        {
+            let mut saved = executor.saved_state.lock().unwrap();
+            let saved = saved.as_mut().expect("paused state should be saved");
+            saved.set(
+                "payment",
+                serde_json::json!({
+                    "attempts": 1
+                }),
+            );
+        }
+
+        let err = resume_workflow(
+            &executor,
+            &wf,
+            "wf-branch-when-drift",
+            serde_json::json!({"event": "manual.approved"}),
+        )
+        .await
+        .expect_err("branch predicate drift must reject resume");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(msg.contains("Invalid workflow resume cursor"), "got: {msg}");
+                assert!(msg.contains("no longer matches"), "got: {msg}");
+            }
+            other => panic!("expected invalid cursor error, got {other:?}"),
+        }
+        assert!(executor.notifications.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3059,7 +3487,7 @@ mod tests {
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "active");
 
-        let drifted_wf = WorkflowDefinition::new("branch_reorder_drifted")
+        let drifted_wf = WorkflowDefinition::new("branch_reorder_source")
             .initial_state("active")
             .transition(
                 "active",
@@ -3161,7 +3589,7 @@ mod tests {
         let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
         assert_eq!(result, "active");
 
-        let drifted_wf = WorkflowDefinition::new("branch_default_drifted")
+        let drifted_wf = WorkflowDefinition::new("branch_default_source")
             .initial_state("active")
             .transition(
                 "active",
