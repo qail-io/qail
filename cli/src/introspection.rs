@@ -10,7 +10,8 @@ use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{Deferrable, FkAction};
 use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
 use qail_core::migrate::{
-    Column, ForeignKey, Generated, Index, MultiColumnForeignKey, Schema, Table, to_qail_string,
+    CheckConstraint, Column, ForeignKey, Generated, Index, MultiColumnForeignKey, Schema, Table,
+    to_qail_string,
 };
 use qail_pg::driver::PgDriver;
 
@@ -630,10 +631,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         {
             for col in columns.iter_mut() {
                 if col.name == *col_name {
-                    col.check = Some(qail_core::migrate::CheckConstraint {
-                        expr: expr.clone(),
-                        name: Some(constraint_name.clone()),
-                    });
+                    push_column_check(
+                        col,
+                        qail_core::migrate::CheckConstraint {
+                            expr: expr.clone(),
+                            name: Some(constraint_name.clone()),
+                        },
+                    );
                     applied = true;
                 }
             }
@@ -642,12 +646,17 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         if !applied
             && let Some(table_name) = check_table_map.get(&constraint_name)
             && let Some(columns) = tables.get_mut(table_name.as_str())
-            && let Some(col) = columns.iter_mut().find(|c| c.check.is_none())
+            && let Some(col) = columns
+                .iter_mut()
+                .find(|c| !column_has_check_name(c, &constraint_name))
         {
-            col.check = Some(qail_core::migrate::CheckConstraint {
-                expr: qail_core::migrate::schema::CheckExpr::Sql(check_clause.clone()),
-                name: Some(constraint_name.clone()),
-            });
+            push_column_check(
+                col,
+                qail_core::migrate::CheckConstraint {
+                    expr: qail_core::migrate::schema::CheckExpr::Sql(check_clause.clone()),
+                    name: Some(constraint_name.clone()),
+                },
+            );
         }
     }
 
@@ -677,7 +686,6 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
                 .push(unique_constraint);
         }
     }
-
     // ── 5b. Qualified FK source/reference tables + deferrability ─────────
     let fk_catalog_cmd = Qail::get("pg_catalog.pg_constraint")
         .table_alias("con")
@@ -2236,6 +2244,26 @@ pub(crate) fn parse_check_expr(
     }
 
     Some(CheckExpr::Sql(s))
+}
+
+fn push_column_check(column: &mut Column, check: CheckConstraint) {
+    if let Some(name) = check.name.as_deref()
+        && column_has_check_name(column, name)
+    {
+        return;
+    }
+
+    if column.check.is_none() {
+        column.check = Some(check);
+    } else {
+        column.extra_checks.push(check);
+    }
+}
+
+fn column_has_check_name(column: &Column, name: &str) -> bool {
+    column
+        .checks()
+        .any(|check| check.name.as_deref() == Some(name))
 }
 
 fn strip_wrapping_parens(mut s: &str) -> &str {

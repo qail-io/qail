@@ -1079,6 +1079,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 default,
                 foreign_key: None, // Will be filled below after FK query
                 check: None,
+                extra_checks: Vec::new(),
                 generated,
             });
         }
@@ -1878,10 +1879,29 @@ fn apply_shadow_column_check_expr(
         return;
     };
 
-    column.check = Some(CheckConstraint {
-        expr,
-        name: Some(constraint_name.to_string()),
-    });
+    push_shadow_column_check(
+        column,
+        CheckConstraint {
+            expr,
+            name: Some(constraint_name.to_string()),
+        },
+    );
+}
+
+fn push_shadow_column_check(column: &mut Column, check: CheckConstraint) {
+    if let Some(name) = check.name.as_deref()
+        && column
+            .checks()
+            .any(|existing| existing.name.as_deref() == Some(name))
+    {
+        return;
+    }
+
+    if column.check.is_none() {
+        column.check = Some(check);
+    } else {
+        column.extra_checks.push(check);
+    }
 }
 
 fn check_expr_anchor_column(expr: &CheckExpr) -> Option<&str> {

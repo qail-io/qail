@@ -301,7 +301,6 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let mut seen_default = false;
     let mut seen_unique = false;
     let mut seen_generated = false;
-    let mut seen_check = false;
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
@@ -461,10 +460,6 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 col = apply_fk_action_options(col, &parts, &mut i)?;
             }
             s if s.starts_with("check(") => {
-                if seen_check {
-                    return Err(format!("duplicate check expression for column '{}'", name));
-                }
-                seen_check = true;
                 // Parse check(expr) — expression may contain nested parens and spaces.
                 // Keep consuming tokens until the outer `check(` parenthesis is balanced.
                 let mut check_str = s.to_string();
@@ -499,11 +494,11 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 let expr = parse_check_expr_from_qail(inner).ok_or_else(|| {
                     format!("invalid check expression for column '{}': {}", name, inner)
                 })?;
-                col.check = Some(CheckConstraint { expr, name: None });
+                push_column_check(&mut col, CheckConstraint { expr, name: None });
             }
             "check_name" if i + 1 < parts.len() => {
                 i += 1;
-                if let Some(ref mut check) = col.check {
+                if let Some(check) = last_column_check_mut(&mut col) {
                     if check.name.is_some() {
                         return Err(format!("duplicate check_name for column '{}'", name));
                     }
@@ -1122,6 +1117,22 @@ fn record_sequence_option(
         return Err(format!("duplicate sequence option: {option}"));
     }
     Ok(())
+}
+
+fn push_column_check(col: &mut Column, check: CheckConstraint) {
+    if col.check.is_none() {
+        col.check = Some(check);
+    } else {
+        col.extra_checks.push(check);
+    }
+}
+
+fn last_column_check_mut(col: &mut Column) -> Option<&mut CheckConstraint> {
+    if let Some(check) = col.extra_checks.last_mut() {
+        Some(check)
+    } else {
+        col.check.as_mut()
+    }
 }
 
 /// Parse a standalone ENUM type definition.
@@ -5276,28 +5287,42 @@ table tickets {
     }
 
     #[test]
-    fn test_parse_check_rejects_duplicates() {
-        for (input, expected) in [
-            (
-                r#"
+    fn test_parse_multiple_checks_on_one_column() {
+        let input = r#"
 table products {
-  score int check(score >= 0) check(score <= 100)
+  score int check(score >= 0) check_name score_min check(score <= 100) check_name score_max
 }
-"#,
-                "duplicate check expression for column 'score'",
-            ),
-            (
-                r#"
+"#;
+
+        let schema = parse_qail(input).expect("multiple checks should parse");
+        let table = schema.tables.get("products").expect("products table");
+        let score = table
+            .columns
+            .iter()
+            .find(|column| column.name == "score")
+            .expect("score column");
+
+        assert_eq!(
+            score.check.as_ref().and_then(|check| check.name.as_deref()),
+            Some("score_min")
+        );
+        assert_eq!(score.extra_checks.len(), 1);
+        assert_eq!(score.extra_checks[0].name.as_deref(), Some("score_max"));
+    }
+
+    #[test]
+    fn test_parse_check_rejects_duplicate_name_for_same_check() {
+        let input = r#"
 table products {
   score int check(score >= 0) check_name score_min check_name score_min_again
 }
-"#,
-                "duplicate check_name for column 'score'",
-            ),
-        ] {
-            let err = parse_qail(input).expect_err("duplicate check metadata should fail");
-            assert!(err.contains(expected), "{err}");
-        }
+"#;
+
+        let err = parse_qail(input).expect_err("duplicate check metadata should fail");
+        assert!(
+            err.contains("duplicate check_name for column 'score'"),
+            "{err}"
+        );
     }
 
     #[test]
