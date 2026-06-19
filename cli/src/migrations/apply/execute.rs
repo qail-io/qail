@@ -569,27 +569,22 @@ fn resolve_apply_shadow_receipt_policy(
     policy: &MigrationPolicy,
     allow_no_shadow_receipt: bool,
 ) -> Result<bool> {
-    if !policy.require_shadow_receipt {
+    if allow_no_shadow_receipt {
         println!(
             "{}",
-            "⚠️  Shadow receipt verification disabled by migrations.policy.require_shadow_receipt=false"
+            "⚠️  --allow-no-shadow-receipt is ignored for native folder apply; \
+             expand/backfill/contract migrations use phase guardrails instead"
                 .yellow()
         );
-        return Ok(false);
-    }
-    if allow_no_shadow_receipt {
-        if !policy.allow_no_shadow_receipt {
-            bail!(
-                "Migration blocked: --allow-no-shadow-receipt is disabled by migrations.policy.allow_no_shadow_receipt=false"
-            );
-        }
+    } else if policy.require_shadow_receipt {
         println!(
             "{}",
-            "⚠️  Skipping shadow receipt verification due to --allow-no-shadow-receipt".yellow()
+            "↷ Shadow receipt verification is scoped to state-diff `migrate up`; \
+             native folder apply uses expand/backfill/contract guardrails"
+                .yellow()
         );
-        return Ok(false);
     }
-    Ok(true)
+    Ok(false)
 }
 
 fn should_run_apply_lock_risk_preflight(direction: MigrateDirection, cmds: &[Qail]) -> bool {
@@ -2284,14 +2279,14 @@ mod tests {
         enforce_apply_down_destructive_policy, ensure_applied_checksum_matches,
         ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches,
         normalize_column_type, parse_qail_to_commands_strict, parse_rename_expr,
-        should_adopt_existing_error, should_run_apply_lock_risk_preflight, split_schema_ident,
-        strip_optional_if_exists_prefix, validate_receipts_against_local,
-        verify_applied_commands_effects,
+        resolve_apply_shadow_receipt_policy, should_adopt_existing_error,
+        should_run_apply_lock_risk_preflight, split_schema_ident, strip_optional_if_exists_prefix,
+        validate_receipts_against_local, verify_applied_commands_effects,
     };
     use super::{ExpectedForeignKeyConstraint, LiveForeignKeyConstraint};
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::{MigrateDirection, MigrationPhase};
-    use crate::migrations::{EnforcementMode, ReceiptValidationMode};
+    use crate::migrations::{EnforcementMode, MigrationPolicy, ReceiptValidationMode};
     use qail_core::ast::{Action, Constraint, Expr, TableConstraint};
     use qail_core::prelude::Qail;
     use std::collections::HashMap;
@@ -2306,6 +2301,24 @@ mod tests {
             path: PathBuf::from(display_name),
             phase: MigrationPhase::Expand,
         }
+    }
+
+    #[test]
+    fn native_folder_apply_does_not_require_shadow_receipts() {
+        let policy = MigrationPolicy {
+            require_shadow_receipt: true,
+            allow_no_shadow_receipt: false,
+            ..MigrationPolicy::default()
+        };
+
+        assert!(
+            !resolve_apply_shadow_receipt_policy(&policy, false)
+                .expect("folder apply shadow policy should resolve")
+        );
+        assert!(
+            !resolve_apply_shadow_receipt_policy(&policy, true)
+                .expect("compat bypass flag should not be required for folder apply")
+        );
     }
 
     #[test]

@@ -210,6 +210,42 @@ ALTER whatsapp_phone_configs ADD fallback_reply_enabled:boolean:default=false
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_supports_mixed_explicit_alter_and_table_blocks() {
+        let input = r#"
+-- mixed production-style migration
+alter tenants add public_booking_enabled:BOOLEAN:default=true
+alter tenants add vendor_confirmation_office_hours:JSONB:default='{}'::jsonb
+
+table booking_operator_offers {
+  id UUID primary_key default gen_random_uuid()
+  order_id UUID not_null
+  expires_at TIMESTAMPTZ not_null
+}
+
+index idx_booking_operator_offers_due on booking_operator_offers (expires_at)
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("mixed explicit alter and table block should compile");
+
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd.action, qail_core::ast::Action::Alter)),
+            "explicit ALTER ADD COLUMN should compile"
+        );
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd.action, qail_core::ast::Action::Make)),
+            "table block should compile"
+        );
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd.action, qail_core::ast::Action::Index)),
+            "index block should compile"
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_explicit_check_constraint_replacement() {
         let input = r#"
 alter transfer_bookings drop constraint chk_booking_status

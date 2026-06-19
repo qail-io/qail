@@ -235,7 +235,7 @@ pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
         map(
             preceded(
                 alt((tag_no_case("default="), tag_no_case("def="))),
-                recognize(take_while1(|c: char| c != ',' && c != ':' && c != ' ')),
+                parse_default_value,
             ),
             |val: &str| Constraint::Default(val.to_string()),
         ),
@@ -248,6 +248,32 @@ pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
         ),
     ))
     .parse(input)
+}
+
+fn parse_default_value(input: &str) -> IResult<&str, &str> {
+    let mut end = 0usize;
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if ch == ':' {
+            if let Some(&(next_idx, ':')) = chars.peek() {
+                chars.next();
+                end = next_idx + 1;
+                continue;
+            }
+            break;
+        }
+        if ch == ',' || ch.is_whitespace() {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+
+    if end == 0 {
+        return Err(column_definition_error(input));
+    }
+
+    Ok((&input[end..], &input[..end]))
 }
 
 /// Parse CREATE INDEX: `index idx_name on table_name col1, col2 [unique]`

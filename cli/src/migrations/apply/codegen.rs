@@ -80,8 +80,15 @@ pub(crate) fn parse_qail_to_commands_strict(content: &str) -> Result<Vec<Qail>> 
     });
 
     if uses_braces {
-        let schema = parse_qail(content).map_err(|e| anyhow!(e))?;
-        return compile_migrate_schema_strict(&schema);
+        match parse_qail(content) {
+            Ok(schema) => return compile_migrate_schema_strict(&schema),
+            Err(parse_err) => {
+                if let Some(cmds) = parse_explicit_apply_commands(content)? {
+                    return Ok(cmds);
+                }
+                return Err(anyhow!(parse_err));
+            }
+        }
     }
 
     if let Ok(schema) = Schema::parse(content) {

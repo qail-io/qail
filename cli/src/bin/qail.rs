@@ -811,7 +811,6 @@ EXAMPLES:
     # Allow destructive operations and lock-risk overrides (if policy requires explicit flags)
     qail migrate apply --allow-destructive
     qail migrate apply --allow-lock-risk
-    qail migrate apply --allow-no-shadow-receipt
     qail migrate apply --adopt-existing
 
     # Wait until global migration lock is available
@@ -836,7 +835,7 @@ EXAMPLES:
         /// Explicitly allow destructive migration operations
         #[arg(long)]
         allow_destructive: bool,
-        /// Skip shadow receipt verification gate (not recommended)
+        /// Compatibility no-op: native folder apply uses expand/backfill/contract guardrails
         #[arg(long)]
         allow_no_shadow_receipt: bool,
         /// Skip lock-risk preflight guardrails (not recommended)
