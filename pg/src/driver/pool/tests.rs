@@ -47,6 +47,7 @@ fn test_pool_config_defaults() {
     assert_eq!(config.gss_circuit_breaker_window, Duration::from_secs(30));
     assert_eq!(config.gss_circuit_breaker_cooldown, Duration::from_secs(15));
     assert_eq!(config.gss_enc_mode, GssEncMode::Disable);
+    assert!(!config.io_uring);
 }
 
 #[test]
@@ -106,6 +107,23 @@ fn test_url_gssencmode_require() {
 fn test_url_gssencmode_invalid() {
     let mut config = PoolConfig::new("localhost", 5432, "u", "db");
     let err = apply_url_query_params(&mut config, "gssencmode=bogus", "localhost");
+    assert!(err.is_err());
+}
+
+#[test]
+fn test_url_io_uring_opt_in() {
+    let mut config = PoolConfig::new("localhost", 5432, "u", "db");
+
+    apply_url_query_params(&mut config, "io_uring=true", "localhost").unwrap();
+
+    assert!(config.io_uring);
+}
+
+#[test]
+fn test_url_io_uring_rejects_invalid_bool() {
+    let mut config = PoolConfig::new("localhost", 5432, "u", "db");
+    let err = apply_url_query_params(&mut config, "io_uring=auto", "localhost");
+
     assert!(err.is_err());
 }
 
@@ -171,7 +189,8 @@ fn test_pool_config_builder_chaining() {
         .gss_circuit_breaker_threshold(12)
         .gss_circuit_breaker_window(Duration::from_secs(45))
         .gss_circuit_breaker_cooldown(Duration::from_secs(20))
-        .test_on_acquire(false);
+        .test_on_acquire(false)
+        .io_uring(true);
 
     assert_eq!(config.host, "db.example.com");
     assert_eq!(config.port, 5433);
@@ -185,6 +204,7 @@ fn test_pool_config_builder_chaining() {
     assert_eq!(config.gss_connect_retries, 4);
     assert_eq!(config.gss_retry_base_delay, Duration::from_millis(250));
     assert_eq!(config.gss_circuit_breaker_threshold, 12);
+    assert!(config.io_uring);
     assert_eq!(config.gss_circuit_breaker_window, Duration::from_secs(45));
     assert_eq!(config.gss_circuit_breaker_cooldown, Duration::from_secs(20));
     assert!(!config.test_on_acquire);
@@ -582,6 +602,25 @@ fn test_pool_config_from_url_applies_auth_and_query_params() {
     assert_eq!(config.database, "app");
     assert_eq!(config.password, Some("s@cret".to_string()));
     assert_eq!(config.tls_mode, TlsMode::Require);
+    assert!(!config.io_uring);
+}
+
+#[test]
+fn test_pool_config_from_url_applies_io_uring_query_param() {
+    let config =
+        PoolConfig::from_url("postgresql://alice@db.internal:5433/app?io_uring=true").unwrap();
+
+    assert!(config.io_uring);
+}
+
+#[test]
+fn test_from_qail_config_maps_io_uring() {
+    let mut qail = qail_core::config::QailConfig::default();
+    qail.postgres.io_uring = true;
+
+    let config = PoolConfig::from_qail_config(&qail).expect("expected valid config");
+
+    assert!(config.io_uring);
 }
 
 #[test]

@@ -117,7 +117,7 @@ pub enum WorkflowStep {
     /// Create a payment charge via a payment provider.
     ///
     /// Resolves amount and reference from context, calls the provider,
-    /// and stores the `ChargeResponse` in context for downstream steps.
+    /// and stores a redacted `PaymentDisplay` in context for downstream steps.
     Charge {
         /// Which payment provider to use
         provider: PaymentKind,
@@ -129,7 +129,10 @@ pub enum WorkflowStep {
         description_key: Option<String>,
         /// Optional context key for payment method override
         payment_method_key: Option<String>,
-        /// Optional key to store `ChargeResponse` in context
+        /// Optional context key for the order origin (`whatsapp`, `mcp`, `web`, `ios_app`, `android_app`, or `api`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order_origin_key: Option<String>,
+        /// Optional key to store redacted payment display details in context
         store_as: Option<String>,
     },
 }
@@ -221,6 +224,7 @@ impl WorkflowStep {
             reference_key: reference_key.into(),
             description_key: None,
             payment_method_key: None,
+            order_origin_key: None,
             store_as: store_as.map(String::from),
         }
     }
@@ -240,6 +244,28 @@ impl WorkflowStep {
             reference_key: reference_key.into(),
             description_key: description_key.map(String::from),
             payment_method_key: payment_method_key.map(String::from),
+            order_origin_key: None,
+            store_as: store_as.map(String::from),
+        }
+    }
+
+    /// Create a Charge step with explicit source-channel tracking.
+    pub fn charge_with_origin(
+        provider: PaymentKind,
+        amount_key: &str,
+        reference_key: &str,
+        description_key: Option<&str>,
+        payment_method_key: Option<&str>,
+        order_origin_key: Option<&str>,
+        store_as: Option<&str>,
+    ) -> Self {
+        WorkflowStep::Charge {
+            provider,
+            amount_key: amount_key.into(),
+            reference_key: reference_key.into(),
+            description_key: description_key.map(String::from),
+            payment_method_key: payment_method_key.map(String::from),
+            order_origin_key: order_origin_key.map(String::from),
             store_as: store_as.map(String::from),
         }
     }

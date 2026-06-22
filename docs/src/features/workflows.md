@@ -151,6 +151,15 @@ The engine provides replay control, not magic exactly-once delivery.
 For payment and notification providers, pass the workflow side-effect operation
 id as the provider idempotency key whenever duplicates would be unsafe.
 
+For checkout flows, set an explicit order origin in workflow context and pass it
+through `WorkflowStep::charge_with_origin`. Use `whatsapp` for WhatsApp-created
+orders, `mcp` for ChatGPT/MCP-created orders, `web` for web checkout,
+`ios_app` for the native iOS app, and `android_app` for the native Android app
+so provider metadata, order records, and analytics cannot mix the channels.
+Charge output stored in context is a redacted payment display payload: show
+QRIS/virtual-account details from that payload, and use only the redirect/payment
+link for card flows.
+
 ## Side-Effect Ledger
 
 The engine wraps query, notify, and charge steps with stable side-effect ids.

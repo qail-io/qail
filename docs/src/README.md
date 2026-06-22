@@ -22,14 +22,17 @@ driver, gateway, schema, workflow, or vector workloads.
 
 ## Latest Updates (June 2026)
 
-- QAIL is now on the `v1.3.3` stable line across the Rust workspace crates and CLI.
+- QAIL is now on the `v1.3.4` stable line across the Rust workspace crates and CLI.
+- Linux `io_uring` transport is now explicit opt-in; Tokio remains the default
+  unless `[postgres].io_uring = true`, `?io_uring=true`, driver/pool options,
+  or `QAIL_PG_IO_BACKEND=io_uring` enables it.
 - The public API is the AST/DSL path: `Qail::get/add/set/del`, typed expressions, relation helpers, RLS contexts, and driver/pool execution.
 - Compatibility aliases that hid fallible behavior were removed: use `with_rls(&ctx)?` and `join_on(...)?` directly.
 - Legacy raw SQL builder APIs remain out of the normal runtime path; use AST-native commands and session AST helpers instead.
 - PostgreSQL cancel-key APIs are bytes-native, matching protocol `3.0` and `3.2` behavior.
 - Native vertical access policy is now first-class through `qail_core::access` and optional `[access]` config for operation and column permissions alongside PostgreSQL RLS.
-- PostgreSQL prepared statement caching, NOTIFY flushing, MERGE/source-query access checks, and strict migration verification were hardened in the latest audit pass.
-- Gateway numeric preservation, Qdrant vector encoding, workflow branch cursors, and SDK route-segment encoding now have focused regression coverage.
+- Workflow charge side effects now carry stable idempotency keys, origin
+  metadata, and redacted display payloads for payment/chat surfaces.
 - Migration docs use the expand/backfill/contract apply model instead of presenting up/down as the primary workflow.
 
 Read [Access Policy](./features/access-policy.md) for the vertical permission
@@ -55,7 +58,7 @@ Some search engines still surface old QAIL pages showing symbolic forms such as 
 
 Those pages are from historical pre-1.0 releases and are not the current API guidance.
 
-Current QAIL `1.3.3` application code should use the native AST/DSL path:
+Current QAIL `1.3.4` application code should use the native AST/DSL path:
 
 ```rust
 let query = Qail::get("users")

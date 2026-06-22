@@ -10,8 +10,8 @@ systems.
 
 ```toml
 [dependencies]
-qail-workflow = "1.3.3"
-qail-core = "1.3.3"
+qail-workflow = "1.3.4"
+qail-core = "1.3.4"
 ```
 
 ## Features
@@ -35,6 +35,14 @@ due-row discovery.
 The engine makes side effects safer, but provider calls still need app-level
 idempotency. Pass the workflow side-effect id to payment, notification, and
 external mutation providers whenever duplicate delivery would be unsafe.
+
+Charge steps now attach that workflow side-effect id to `ChargeRequest` as the
+provider idempotency key when the app has not already set one. Payment display
+data stored in workflow context is redacted for chat/notification use: QRIS and
+virtual-account fields can be shown, card payments should expose only the
+provider redirect/payment link. Use `order_origin` (`whatsapp`, `mcp`, `web`,
+`ios_app`, `android_app`, or `api`) to keep WhatsApp, MCP/ChatGPT, web, and
+native-app orders separate in provider metadata and downstream order records.
 
 ## License
 

@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "1.3.3"
+version = "1.3.4"
 edition = "2024"
 description = "Rust PostgreSQL driver for typed AST queries with direct wire-protocol execution"
 license = "Apache-2.0"
@@ -28,7 +28,7 @@ enterprise-gssapi = []
 libpq = []
 
 [dependencies]
-qail-core = { version = "1.3.3", path = "../core" }
+qail-core = { version = "1.3.4", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 tokio = { version = "1.50.0", features = ["net", "io-util", "sync", "rt", "time"] }

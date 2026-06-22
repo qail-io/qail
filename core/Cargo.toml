@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "1.3.3"
+version = "1.3.4"
 edition = "2024"
 description = "QAIL AST Kernel - typed query AST, schema validation, RLS context, and native access policy"
 license = "Apache-2.0"

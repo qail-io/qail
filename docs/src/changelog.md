@@ -4,13 +4,12 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v1.3.3)
+## Current Highlights (v1.3.4)
 
-- **PostgreSQL protocol hardening**: fast-path backend control-frame validation, frontend send/flush handling, prepared statement lifecycle checks, and pooled raw cleanup behavior now fail closed more consistently.
-- **Native AST/parser validation**: QAIL grammar, schema/query-file parsing, native MERGE handling, identifiers, and expression encoding reject more malformed or unsafe AST shapes before PostgreSQL execution.
-- **MERGE live behavior**: PostgreSQL coverage now exercises complex expressions, CTE/query sources, RLS-scoped update/insert/delete flows, and invalid ASTs that must fail before mutation.
-- **Panic-safety gate**: legacy COPY/time helper paths avoid runtime panics, and encoder FFI cleanup sites now satisfy the stricter unsafe documentation gate.
-- **Real database validation**: PostgreSQL 18 lab coverage passed for cursor cleanup, set operations, recursive CTEs, access-checked execution, MERGE, legacy integration, and seeded RLS behavior.
+- **PostgreSQL io_uring opt-in security**: Linux `io_uring` plain-TCP transport no longer auto-enables on kernel support; enable it explicitly with `[postgres].io_uring = true`, `?io_uring=true`, driver/pool options, or `QAIL_PG_IO_BACKEND=io_uring`.
+- **Tokio remains the safe default**: building with the `qail-pg/io_uring` feature only makes the backend available; TLS, mTLS, and GSSENC paths continue to use Tokio transport.
+- **Workflow payment hardening**: charge side effects now default to stable workflow idempotency keys, support order-origin metadata, and store redacted payment display payloads for chat/notification use.
+- **Release line**: Rust workspace crates and install snippets are bumped to `1.3.4`.
 
 ## v1.3.0 Highlights
 

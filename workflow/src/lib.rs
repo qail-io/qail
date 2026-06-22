@@ -70,8 +70,8 @@ pub use engine::{
     timeout_workflow, timeout_workflow_with_options,
 };
 pub use payment::{
-    ChargeRequest, ChargeResponse, ChargeStatus, Currency, PaymentError, PaymentEvent, PaymentKind,
-    PaymentProvider,
+    ChargeRequest, ChargeResponse, ChargeStatus, Currency, OrderOrigin, PaymentDisplay,
+    PaymentError, PaymentEvent, PaymentKind, PaymentProvider,
 };
 pub use registry::{StateTransition, WorkflowDefinition};
 pub use runtime::{

@@ -14,7 +14,7 @@ use crate::context::{
     WorkflowBranchCursorSelection, WorkflowContext, WorkflowCursor, WorkflowCursorFrame,
     WorkflowPendingWait,
 };
-use crate::payment::{ChargeRequest, ChargeResponse, Currency, PaymentKind};
+use crate::payment::{ChargeRequest, ChargeResponse, Currency, OrderOrigin, PaymentKind};
 use crate::registry::{StateTransition, WorkflowDefinition};
 use crate::runtime::{
     WorkflowLease, WorkflowOperation, WorkflowOperationKind, WorkflowOperationStatus,
@@ -437,10 +437,13 @@ pub trait WorkflowExecutor: Send + Sync {
         &self,
         operation: &WorkflowSideEffect,
         provider: &PaymentKind,
-        request: ChargeRequest,
+        mut request: ChargeRequest,
     ) -> Result<ChargeResponse, WorkflowError> {
         match self.begin_workflow_side_effect(operation).await? {
             WorkflowSideEffectStatus::Execute => {
+                if request.idempotency_key.is_none() {
+                    request.idempotency_key = Some(operation.operation_id.clone());
+                }
                 let response = match self.create_charge(provider, request).await {
                     Ok(response) => response,
                     Err(err) => {
@@ -1109,6 +1112,7 @@ fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> 
                 reference_key,
                 description_key,
                 payment_method_key,
+                order_origin_key,
                 store_as,
                 ..
             } => {
@@ -1119,6 +1123,9 @@ fn validate_workflow_steps(steps: &[WorkflowStep]) -> Result<(), WorkflowError> 
                 }
                 if let Some(payment_method_key) = payment_method_key {
                     ensure_context_lookup_key(payment_method_key, "Charge payment_method_key")?;
+                }
+                if let Some(order_origin_key) = order_origin_key {
+                    ensure_context_lookup_key(order_origin_key, "Charge order_origin_key")?;
                 }
                 ensure_optional_user_context_key(store_as.as_ref(), "Charge store_as")?;
             }
@@ -1816,6 +1823,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 reference_key,
                 description_key,
                 payment_method_key,
+                order_origin_key,
                 store_as,
             } => {
                 ensure_no_child_cursor("Charge", cursor_frames)?;
@@ -1830,6 +1838,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 let description = resolve_optional_charge_string(ctx, description_key.as_ref())?;
                 let payment_method =
                     resolve_optional_charge_string(ctx, payment_method_key.as_ref())?;
+                let order_origin = resolve_optional_order_origin(ctx, order_origin_key.as_ref())?;
 
                 let request = ChargeRequest {
                     amount,
@@ -1837,6 +1846,8 @@ fn execute_step<'a, E: WorkflowExecutor>(
                     reference_id,
                     description,
                     payment_method,
+                    order_origin,
+                    idempotency_key: None,
                     return_url: None,
                     metadata: None,
                 };
@@ -1844,11 +1855,11 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 let operation =
                     side_effect_operation(ctx, scope, step_index, WorkflowSideEffectKind::Charge);
                 let response = executor
-                    .create_charge_once(&operation, provider, request)
+                    .create_charge_once(&operation, provider, request.clone())
                     .await?;
 
                 if let Some(key) = store_as {
-                    let response_json = serde_json::to_value(&response)
+                    let response_json = serde_json::to_value(response.display_for(&request))
                         .map_err(|e| WorkflowError::Other(e.to_string()))?;
                     ctx.set(key, response_json);
                 }
@@ -1893,6 +1904,24 @@ fn resolve_optional_charge_string(
     ctx.get_str(key)
         .map(|value| Some(value.to_string()))
         .ok_or_else(|| WorkflowError::MissingContextKey(format!("{key} (expected string)")))
+}
+
+fn resolve_optional_order_origin(
+    ctx: &WorkflowContext,
+    key: Option<&String>,
+) -> Result<Option<OrderOrigin>, WorkflowError> {
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let value = ctx.get_str(key).ok_or_else(|| {
+        WorkflowError::MissingContextKey(format!("{key} (expected order origin)"))
+    })?;
+
+    OrderOrigin::parse(value).map(Some).ok_or_else(|| {
+        WorkflowError::Other(format!(
+            "Charge order_origin_key '{key}' must resolve to one of: whatsapp, mcp, web, ios_app, android_app, api"
+        ))
+    })
 }
 
 fn charge_amount_from_number(
@@ -2731,7 +2760,7 @@ mod tests {
                 qr_code: Some("00020101021226610014ID.CO.MOCK".into()),
                 payment_code: None,
                 expires_at: Some("2026-02-13T16:00:00Z".into()),
-                raw: None,
+                raw: Some(serde_json::json!({"provider_secret": "hidden"})),
             })
         }
 
@@ -6549,10 +6578,13 @@ mod tests {
                 "created",
                 "awaiting_payment",
                 vec![
-                    WorkflowStep::charge(
+                    WorkflowStep::charge_with_origin(
                         PaymentKind::Xendit,
                         "order.total",
                         "order.id",
+                        None,
+                        Some("order.payment_method"),
+                        Some("order.origin"),
                         Some("charge"),
                     ),
                     WorkflowStep::wait("payment.success", std::time::Duration::from_secs(3600)),
@@ -6572,7 +6604,9 @@ mod tests {
             "order",
             serde_json::json!({
                 "id": "booking-789",
-                "total": 150000
+                "total": 150000,
+                "payment_method": "QRIS",
+                "origin": "mcp"
             }),
         );
         ctx.set(
@@ -6598,10 +6632,76 @@ mod tests {
             Some("Pending")
         );
         assert!(charge.get("qr_code").is_some());
+        assert_eq!(
+            charge.get("payment_method").and_then(|v| v.as_str()),
+            Some("QRIS")
+        );
+        assert_eq!(
+            charge.get("order_origin").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+        assert!(
+            charge.get("raw").is_none(),
+            "stored charge context must be safe for chat display"
+        );
 
         let charges = executor.charges.lock().unwrap();
         assert_eq!(charges.len(), 1);
         assert_eq!(charges[0].amount, 150000);
+        assert_eq!(charges[0].order_origin, Some(OrderOrigin::Mcp));
+        assert!(
+            charges[0]
+                .idempotency_key
+                .as_deref()
+                .is_some_and(|key| key.contains("qail-workflow-side-effect")),
+            "provider charge request must carry a stable workflow idempotency key"
+        );
+    }
+
+    #[tokio::test]
+    async fn charge_rejects_invalid_origin_before_provider_call() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("charge_invalid_origin")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![WorkflowStep::charge_with_origin(
+                    PaymentKind::Xendit,
+                    "order.total",
+                    "order.id",
+                    None,
+                    None,
+                    Some("order.origin"),
+                    Some("charge"),
+                )],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-charge-invalid-origin", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-invalid-origin",
+                "total": 150000,
+                "origin": "telegram"
+            }),
+        );
+
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("invalid order origin must fail before provider call");
+
+        match err {
+            WorkflowError::Other(msg) => {
+                assert!(
+                    msg.contains("Charge order_origin_key 'order.origin'"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected invalid order origin error, got {other:?}"),
+        }
+        assert!(executor.charges.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

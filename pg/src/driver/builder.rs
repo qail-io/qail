@@ -114,6 +114,12 @@ impl PgDriverBuilder {
         self
     }
 
+    /// Opt into Linux io_uring for plain TCP transport.
+    pub fn io_uring(mut self, enabled: bool) -> Self {
+        self.connect_options.io_uring = enabled;
+        self
+    }
+
     /// Set Kerberos/GSS/SSPI token provider callback.
     pub fn gss_token_provider(mut self, provider: GssTokenProvider) -> Self {
         self.connect_options.gss_token_provider = Some(provider);

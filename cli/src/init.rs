@@ -414,6 +414,7 @@ url = "{}"
 # acquire_timeout_secs = 30
 # connect_timeout_secs = 10
 # test_on_acquire = false
+# io_uring = false  # opt in only; plain TCP on Linux builds with qail-pg/io_uring
 
 # [postgres.rls]
 # default_role = "app_user"

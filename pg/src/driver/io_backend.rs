@@ -1,11 +1,12 @@
-//! I/O Backend Auto-detection
+//! I/O backend policy and capability checks
 //!
 //! Reports active I/O backend and optional kernel capabilities.
 //!
 //! Current rollout:
 //! - Tokio remains the universal default.
 //! - On Linux with `io_uring` feature, plain TCP transport can use io_uring
-//!   (TLS/mTLS/GSSENC still use Tokio stream path).
+//!   only when explicitly enabled by config or environment policy.
+//! - TLS/mTLS/GSSENC still use the Tokio stream path.
 
 use std::sync::OnceLock;
 
@@ -38,11 +39,14 @@ fn probe_uring_support() -> Result<(), std::io::Error> {
 }
 
 /// Detect the preferred I/O backend used for plain TCP transport.
+///
+/// Without a concrete connection config this only honors explicit
+/// `QAIL_PG_IO_BACKEND=io_uring`; unset environment still reports Tokio.
 pub fn detect() -> IoBackend {
     *DETECTED_BACKEND.get_or_init(|| {
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            if should_use_uring_plain_transport() {
+            if should_use_uring_plain_transport(false) {
                 tracing::info!("qail-pg: using io_uring backend for plain TCP transport");
                 return IoBackend::IoUring;
             }
@@ -82,9 +86,9 @@ pub fn is_uring_available() -> bool {
 /// Policy:
 /// - `QAIL_PG_IO_BACKEND=tokio` → force tokio
 /// - `QAIL_PG_IO_BACKEND=io_uring` → force io_uring (requires availability)
-/// - unset/other → auto-enable io_uring when available
+/// - unset/other → use the explicit connection config value
 #[inline]
-pub fn should_use_uring_plain_transport() -> bool {
+pub fn should_use_uring_plain_transport(config_enabled: bool) -> bool {
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     {
         let backend = std::env::var("QAIL_PG_IO_BACKEND")
@@ -96,10 +100,11 @@ pub fn should_use_uring_plain_transport() -> bool {
         if backend == "io_uring" {
             return probe_uring_support().is_ok();
         }
-        probe_uring_support().is_ok()
+        config_enabled && probe_uring_support().is_ok()
     }
     #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
     {
+        let _ = config_enabled;
         false
     }
 }

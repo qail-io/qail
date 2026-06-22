@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-06-22
+
+### Security
+- **PostgreSQL io_uring transport is now explicit opt-in:** Linux `io_uring` plain-TCP transport no longer auto-enables just because the kernel and `qail-pg/io_uring` feature support it. Tokio remains the default backend unless `[postgres].io_uring = true`, `?io_uring=true`, `PoolConfig::io_uring(true)`, `ConnectOptions::with_io_uring(true)`, or `QAIL_PG_IO_BACKEND=io_uring` explicitly opts in.
+
+### Added
+- **Workflow payment origin metadata:** Charge workflow steps can now carry an `order_origin` such as `whatsapp`, `mcp`, `web`, `ios_app`, `android_app`, or `api` so providers and downstream order records keep channels separated.
+
+### Fixed
+- **Workflow charge idempotency and display safety:** Charge side effects now default their provider idempotency key to the stable workflow side-effect operation id when the app does not provide one, and stored charge context uses redacted display-safe payment payloads instead of provider raw data.
+
+### Changed
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.4`.
+
 ## [1.3.3] - 2026-06-18
 
 ### Added
