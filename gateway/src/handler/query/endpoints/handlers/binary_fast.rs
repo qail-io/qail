@@ -11,9 +11,9 @@ pub async fn execute_query_binary(
     extensions: axum::http::Extensions,
     request: axum::extract::Request,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let headers = request.headers().clone();
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+    let (parts, body) = request.into_parts();
+    let auth = authenticate_request(state.as_ref(), &parts.headers).await?;
+    let body = axum::body::to_bytes(body, state.config.max_request_body_bytes)
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     if body.is_empty() {
@@ -92,7 +92,7 @@ pub async fn execute_query_binary(
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-    execute_qail_cmd(&state, &auth, &cmd, tenant_guard_plan.as_ref(), &extensions).await
+    execute_qail_cmd(&state, &auth, cmd, tenant_guard_plan.as_ref(), &extensions).await
 }
 
 /// Execute a QAIL query (FAST — array-of-arrays response)
@@ -105,9 +105,9 @@ pub async fn execute_query_fast(
     extensions: axum::http::Extensions,
     request: axum::extract::Request,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
-    let headers = request.headers().clone();
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+    let (parts, body) = request.into_parts();
+    let auth = authenticate_request(state.as_ref(), &parts.headers).await?;
+    let body = axum::body::to_bytes(body, state.config.max_request_body_bytes)
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let query_text = std::str::from_utf8(&body)
@@ -150,5 +150,5 @@ pub async fn execute_query_fast(
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-    execute_qail_cmd_fast(&state, &auth, &cmd, tenant_guard_plan.as_ref(), &extensions).await
+    execute_qail_cmd_fast(&state, &auth, cmd, tenant_guard_plan.as_ref(), &extensions).await
 }

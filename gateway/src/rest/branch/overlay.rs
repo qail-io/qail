@@ -55,9 +55,10 @@ pub(crate) fn project_rows_to_selected_columns(data: &mut [Value], selected_colu
             continue;
         };
 
+        let mut source = std::mem::take(obj);
         let mut projected = serde_json::Map::new();
         for column in selected_columns {
-            if let Some(value) = obj.get(column).cloned() {
+            if let Some(value) = source.remove(column) {
                 projected.insert(column.clone(), value);
             }
         }
@@ -206,13 +207,17 @@ fn patch_overlay_row(
     if let Some(&idx) = data_map.get(row_pk) {
         to_delete.remove(&idx);
         let existing = &mut data[idx];
-        if let (Some(existing_obj), Some(patch_obj)) = (existing.as_object_mut(), patch.as_object())
-        {
-            for (k, v) in patch_obj {
-                existing_obj.insert(k.clone(), v.clone());
+        match patch {
+            Value::Object(patch_obj) => {
+                if let Some(existing_obj) = existing.as_object_mut() {
+                    existing_obj.extend(patch_obj);
+                } else {
+                    *existing = Value::Object(patch_obj);
+                }
             }
-        } else {
-            *existing = patch;
+            patch => {
+                *existing = patch;
+            }
         }
     } else {
         let idx = data.len();

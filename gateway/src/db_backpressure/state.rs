@@ -143,12 +143,14 @@ impl GatewayState {
             .transaction_manager
             .create_session(
                 &self.pool,
-                auth.to_rls_context(),
-                tenant_id,
-                user_id,
-                auth.transaction_scope_fingerprint(),
-                statement_timeout_ms,
-                lock_timeout_ms,
+                crate::transaction::TransactionSessionCreate {
+                    rls_ctx: auth.to_rls_context(),
+                    tenant_id,
+                    user_id,
+                    auth_fingerprint: auth.transaction_scope_fingerprint(),
+                    statement_timeout_ms,
+                    lock_timeout_ms,
+                },
             )
             .await;
 

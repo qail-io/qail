@@ -12,10 +12,27 @@ use crate::transpiler::traits::{SqlGenerator, escape_sql_string_literal};
 
 /// Generate SELECT SQL from a QAIL command, including CTEs, joins, filtering, grouping, and ordering.
 pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
+    build_select_with_columns(cmd, dialect, &cmd.columns)
+}
+
+pub(crate) fn build_select_with_columns(cmd: &Qail, dialect: Dialect, columns: &[Expr]) -> String {
+    build_select_inner(cmd, dialect, columns, true)
+}
+
+pub(super) fn build_select_without_cte_prefix(cmd: &Qail, dialect: Dialect) -> String {
+    build_select_inner(cmd, dialect, &cmd.columns, false)
+}
+
+fn build_select_inner(
+    cmd: &Qail,
+    dialect: Dialect,
+    columns: &[Expr],
+    include_ctes: bool,
+) -> String {
     let generator = dialect.generator();
 
     // CTE prefix: WITH cte1 AS (...), cte2 AS (...)
-    let cte_prefix = if !cmd.ctes.is_empty() {
+    let cte_prefix = if include_ctes && !cmd.ctes.is_empty() {
         let has_recursive = cmd.ctes.iter().any(|c| c.recursive);
         let cte_parts: Vec<String> = cmd
             .ctes
@@ -44,11 +61,10 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
         format!("{}SELECT ", cte_prefix)
     };
 
-    if cmd.columns.is_empty() {
+    if columns.is_empty() {
         sql.push('*');
     } else {
-        let cols: Vec<String> = cmd
-            .columns
+        let cols: Vec<String> = columns
             .iter()
             .map(|c| {
                 match c {
@@ -497,13 +513,10 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     // Prepare for GROUP BY check
-    let has_aggregates = cmd
-        .columns
-        .iter()
-        .any(|c| matches!(c, Expr::Aggregate { .. }));
+    let has_aggregates = columns.iter().any(|c| matches!(c, Expr::Aggregate { .. }));
     let mut non_aggregated_cols = Vec::new();
     if has_aggregates {
-        for col in &cmd.columns {
+        for col in columns {
             match col {
                 Expr::Named(name) => {
                     non_aggregated_cols.push(render_named_reference(name, generator.as_ref(), cmd));

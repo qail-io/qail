@@ -162,8 +162,8 @@ impl EventTriggerEngine {
         conn: &mut qail_pg::PooledConnection,
         table: &str,
         op: OperationType,
-        new_data: Option<Value>,
-        old_data: Option<Value>,
+        mut new_data: Option<Value>,
+        mut old_data: Option<Value>,
     ) -> Result<usize, qail_pg::PgError> {
         let matching = self.triggers_for(table, &op);
         if matching.is_empty() {
@@ -179,14 +179,24 @@ impl EventTriggerEngine {
 
         let timestamp = chrono::Utc::now().to_rfc3339();
         let mut queued = 0;
-        for trigger in matching {
+        let trigger_count = matching.len();
+        for (idx, trigger) in matching.into_iter().enumerate() {
+            let is_last_trigger = idx + 1 == trigger_count;
             let payload = WebhookPayload {
                 trigger: trigger.name.clone(),
                 table: table.to_string(),
                 operation: op_str.to_string(),
                 data: WebhookData {
-                    new: new_data.clone(),
-                    old: old_data.clone(),
+                    new: if is_last_trigger {
+                        new_data.take()
+                    } else {
+                        new_data.clone()
+                    },
+                    old: if is_last_trigger {
+                        old_data.take()
+                    } else {
+                        old_data.clone()
+                    },
                 },
                 timestamp: timestamp.clone(),
             };
@@ -217,8 +227,8 @@ impl EventTriggerEngine {
         &self,
         table: &str,
         op: OperationType,
-        new_data: Option<Value>,
-        old_data: Option<Value>,
+        mut new_data: Option<Value>,
+        mut old_data: Option<Value>,
     ) {
         let matching = self.triggers_for(table, &op);
         if matching.is_empty() {
@@ -239,14 +249,24 @@ impl EventTriggerEngine {
 
         let timestamp = chrono::Utc::now().to_rfc3339();
 
-        for trigger in matching {
+        let trigger_count = matching.len();
+        for (idx, trigger) in matching.into_iter().enumerate() {
+            let is_last_trigger = idx + 1 == trigger_count;
             let payload = WebhookPayload {
                 trigger: trigger.name.clone(),
                 table: table.to_string(),
                 operation: op_str.to_string(),
                 data: WebhookData {
-                    new: new_data.clone(),
-                    old: old_data.clone(),
+                    new: if is_last_trigger {
+                        new_data.take()
+                    } else {
+                        new_data.clone()
+                    },
+                    old: if is_last_trigger {
+                        old_data.take()
+                    } else {
+                        old_data.clone()
+                    },
                 },
                 timestamp: timestamp.clone(),
             };

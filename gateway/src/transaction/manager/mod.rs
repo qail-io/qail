@@ -6,6 +6,8 @@ mod create_session;
 mod reap;
 mod session_ops;
 
+pub(crate) use create_session::TransactionSessionCreate;
+
 impl TransactionSessionManager {
     /// Create a new session manager.
     pub fn new(

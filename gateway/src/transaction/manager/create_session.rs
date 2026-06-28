@@ -6,23 +6,35 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+pub(crate) struct TransactionSessionCreate {
+    pub rls_ctx: RlsContext,
+    pub tenant_id: String,
+    pub user_id: Option<String>,
+    pub auth_fingerprint: String,
+    pub statement_timeout_ms: u32,
+    pub lock_timeout_ms: u32,
+}
+
 impl TransactionSessionManager {
     /// Create a new transaction session.
     ///
     /// Acquires a connection from the pool. The RLS checkout already opens
     /// the transaction that pins tenant-local settings for the session.
     /// Returns the session ID (UUID v4).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_session(
+    pub(crate) async fn create_session(
         &self,
         pool: &PgPool,
-        rls_ctx: RlsContext,
-        tenant_id: String,
-        user_id: Option<String>,
-        auth_fingerprint: String,
-        statement_timeout_ms: u32,
-        lock_timeout_ms: u32,
+        request: TransactionSessionCreate,
     ) -> Result<String, TransactionError> {
+        let TransactionSessionCreate {
+            rls_ctx,
+            tenant_id,
+            user_id,
+            auth_fingerprint,
+            statement_timeout_ms,
+            lock_timeout_ms,
+        } = request;
+
         {
             let sessions = self.sessions.lock().await;
             if sessions.len() >= self.max_sessions {

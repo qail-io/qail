@@ -24,3 +24,27 @@ pub(crate) fn json_to_qail_value(v: &Value) -> QailValue {
         other => QailValue::String(other.to_string()),
     }
 }
+
+/// Convert an owned serde_json::Value to a qail_core::ast::Value.
+pub(crate) fn json_into_qail_value(v: Value) -> QailValue {
+    match v {
+        Value::String(s) => QailValue::String(s),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                QailValue::Int(i)
+            } else if let Some(u) = n.as_u64() {
+                i64::try_from(u)
+                    .map(QailValue::Int)
+                    .unwrap_or_else(|_| QailValue::String(n.to_string()))
+            } else if let Some(f) = n.as_f64() {
+                QailValue::Float(f)
+            } else {
+                QailValue::String(n.to_string())
+            }
+        }
+        Value::Bool(b) => QailValue::Bool(b),
+        Value::Null => QailValue::Null,
+        Value::Array(arr) => QailValue::Array(arr.into_iter().map(json_into_qail_value).collect()),
+        other => QailValue::String(other.to_string()),
+    }
+}

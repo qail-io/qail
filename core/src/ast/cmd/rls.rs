@@ -277,20 +277,26 @@ impl Qail {
         }
     }
 
+    fn scope_boxed_query_rls(query: &mut Box<Qail>, ctx: &RlsContext) -> QailBuildResult<()> {
+        let nested = std::mem::take(query.as_mut());
+        **query = nested.with_rls(ctx)?;
+        Ok(())
+    }
+
     fn scope_nested_rls(mut self, ctx: &RlsContext) -> QailBuildResult<Self> {
         for cte in &mut self.ctes {
-            *cte.base_query = cte.base_query.as_ref().clone().with_rls(ctx)?;
+            Self::scope_boxed_query_rls(&mut cte.base_query, ctx)?;
             if let Some(ref mut recursive_query) = cte.recursive_query {
-                **recursive_query = recursive_query.as_ref().clone().with_rls(ctx)?;
+                Self::scope_boxed_query_rls(recursive_query, ctx)?;
             }
         }
 
         if let Some(ref mut source_query) = self.source_query {
-            **source_query = source_query.as_ref().clone().with_rls(ctx)?;
+            Self::scope_boxed_query_rls(source_query, ctx)?;
         }
 
         for (_, set_query) in &mut self.set_ops {
-            **set_query = set_query.as_ref().clone().with_rls(ctx)?;
+            Self::scope_boxed_query_rls(set_query, ctx)?;
         }
 
         self.scope_embedded_expr_rls(ctx)?;
@@ -306,7 +312,7 @@ impl Qail {
                 }
             }
             Value::Subquery(query) => {
-                **query = query.as_ref().clone().with_rls(ctx)?;
+                Self::scope_boxed_query_rls(query, ctx)?;
             }
             Value::Expr(expr) => Self::scope_expr_nested_rls(expr, ctx)?,
             _ => {}
@@ -385,7 +391,7 @@ impl Qail {
             }
             Expr::FieldAccess { expr, .. } => Self::scope_expr_nested_rls(expr, ctx)?,
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
-                **query = query.as_ref().clone().with_rls(ctx)?;
+                Self::scope_boxed_query_rls(query, ctx)?;
             }
             Expr::Star
             | Expr::Named(_)
@@ -712,7 +718,7 @@ impl Qail {
             return Ok(());
         };
 
-        let scoped_query = query.as_ref().clone().with_rls(ctx)?;
+        let scoped_query = std::mem::take(query.as_mut()).with_rls(ctx)?;
         let scoped_query = ensure_merge_query_source_projects_tenant(
             scoped_query,
             &target_table,

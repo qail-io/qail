@@ -15,7 +15,7 @@ use crate::middleware::ApiError;
 
 use super::extract_table_name;
 use super::filters::{
-    apply_filters, apply_sorting, parse_cursor_value, parse_expand_relations, parse_filters_checked,
+    apply_sorting, parse_cursor_value, parse_expand_relations, parse_filters_checked,
 };
 use super::handlers::{check_table_not_blocked, primary_sort_for_cursor};
 use super::types::ListParams;
@@ -161,7 +161,7 @@ pub(crate) async fn explain_handler(
     // Apply filters
     let query_string = request.uri().query().unwrap_or("");
     let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
-    cmd = apply_filters(cmd, &filters);
+    cmd = crate::rest::filters::apply_filters_owned(cmd, filters);
 
     // Full-text search
     if let Some(ref term) = params.search {

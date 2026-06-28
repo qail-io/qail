@@ -12,7 +12,7 @@ use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
 use crate::rest::branch::validate_branch_name;
-use crate::rest::filters::json_to_qail_value;
+use crate::rest::filters::json_into_qail_value;
 
 const BRANCH_MERGE_SAVEPOINT: &str = "qail_branch_merge";
 
@@ -86,9 +86,13 @@ fn parse_overlay_object(
 ) -> Result<serde_json::Map<String, Value>, String> {
     let val = serde_json::from_str::<Value>(row_data_str)
         .map_err(|e| format!("Invalid {} overlay JSON: {}", operation, e))?;
-    val.as_object()
-        .cloned()
-        .ok_or_else(|| format!("Invalid {} overlay row_data: expected object", operation))
+    match val {
+        Value::Object(obj) => Ok(obj),
+        _ => Err(format!(
+            "Invalid {} overlay row_data: expected object",
+            operation
+        )),
+    }
 }
 
 fn ensure_insert_row_pk_matches(
@@ -176,10 +180,11 @@ fn build_branch_overlay_merge_cmd(
             validate_overlay_object_keys(operation, &obj)?;
             ensure_insert_row_pk_matches(table, row_pk, &obj, pk_col)?;
             let mut q = qail_core::ast::Qail::add(table);
-            for (k, v) in &obj {
-                q = q.set_value(k, json_to_qail_value(v));
+            q = apply_insert_conflict_target(q, &obj, pk_col);
+            for (k, v) in obj {
+                q = q.set_value(k, json_into_qail_value(v));
             }
-            Ok(apply_insert_conflict_target(q, &obj, pk_col))
+            Ok(q)
         }
         "update" => {
             let obj = parse_overlay_object(operation, row_data_str)?;
@@ -187,8 +192,8 @@ fn build_branch_overlay_merge_cmd(
             let pk_col = pk_col.unwrap_or("id");
             ensure_update_row_pk_matches(table, row_pk, &obj, pk_col)?;
             let mut q = qail_core::ast::Qail::set(table);
-            for (k, v) in &obj {
-                q = q.set_value(k, json_to_qail_value(v));
+            for (k, v) in obj {
+                q = q.set_value(k, json_into_qail_value(v));
             }
             Ok(q.eq(pk_col, row_pk.to_string()).returning([pk_col]))
         }

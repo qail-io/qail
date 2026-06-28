@@ -539,7 +539,13 @@ pub(crate) async fn list_handler(
     // Parse and apply filters from query string
     let query_string = request.uri().query().unwrap_or("");
     let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
-    cmd = apply_filters(cmd, &filters);
+    let branch_filters = if has_branch {
+        cmd = apply_filters(cmd, &filters);
+        Some(filters)
+    } else {
+        cmd = crate::rest::filters::apply_filters_owned(cmd, filters);
+        None
+    };
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         cmd = cmd.filter(
             scope_column,
@@ -616,11 +622,14 @@ pub(crate) async fn list_handler(
         None
     };
     if has_branch {
+        let Some(filters) = branch_filters.as_deref() else {
+            return Err(ApiError::internal("Branch replay filters missing"));
+        };
         let pk_col = table.primary_key.as_deref().unwrap_or("id");
         ensure_branch_replay_columns_projected(
             &mut cmd,
             BranchReplayProjectionInput {
-                filters: &filters,
+                filters,
                 policy_filter_cages: &branch_policy_filter_cages,
                 search: params.search.as_deref(),
                 search_columns: params.search_columns.as_deref(),
@@ -827,6 +836,10 @@ pub(crate) async fn list_handler(
 
     // Branch overlay merge (CoW Read)
     if let Some(branch_name) = branch_ctx.branch_name() {
+        let Some(filters) = branch_filters.as_deref() else {
+            conn.release().await;
+            return Err(ApiError::internal("Branch replay filters missing"));
+        };
         let pk_col = table.primary_key.as_deref().unwrap_or("id");
         if let Err(e) =
             apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await
@@ -837,7 +850,7 @@ pub(crate) async fn list_handler(
         if let Err(e) = apply_branch_read_constraints(
             &mut data,
             BranchReadConstraintInput {
-                filters: &filters,
+                filters,
                 policy_filter_cages: &branch_policy_filter_cages,
                 search: params.search.as_deref(),
                 search_columns: params.search_columns.as_deref(),

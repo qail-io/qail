@@ -143,13 +143,16 @@ const WS_MIN_LIVE_QUERY_INTERVAL_MS: u64 = 1000;
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const WS_LISTENER_RETRY_MS: u64 = 500;
 
-fn auth_headers_for_ws(headers: &HeaderMap, uri: &Uri, allow_query_token: bool) -> HeaderMap {
-    let mut auth_headers = headers.clone();
-    if auth_headers.contains_key(AUTHORIZATION) {
-        return auth_headers;
+fn auth_headers_for_ws<'a>(
+    headers: &'a HeaderMap,
+    uri: &Uri,
+    allow_query_token: bool,
+) -> std::borrow::Cow<'a, HeaderMap> {
+    if headers.contains_key(AUTHORIZATION) {
+        return std::borrow::Cow::Borrowed(headers);
     }
     if !allow_query_token {
-        return auth_headers;
+        return std::borrow::Cow::Borrowed(headers);
     }
 
     let token = uri.query().and_then(|q| {
@@ -161,10 +164,12 @@ fn auth_headers_for_ws(headers: &HeaderMap, uri: &Uri, allow_query_token: bool) 
     if let Some(token) = token
         && let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token))
     {
+        let mut auth_headers = headers.clone();
         auth_headers.insert(AUTHORIZATION, value);
+        return std::borrow::Cow::Owned(auth_headers);
     }
 
-    auth_headers
+    std::borrow::Cow::Borrowed(headers)
 }
 const WS_LISTENER_CMD_TIMEOUT_MS: u64 = 3000;
 const WS_LISTENER_UNAVAILABLE_NOTICE_MS: u64 = 5000;
@@ -397,7 +402,7 @@ pub async fn ws_handler(
     uri: Uri,
 ) -> impl IntoResponse {
     let auth_headers = auth_headers_for_ws(&headers, &uri, state.config.ws_allow_query_token);
-    let auth = extract_auth_for_state(&auth_headers, state.as_ref()).await;
+    let auth = extract_auth_for_state(auth_headers.as_ref(), state.as_ref()).await;
 
     // SECURITY (P0-3): Enforce authentication policy on WS upgrade.
     if let Err(e) = ensure_request_auth(

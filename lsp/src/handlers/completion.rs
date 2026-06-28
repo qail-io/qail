@@ -82,13 +82,12 @@ impl QailLanguageServer {
         let uri = params.text_document_position.text_document.uri.to_string();
         let position = params.text_document_position.position;
         let query = self.extract_query_at_position(&uri, position);
-        let content = self.get_document(&uri);
         let mut items = Vec::new();
 
         if uri.ends_with(".rs") {
-            let in_builder_context = content
-                .as_deref()
-                .is_some_and(|text| rust_builder_context(text, position));
+            let in_builder_context = self
+                .with_document(&uri, |text| rust_builder_context(text, position))
+                .unwrap_or(false);
 
             if !in_builder_context && query.is_none() {
                 return Ok(None);
@@ -104,7 +103,7 @@ impl QailLanguageServer {
                 push_qail_keyword_items(&mut items);
                 push_qail_operator_items(&mut items);
                 if let Some(validator) = self.schema_validator_for_uri(&uri) {
-                    push_schema_items(&mut items, &validator);
+                    push_schema_items(&mut items, validator.as_ref());
                 }
             }
         } else {
@@ -112,7 +111,7 @@ impl QailLanguageServer {
             push_qail_operator_items(&mut items);
 
             if let Some(validator) = self.schema_validator_for_uri(&uri) {
-                push_schema_items(&mut items, &validator);
+                push_schema_items(&mut items, validator.as_ref());
             }
         }
 

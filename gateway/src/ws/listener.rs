@@ -143,16 +143,13 @@ pub(super) async fn run_listener_session(
                                 )));
                                 continue;
                             }
-                            channels.insert(channel.clone());
                             if let Err(e) = c.listen(&channel).await {
-                                channels.remove(&channel);
                                 tracing::warn!("WS listener LISTEN failed: {}", e);
                                 let _ = reply.send(Err("Subscribe failed".to_string()));
                                 release_listener_conn(&mut conn).await;
                             } else if reply.send(Ok(())).is_err() {
                                 // Caller timed out/cancelled; roll back LISTEN to avoid
                                 // ghost subscriptions not tracked by connection state.
-                                channels.remove(&channel);
                                 if let Err(e) = c.unlisten(&channel).await {
                                     tracing::warn!(
                                         "WS listener rollback UNLISTEN failed after dropped reply: {}",
@@ -160,6 +157,8 @@ pub(super) async fn run_listener_session(
                                     );
                                     let _ = c.unlisten_all().await;
                                 }
+                            } else {
+                                channels.insert(channel);
                             }
                         }
                         Some(ListenControl::Unlisten { channel, reply }) => {
@@ -184,7 +183,7 @@ pub(super) async fn run_listener_session(
                             let channel = notification.channel;
                             if channels.contains(&channel) {
                                 match notify_tx.send(ListenerNotification {
-                                    channel: channel.clone(),
+                                    channel,
                                     payload: notification.payload,
                                 }).await {
                                     Ok(()) => {}

@@ -743,25 +743,42 @@ impl Schema {
         for entry in entries.flatten() {
             let path = entry.path();
 
-            // Check for migration file candidates in subdirectory (prefer native QAIL),
-            // or direct file entries.
-            let migration_file = if path.is_dir() {
+            // Collect the migration file(s) to merge for this entry. A subdirectory
+            // is either the legacy single-file form (`up.qail` / `up.sql`) or the
+            // phased form the migrator applies (`expand.qail` → `backfill.qail` →
+            // `contract.qail`). Merge whichever exist, in phase order.
+            let mut migration_files: Vec<std::path::PathBuf> = Vec::new();
+            if path.is_dir() {
                 let up_qail = path.join("up.qail");
                 let up_sql = path.join("up.sql");
                 if up_qail.exists() {
-                    up_qail
+                    migration_files.push(up_qail);
                 } else if up_sql.exists() {
-                    up_sql
+                    migration_files.push(up_sql);
                 } else {
-                    continue;
+                    for phase in ["expand", "backfill", "contract"] {
+                        let qail = path.join(format!("{phase}.qail"));
+                        let sql = path.join(format!("{phase}.sql"));
+                        if qail.exists() {
+                            migration_files.push(qail);
+                        } else if sql.exists() {
+                            migration_files.push(sql);
+                        }
+                    }
+                    if migration_files.is_empty() {
+                        continue;
+                    }
                 }
             } else if path.extension().is_some_and(|e| e == "qail" || e == "sql") {
-                path.clone()
+                migration_files.push(path.clone());
             } else {
                 continue;
-            };
+            }
 
-            if migration_file.exists() {
+            for migration_file in migration_files {
+                if !migration_file.exists() {
+                    continue;
+                }
                 let content = fs::read_to_string(&migration_file)
                     .map_err(|e| format!("Failed to read {}: {}", migration_file.display(), e))?;
 
@@ -850,6 +867,30 @@ impl Schema {
         for (line_no, raw_line) in qail.lines().enumerate() {
             let line = strip_schema_comments(raw_line);
             if line.is_empty() || !line.starts_with("alter ") {
+                continue;
+            }
+
+            // Only `alter <table> add <column:type>` changes the shape queries are
+            // validated against. Constraint / index / rename / drop DDL (e.g.
+            // `alter t drop constraint c`, `alter t add constraint c check(...)`)
+            // is irrelevant to validation — skip it instead of failing the parse.
+            let mut alter_toks = line["alter ".len()..].split_whitespace();
+            let _alter_table = alter_toks.next();
+            let is_add_column = matches!(alter_toks.next(), Some("add"))
+                && !matches!(
+                    alter_toks
+                        .next()
+                        .map(|t| t.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("constraint")
+                        | Some("primary")
+                        | Some("foreign")
+                        | Some("unique")
+                        | Some("check")
+                        | Some("index")
+                        | None
+                );
+            if !is_add_column {
                 continue;
             }
 

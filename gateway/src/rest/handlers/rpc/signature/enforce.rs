@@ -127,10 +127,10 @@ async fn probe_rpc_overload_resolution(
         return Ok(None);
     }
 
-    let mut matched: Vec<RpcCallableSignature> = Vec::new();
+    let mut matched: Vec<&RpcCallableSignature> = Vec::new();
     for signature in candidates {
         match probe_rpc_signature_candidate(conn, function_name, args, signature).await {
-            Ok(true) => matched.push(signature.clone()),
+            Ok(true) => matched.push(signature),
             Ok(false) => {}
             Err(err) => return Err(ApiError::from_pg_driver_error(&err, None)),
         }
@@ -145,7 +145,7 @@ async fn probe_rpc_overload_resolution(
         crate::metrics::record_rpc_signature_rejection("ambiguous");
         let matched_overloads = matched
             .iter()
-            .map(format_signature_brief)
+            .map(|signature| format_signature_brief(signature))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(ApiError::parse_error(format!(
@@ -156,7 +156,7 @@ async fn probe_rpc_overload_resolution(
     }
 
     crate::metrics::record_rpc_signature_local_mismatch();
-    Ok(matched.into_iter().next())
+    Ok(matched.into_iter().next().cloned())
 }
 
 pub(in super::super) async fn enforce_rpc_signature_contract(

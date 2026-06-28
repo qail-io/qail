@@ -89,16 +89,14 @@ impl ToSql for Qail {
             Action::Get => dml::select::build_select(self, dialect),
             Action::Cnt => {
                 // Build a count query: SELECT COUNT(*) FROM table WHERE ...
-                let mut count_ast = self.clone();
-                count_ast.action = Action::Get;
-                count_ast.columns = vec![Expr::Aggregate {
+                let count_columns = [Expr::Aggregate {
                     col: "*".to_string(),
                     func: AggregateFunc::Count,
                     distinct: false,
                     filter: None,
                     alias: None,
                 }];
-                dml::select::build_select(&count_ast, dialect)
+                dml::select::build_select_with_columns(self, dialect, &count_columns)
             }
             Action::Set => dml::update::build_update(self, dialect),
             Action::Del => dml::delete::build_delete(self, dialect),

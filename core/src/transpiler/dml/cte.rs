@@ -2,7 +2,9 @@
 
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;
-use crate::transpiler::dml::select::{build_select, build_set_operand};
+use crate::transpiler::dml::select::{
+    build_select, build_select_without_cte_prefix, build_set_operand,
+};
 
 /// Generate CTE SQL with support for multiple CTEs and RECURSIVE.
 /// Supports:
@@ -30,16 +32,17 @@ pub fn build_cte(cmd: &Qail, dialect: Dialect) -> String {
 
     sql.push_str(&cte_parts.join(", "));
 
-    let mut final_query = cmd.clone();
-    final_query.ctes.clear();
-    if final_query.table.is_empty()
+    sql.push(' ');
+    if cmd.table.is_empty()
         && let Some(final_table) = cmd.ctes.last().map(|cte| &cte.name)
     {
+        let mut final_query = cmd.clone();
+        final_query.ctes.clear();
         final_query.table = final_table.clone();
+        sql.push_str(&build_select_without_cte_prefix(&final_query, dialect));
+    } else {
+        sql.push_str(&build_select_without_cte_prefix(cmd, dialect));
     }
-
-    sql.push(' ');
-    sql.push_str(&build_select(&final_query, dialect));
 
     sql
 }

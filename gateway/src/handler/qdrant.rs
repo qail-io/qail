@@ -22,7 +22,7 @@ const ORIGINAL_POINT_ID_PAYLOAD_KEY: &str = "_qail_original_point_id";
 pub(super) async fn execute_qdrant_cmd(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
-    cmd: &qail_core::ast::Qail,
+    mut cmd: qail_core::ast::Qail,
 ) -> Result<Json<QueryResponse>, ApiError> {
     use qail_core::ast::{Action, Distance as CoreDistance};
 
@@ -42,7 +42,6 @@ pub(super) async fn execute_qdrant_cmd(
         ApiError::with_code("QDRANT_CONNECTION_ERROR", "Qdrant connection failed")
     })?;
 
-    let mut cmd = cmd.clone();
     let tenant_col = state.config.tenant_column.clone();
     if let Some(tenant_id) = auth.tenant_id.as_deref() {
         inject_qdrant_tenant_scope(&mut cmd, &tenant_col, tenant_id);
@@ -169,7 +168,12 @@ pub(super) async fn execute_qdrant_cmd(
                 .map_err(|e| ApiError::with_code("POLICY_DENIED", e.to_string()))?;
             let request_filter_cages =
                 qdrant_request_filter_cages(&upsert_filter_cages, &update_policy_filter_cages);
-            let mut point = extract_upsert_point_with_filter_fallback(&cmd, &request_filter_cages)?;
+            let initial_vector = cmd.vector.take();
+            let mut point = extract_upsert_point_with_filter_fallback(
+                &cmd,
+                initial_vector,
+                &request_filter_cages,
+            )?;
             if let Some(tenant_id) = auth.tenant_id.as_deref() {
                 prepare_tenant_scoped_qdrant_upsert_point(&mut point, tenant_id, &tenant_col);
             }
@@ -800,12 +804,13 @@ fn set_payload_upsert_vector(
 
 fn extract_upsert_point_with_filter_fallback(
     cmd: &qail_core::ast::Qail,
+    initial_vector: Option<Vec<f32>>,
     id_filter_cages: &[qail_core::ast::Cage],
 ) -> Result<qail_qdrant::Point, ApiError> {
     use qail_core::ast::{CageKind, Expr, LogicalOp, Operator};
 
     let mut id = None;
-    let mut vector = cmd.vector.clone();
+    let mut vector = initial_vector;
     let mut payload = qail_qdrant::Payload::new();
     let mut payload_fields = HashSet::new();
 
@@ -946,7 +951,7 @@ fn extract_upsert_point_with_filter_fallback(
 #[cfg(test)]
 fn extract_upsert_point(cmd: &qail_core::ast::Qail) -> Result<qail_qdrant::Point, ApiError> {
     let filter_cages = qdrant_upsert_filter_cages(cmd);
-    extract_upsert_point_with_filter_fallback(cmd, &filter_cages)
+    extract_upsert_point_with_filter_fallback(cmd, cmd.vector.clone(), &filter_cages)
 }
 
 fn ensure_qdrant_vector_finite(vector: &[f32]) -> Result<(), ApiError> {
@@ -2989,7 +2994,9 @@ mod tests {
             .filter("id", Operator::Eq, 7);
         let request_filters = qdrant_upsert_filter_cages(&cmd);
 
-        let point = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap();
+        let point =
+            extract_upsert_point_with_filter_fallback(&cmd, cmd.vector.clone(), &request_filters)
+                .unwrap();
 
         assert_eq!(point.id, qail_qdrant::PointId::Num(7));
     }
@@ -3012,7 +3019,9 @@ mod tests {
         };
         let request_filters = qdrant_upsert_filter_cages(&cmd);
 
-        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+        let err =
+            extract_upsert_point_with_filter_fallback(&cmd, cmd.vector.clone(), &request_filters)
+                .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
@@ -3033,7 +3042,9 @@ mod tests {
         };
         let request_filters = qdrant_upsert_filter_cages(&cmd);
 
-        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+        let err =
+            extract_upsert_point_with_filter_fallback(&cmd, cmd.vector.clone(), &request_filters)
+                .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
@@ -3047,7 +3058,9 @@ mod tests {
             .filter("id", Operator::Eq, 8);
         let request_filters = qdrant_upsert_filter_cages(&cmd);
 
-        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+        let err =
+            extract_upsert_point_with_filter_fallback(&cmd, cmd.vector.clone(), &request_filters)
+                .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
@@ -3077,7 +3090,9 @@ mod tests {
         };
         let request_filters = qdrant_upsert_filter_cages(&cmd);
 
-        let err = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap_err();
+        let err =
+            extract_upsert_point_with_filter_fallback(&cmd, cmd.vector.clone(), &request_filters)
+                .unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "AMBIGUOUS_VECTOR");
@@ -3092,7 +3107,9 @@ mod tests {
         let all_filters = qdrant_upsert_filter_cages(&cmd);
         let request_filters = qdrant_request_filter_cages(&all_filters, &all_filters);
 
-        let point = extract_upsert_point_with_filter_fallback(&cmd, &request_filters).unwrap();
+        let point =
+            extract_upsert_point_with_filter_fallback(&cmd, cmd.vector.clone(), &request_filters)
+                .unwrap();
 
         assert_eq!(
             point.id,
