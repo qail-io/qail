@@ -878,10 +878,7 @@ impl Schema {
             let _alter_table = alter_toks.next();
             let is_add_column = matches!(alter_toks.next(), Some("add"))
                 && !matches!(
-                    alter_toks
-                        .next()
-                        .map(|t| t.to_ascii_lowercase())
-                        .as_deref(),
+                    alter_toks.next().map(|t| t.to_ascii_lowercase()).as_deref(),
                     Some("constraint")
                         | Some("primary")
                         | Some("foreign")

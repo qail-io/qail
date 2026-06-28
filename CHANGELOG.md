@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-06-29
+
+### Fixed
+- **CI formatting compatibility:** Applied the Rust stable `1.96.0` rustfmt shape required by the GitHub Actions formatting job.
+
+### Changed
+- **Runtime audit hardening:** Continued the unsafe panic/clone audit across core, gateway, LSP, Qdrant, and transaction paths, including production clippy suppression cleanup, lower-copy REST/event handling, LSP schema/document cache clone reductions, and safer owned-value conversion paths.
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.5`.
+
 ## [1.3.4] - 2026-06-22
 
 ### Security
