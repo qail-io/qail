@@ -2365,7 +2365,7 @@ fn collect_execution_site_rls_offsets(source: &str) -> HashMap<String, Vec<usize
                 i += 1;
                 continue;
             };
-            if matches!(name, "with_rls" | "rls") {
+            if matches!(name, "with_rls" | "with_rls_policy" | "rls") {
                 cursor = skip_ws(bytes, cursor);
                 if bytes.get(cursor).copied() == Some(b'(')
                     && let Some(var) = extract_receiver_ident_before_dot(source, i)
@@ -2952,6 +2952,7 @@ fn collect_helper_rls_param_indices(
         let mut indices = HashSet::new();
         for (idx, param) in function.params.iter().enumerate() {
             if source_contains_ident_method_call(body, param, "with_rls")
+                || source_contains_ident_method_call(body, param, "with_rls_policy")
                 || source_contains_ident_method_call(body, param, "rls")
             {
                 indices.insert(idx);
@@ -5060,7 +5061,7 @@ fn normalize_column_with_aliases(column: &str, aliases: &HashMap<String, String>
 fn chain_has_rls(chain: &str) -> bool {
     scan_chain_method_calls(chain)
         .into_iter()
-        .any(|call| matches!(call.name, "with_rls" | "rls"))
+        .any(|call| matches!(call.name, "with_rls" | "with_rls_policy" | "rls"))
 }
 
 fn chain_has_explicit_tenant_scope(
