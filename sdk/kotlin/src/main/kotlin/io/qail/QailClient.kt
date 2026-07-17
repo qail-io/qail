@@ -11,7 +11,9 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNamingStrategy
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -34,7 +36,12 @@ enum class WebSocketAuthMode {
  * @param tokenProvider Async token provider for refreshable auth
  * @param headers Additional default headers
  * @param timeoutMs Request timeout in milliseconds (default: 30000)
- * @param httpClient Custom Ktor HttpClient (optional)
+ * @param snakeCaseKeys Convert camelCase model fields to/from snake_case JSON keys (default: true, mirrors the Swift SDK).
+ *        NOTE: this only governs body (de)serialization when the SDK builds its own client. If [httpClient] is
+ *        injected, that client's own ContentNegotiation owns body (de)serialization and `snakeCaseKeys` then only
+ *        affects error-body parsing and WebSocket frames — configure the injected client's Json to match.
+ * @param httpClient Custom Ktor HttpClient (optional). When supplied, install ContentNegotiation on it yourself;
+ *        the SDK's internal Json is not applied to request/response bodies on an injected client.
  */
 data class QailConfig(
     val url: String,
@@ -45,6 +52,7 @@ data class QailConfig(
     val wsAuthMode: WebSocketAuthMode = WebSocketAuthMode.HEADER,
     val wsTokenQueryParam: String = "access_token",
     val httpClient: HttpClient? = null,
+    val snakeCaseKeys: Boolean = true,
 )
 
 // ─── Client ─────────────────────────────────────────────────────────
@@ -76,10 +84,15 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
     @PublishedApi
     internal val baseUrl: String = config.url.trimEnd('/')
 
+    @OptIn(ExperimentalSerializationApi::class)
     @PublishedApi
     internal val json: Json = Json {
         ignoreUnknownKeys = true
         isLenient = true
+        explicitNulls = false
+        if (config.snakeCaseKeys) {
+            namingStrategy = JsonNamingStrategy.SnakeCase
+        }
     }
 
     @PublishedApi
@@ -216,6 +229,55 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
 
         return sub
     }
+
+    // ── Raw HTTP (for Workers endpoints) ────────────────────────────
+    // Mirrors the Swift SDK's public raw-HTTP surface so app code can reach
+    // arbitrary Worker routes (/search, /destinations, /locations, /booking/*)
+    // that are not gateway auto-REST tables. Bodies are any @Serializable value;
+    // Ktor's ContentNegotiation serializes them with the configured Json.
+
+    /** GET an arbitrary path, decoding the JSON response into [T]. */
+    suspend inline fun <reified T> get(path: String): T =
+        request(HttpMethod.Get, path)
+
+    /** POST an arbitrary path with an optional JSON body. */
+    suspend inline fun <reified T> post(path: String, body: Any? = null): T =
+        request(HttpMethod.Post, path) {
+            if (body != null) {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        }
+
+    /** PATCH an arbitrary path with an optional JSON body. */
+    suspend inline fun <reified T> patch(path: String, body: Any? = null): T =
+        request(HttpMethod.Patch, path) {
+            if (body != null) {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        }
+
+    /** PUT an arbitrary path with an optional JSON body. */
+    suspend inline fun <reified T> put(path: String, body: Any? = null): T =
+        request(HttpMethod.Put, path) {
+            if (body != null) {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        }
+
+    /**
+     * DELETE an arbitrary path with an optional JSON body.
+     * Named `deleteRaw` to avoid colliding with [delete] (the table CRUD builder).
+     */
+    suspend inline fun <reified T> deleteRaw(path: String, body: Any? = null): T =
+        request(HttpMethod.Delete, path) {
+            if (body != null) {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        }
 
     // ── Internal HTTP ───────────────────────────────────────────────
 
