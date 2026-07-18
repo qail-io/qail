@@ -28,6 +28,7 @@ py/python/qail/*.so
 
 # Node
 node_modules/
+sdk/typescript/dist/
 
 # VS Code extension release artifacts
 vscode/qail-lsp-extension/*.vsix

@@ -267,7 +267,7 @@ qail.rs/
 ├── encoder/    Wire protocol encoder + FFI/runtime internals
 ├── qdrant/     Qdrant vector DB driver (optional)
 ├── workflow/   Workflow engine
-└── sdk/        Direct SDKs (TypeScript, Swift, Kotlin)
+└── sdk/        Direct SDKs (TypeScript, Swift, Kotlin, Dart)
 ```
 
 ---
@@ -279,6 +279,7 @@ qail.rs/
 | TypeScript | ✅ Supported | `npm install @qail/client` |
 | Swift | ✅ Supported | Source package in `sdk/swift` |
 | Kotlin | ✅ Supported | Gradle module in `sdk/kotlin` |
+| Dart | ✅ Supported | Pub package in `sdk/dart` |
 | Node.js native binding | ⏸ Deferred | Not shipped yet |
 
 `tenant_id` is the runtime contract across gateway and RLS paths. Legacy

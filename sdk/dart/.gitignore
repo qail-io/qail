@@ -1,0 +1,6 @@
+# Dart tooling
+.dart_tool/
+build/
+
+# Library packages don't commit lockfiles
+pubspec.lock

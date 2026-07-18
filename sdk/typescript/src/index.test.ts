@@ -77,10 +77,11 @@ describe('QailClient', () => {
 
     describe('raw query', () => {
         it('sends DSL to /qail', async () => {
-            const fetch = mockFetch({ data: [{ id: 1, name: 'Alice' }], rows_affected: 1, columns: ['id', 'name'] });
+            const fetch = mockFetch({ rows: [{ id: 1, name: 'Alice' }], count: 1, metadata: { request_id: 'test-123' } });
             const client = createClient(fetch);
             const res = await client.query('get users fields id, name limit 10');
-            expect(res.data).toHaveLength(1);
+            expect(res.rows).toHaveLength(1);
+            expect(res.metadata?.request_id).toBe('test-123');
             expect(fetch).toHaveBeenCalledWith(
                 'http://localhost:8080/qail',
                 expect.objectContaining({
@@ -188,7 +189,7 @@ describe('QailClient', () => {
 
     describe('InsertBuilder', () => {
         it('POST /api/users with body', async () => {
-            const fetch = mockFetch({ data: { id: 1, name: 'New' }, rows_affected: 1 });
+            const fetch = mockFetch({ data: { id: 1, name: 'New' }, count: 1 });
             const client = createClient(fetch);
 
             await client.into('users')
@@ -203,7 +204,7 @@ describe('QailClient', () => {
         });
 
         it('supports upsert via onConflict', async () => {
-            const fetch = mockFetch({ data: {}, rows_affected: 1 });
+            const fetch = mockFetch({ data: {}, count: 1 });
             const client = createClient(fetch);
 
             await client.into('users')
@@ -219,7 +220,7 @@ describe('QailClient', () => {
 
     describe('UpdateBuilder', () => {
         it('PATCH /api/users/:id', async () => {
-            const fetch = mockFetch({ data: { id: 1, name: 'Updated' }, rows_affected: 1 });
+            const fetch = mockFetch({ data: { id: 1, name: 'Updated' }, count: 1 });
             const client = createClient(fetch);
 
             await client.update('users')
@@ -233,7 +234,7 @@ describe('QailClient', () => {
         });
 
         it('encodes update ids as path segments', async () => {
-            const fetch = mockFetch({ data: { id: 'tenant/a?b#c' }, rows_affected: 1 });
+            const fetch = mockFetch({ data: { id: 'tenant/a?b#c' }, count: 1 });
             const client = createClient(fetch);
 
             await client.update('users').set({ name: 'Updated' }).exec('tenant/a?b#c');
@@ -302,6 +303,71 @@ describe('QailClient', () => {
                 expect(err.table).toBe('users');
                 expect(err.column).toBe('email');
             }
+        });
+    });
+
+    describe('batch & fast', () => {
+        it('POSTs {queries} envelope and returns BatchResponse', async () => {
+            const fetch = mockFetch({
+                results: [{ index: 0, success: true, rows: [{ id: 1, name: 'Alice' }], count: 1 }],
+                total: 1,
+                success: 1,
+                metadata: { request_id: 'batch-1' },
+            });
+            const client = createClient(fetch);
+
+            const res = await client.batch(['get users']);
+            expect(res.total).toBe(1);
+            expect(res.results).toHaveLength(1);
+            expect(res.metadata?.request_id).toBe('batch-1');
+            expect(fetch.mock.calls[0][0]).toBe('http://localhost:8080/qail/batch');
+            expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ queries: ['get users'] });
+        });
+
+        it('queryFast returns array-of-arrays rows', async () => {
+            const fetch = mockFetch({
+                rows: [[1, 'Alice']],
+                count: 1,
+                metadata: { request_id: 'fast-1' },
+            });
+            const client = createClient(fetch);
+
+            const res = await client.queryFast('get users');
+            expect(res.rows).toEqual([[1, 'Alice']]);
+            expect(fetch.mock.calls[0][0]).toBe('http://localhost:8080/qail/fast');
+            expect(fetch.mock.calls[0][1].headers['Content-Type']).toBe('text/plain');
+        });
+    });
+
+    describe('transactions', () => {
+        it('runs query and commit with X-Transaction-Id', async () => {
+            const responses = [
+                { txn_id: 'txn-123' },
+                { rows: [{ id: 1, name: 'Alice' }], count: 1 },
+                { status: 'committed' },
+            ];
+            let step = 0;
+            const fetch = vi.fn().mockImplementation(async () => ({
+                ok: true,
+                status: 200,
+                json: async () => responses[step++],
+                text: async () => JSON.stringify(responses[step]),
+            }));
+            const client = createClient(fetch);
+
+            const txn = await client.beginTxn();
+            expect(txn.txnId).toBe('txn-123');
+            expect(fetch.mock.calls[0][0]).toBe('http://localhost:8080/txn/begin');
+
+            const res = await txn.query('get users');
+            expect(res.rows).toHaveLength(1);
+            expect(fetch.mock.calls[1][0]).toBe('http://localhost:8080/txn/query');
+            expect(fetch.mock.calls[1][1].headers['X-Transaction-Id']).toBe('txn-123');
+
+            const end = await txn.commit();
+            expect(end.status).toBe('committed');
+            expect(fetch.mock.calls[2][0]).toBe('http://localhost:8080/txn/commit');
+            expect(fetch.mock.calls[2][1].headers['X-Transaction-Id']).toBe('txn-123');
         });
     });
 

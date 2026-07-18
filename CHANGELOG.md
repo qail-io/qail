@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Dart SDK (`sdk/dart`):** pure-Dart client for Flutter and server-side Dart, mirroring the Swift/Kotlin surface — fluent builders, raw DSL (`/qail`, `/qail/fast`, `/qail/batch`), transactions, realtime WebSocket subscribe, raw HTTP verbs, and structured `QailError`. Typed rows use explicit `fromJson` decoders (Dart generics are not reified). WS auth mode resolves per platform: `header` on `dart:io`, `query` on web (browsers cannot set handshake headers).
+- **TypeScript SDK:** `queryFast()` (`/qail/fast`), transactions (`beginTxn()` → query/commit/rollback/savepoint with `X-Transaction-Id`), and `ResponseMetadata`/`request_id` on responses and errors.
+
+### Fixed
+- **TypeScript SDK drift (breaking, `@qail/client` 0.2.0):** realigned response shapes with the gateway — `QueryResponse` is `{rows, count, metadata?}` (was `{data, rows_affected, columns}`), `MutationResponse` is `{data, count?, metadata?}` (was `rows_affected`), `batch()` sends the `{"queries": [...]}` envelope and returns `BatchResponse {results, total, success, metadata?}` (was a raw array body returning `BatchResult[]`), `QailError.detail` renamed to `details`.
+
 ## [1.3.5] - 2026-06-29
 
 ### Fixed
