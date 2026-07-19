@@ -11,6 +11,7 @@ members = [
     "workflow",
     "workflow-postgres",
     "mcp",
+    "wasm",
 ]
 exclude = [
     "pg/fuzz",
