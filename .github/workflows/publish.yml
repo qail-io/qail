@@ -61,6 +61,7 @@ jobs:
             lsp/Cargo.toml
             workflow/Cargo.toml
             workflow-postgres/Cargo.toml
+            mcp/Cargo.toml
           )
 
           expected_version=""

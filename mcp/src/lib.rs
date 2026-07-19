@@ -1,6 +1,7 @@
 use qail_core::ast::{CageKind, Condition, Qail};
 use qail_core::fmt::Formatter;
-use qail_core::parser::schema::Schema;
+use qail_core::migrate::schema::{IndexMethod, Schema};
+use qail_core::migrate::{FkAction, parse_qail};
 use qail_core::transpiler::{Dialect, ToSql, ToSqlParameterized};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -45,23 +46,35 @@ pub fn run_stdio() -> io::Result<()> {
             continue;
         }
 
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle_message(message),
-            Err(err) => Some(error_response(
-                Value::Null,
-                -32700,
-                format!("Parse error: {err}"),
-                None,
-            )),
-        };
-
-        if let Some(response) = response {
-            writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+        if let Some(response) = handle_rpc(&line) {
+            writeln!(stdout, "{response}")?;
             stdout.flush()?;
         }
     }
 
     Ok(())
+}
+
+/// Handle one JSON-RPC message and return the serialized response, if any.
+///
+/// This is the transport-independent entry point: [`run_stdio`] wraps it for
+/// newline-delimited stdio, and the `qail-wasm` crate exports it directly so the
+/// remote HTTP server runs the exact same dispatch with no reimplementation.
+///
+/// Returns `None` for notifications (messages without an `id`), which have no
+/// response by JSON-RPC definition. Over HTTP that maps to `202 Accepted`.
+pub fn handle_rpc(line: &str) -> Option<String> {
+    let response = match serde_json::from_str::<Value>(line) {
+        Ok(message) => handle_message(message)?,
+        Err(err) => error_response(Value::Null, -32700, format!("Parse error: {err}"), None),
+    };
+
+    // A JSON-RPC envelope of plain `Value`s cannot fail to serialize.
+    Some(serde_json::to_string(&response).unwrap_or_else(|err| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":null,"error":{{"code":-32603,"message":"Serialization failed: {err}"}}}}"#
+        )
+    }))
 }
 
 fn handle_message(message: Value) -> Option<Value> {
@@ -486,9 +499,9 @@ fn schema_summary_tool(args: &Value) -> Value {
         Ok(schema) => schema,
         Err(err) => return tool_error(err.message),
     };
-    let schema = match Schema::parse(schema_source) {
+    let schema = match parse_qail(schema_source) {
         Ok(schema) => schema,
-        Err(err) => return tool_error(err),
+        Err(err) => return tool_error(paren_dialect_hint(schema_source, &err)),
     };
 
     tool_structured(schema_summary(&schema))
@@ -788,25 +801,83 @@ fn action_notes(cmd: &Qail) -> Vec<&'static str> {
     notes
 }
 
+/// Detect the legacy paren schema dialect so a parse failure teaches the caller
+/// the canonical form instead of just reporting a syntax error.
+///
+/// `table users ( ... )` is the legacy dialect still accepted by parts of the
+/// CLI. QAIL schemas use brace syntax, which is what `examples/schema/` and the
+/// documentation use, and what `parse_qail` accepts.
+fn paren_dialect_hint(source: &str, err: &str) -> String {
+    let looks_paren = source
+        .lines()
+        .map(str::trim)
+        .any(|line| line.starts_with("table ") && line.ends_with('(') || line.ends_with(") ("));
+
+    if looks_paren {
+        format!(
+            "{err}\n\nThis looks like the legacy paren schema dialect \
+             (`table users ( ... )`). QAIL schemas use brace syntax:\n\n\
+             table users {{\n  id uuid primary_key\n  email text unique\n}}\n\n\
+             See the qail://guide/schema resource for the canonical form."
+        )
+    } else {
+        err.to_string()
+    }
+}
+
+fn index_method(method: &IndexMethod) -> &'static str {
+    match method {
+        IndexMethod::BTree => "btree",
+        IndexMethod::Hash => "hash",
+        IndexMethod::Gin => "gin",
+        IndexMethod::Gist => "gist",
+        IndexMethod::Brin => "brin",
+        IndexMethod::SpGist => "spgist",
+        IndexMethod::Hnsw => "hnsw",
+        IndexMethod::IvfFlat => "ivfflat",
+    }
+}
+
+fn fk_action(action: &FkAction) -> &'static str {
+    match action {
+        FkAction::NoAction => "no_action",
+        FkAction::Restrict => "restrict",
+        FkAction::Cascade => "cascade",
+        FkAction::SetNull => "set_null",
+        FkAction::SetDefault => "set_default",
+    }
+}
+
 fn schema_summary(schema: &Schema) -> Value {
-    let tables: Vec<Value> = schema
-        .tables
+    // `Schema.tables` is a HashMap; sort so the summary is deterministic.
+    let mut table_names: Vec<&String> = schema.tables.keys().collect();
+    table_names.sort();
+
+    let tables: Vec<Value> = table_names
         .iter()
+        .filter_map(|name| schema.tables.get(*name))
         .map(|table| {
             json!({
                 "name": table.name,
                 "enableRls": table.enable_rls,
+                "forceRls": table.force_rls,
                 "columns": table.columns.iter().map(|column| {
                     json!({
                         "name": column.name,
-                        "type": column_type(column),
+                        "type": column.data_type.to_string(),
                         "nullable": column.nullable,
                         "primaryKey": column.primary_key,
                         "unique": column.unique,
-                        "references": column.references,
-                        "default": column.default_value,
-                        "check": column.check,
-                        "serial": column.is_serial
+                        "default": column.default,
+                        "references": column.foreign_key.as_ref().map(|fk| json!({
+                            "table": fk.table,
+                            "column": fk.column,
+                            "onDelete": fk_action(&fk.on_delete),
+                            "onUpdate": fk_action(&fk.on_update)
+                        })),
+                        "check": column.check.as_ref().map(|c| {
+                            c.name.clone().unwrap_or_else(|| "unnamed".to_string())
+                        })
                     })
                 }).collect::<Vec<_>>()
             })
@@ -815,36 +886,29 @@ fn schema_summary(schema: &Schema) -> Value {
 
     json!({
         "ok": true,
-        "version": schema.version,
+        "dialect": "brace",
         "tableCount": schema.tables.len(),
         "policyCount": schema.policies.len(),
         "indexCount": schema.indexes.len(),
         "tables": tables,
+        "extensions": schema.extensions.iter().map(|ext| ext.name.clone()).collect::<Vec<_>>(),
         "indexes": schema.indexes.iter().map(|index| {
             json!({
                 "name": index.name,
                 "table": index.table,
                 "columns": index.columns,
-                "unique": index.unique
+                "unique": index.unique,
+                "method": index_method(&index.method)
             })
         }).collect::<Vec<_>>(),
         "policies": schema.policies.iter().map(|policy| {
-            serde_json::to_value(policy).unwrap_or_else(|_| json!({}))
+            json!({
+                "name": policy.name,
+                "table": policy.table,
+                "role": policy.role
+            })
         }).collect::<Vec<_>>()
     })
-}
-
-fn column_type(column: &qail_core::parser::schema::ColumnDef) -> String {
-    let mut typ = column.typ.clone();
-    if let Some(params) = &column.type_params {
-        typ.push('(');
-        typ.push_str(&params.join(", "));
-        typ.push(')');
-    }
-    if column.is_array {
-        typ.push_str("[]");
-    }
-    typ
 }
 
 fn cookbook(topic: &str) -> &'static str {
@@ -913,26 +977,38 @@ const SCHEMA_GUIDE: &str = r#"# schema.qail Guide
 `schema.qail` describes database shape for validation, migration planning, typed
 code generation, and relation-aware helpers.
 
-Example:
+Schemas use **brace** syntax. Columns are newline-separated with no commas, and
+table-level flags such as `enable_rls` sit inside the braces:
 
 ```qail
-table users (
-  id uuid primary_key,
-  tenant_id uuid not null,
-  email text not null unique,
-  active bool default true,
-  created_at timestamptz default now()
-) enable_rls
+extension "pgcrypto"
 
-table posts (
-  id uuid primary_key,
-  tenant_id uuid not null,
-  user_id uuid references users(id),
-  title text not null
-) enable_rls
+table users {
+  id uuid primary_key default gen_random_uuid()
+  tenant_id uuid not_null
+  email text unique not_null
+  active bool not_null default true
+  created_at timestamptz not_null default now()
+  enable_rls
+}
+
+table posts {
+  id uuid primary_key default gen_random_uuid()
+  tenant_id uuid not_null
+  user_id uuid not_null references users(id) on_delete cascade
+  title text not_null
+  enable_rls
+}
 
 index posts_user_id on posts (user_id)
 ```
+
+Note `not_null` (underscore), not `not null`.
+
+An older **paren** dialect (`table users ( id uuid primary_key, ... )`, with
+commas and trailing `) enable_rls`) still appears in some CLI paths. It is
+legacy — do not write it, and do not mix the two. `qail_schema_summary` accepts
+only the brace form and will tell you if it detects paren input.
 
 Use `qail_schema_summary` to turn a schema source string into structured tables,
 columns, indexes, and policy metadata.
@@ -1139,11 +1215,87 @@ mod tests {
     #[test]
     fn schema_summary_counts_tables() {
         let response = schema_summary_tool(&json!({
-            "schema": "table users (\n  id uuid primary_key,\n  email text not null\n)\n"
+            "schema": "table users {\n  id uuid primary_key\n  email text unique not_null\n}\n"
         }));
 
         assert_eq!(response["isError"], false);
+        assert_eq!(response["structuredContent"]["dialect"], "brace");
         assert_eq!(response["structuredContent"]["tableCount"], 1);
         assert_eq!(response["structuredContent"]["tables"][0]["name"], "users");
+    }
+
+    #[test]
+    fn schema_summary_reads_brace_features() {
+        let response = schema_summary_tool(&json!({
+            "schema": concat!(
+                "extension \"pgcrypto\"\n\n",
+                "table tenants {\n  id uuid primary_key\n}\n\n",
+                "table users {\n",
+                "  id uuid primary_key default gen_random_uuid()\n",
+                "  tenant_id uuid not_null references tenants(id) on_delete cascade\n",
+                "  enable_rls\n  force_rls\n",
+                "}\n"
+            )
+        }));
+
+        assert_eq!(response["isError"], false);
+        let out = &response["structuredContent"];
+        assert_eq!(out["tableCount"], 2);
+        assert_eq!(out["extensions"][0], "pgcrypto");
+
+        // tables are sorted by name, so `users` follows `tenants`
+        let users = &out["tables"][1];
+        assert_eq!(users["name"], "users");
+        assert_eq!(users["enableRls"], true);
+        assert_eq!(users["forceRls"], true);
+
+        let tenant_fk = &users["columns"][1]["references"];
+        assert_eq!(tenant_fk["table"], "tenants");
+        assert_eq!(tenant_fk["onDelete"], "cascade");
+    }
+
+    #[test]
+    fn schema_summary_rejects_paren_dialect_with_guidance() {
+        // The legacy paren dialect must not silently parse, and the error must
+        // teach the canonical brace form rather than just reporting a syntax error.
+        let response = schema_summary_tool(&json!({
+            "schema": "table users (\n  id uuid primary_key,\n  email text not null\n)\n"
+        }));
+
+        assert_eq!(response["isError"], true);
+        let text = response["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("legacy paren schema dialect"),
+            "paren input should be diagnosed, got: {text}"
+        );
+        assert!(text.contains("table users {"), "should show brace form");
+    }
+
+    #[test]
+    fn schema_guide_example_actually_parses() {
+        // The guide is what agents copy. If its example stops parsing, the
+        // server is teaching invalid schemas — fail the build instead.
+        let block = SCHEMA_GUIDE
+            .split("```qail")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("SCHEMA_GUIDE must contain a ```qail example");
+
+        let schema = parse_qail(block)
+            .unwrap_or_else(|err| panic!("SCHEMA_GUIDE example does not parse: {err}"));
+        assert!(schema.tables.contains_key("users"));
+        assert!(schema.tables.contains_key("posts"));
+    }
+
+    #[test]
+    fn handle_rpc_returns_none_for_notifications() {
+        // Notifications carry no id and have no response. Over HTTP this is 202.
+        assert!(handle_rpc(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
+    }
+
+    #[test]
+    fn handle_rpc_reports_parse_errors() {
+        let response = handle_rpc("{not json").expect("parse error must respond");
+        assert!(response.contains("-32700"), "got: {response}");
     }
 }
