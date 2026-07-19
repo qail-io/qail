@@ -343,7 +343,7 @@ pub async fn migrate_up(
             "  {} {} {}",
             format!("[{}/{}]", i + 1, cmds.len()).cyan(),
             format!("{}", cmd.action).yellow(),
-            &cmd.table
+            cmd.table
         );
 
         let sql = cmd.to_sql();

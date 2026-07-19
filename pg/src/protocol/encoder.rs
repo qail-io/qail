@@ -1008,10 +1008,10 @@ mod tests {
         let bytes = PgEncoder::encode_extended_query("SELECT $1", &params).unwrap();
 
         // Should contain all 4 message types: P, B, E, S
-        assert!(bytes.windows(1).any(|w| w == [b'P']));
-        assert!(bytes.windows(1).any(|w| w == [b'B']));
-        assert!(bytes.windows(1).any(|w| w == [b'E']));
-        assert!(bytes.windows(1).any(|w| w == [b'S']));
+        assert!(bytes.windows(1).any(|w| w == b"P"));
+        assert!(bytes.windows(1).any(|w| w == b"B"));
+        assert!(bytes.windows(1).any(|w| w == b"E"));
+        assert!(bytes.windows(1).any(|w| w == b"S"));
     }
 
     #[test]

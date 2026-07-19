@@ -170,9 +170,7 @@ fn parse_identify_system_row(row: &PgRow) -> PgResult<IdentifySystem> {
         .parse::<u32>()
         .map_err(|e| PgError::Protocol(format!("Invalid timeline value: {}", e)))?;
     let xlog_pos = required_text(row, 2, "xlogpos")?;
-    let dbname = row
-        .get_string(3)
-        .and_then(|v| if v.is_empty() { None } else { Some(v) });
+    let dbname = row.get_string(3).filter(|v| !v.is_empty());
 
     Ok(IdentifySystem {
         system_id,
@@ -185,9 +183,7 @@ fn parse_identify_system_row(row: &PgRow) -> PgResult<IdentifySystem> {
 fn parse_create_slot_row(row: &PgRow) -> PgResult<ReplicationSlotInfo> {
     let slot_name = required_text(row, 0, "slot_name")?;
     let consistent_point = required_text(row, 1, "consistent_point")?;
-    let snapshot_name = row
-        .get_string(2)
-        .and_then(|v| if v.is_empty() { None } else { Some(v) });
+    let snapshot_name = row.get_string(2).filter(|v| !v.is_empty());
     let output_plugin = required_text(row, 3, "output_plugin")?;
 
     Ok(ReplicationSlotInfo {

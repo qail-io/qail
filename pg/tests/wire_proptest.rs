@@ -118,7 +118,7 @@ proptest! {
                 prop_assert!(bytes.len() >= 5, "Messages must be ≥5 bytes");
                 let type_byte = bytes[0];
                 prop_assert!(
-                    [b'Q', b'P', b'B', b'E', b'p', b'X', b'S'].contains(&type_byte),
+                    b"QPBEpXS".contains(&type_byte),
                     "Unknown type byte: {}",
                     type_byte as char
                 );
