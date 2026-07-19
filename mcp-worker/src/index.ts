@@ -33,11 +33,49 @@ initSync({ module: wasmModule });
 const PROTOCOL_VERSION = "2025-06-18";
 
 /**
- * Revisions we accept in the MCP-Protocol-Version header. 2025-03-26 is
- * included because the spec says a server should assume it when the header is
- * absent, so rejecting it outright would be stricter than the spec allows.
+ * Only 2025-06-18 is implemented, so only 2025-06-18 is accepted.
+ *
+ * An earlier version of this file also accepted 2025-03-26 on the theory that
+ * the spec treats it as the default when the header is absent. That was wrong
+ * to advertise: 2025-03-26 permits JSON-RPC batching, which the dispatcher does
+ * not implement, so a client relying on the older revision would send a batch
+ * and get a single-message response. Rejecting the header is honest; silently
+ * accepting it is not.
+ *
+ * An absent header is still allowed — many clients omit it — and is treated as
+ * this revision.
  */
-const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2025-06-18"]);
+
+/**
+ * Origins permitted to drive this server from a browser.
+ *
+ * The transport spec requires Origin validation to prevent DNS-rebinding
+ * attacks, where a page on an attacker's domain resolves a hostname to a local
+ * or internal address and then drives the MCP server with the victim's network
+ * position. Non-browser clients (Claude Desktop, Code, curl) send no Origin at
+ * all and are unaffected by this check.
+ */
+const ALLOWED_ORIGINS = new Set([
+    "https://dev.qail.io",
+    "https://qail.io",
+    "https://www.qail.io",
+    "https://qail-mcp.derylabergin.workers.dev",
+]);
+
+/** Localhost origins are allowed so the MCP Inspector can be run locally. */
+function isAllowedOrigin(origin: string): boolean {
+    if (ALLOWED_ORIGINS.has(origin)) return true;
+    try {
+        const { hostname, protocol } = new URL(origin);
+        return (
+            (protocol === "http:" || protocol === "https:") &&
+            (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]")
+        );
+    } catch {
+        return false;
+    }
+}
 
 /**
  * Reject oversized bodies before touching WASM. The parser caps input at 64 KB
@@ -46,21 +84,37 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
  */
 const MAX_BODY_BYTES = 128 * 1024;
 
-const CORS_HEADERS: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers":
-        "Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Authorization",
-    // Exposed even though this server never sets Mcp-Session-Id: some clients
-    // probe for it, and a missing expose-header reads as a CORS failure rather
-    // than an absent header.
-    "Access-Control-Expose-Headers": "Mcp-Session-Id, MCP-Protocol-Version",
-    "Access-Control-Max-Age": "86400",
-};
-
-function baseHeaders(extra: Record<string, string> = {}): Record<string, string> {
+/**
+ * CORS headers, echoing the caller's origin rather than `*`.
+ *
+ * `*` would contradict the Origin check below — it tells every browser page on
+ * every domain that cross-origin reads are permitted. Only origins that pass
+ * validation are echoed; requests with no Origin get no CORS headers, which is
+ * correct because they are not browser requests.
+ */
+function corsHeaders(origin: string | null): Record<string, string> {
+    if (!origin || !isAllowedOrigin(origin)) return {};
     return {
-        ...CORS_HEADERS,
+        "Access-Control-Allow-Origin": origin,
+        // The response varies by request Origin, so caches must key on it.
+        Vary: "Origin",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers":
+            "Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version, Authorization",
+        // Exposed even though this server never sets Mcp-Session-Id: some
+        // clients probe for it, and a missing expose-header reads as a CORS
+        // failure rather than an absent header.
+        "Access-Control-Expose-Headers": "Mcp-Session-Id, MCP-Protocol-Version",
+        "Access-Control-Max-Age": "86400",
+    };
+}
+
+function baseHeaders(
+    origin: string | null = null,
+    extra: Record<string, string> = {},
+): Record<string, string> {
+    return {
+        ...corsHeaders(origin),
         "MCP-Protocol-Version": PROTOCOL_VERSION,
         // Responses embed the request id, so nothing here is cacheable whole.
         "Cache-Control": "no-store",
@@ -69,10 +123,15 @@ function baseHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 /** A JSON-RPC error envelope for failures that occur outside the WASM dispatch. */
-function rpcError(code: number, message: string, status: number): Response {
+function rpcError(
+    code: number,
+    message: string,
+    status: number,
+    origin: string | null = null,
+): Response {
     return new Response(
         JSON.stringify({ jsonrpc: "2.0", id: null, error: { code, message } }),
-        { status, headers: baseHeaders({ "Content-Type": "application/json" }) },
+        { status, headers: baseHeaders(origin, { "Content-Type": "application/json" }) },
     );
 }
 
@@ -81,10 +140,10 @@ function rpcError(code: number, message: string, status: number): Response {
  * Emitting the single response as one SSE frame satisfies them without making
  * the server stateful or introducing a real stream.
  */
-function sseResponse(body: string): Response {
+function sseResponse(body: string, origin: string | null): Response {
     return new Response(`event: message\ndata: ${body}\n\n`, {
         status: 200,
-        headers: baseHeaders({
+        headers: baseHeaders(origin, {
             "Content-Type": "text/event-stream",
             Connection: "keep-alive",
         }),
@@ -186,27 +245,52 @@ function wasmResult(body: string): any {
     }
 }
 
-async function handleMcpPost(request: Request): Promise<Response> {
+async function handleMcpPost(request: Request, env: Env, origin: string | null): Promise<Response> {
+    // Rate limiting, not the CPU cap. `limits.cpu_ms` bounds one pathological
+    // request; it does nothing about a flood of cheap ones. Parsing is
+    // CPU-bound and this endpoint is public and unauthenticated.
+    if (env.MCP_RATE_LIMIT) {
+        const key = request.headers.get("CF-Connecting-IP") ?? "unknown";
+        const { success } = await env.MCP_RATE_LIMIT.limit({ key });
+        if (!success) {
+            return new Response(
+                JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: null,
+                    error: { code: -32000, message: "Rate limit exceeded. Try again shortly." },
+                }),
+                {
+                    status: 429,
+                    headers: baseHeaders(origin, {
+                        "Content-Type": "application/json",
+                        "Retry-After": "60",
+                    }),
+                },
+            );
+        }
+    }
+
     const declared = request.headers.get("MCP-Protocol-Version");
     if (declared && !SUPPORTED_PROTOCOL_VERSIONS.has(declared)) {
         return rpcError(
             -32600,
-            `Unsupported MCP-Protocol-Version: ${declared}. This server implements ${PROTOCOL_VERSION}.`,
+            `Unsupported MCP-Protocol-Version: ${declared}. This server implements ${PROTOCOL_VERSION} only.`,
             400,
+            origin,
         );
     }
 
     const declaredLength = Number(request.headers.get("Content-Length") ?? "0");
     if (declaredLength > MAX_BODY_BYTES) {
-        return rpcError(-32600, "Request body too large", 413);
+        return rpcError(-32600, "Request body too large", 413, origin);
     }
 
     const body = await request.text();
     if (body.length > MAX_BODY_BYTES) {
-        return rpcError(-32600, "Request body too large", 413);
+        return rpcError(-32600, "Request body too large", 413, origin);
     }
     if (body.trim() === "") {
-        return rpcError(-32700, "Parse error: empty request body", 400);
+        return rpcError(-32700, "Parse error: empty request body", 400, origin);
     }
 
     // The crate returns undefined for notifications, which by JSON-RPC
@@ -217,11 +301,11 @@ async function handleMcpPost(request: Request): Promise<Response> {
     } catch (err) {
         // handle_rpc is written not to throw; reaching here means the module
         // itself is unhealthy rather than the request being malformed.
-        return rpcError(-32603, `Internal error: ${err}`, 500);
+        return rpcError(-32603, `Internal error: ${err}`, 500, origin);
     }
 
     if (response === undefined) {
-        return new Response(null, { status: 202, headers: baseHeaders() });
+        return new Response(null, { status: 202, headers: baseHeaders(origin) });
     }
 
     // Malformed JSON produces a -32700 envelope rather than a throw, so the
@@ -229,17 +313,26 @@ async function handleMcpPost(request: Request): Promise<Response> {
     const status = response.includes('"code":-32700') ? 400 : 200;
 
     if (wantsSse(request)) {
-        return sseResponse(response);
+        return sseResponse(response, origin);
     }
 
     return new Response(response, {
         status,
-        headers: baseHeaders({ "Content-Type": "application/json" }),
+        headers: baseHeaders(origin, { "Content-Type": "application/json" }),
     });
 }
 
+/**
+ * Cloudflare rate-limiting binding. Optional so `wrangler dev` and any
+ * deployment without the binding still run — the limiter is then skipped rather
+ * than crashing, and the absence is visible at /mcp/health.
+ */
+interface Env {
+    MCP_RATE_LIMIT?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+}
+
 /** Build metadata, for humans and for the docs-site drift check. */
-function handleHealth(): Response {
+function handleHealth(env: Env, origin: string | null): Response {
     return new Response(
         JSON.stringify(
             {
@@ -248,34 +341,59 @@ function handleHealth(): Response {
                 protocol_version: PROTOCOL_VERSION,
                 transport: "streamable-http",
                 stateless: true,
+                rate_limited: Boolean(env.MCP_RATE_LIMIT),
             },
             null,
             2,
         ),
-        { status: 200, headers: baseHeaders({ "Content-Type": "application/json" }) },
+        { status: 200, headers: baseHeaders(origin, { "Content-Type": "application/json" }) },
     );
 }
 
 export default {
-    async fetch(request: Request): Promise<Response> {
+    async fetch(request: Request, env: Env): Promise<Response> {
         const url = new URL(request.url);
         const path = url.pathname.replace(/\/+$/, "") || "/";
+        const origin = request.headers.get("Origin");
+
+        // The transport spec requires servers to validate Origin, to stop a
+        // page on an attacker's domain from driving this server with the
+        // victim's network position (DNS rebinding). A browser always sends
+        // Origin; native clients never do, so an absent Origin is allowed and
+        // a present-but-unrecognised one is refused outright.
+        if (origin !== null && !isAllowedOrigin(origin)) {
+            return new Response(
+                JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: null,
+                    error: { code: -32600, message: `Origin not allowed: ${origin}` },
+                }),
+                {
+                    status: 403,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Cache-Control": "no-store",
+                        Vary: "Origin",
+                    },
+                },
+            );
+        }
 
         if (request.method === "OPTIONS") {
-            return new Response(null, { status: 204, headers: baseHeaders() });
+            return new Response(null, { status: 204, headers: baseHeaders(origin) });
         }
 
         if (path === "/mcp/health" || path === "/health") {
-            return handleHealth();
+            return handleHealth(env, origin);
         }
 
         if (path !== "/mcp" && path !== "/") {
-            return rpcError(-32600, `Not found: ${url.pathname}`, 404);
+            return rpcError(-32600, `Not found: ${url.pathname}`, 404, origin);
         }
 
         switch (request.method) {
             case "POST":
-                return handleMcpPost(request);
+                return handleMcpPost(request, env, origin);
 
             // This server offers no server-initiated stream and has no session
             // to tear down, so both are 405 rather than unimplemented stubs.
@@ -294,7 +412,7 @@ export default {
                     }),
                     {
                         status: 405,
-                        headers: baseHeaders({
+                        headers: baseHeaders(origin, {
                             "Content-Type": "application/json",
                             Allow: "POST, OPTIONS",
                         }),
@@ -302,7 +420,7 @@ export default {
                 );
 
             default:
-                return rpcError(-32600, `Method not allowed: ${request.method}`, 405);
+                return rpcError(-32600, `Method not allowed: ${request.method}`, 405, origin);
         }
     },
 };

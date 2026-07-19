@@ -88,10 +88,46 @@ fn handle_message(message: Value) -> Option<Value> {
     }
 
     let id = id.expect("id checked");
+
+    // JSON-RPC 2.0 requires the version marker on every message. Accepting a
+    // message without it (or with "1.0") would answer a request this server
+    // does not actually speak.
+    match message.get("jsonrpc").and_then(Value::as_str) {
+        Some("2.0") => {}
+        Some(other) => {
+            return Some(error_response(
+                id,
+                -32600,
+                format!("Invalid request: jsonrpc must be \"2.0\", got \"{other}\""),
+                None,
+            ));
+        }
+        None => {
+            return Some(error_response(
+                id,
+                -32600,
+                "Invalid request: missing \"jsonrpc\": \"2.0\"",
+                None,
+            ));
+        }
+    }
+
+    // JSON-RPC restricts id to a string or a number. Objects, arrays and
+    // booleans are not valid identifiers, and echoing one back would propagate
+    // the client's error rather than reporting it.
+    if !(id.is_string() || id.is_number()) {
+        return Some(error_response(
+            Value::Null,
+            -32600,
+            "Invalid request: id must be a string or a number",
+            None,
+        ));
+    }
+
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
 
     let result = match method {
-        "initialize" => Ok(initialize_result(&params)),
+        "initialize" => validate_initialize(&params).map(|()| initialize_result(&params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => handle_tool_call(&params),
@@ -112,6 +148,36 @@ fn handle_message(message: Value) -> Option<Value> {
         }),
         Err(err) => error_response(id, err.code, err.message, err.data),
     })
+}
+
+/// The lifecycle spec requires `initialize` to carry `protocolVersion`,
+/// `capabilities` and `clientInfo`. Answering a bare `initialize` would let a
+/// client skip negotiation entirely and still believe a session was
+/// established.
+fn validate_initialize(params: &Value) -> Result<(), McpError> {
+    if !params.is_object() || params.as_object().is_some_and(|o| o.is_empty()) {
+        return Err(McpError::invalid_params(
+            "initialize requires params with protocolVersion, capabilities and clientInfo",
+        ));
+    }
+
+    required_str(params, "protocolVersion")?;
+
+    if !params.get("capabilities").is_some_and(Value::is_object) {
+        return Err(McpError::invalid_params(
+            "initialize requires \"capabilities\" to be an object",
+        ));
+    }
+
+    let client_info = params
+        .get("clientInfo")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| {
+            McpError::invalid_params("initialize requires \"clientInfo\" to be an object")
+        })?;
+    required_str(client_info, "name")?;
+
+    Ok(())
 }
 
 fn initialize_result(params: &Value) -> Value {
@@ -372,12 +438,102 @@ fn prompts() -> Vec<Value> {
     ]
 }
 
+/// Validate `arguments` against the tool's advertised inputSchema.
+///
+/// The schemas declare typed fields and `additionalProperties: false`, so
+/// silently coercing a wrong type or ignoring an unknown key would make the
+/// advertised contract a fiction — a client sending `"parameterized": "false"`
+/// (a string) would get parameterized output and never learn why.
+///
+/// This is a targeted check against the property table rather than a general
+/// JSON Schema implementation: the schemas here are flat objects of strings,
+/// booleans and enums, and a full validator would be far more machinery than
+/// that shape warrants.
+fn validate_tool_args(tool: &Value, args: &Value) -> Result<(), McpError> {
+    let Some(schema) = tool.get("inputSchema") else {
+        return Ok(());
+    };
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(provided) = args.as_object() else {
+        return Err(McpError::invalid_params("arguments must be an object"));
+    };
+
+    for (key, value) in provided {
+        let Some(spec) = properties.get(key) else {
+            let known: Vec<&str> = properties.keys().map(String::as_str).collect();
+            return Err(McpError::invalid_params(format!(
+                "Unknown argument \"{key}\". Accepted: {}",
+                known.join(", ")
+            )));
+        };
+
+        let expected = spec.get("type").and_then(Value::as_str).unwrap_or("");
+        let matches = match expected {
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => true,
+        };
+        if !matches {
+            return Err(McpError::invalid_params(format!(
+                "Argument \"{key}\" must be a {expected}, got {}",
+                json_type_name(value)
+            )));
+        }
+
+        // Enum members are part of the advertised contract too; an unlisted
+        // value would otherwise fall through to a silent default.
+        if let Some(allowed) = spec.get("enum").and_then(Value::as_array)
+            && !allowed.contains(value)
+        {
+            let names: Vec<String> = allowed.iter().map(ToString::to_string).collect();
+            return Err(McpError::invalid_params(format!(
+                "Argument \"{key}\" must be one of: {}",
+                names.join(", ")
+            )));
+        }
+    }
+
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !provided.contains_key(key) {
+                return Err(McpError::invalid_params(format!(
+                    "Missing required argument: {key}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 fn handle_tool_call(params: &Value) -> Result<Value, McpError> {
     let name = required_str(params, "name")?;
     let args = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    let Some(tool) = tools().into_iter().find(|t| t["name"] == name) else {
+        return Err(McpError::invalid_params(format!("Unknown tool: {name}")));
+    };
+    validate_tool_args(&tool, &args)?;
 
     match name {
         "qail_parse_query" => Ok(parse_query_tool(&args)),
@@ -1151,14 +1307,18 @@ let query = Qail::get("users")
 const BUILDER_COOKBOOK_SCHEMA: &str = r#"# Schema
 
 ```qail
-table users (
-  id uuid primary_key,
-  tenant_id uuid not null,
-  email text not null unique
-) enable_rls
+table users {
+  id uuid primary_key default gen_random_uuid()
+  tenant_id uuid not_null
+  email text unique not_null
+  enable_rls
+}
 
-index users_email on users (email) unique
+unique index users_email on users (email)
 ```
+
+Note `not_null` (underscore) and that table-level flags such as `enable_rls`
+live inside the braces. The older paren form is legacy — do not write it.
 
 Call `qail_schema_summary` with the schema source to inspect what qail-core
 parses.
@@ -1271,6 +1431,49 @@ mod tests {
         assert!(text.contains("table users {"), "should show brace form");
     }
 
+    /// Every ```qail block this server hands to an agent must parse. Checking
+    /// SCHEMA_GUIDE alone was not enough: the paren dialect survived in
+    /// BUILDER_COOKBOOK_SCHEMA and shipped, so this sweeps all of them.
+    #[test]
+    fn every_embedded_schema_example_parses() {
+        let sources: [(&str, &str); 3] = [
+            ("SCHEMA_GUIDE", SCHEMA_GUIDE),
+            ("BUILDER_COOKBOOK_SCHEMA", BUILDER_COOKBOOK_SCHEMA),
+            ("BUILDER_COOKBOOK_ALL", BUILDER_COOKBOOK_ALL),
+        ];
+
+        for (name, text) in sources {
+            for (index, block) in text.split("```qail").skip(1).enumerate() {
+                let Some(body) = block.split("```").next() else {
+                    continue;
+                };
+                let body = body.trim();
+                // Only schema blocks go through the schema parser; query blocks
+                // are covered by the parser's own test suite.
+                if !body.contains("table ") {
+                    continue;
+                }
+                assert!(
+                    parse_qail(body).is_ok(),
+                    "{name} block {} does not parse: {:?}\n{body}",
+                    index + 1,
+                    parse_qail(body).err()
+                );
+                // The paren dialect is `table NAME (`. Index declarations
+                // legitimately use parens (`index x on t (col)`), so the check
+                // is anchored to table declarations specifically.
+                let paren_table = body.lines().map(str::trim).any(|line| {
+                    line.starts_with("table ") && line.ends_with('(')
+                });
+                assert!(
+                    !paren_table,
+                    "{name} block {} uses the legacy paren dialect",
+                    index + 1
+                );
+            }
+        }
+    }
+
     #[test]
     fn schema_guide_example_actually_parses() {
         // The guide is what agents copy. If its example stops parsing, the
@@ -1285,6 +1488,83 @@ mod tests {
             .unwrap_or_else(|err| panic!("SCHEMA_GUIDE example does not parse: {err}"));
         assert!(schema.tables.contains_key("users"));
         assert!(schema.tables.contains_key("posts"));
+    }
+
+    fn err_code(response: &Value) -> i64 {
+        response["error"]["code"].as_i64().unwrap_or(0)
+    }
+
+    #[test]
+    fn rejects_wrong_jsonrpc_version() {
+        let response =
+            handle_message(json!({"jsonrpc": "1.0", "id": 1, "method": "ping"})).expect("responds");
+        assert_eq!(err_code(&response), -32600, "{response}");
+    }
+
+    #[test]
+    fn rejects_missing_jsonrpc_version() {
+        let response = handle_message(json!({"id": 1, "method": "ping"})).expect("responds");
+        assert_eq!(err_code(&response), -32600, "{response}");
+    }
+
+    #[test]
+    fn rejects_non_scalar_id() {
+        for id in [json!({"a": 1}), json!([1]), json!(true)] {
+            let response = handle_message(json!({"jsonrpc": "2.0", "id": id, "method": "ping"}))
+                .expect("responds");
+            assert_eq!(err_code(&response), -32600, "id {id} should be rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_initialize() {
+        // No params at all.
+        let bare = handle_message(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+            .expect("responds");
+        assert_eq!(err_code(&bare), -32602, "{bare}");
+
+        // Missing clientInfo.
+        let partial = handle_message(json!({
+            "jsonrpc": "2.0", "id": 2, "method": "initialize",
+            "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}}
+        }))
+        .expect("responds");
+        assert_eq!(err_code(&partial), -32602, "{partial}");
+    }
+
+    #[test]
+    fn rejects_unknown_and_mistyped_tool_arguments() {
+        // Unknown field, against additionalProperties: false.
+        let unknown = handle_message(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "qail_parse_query", "arguments": {"query": "get users", "bogus": true}}
+        }))
+        .expect("responds");
+        assert_eq!(err_code(&unknown), -32602, "{unknown}");
+
+        // Right name, wrong type: the schema says boolean.
+        let mistyped = handle_message(json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "qail_parse_query", "arguments": {"query": "get users", "parameterized": "false"}}
+        }))
+        .expect("responds");
+        assert_eq!(err_code(&mistyped), -32602, "{mistyped}");
+
+        // Value outside the declared enum.
+        let bad_enum = handle_message(json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "qail_parse_query", "arguments": {"query": "get users", "dialect": "oracle"}}
+        }))
+        .expect("responds");
+        assert_eq!(err_code(&bad_enum), -32602, "{bad_enum}");
+
+        // A well-formed call must still succeed.
+        let good = handle_message(json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "qail_parse_query", "arguments": {"query": "get users", "dialect": "postgres", "parameterized": false}}
+        }))
+        .expect("responds");
+        assert_eq!(good["result"]["isError"], false, "{good}");
     }
 
     #[test]

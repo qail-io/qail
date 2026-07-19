@@ -22,5 +22,15 @@
     // letting it run to the account default.
     "limits": { "cpu_ms": 200 },
 
+    // Rate limiting, which the CPU cap above is not: cpu_ms bounds one
+    // pathological request, not a flood of cheap ones. Keyed on client IP.
+    "ratelimits": [
+        {
+            "name": "MCP_RATE_LIMIT",
+            "namespace_id": "1001",
+            "simple": { "limit": 120, "period": 60 }
+        }
+    ],
+
     "observability": { "enabled": true, "head_sampling_rate": 1 }
 }

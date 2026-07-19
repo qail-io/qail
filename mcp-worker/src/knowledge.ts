@@ -1495,8 +1495,9 @@ const SCHEMA_REFERENCE = [
     "",
     "## Verifying",
     "",
-    "This server cannot run the schema parsers. To check a schema, run the CLI against it, or use",
-    "qail_search over the migration documentation for the workflow (author deltas in db/, then pull).",
+    "Call qail_schema_summary with the schema source. It runs the real brace parser and returns",
+    "the parsed tables, columns, indexes and policies - or, if you passed the legacy paren dialect,",
+    "an error naming the canonical form. That is ground truth, not a lint.",
 ].join("\n");
 
 /** Null-prototype so an unknown uri such as "constructor" reads as undefined. */
