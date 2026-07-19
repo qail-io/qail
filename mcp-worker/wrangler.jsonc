@@ -7,12 +7,14 @@
 
     // Both patterns are needed: a route without a wildcard matches only the
     // exact path, so "/mcp" alone would not serve "/mcp/health".
-    // Commented out until route precedence over the qail-web Pages custom
-    // domain is verified with a stub — see README.
-    // "routes": [
-    //     { "pattern": "dev.qail.io/mcp", "zone_name": "qail.io" },
-    //     { "pattern": "dev.qail.io/mcp/*", "zone_name": "qail.io" }
-    // ],
+    //
+    // These take precedence over the qail-web Pages custom domain on the same
+    // hostname. Nothing is shadowed: Pages serves its homepage as a soft-404
+    // for every unknown path, so /mcp had no real content before this.
+    "routes": [
+        { "pattern": "dev.qail.io/mcp", "zone_name": "qail.io" },
+        { "pattern": "dev.qail.io/mcp/*", "zone_name": "qail.io" }
+    ],
 
     // Parsing is CPU-bound and the endpoint is public and unauthenticated.
     // MAX_INPUT_LENGTH in the parser is 64 KB, so a well-formed request is
