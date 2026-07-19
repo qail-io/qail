@@ -17,6 +17,8 @@ env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/qail_test
   QAIL_TEST_DB_URL: postgres://postgres:postgres@localhost:5432/qail_test
+  DART_VERSION: "3.12.2"
+  DART_SHA256: 28e47b44cf075f36771046c068bb0d174201cf9c7608744aed1cc23204299c2d
 
 jobs:
   test:
@@ -157,7 +159,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
-      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+      - name: Setup Dart
+        run: .github/scripts/setup-dart-linux-x64.sh
 
       - name: Install SDK dependencies
         working-directory: sdk/dart

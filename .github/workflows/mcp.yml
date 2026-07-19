@@ -45,7 +45,8 @@ env:
   # Node is an input to the corpus drift gate, which asserts byte-identical JSON.
   # Pin it rather than inheriting whatever the runner image ships this week.
   # wrangler 4 also requires >= 20.
-  NODE_VERSION: "22"
+  NODE_VERSION: "22.23.1"
+  NODE_SHA256: 9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578
   # binaryen is pinned to the version the local toolchain uses. Ubuntu's apt
   # package is far older and rejects the flags build.sh passes — see the
   # "Install wasm toolchain" step.
@@ -147,9 +148,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+        run: .github/scripts/setup-node-linux-x64.sh
 
       - name: Show Node toolchain
         run: |
@@ -233,9 +232,7 @@ jobs:
           key: worker-build
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+        run: .github/scripts/setup-node-linux-x64.sh
 
       - name: Install wasm toolchain
         shell: bash
@@ -307,9 +304,11 @@ jobs:
           fi
 
           echo "bundle: ${total_kib:-unknown} KiB raw / ${gzip_kib} KiB gzip (limit ${BUNDLE_GZIP_LIMIT_KIB} KiB gzip)"
-          echo "### MCP Worker bundle" >> "$GITHUB_STEP_SUMMARY"
-          echo "- raw: ${total_kib:-unknown} KiB" >> "$GITHUB_STEP_SUMMARY"
-          echo "- gzip: ${gzip_kib} KiB (limit ${BUNDLE_GZIP_LIMIT_KIB} KiB)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### MCP Worker bundle"
+            echo "- raw: ${total_kib:-unknown} KiB"
+            echo "- gzip: ${gzip_kib} KiB (limit ${BUNDLE_GZIP_LIMIT_KIB} KiB)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           if awk -v got="$gzip_kib" -v max="$BUNDLE_GZIP_LIMIT_KIB" 'BEGIN { exit !(got > max) }'; then
             echo "::error::gzipped bundle ${gzip_kib} KiB exceeds the ${BUNDLE_GZIP_LIMIT_KIB} KiB limit"
@@ -352,9 +351,7 @@ jobs:
           key: worker-build
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+        run: .github/scripts/setup-node-linux-x64.sh
 
       # Must stay identical to the worker-build job's step. In particular
       # binaryen comes from a pinned release tarball, never from apt: the
