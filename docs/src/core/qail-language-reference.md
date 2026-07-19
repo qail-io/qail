@@ -7,8 +7,9 @@ transpiler, and the SQL shown is the exact SQL that was produced. Nothing here i
 
 Examples are fenced as ```qail and are checked on every build by
 `cargo run -p qail-core --example knowledge_export` — if one stops parsing, the build fails.
-The single exception is §6, which documents inputs the parser *rejects*; those are fenced as
-```text precisely so they are not checked.
+Every QAIL snippet on this page carries a ```qail fence. The exceptions are §6, which documents
+inputs the parser *rejects*, and the grammar skeletons in §1 and §4.14, which are shapes rather
+than queries; both are fenced as ```text precisely so they are not checked.
 Source of truth: `docs/generated/verified-examples.json`, `docs/generated/invalid-examples.json`,
 `docs/generated/grammar-productions.json`, and `core/src/parser/`.
 
@@ -30,15 +31,19 @@ The action and the table are separated by whitespace. Everything after the table
 |--------|---------|----------|
 | `get` | — | `SELECT` |
 | `add` | `insert` | `INSERT` |
-| `set` | `update` | `UPDATE` |
+| `set` | — | `UPDATE` |
 | `del` | `delete` | `DELETE` |
 | `merge` | — | `MERGE INTO` |
 | `export` | — | `SELECT` (export pipeline) |
 | `cnt` | `count` | aggregate count |
 | `make` | `create` | `CREATE TABLE` |
 
+`set` has **no** alias. `update` is *not* accepted as an action — `update users values ...`
+is a parse error. The complete alias table is `core/src/parser/grammar/base.rs`; `update` appears
+in the grammar only as a MERGE arm keyword and inside a `conflict (...) update` clause.
+
 Standalone commands that do **not** take a table: `begin`, `commit`, `rollback`,
-`session set/show/reset`, `call`, `do`, and `index ... on ...`.
+`session set/show/reset`, `call`, `do`, and `index ... on ...` (§4.14).
 
 ### Clause order is fixed
 
@@ -53,7 +58,7 @@ The order is:
 3. `fields`
 4. `from (...)` or `values ...` — **`add` only**
 5. `where`
-6. `having`
+6. `having` — non-aggregate conditions only, see §6.4
 7. `conflict` — **`add` only**
 8. `order by`
 9. `limit`
@@ -150,7 +155,7 @@ The rewrite is guarded. It does **not** fire when the text before the bracket al
 ` where `, ` fields `, ` having `, ` order `, ` limit `, ` offset `, or ` join `. This is what
 keeps array and JSON literals in clause position intact:
 
-```text
+```qail
 get users fields id where tags && '["a","b"]'
 ```
 ```sql
@@ -165,7 +170,7 @@ Grouped by construct, extracted from the grammar productions.
 
 | Construct | Keywords |
 |-----------|----------|
-| Actions | `get`, `export`, `set`, `update`, `del`, `delete`, `add`, `insert`, `merge`, `make`, `create`, `cnt`, `count`, `distinct` |
+| Actions | `get`, `export`, `set`, `del`, `delete`, `add`, `insert`, `merge`, `make`, `create`, `cnt`, `count`, `distinct` |
 | Projection | `fields`, `*`, `as` |
 | Filtering | `where`, `and`, `or`, `exists`, `not exists` |
 | Aggregate filtering | `having`, `filter` |
@@ -178,7 +183,7 @@ Grouped by construct, extracted from the grammar productions.
 | Transactions | `begin`, `commit`, `rollback` |
 | Session | `session`, `set`, `show`, `reset` |
 | Procedural | `call`, `do` |
-| DDL | `index`, `unique`, `on`, `primary`, `key` |
+| DDL | `index`, `unique`, `on`, `primary`, `key` (in query position `unique` *trails* the column list — §4.14) |
 | Window functions | `over`, `partition`, `by`, `order`, `rows`, `range`, `between`, `unbounded`, `preceding`, `current`, `row`, `following` |
 | Case expressions | `case`, `when`, `then`, `else`, `end` |
 | Special functions | `extract`, `substring`, `from`, `for` |
@@ -348,7 +353,7 @@ UPDATE users SET name = 'John', active = true WHERE id = $1
 
 ### 4.7 `del` — DELETE
 
-```text
+```qail
 del sessions where expired_at < $1
 ```
 ```sql
@@ -494,6 +499,38 @@ do $$ BEGIN RAISE NOTICE 'ok'; END; $$ language plpgsql
 DO $$  BEGIN RAISE NOTICE 'ok'; END;  $$ LANGUAGE plpgsql
 ```
 
+### 4.14 DDL: `index` and `make`
+
+No verified example covers these two, so this section gives the **grammar shape** rather than a
+worked example — the shapes below are transcribed from the doc comments on `parse_create_index`
+and `parse_create_table` in `core/src/parser/grammar/ddl.rs`. Run any concrete query through
+`qail_parse_query` (or `cargo run -p qail-core --example test_query_parse`) before relying on it.
+
+`index` takes a **bare, unparenthesised** column list, and `unique` **trails** the columns:
+
+```text
+index <name> on <table> <col>[, <col>...] [unique]
+```
+
+The SQL-shaped reading — `index idx on users (email)` — is a parse error. Note that this is the
+opposite of the schema-file form (§8), where `unique` *prefixes* `index` and the column list *is*
+parenthesised. The two are different grammars for the same concept; do not carry one into the other.
+
+`make` is colon-delimited per column, and shares nothing with either the SQL paren form or the
+brace schema dialect of §8:
+
+```text
+make <table> <col>:<type>[:<constraint>...][, <col>:<type>[:<constraint>...]...]
+```
+
+Constraint shorthands are `pk` / `primarykey`, `unique` / `uniq`, `nullable` / `null`,
+`default=<value>` / `def=<value>`, and `check=<expr>`. Columns are `NOT NULL` unless marked
+`nullable`. Every SQL-shaped guess fails: `make users (id uuid)`, `make table users (...)`, and
+`create table users (...)` are all parse errors.
+
+`make` is the ad-hoc query form for creating a table. It is unrelated to the brace schema dialect
+in §8, which is what you should actually be writing for anything persistent.
+
 ---
 
 ## 5. Expressions
@@ -600,7 +637,7 @@ Explicit `->`, `->>`, `#>`, `#>>` and `::` casts are also accepted directly.
 
 A brace/bracket literal in value position is captured as JSON and cast to `jsonb`:
 
-```text
+```qail
 get docs fields id where metadata @> {"tags":["a",{"b":true}],"n":1}
 ```
 ```sql
@@ -674,6 +711,36 @@ INSERT INTO users (/* ERROR: Invalid insert column */) VALUES (1, 'Ana') ON CONF
 
 Anything over 64 KB is rejected before parsing (§2.1).
 
+### 6.4 `having` with an aggregate
+
+Same dangerous class as §6.2: it **parses successfully** but transpiles to invalid SQL, with the
+error embedded as a SQL comment where the left operand belongs. `having` currently accepts only a
+non-aggregate left-hand side.
+
+```text
+get orders fields status having count(*) > 1
+```
+```text
+parses, but transpiles to invalid SQL:
+SELECT status FROM orders HAVING /* ERROR: Invalid condition expression */ > 1
+```
+
+`having sum(total) > 100` fails the same way. A plain column — `having total > 100` — works.
+
+### 6.5 `group by`
+
+QAIL has **no** `group by` clause. There is no group-by production in the grammar, and a trailing
+`group by ...` is reported as trailing content:
+
+```text
+get orders fields status group by status
+```
+```text
+Parse error at position 0: Unexpected trailing content: 'group by status'
+```
+
+Grouping is reachable only through the builder API's `group_by_mode`, never through text syntax.
+
 ---
 
 ## 7. SQL → QAIL translation
@@ -684,11 +751,11 @@ Anything over 64 KB is rejected before parsing (§2.1).
 |-----|------|
 | `SELECT` | `get` |
 | `INSERT` | `add` (alias `insert`) |
-| `UPDATE` | `set` (alias `update`) |
+| `UPDATE` | `set` (no alias — `update` is not an action) |
 | `DELETE` | `del` (alias `delete`) |
 | `MERGE INTO` | `merge` |
-| `CREATE TABLE` | `make` (alias `create`) |
-| `CREATE INDEX` | `index <name> on <table> ...` |
+| `CREATE TABLE` | `make` (alias `create`) — colon-delimited columns, see §4.14 |
+| `CREATE INDEX` | `index <name> on <table> <cols>` — no parens, `unique` trails, see §4.14 |
 | `BEGIN` / `COMMIT` / `ROLLBACK` | `begin` / `commit` / `rollback` |
 | `SET` / `SHOW` / `RESET` | `session set` / `session show` / `session reset` |
 | `CALL` | `call` |
@@ -706,7 +773,7 @@ Anything over 64 KB is rejected before parsing (§2.1).
 | `RIGHT JOIN` | `right join` | |
 | `ORDER BY x DESC` | `order by x desc` | `asc` is the default |
 | `LIMIT` / `OFFSET` | `limit` / `offset` | |
-| `HAVING` | `having` | |
+| `HAVING` | `having` | non-aggregate conditions only — see §6.4 | |
 | `SET a = 1` (UPDATE) | `values a = 1` | before `where` |
 | `VALUES (1, 'x')` (INSERT) | `values 1, "x"` | positional; pair with `fields` |
 | `INSERT ... SELECT` | `from (get ...)` | |

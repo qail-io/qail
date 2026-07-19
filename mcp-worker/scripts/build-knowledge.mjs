@@ -521,20 +521,34 @@ const STOPWORDS = new Set(
     "nor now off once only other out over own same some through too under until up very via").split(/\s+/)
 );
 
+/**
+ * Returns { terms, length }.
+ *
+ * `terms` carries a light plural stem alongside each original token, so a query
+ * for "field" still hits a chunk that only ever writes "fields". That makes the
+ * vocabulary a superset of the text.
+ *
+ * `length` counts ONLY the original tokens. The stems are index padding, not
+ * words the document actually contains — counting them would inflate every
+ * chunk's length and skew BM25's length normalisation against plural-heavy
+ * chunks. knowledge.ts documents this same split; keep the two in agreement.
+ */
 function tokenize(s) {
   const raw = s.toLowerCase().split(/[^a-z0-9]+/);
-  const out = [];
+  const terms = [];
+  let length = 0;
   for (const t of raw) {
     if (t.length < 2) continue;
     if (STOPWORDS.has(t)) continue;
-    out.push(t);
+    terms.push(t);
+    length++;
     // light stem: strip a trailing plural 's'
     if (t.length > 3 && t.endsWith("s") && !t.endsWith("ss")) {
       const stem = t.slice(0, -1);
-      if (stem.length >= 2 && !STOPWORDS.has(stem)) out.push(stem);
+      if (stem.length >= 2 && !STOPWORDS.has(stem)) terms.push(stem);
     }
   }
-  return out;
+  return { terms, length };
 }
 
 const df = Object.create(null);
@@ -543,8 +557,8 @@ const len = [];
 
 corpus.forEach((c, idx) => {
   // title + headingPath are part of the searchable surface
-  const terms = tokenize(`${c.title} ${c.headingPath.join(" ")} ${c.content}`);
-  len.push(terms.length);
+  const { terms, length } = tokenize(`${c.title} ${c.headingPath.join(" ")} ${c.content}`);
+  len.push(length);
   const tf = new Map();
   for (const t of terms) tf.set(t, (tf.get(t) || 0) + 1);
   for (const [term, freq] of tf) {
