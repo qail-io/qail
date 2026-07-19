@@ -151,6 +151,30 @@ jobs:
         working-directory: sdk/typescript
         run: npm audit --audit-level=moderate
 
+  dart-sdk:
+    name: Dart SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+
+      - name: Install SDK dependencies
+        working-directory: sdk/dart
+        run: dart pub get
+
+      - name: Check SDK formatting
+        working-directory: sdk/dart
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze SDK
+        working-directory: sdk/dart
+        run: dart analyze --fatal-infos
+
+      - name: Test SDK
+        working-directory: sdk/dart
+        run: dart test
+
   wire-fuzz:
     name: qail-pg wire decode fuzz gate
     runs-on: ubuntu-latest

@@ -1,0 +1,17 @@
+name: qail
+description: >-
+  Dart client SDK for the Qail Gateway — fluent query builders, raw DSL
+  execution, transactions, and realtime WebSocket subscriptions.
+version: 0.1.0
+repository: https://github.com/qail-io/qail
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  http: ^1.2.0
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

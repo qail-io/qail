@@ -1,0 +1,35 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "qail-mcp",
+    "main": "src/index.ts",
+    "compatibility_date": "2026-07-01",
+    "workers_dev": true,
+
+    // Both patterns are needed: a route without a wildcard matches only the
+    // exact path, so "/mcp" alone would not serve "/mcp/health".
+    //
+    // These take precedence over the qail-web Pages custom domain on the same
+    // hostname. Nothing is shadowed: Pages serves its homepage as a soft-404
+    // for every unknown path, so /mcp had no real content before this.
+    "routes": [
+        { "pattern": "dev.qail.io/mcp", "zone_name": "qail.io" },
+        { "pattern": "dev.qail.io/mcp/*", "zone_name": "qail.io" }
+    ],
+
+    // Parsing is CPU-bound and the endpoint is public and unauthenticated.
+    // MAX_INPUT_LENGTH in the parser is 64 KB, so a well-formed request is
+    // single-digit milliseconds; this caps a pathological input instead of
+    // letting it run to the account default.
+    "limits": { "cpu_ms": 200 },
+
+    // Rate limiting via a Durable Object. The native `ratelimits` binding was
+    // tried first and proved inert on this account — limit() returned success
+    // indefinitely past the threshold, across two namespace ids — so this uses
+    // a mechanism whose behaviour can actually be demonstrated.
+    "durable_objects": {
+        "bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
+    },
+    "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }],
+
+    "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

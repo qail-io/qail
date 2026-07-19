@@ -1,0 +1,15 @@
+{
+    "name": "qail-mcp-worker",
+    "version": "1.3.6",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "build": "./build.sh",
+        "dev": "npm run build && wrangler dev",
+        "deploy": "npm run build && wrangler deploy",
+        "tail": "wrangler tail"
+    },
+    "devDependencies": {
+        "wrangler": "^4.63.0"
+    }
+}

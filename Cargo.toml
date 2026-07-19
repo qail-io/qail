@@ -10,6 +10,8 @@ members = [
     "gateway",
     "workflow",
     "workflow-postgres",
+    "mcp",
+    "wasm",
 ]
 exclude = [
     "pg/fuzz",
@@ -28,6 +30,13 @@ unused_variables = "deny"
 strip = true       # Remove debug symbols (~240MB savings)
 lto = true          # Link-time optimization (smaller + faster)
 codegen-units = 1   # Better optimization (slower compile)
+
+# WASM builds for the remote MCP server (qail-wasm). Must live here: profile
+# sections declared in workspace members are silently ignored by Cargo.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"     # Optimize for size over speed (edge bundle budget)
+panic = "abort"     # No unwinding tables in wasm
 
 # For profiling, use: cargo build --profile release-with-debug
 [profile.release-with-debug]

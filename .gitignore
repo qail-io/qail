@@ -28,6 +28,7 @@ py/python/qail/*.so
 
 # Node
 node_modules/
+sdk/typescript/dist/
 
 # VS Code extension release artifacts
 vscode/qail-lsp-extension/*.vsix
@@ -109,3 +110,8 @@ tmp/*/migrations/
 
 # VS Code extension build output
 vscode/qail-lsp-extension/dist/
+
+# wasm-bindgen output for the MCP worker (built in CI, never committed)
+mcp-worker/src/wasm/
+mcp-worker/node_modules/
+mcp-worker/.wrangler/
