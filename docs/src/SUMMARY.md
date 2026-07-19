@@ -23,6 +23,7 @@
 
 # Core Concepts
 
+- [QAIL Language Reference](./core/qail-language-reference.md)
 - [AST Builder API](./core/builder-api.md)
 - [Expression Types](./core/expressions.md)
 - [Expression Builders](./core/builders.md)

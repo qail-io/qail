@@ -19,6 +19,13 @@
 // `new WebAssembly.Instance` on an already-loaded module is allowed.
 import wasmModule from "./wasm/qail_wasm_bg.wasm";
 import { initSync, handle_rpc, version } from "./wasm/qail_wasm.js";
+import {
+    KNOWLEDGE_TOOLS,
+    KNOWLEDGE_RESOURCES,
+    isKnowledgeTool,
+    callKnowledgeTool,
+    readKnowledgeResource,
+} from "./knowledge.js";
 
 initSync({ module: wasmModule });
 
@@ -89,6 +96,96 @@ function wantsSse(request: Request): boolean {
     return accept.includes("text/event-stream") && !accept.includes("application/json");
 }
 
+/**
+ * Route one JSON-RPC message between the two halves of this server.
+ *
+ * The compute tools (parse, transpile, explain, schema summary, cookbook) live
+ * in WebAssembly and are answered by `handle_rpc`. The knowledge tools (search,
+ * doc, syntax, examples, map) are pure TypeScript over an in-bundle corpus.
+ * Neither half knows about the other, so this function merges their `tools/list`
+ * and `resources/list` output and routes calls to whichever half owns the name.
+ *
+ * Anything not explicitly handled here — initialize, ping, prompts, the compute
+ * tools — falls through to WASM unchanged, so the stdio server and this one stay
+ * behaviourally identical for everything they share.
+ */
+function dispatch(body: string): string | undefined {
+    let message: { id?: unknown; method?: unknown; params?: any };
+    try {
+        message = JSON.parse(body);
+    } catch {
+        // Let the WASM side produce the canonical -32700 envelope rather than
+        // duplicating its error shape here.
+        return handle_rpc(body);
+    }
+
+    const { id, method, params } = message;
+    // Notifications carry no id and get no response, whichever half would own them.
+    if (id === undefined || id === null) {
+        return handle_rpc(body);
+    }
+
+    const ok = (result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
+
+    switch (method) {
+        case "tools/list": {
+            const base = wasmResult(body);
+            const tools = [...(base?.tools ?? []), ...KNOWLEDGE_TOOLS];
+            return ok({ tools });
+        }
+
+        case "resources/list": {
+            const base = wasmResult(body);
+            const resources = [...(base?.resources ?? []), ...KNOWLEDGE_RESOURCES];
+            return ok({ resources });
+        }
+
+        case "tools/call": {
+            const name = params?.name;
+            if (typeof name === "string" && isKnowledgeTool(name)) {
+                try {
+                    return ok(callKnowledgeTool(name, params?.arguments ?? {}));
+                } catch (err) {
+                    // Tool-level failures are results with isError, not JSON-RPC
+                    // errors — matching how the WASM tools report problems.
+                    return ok({
+                        content: [{ type: "text", text: `${err}` }],
+                        isError: true,
+                    });
+                }
+            }
+            return handle_rpc(body);
+        }
+
+        case "resources/read": {
+            const uri = params?.uri;
+            if (typeof uri === "string") {
+                const text = readKnowledgeResource(uri);
+                if (text !== null) {
+                    return ok({
+                        contents: [{ uri, mimeType: "text/markdown", text }],
+                    });
+                }
+            }
+            return handle_rpc(body);
+        }
+
+        default:
+            return handle_rpc(body);
+    }
+}
+
+/** Run a message through WASM and return just its `result`, if it produced one. */
+function wasmResult(body: string): any {
+    const raw = handle_rpc(body);
+    if (raw === undefined) return undefined;
+    try {
+        return JSON.parse(raw)?.result;
+    } catch {
+        return undefined;
+    }
+}
+
 async function handleMcpPost(request: Request): Promise<Response> {
     const declared = request.headers.get("MCP-Protocol-Version");
     if (declared && !SUPPORTED_PROTOCOL_VERSIONS.has(declared)) {
@@ -116,7 +213,7 @@ async function handleMcpPost(request: Request): Promise<Response> {
     // definition have no response. Over HTTP that is 202 with an empty body.
     let response: string | undefined;
     try {
-        response = handle_rpc(body);
+        response = dispatch(body);
     } catch (err) {
         // handle_rpc is written not to throw; reaching here means the module
         // itself is unhealthy rather than the request being malformed.
