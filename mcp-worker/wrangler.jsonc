@@ -1,0 +1,24 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "qail-mcp",
+    "main": "src/index.ts",
+    "compatibility_date": "2026-07-01",
+    "workers_dev": true,
+
+    // Both patterns are needed: a route without a wildcard matches only the
+    // exact path, so "/mcp" alone would not serve "/mcp/health".
+    // Commented out until route precedence over the qail-web Pages custom
+    // domain is verified with a stub — see README.
+    // "routes": [
+    //     { "pattern": "dev.qail.io/mcp", "zone_name": "qail.io" },
+    //     { "pattern": "dev.qail.io/mcp/*", "zone_name": "qail.io" }
+    // ],
+
+    // Parsing is CPU-bound and the endpoint is public and unauthenticated.
+    // MAX_INPUT_LENGTH in the parser is 64 KB, so a well-formed request is
+    // single-digit milliseconds; this caps a pathological input instead of
+    // letting it run to the account default.
+    "limits": { "cpu_ms": 200 },
+
+    "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

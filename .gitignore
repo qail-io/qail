@@ -113,3 +113,5 @@ vscode/qail-lsp-extension/dist/
 
 # wasm-bindgen output for the MCP worker (built in CI, never committed)
 mcp-worker/src/wasm/
+mcp-worker/node_modules/
+mcp-worker/.wrangler/
