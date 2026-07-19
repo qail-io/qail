@@ -67,19 +67,29 @@ so the MCP Inspector works locally. CORS echoes the validated origin rather than
 minute per IP. This is separate from `limits.cpu_ms`, which bounds a single
 pathological request and does nothing about a flood of cheap ones.
 
-Cloudflare's native `ratelimits` binding was tried first and proved **inert** on
-this account: `limit()` returned `{success: true}` indefinitely past the
-threshold, across two namespace ids, with no exception thrown. Config and call
-signature matched the docs exactly. If you revisit it, verify with a burst
-before trusting it — a limiter that never limits is worse than none.
+Cloudflare's native `ratelimits` binding was evaluated first and rejected. It is
+documented as intentionally permissive and eventually consistent, which makes it
+unsuitable for a hard per-IP cap — measured here, a 200-request burst against a
+configured limit of 120 was not throttled at all. That is consistent with its
+documented behaviour, not evidence of a defect.
 
-The DO limiter **fails open**: if the namespace is missing or the call throws,
-the request is allowed. Measured behaviour on a 200-request burst was 160
-allowed / 40 rejected against a limit of 120, the excess being requests that
-failed open during DO cold-start contention. Enforcement is therefore
-approximate under burst and exact under steady load. That is a deliberate trade
-— a limiter that takes the service down when its own backend hiccups swaps a
-bounded problem for an unbounded one.
+Failure handling is classified rather than swallowed:
+
+| Condition | Response |
+|---|---|
+| over budget | `429` + `Retry-After` |
+| DO `.overloaded` | `429` — object overload from one IP *is* the abuse signal, so failing open here would pass exactly the traffic being limited |
+| DO `.retryable` | one bounded retry, then fail open |
+| anything else | fail open |
+
+Every fail-open is logged as `ratelimit_bypass` and must be counted. An
+uncounted bypass is indistinguishable from working protection: an earlier
+version of this file swallowed exceptions in a catch, reported 160 allowed
+against a limit of 120, and was described as verified.
+
+Measured on a 200-request same-IP burst: **exactly 120 × 2xx / 80 × 429**, with
+zero bypasses logged. The DO is single-threaded and the counter increment has no
+`await` between read and write, so successful calls stop at exactly the limit.
 
 **Input validation.** `qail-mcp` validates JSON-RPC envelopes (`jsonrpc` must be
 `"2.0"`, `id` must be a string or number), requires complete `initialize`

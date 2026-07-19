@@ -251,12 +251,30 @@ async function handleMcpPost(request: Request, env: Env, origin: string | null):
     // request; it does nothing about a flood of cheap ones. Parsing is
     // CPU-bound and this endpoint is public and unauthenticated.
     const rate = await checkRateLimit(env.RATE_LIMITER, request);
-    if (!rate.allowed) {
+
+    if (rate.outcome === "bypass") {
+        // The limiter did not run. Record it rather than folding it into the
+        // success path — an uncounted bypass is indistinguishable from working
+        // protection, which is how an earlier version of this file reported
+        // 160 allowed against a limit of 120 and called it verified.
+        console.log(
+            JSON.stringify({ event: "ratelimit_bypass", reason: rate.reason }),
+        );
+    }
+
+    if (rate.outcome === "deny" || rate.outcome === "overloaded") {
+        const message =
+            rate.outcome === "overloaded"
+                ? "Too many concurrent requests. Try again shortly."
+                : "Rate limit exceeded. Try again shortly.";
+        console.log(
+            JSON.stringify({ event: "ratelimit_reject", outcome: rate.outcome }),
+        );
         return new Response(
             JSON.stringify({
                 jsonrpc: "2.0",
                 id: null,
-                error: { code: -32000, message: "Rate limit exceeded. Try again shortly." },
+                error: { code: -32000, message },
             }),
             {
                 status: 429,
