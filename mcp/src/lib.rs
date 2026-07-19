@@ -83,9 +83,7 @@ fn handle_message(message: Value) -> Option<Value> {
         return id.map(|id| error_response(id, -32600, "Invalid request: missing method", None));
     };
 
-    id.as_ref()?;
-
-    let id = id.expect("id checked");
+    let id = id?;
 
     // JSON-RPC 2.0 requires the version marker on every message. Accepting a
     // message without it (or with "1.0") would answer a request this server

@@ -409,11 +409,13 @@ fn evaluate(input: &str, source: &str) -> Result<VerifiedExample, InvalidExample
                     source: source.to_string(),
                 });
             }
+            let action = format!("{:?}", cmd.action).to_lowercase();
+            let table = cmd.table;
             Ok(VerifiedExample {
                 input: input.to_string(),
                 sql,
-                action: format!("{:?}", cmd.action).to_lowercase(),
-                table: cmd.table.clone(),
+                action,
+                table,
                 source: source.to_string(),
             })
         }
@@ -428,7 +430,7 @@ fn evaluate(input: &str, source: &str) -> Result<VerifiedExample, InvalidExample
 /// QAIL queries begin with an action keyword. Used to separate executable
 /// queries from grammar fragments and schema blocks.
 fn starts_with_action(input: &str) -> bool {
-    let first = input.trim_start().split_whitespace().next().unwrap_or("");
+    let first = input.split_whitespace().next().unwrap_or("");
     matches!(
         first.to_lowercase().as_str(),
         "get" | "add" | "set" | "del" | "merge" | "with" | "export"
