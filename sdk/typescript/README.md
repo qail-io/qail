@@ -105,14 +105,26 @@ await qail.into('settings')
 ### Raw DSL
 
 ```typescript
-// Direct QAIL text protocol
+// Direct QAIL text protocol — returns { rows, count, metadata? }
 const result = await qail.query('get users fields id, name where active = true limit 10');
 
-// Batch
-const results = await qail.batch([
+// Fast protocol (array-of-arrays, no column names)
+const fast = await qail.queryFast('get users fields id, name limit 5');
+
+// Batch — returns { results, total, success, metadata? }
+const batch = await qail.batch([
   'get users fields id, name limit 5',
   'get orders fields id, total limit 5',
 ]);
+```
+
+## Transactions
+
+```typescript
+const txn = await qail.beginTxn();
+await txn.query("add users name = 'X'");
+await txn.savepoint('create', 'sp1');
+await txn.commit(); // or txn.rollback()
 ```
 
 ## Realtime (WebSocket)

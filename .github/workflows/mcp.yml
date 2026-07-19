@@ -1,0 +1,446 @@
+# MCP Worker CI/CD
+#
+# Covers the qail-mcp crate, the qail-wasm build it ships as, and the
+# Cloudflare Worker in mcp-worker/ that serves https://dev.qail.io/mcp.
+#
+# ---------------------------------------------------------------------------
+# THE `deploy` JOB IS THE ONLY SUPPORTED WAY TO SHIP THE WORKER.
+#
+# Do not run `wrangler deploy` (or `npm run deploy`) from a laptop. A local
+# deploy skips every gate below — the drift gates in particular — and can put a
+# Worker on production whose embedded knowledge base does not match any commit,
+# which is unreproducible and undebuggable after the fact. Ship by pushing a
+# `v*` tag, or by running this workflow manually via workflow_dispatch.
+#
+# mcp-worker/src/wasm/ IS GITIGNORED. The wasm-bindgen output is never
+# committed; it is built here (and by mcp-worker/build.sh locally) from the
+# qail-wasm crate. A checkout alone is therefore not deployable — build.sh must
+# run first, which is exactly what the worker-build and deploy jobs do.
+# ---------------------------------------------------------------------------
+
+name: MCP
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Superseding a PR's CI run is free; superseding a DEPLOY is not. The two
+  # triggers that can reach the deploy job (a v* tag, a manual dispatch) opt out,
+  # because cancelling between `wrangler deploy` and the post-deploy conformance
+  # check would leave production live and unverified.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CARGO_TERM_COLOR: always
+  # Node is an input to the corpus drift gate, which asserts byte-identical JSON.
+  # Pin it rather than inheriting whatever the runner image ships this week.
+  # wrangler 4 also requires >= 20.
+  NODE_VERSION: "22.23.1"
+  NODE_SHA256: 9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578
+  # binaryen is pinned to the version the local toolchain uses. Ubuntu's apt
+  # package is far older and rejects the flags build.sh passes — see the
+  # "Install wasm toolchain" step.
+  BINARYEN_VERSION: "131"
+  BINARYEN_SHA256: b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db
+  # Gzipped bundle ceiling for `wrangler deploy`. The bundle sits near 500 KiB;
+  # this is a runaway detector (a stray dependency, an uncompressed corpus), not
+  # a budget on normal growth. Raise it deliberately, with a reason.
+  BUNDLE_GZIP_LIMIT_KIB: 1500
+
+jobs:
+  rust:
+    name: qail-mcp crate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: mcp
+
+      - name: Tests
+        run: cargo test -p qail-mcp
+
+      - name: Build
+        run: cargo build -p qail-mcp
+
+      - name: Clippy
+        run: cargo clippy -p qail-mcp --all-targets -- -D warnings
+
+  wasm:
+    name: qail-wasm (wasm32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: wasm32
+
+      - name: Build qail-wasm
+        run: cargo build -p qail-wasm --target wasm32-unknown-unknown --profile wasm-release
+
+  generated-artifacts-fresh:
+    name: docs/generated drift gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: knowledge-export
+
+      # This does double duty. Besides regenerating the JSON, knowledge_export
+      # parses every ```qail fence in docs/ and exits non-zero if one of them is
+      # not valid QAIL — so a broken snippet in the docs fails here, not in a
+      # user's editor.
+      - name: Regenerate exported knowledge (also lints every ```qail fence in docs/)
+        run: cargo run -p qail-core --example knowledge_export -- --out docs/generated
+
+      - name: Assert docs/generated is committed and current
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- docs/generated/; then
+            echo "::error::docs/generated is stale. Re-run: cargo run -p qail-core --example knowledge_export -- --out docs/generated  — then commit the result."
+            exit 1
+          fi
+          echo "docs/generated is current"
+
+  corpus-fresh:
+    name: MCP knowledge corpus drift gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Node
+        run: .github/scripts/setup-node-linux-x64.sh
+
+      - name: Show Node toolchain
+        run: |
+          node --version
+          npm --version
+
+      # The builder reads docs/generated/*.json, so it must be run against the
+      # committed ones. That is the point: if docs/generated changed and the
+      # corpus was not rebuilt, this job is what catches it.
+      - name: Rebuild knowledge corpus
+        working-directory: mcp-worker
+        run: node scripts/build-knowledge.mjs
+
+      # corpus.json and index.json are pure functions of the tree and are
+      # compared byte for byte.
+      #
+      # VERSION.json is not: `qailCommit` records HEAD, and committing a
+      # regenerated VERSION.json advances HEAD, so that one field can never
+      # agree with a fresh build.
+      #
+      # So the comparison is a WHITELIST of the fields that carry meaning
+      # (qailVersion, chunkCount) rather than "everything except qailCommit".
+      # A blacklist makes this gate hostage to the committed file's incidental
+      # shape: VERSION.json used to carry a wall-clock `generatedAt`, and while
+      # any commit predating its removal was HEAD, `del(.qailCommit)` left that
+      # timestamp on one side only and the gate failed for a reason that had
+      # nothing to do with corpus drift. A gate that cannot pass gets disabled,
+      # which is worse than no gate.
+      #
+      # The rebuilt file's key set is asserted separately, so a genuinely new
+      # field still has to be acknowledged here rather than slipping through
+      # the whitelist unnoticed.
+      - name: Assert knowledge corpus is committed and current
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stale() {
+            echo "::error::mcp-worker/src/knowledge is stale ($1). Re-run: cd mcp-worker && node scripts/build-knowledge.mjs  — then commit the result."
+            exit 1
+          }
+
+          if ! git diff --exit-code -- mcp-worker/src/knowledge/corpus.json mcp-worker/src/knowledge/index.json; then
+            stale "corpus.json/index.json differ"
+          fi
+
+          # Shape check on the freshly built file — the authoritative one.
+          keys="$(jq -S -c 'keys' mcp-worker/src/knowledge/VERSION.json)"
+          expected='["chunkCount","qailCommit","qailVersion"]'
+          if [ "$keys" != "$expected" ]; then
+            echo "::error::VERSION.json key set changed: got $keys, expected $expected. Update the whitelist comparison in this job to cover the new field."
+            exit 1
+          fi
+
+          meaningful='{qailVersion, chunkCount}'
+          committed="$(git show "HEAD:mcp-worker/src/knowledge/VERSION.json" | jq -S "$meaningful")"
+          rebuilt="$(jq -S "$meaningful" mcp-worker/src/knowledge/VERSION.json)"
+          if [ "$committed" != "$rebuilt" ]; then
+            diff <(printf '%s\n' "$committed") <(printf '%s\n' "$rebuilt") || true
+            stale "VERSION.json provenance differs"
+          fi
+
+          echo "mcp-worker/src/knowledge is current"
+
+  worker-build:
+    name: Worker bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: worker-build
+
+      - name: Setup Node
+        run: .github/scripts/setup-node-linux-x64.sh
+
+      - name: Install wasm toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pin wasm-bindgen-cli to the exact wasm-bindgen version in Cargo.lock.
+          # A CLI/crate version mismatch is a hard error from wasm-bindgen, so
+          # deriving it here keeps the two in lockstep with no manual bump.
+          wb_version="$(awk '/^name = "wasm-bindgen"$/{found=1; next} found && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.lock)"
+          if [ -z "$wb_version" ]; then
+            echo "::error::could not read wasm-bindgen version from Cargo.lock"
+            exit 1
+          fi
+          echo "wasm-bindgen-cli $wb_version"
+          cargo install wasm-bindgen-cli --version "$wb_version" --locked
+
+          # wasm-opt, from a PINNED official release — NOT `apt-get install
+          # binaryen`.
+          #
+          # build.sh passes --enable-bulk-memory-opt, a flag binaryen only grew
+          # in v121. Ubuntu 24.04 packages v108, and wasm-opt hard-errors on an
+          # unknown option, so under build.sh's `set -euo pipefail` the apt
+          # route aborts this job every single run. It does not reproduce on a
+          # laptop because Homebrew ships a current binaryen.
+          #
+          # The version is pinned to whatever the local toolchain uses so CI and
+          # laptop builds agree, and the digest is checked so the tarball cannot
+          # change under us. `wasm-opt --version` is echoed below to make future
+          # drift visible in the log.
+          tarball="binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${tarball}"
+          echo "${BINARYEN_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Show wasm toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          wasm-bindgen --version
+          wasm-opt --version
+
+      - name: Build worker wasm
+        run: ./mcp-worker/build.sh
+
+      - name: Install worker dependencies
+        working-directory: mcp-worker
+        run: npm ci
+
+      - name: Bundle (wrangler dry-run) and check size
+        working-directory: mcp-worker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Build outside the worktree: nothing this job produces belongs in the
+          # repo, and a stray dist/ would be noise for any later diff gate.
+          log="$RUNNER_TEMP/bundle.log"
+          npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/worker-bundle" 2>&1 | tee "$log"
+
+          # Wrangler reports e.g. "Total Upload: 1625.19 KiB / gzip: 501.19 KiB".
+          gzip_kib="$(sed -n 's/.*gzip:[[:space:]]*\([0-9.]*\)[[:space:]]*KiB.*/\1/p' "$log" | tail -n 1)"
+          total_kib="$(sed -n 's/.*Total Upload:[[:space:]]*\([0-9.]*\)[[:space:]]*KiB.*/\1/p' "$log" | tail -n 1)"
+
+          if [ -z "$gzip_kib" ]; then
+            echo "::error::could not parse the gzipped bundle size out of wrangler output"
+            exit 1
+          fi
+
+          echo "bundle: ${total_kib:-unknown} KiB raw / ${gzip_kib} KiB gzip (limit ${BUNDLE_GZIP_LIMIT_KIB} KiB gzip)"
+          {
+            echo "### MCP Worker bundle"
+            echo "- raw: ${total_kib:-unknown} KiB"
+            echo "- gzip: ${gzip_kib} KiB (limit ${BUNDLE_GZIP_LIMIT_KIB} KiB)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if awk -v got="$gzip_kib" -v max="$BUNDLE_GZIP_LIMIT_KIB" 'BEGIN { exit !(got > max) }'; then
+            echo "::error::gzipped bundle ${gzip_kib} KiB exceeds the ${BUNDLE_GZIP_LIMIT_KIB} KiB limit"
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy Worker
+    needs:
+      - rust
+      - wasm
+      - generated-artifacts-fresh
+      - corpus-fresh
+      - worker-build
+    # Tag pushes and manual runs only. Never on pull_request, never on a
+    # branch push — see the header: this job is the only supported way to ship.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The `if:` above restricts the TRIGGER; this restricts the ACTOR and the
+    # REF. Without it, workflow_dispatch lets anyone with write access ship an
+    # arbitrary branch straight to production, which is not what the header
+    # claims this job is. Configure in Settings > Environments > production:
+    #   - required reviewers
+    #   - deployment branches: `main` and tag pattern `v*` only
+    #   - scope CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID to this environment
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          key: worker-build
+
+      - name: Setup Node
+        run: .github/scripts/setup-node-linux-x64.sh
+
+      # Must stay identical to the worker-build job's step. In particular
+      # binaryen comes from a pinned release tarball, never from apt: the
+      # packaged version predates --enable-bulk-memory-opt and aborts build.sh.
+      - name: Install wasm toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          wb_version="$(awk '/^name = "wasm-bindgen"$/{found=1; next} found && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.lock)"
+          if [ -z "$wb_version" ]; then
+            echo "::error::could not read wasm-bindgen version from Cargo.lock"
+            exit 1
+          fi
+          cargo install wasm-bindgen-cli --version "$wb_version" --locked
+
+          tarball="binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${tarball}"
+          echo "${BINARYEN_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Show wasm toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          wasm-bindgen --version
+          wasm-opt --version
+
+      # mcp-worker/src/wasm/ is gitignored, so the checkout has no wasm at all.
+      # This step is what makes the tree deployable.
+      - name: Build worker wasm
+        run: ./mcp-worker/build.sh
+
+      - name: Install worker dependencies
+        working-directory: mcp-worker
+        run: npm ci
+
+      - name: Deploy to Cloudflare
+        working-directory: mcp-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
+      # Cloudflare propagation is fast but not instantaneous; give the new
+      # version a moment before asserting against it.
+      - name: Wait for propagation
+        run: sleep 15
+
+      # The deploy is not done until production actually behaves. A failure
+      # here fails the job — conformance.mjs exits non-zero unless every check
+      # passes.
+      #
+      # RATE LIMITER COVERAGE, stated honestly:
+      #
+      # The exact 120-allowed / 80-denied split is NOT asserted here, and cannot
+      # be. The limiter is a fixed 120-req/60s window keyed on client IP, and
+      # GitHub runners egress through shared NAT addresses, so a 200-request
+      # burst from here shares its budget with anything else leaving the same
+      # address and would fail for reasons unrelated to this deploy. That exact
+      # split is verified only by running this script manually from a known-clean
+      # IP (`node scripts/conformance.mjs --url https://dev.qail.io`, no flags).
+      # There are no unit tests for src/ratelimit.ts — do not claim otherwise.
+      #
+      # What runs here instead is --ratelimit-probe: fire 130 requests (above the
+      # 120 budget) and assert at least one 429 with a Retry-After. It is a
+      # weaker assertion, but it is NAT-safe in the correct direction — competing
+      # traffic on a shared IP can only produce more 429s, never fewer — and it
+      # catches the regression that matters unattended: a limiter that silently
+      # stops limiting (binding dropped, fail-open path taken).
+      #
+      # --expect-version pins /mcp/health's qail_version to the workspace version
+      # of this very commit, so a deploy that quietly served a stale worker fails
+      # here rather than looking healthy.
+      - name: Post-deploy conformance suite
+        working-directory: mcp-worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ../core/Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read the qail-core version from core/Cargo.toml"
+            exit 1
+          fi
+          echo "asserting the live worker reports qail_version $version"
+          # Explicit /mcp, not a bare host root: the script warns on a pathless
+          # base because that shape is what makes a mis-aimed run look correct.
+          node scripts/conformance.mjs \
+            --url https://dev.qail.io/mcp \
+            --expect-version "$version" \
+            --ratelimit-probe

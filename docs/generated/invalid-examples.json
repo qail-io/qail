@@ -1,0 +1,6 @@
+[
+  {"input":"add users values 1 conflict (id) update name = excluded.name","error":"parses, but transpiles to invalid SQL: INSERT INTO users (/* ERROR: Invalid insert column */) VALUES (1) ON CONFLICT (id) DO UPDATE SET name = excluded.name RETURNING *","source":"core/src/parser/tests/dml.rs","verified":false},
+  {"input":"add users values 1, \"Ana\" conflict (id) update name = '''O'Reilly'''","error":"parses, but transpiles to invalid SQL: INSERT INTO users (/* ERROR: Invalid insert column */) VALUES (1, 'Ana') ON CONFLICT (id) DO UPDATE SET name = 'O''Reilly' RETURNING *","source":"core/src/parser/tests/dml.rs","verified":false},
+  {"input":"get users fields * where active = true and role = \"admin\" or age > 18","error":"Parse error at position 0: Unexpected trailing content: 'where active = true and role = \"admin\" or age > 18'","source":"core/src/parser/tests/get.rs","verified":false},
+  {"input":"set users values verified = true where id = $1 and active = true or role = \"admin\"","error":"Parse error at position 0: Unexpected trailing content: 'where id = $1 and active = true or role = \"admin\"'","source":"core/src/parser/tests/dml.rs","verified":false}
+]

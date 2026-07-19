@@ -17,6 +17,8 @@ env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/qail_test
   QAIL_TEST_DB_URL: postgres://postgres:postgres@localhost:5432/qail_test
+  DART_VERSION: "3.12.2"
+  DART_SHA256: 28e47b44cf075f36771046c068bb0d174201cf9c7608744aed1cc23204299c2d
 
 jobs:
   test:
@@ -150,6 +152,31 @@ jobs:
       - name: Audit SDK dependencies
         working-directory: sdk/typescript
         run: npm audit --audit-level=moderate
+
+  dart-sdk:
+    name: Dart SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Setup Dart
+        run: .github/scripts/setup-dart-linux-x64.sh
+
+      - name: Install SDK dependencies
+        working-directory: sdk/dart
+        run: dart pub get
+
+      - name: Check SDK formatting
+        working-directory: sdk/dart
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze SDK
+        working-directory: sdk/dart
+        run: dart analyze --fatal-infos
+
+      - name: Test SDK
+        working-directory: sdk/dart
+        run: dart test
 
   wire-fuzz:
     name: qail-pg wire decode fuzz gate
