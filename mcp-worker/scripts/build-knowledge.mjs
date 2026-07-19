@@ -603,9 +603,18 @@ const coreCargo = readFileSync(join(REPO, "core", "Cargo.toml"), "utf8");
 const qailVersion = coreCargo.match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
 if (!qailVersion) throw new Error("could not read version from core/Cargo.toml");
 
+// Deterministic on purpose: every field here is a pure function of the checked
+// out tree, so re-running the builder on an unchanged repo reproduces all three
+// outputs byte for byte. That is what lets CI gate on `git diff --exit-code`.
+//
+// There is deliberately no `generatedAt` timestamp: nothing reads it, and a
+// wall-clock field would make the drift gate fail on every run. `qailCommit` is
+// the one field that legitimately moves without the corpus changing (committing
+// a regenerated VERSION.json advances HEAD), so the CI gate compares VERSION.json
+// with that key removed. See .github/workflows/mcp.yml, job `corpus-fresh`.
 writeFileSync(
   versionPath,
-  JSON.stringify({ qailCommit, qailVersion, generatedAt: new Date().toISOString(), chunkCount: corpus.length }, null, 2) + "\n"
+  JSON.stringify({ qailCommit, qailVersion, chunkCount: corpus.length }, null, 2) + "\n"
 );
 
 // --------------------------------------------------------------- assertions
