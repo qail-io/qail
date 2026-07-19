@@ -63,11 +63,23 @@ The allowlist is `ALLOWED_ORIGINS` in `src/index.ts`, plus any localhost origin
 so the MCP Inspector works locally. CORS echoes the validated origin rather than
 `*` — `*` would contradict the check it sits next to.
 
-**Rate limiting.** The `MCP_RATE_LIMIT` binding caps 120 requests per minute per
-IP. This is separate from `limits.cpu_ms`, which bounds a single pathological
-request and does nothing about a flood of cheap ones. The binding is optional in
-code, so a deployment without it still runs — check `rate_limited` in
-`/mcp/health` to see which you have.
+**Rate limiting.** A Durable Object (`src/ratelimit.ts`) caps 120 requests per
+minute per IP. This is separate from `limits.cpu_ms`, which bounds a single
+pathological request and does nothing about a flood of cheap ones.
+
+Cloudflare's native `ratelimits` binding was tried first and proved **inert** on
+this account: `limit()` returned `{success: true}` indefinitely past the
+threshold, across two namespace ids, with no exception thrown. Config and call
+signature matched the docs exactly. If you revisit it, verify with a burst
+before trusting it — a limiter that never limits is worse than none.
+
+The DO limiter **fails open**: if the namespace is missing or the call throws,
+the request is allowed. Measured behaviour on a 200-request burst was 160
+allowed / 40 rejected against a limit of 120, the excess being requests that
+failed open during DO cold-start contention. Enforcement is therefore
+approximate under burst and exact under steady load. That is a deliberate trade
+— a limiter that takes the service down when its own backend hiccups swaps a
+bounded problem for an unbounded one.
 
 **Input validation.** `qail-mcp` validates JSON-RPC envelopes (`jsonrpc` must be
 `"2.0"`, `id` must be a string or number), requires complete `initialize`

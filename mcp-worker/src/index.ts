@@ -19,6 +19,7 @@
 // `new WebAssembly.Instance` on an already-loaded module is allowed.
 import wasmModule from "./wasm/qail_wasm_bg.wasm";
 import { initSync, handle_rpc, version } from "./wasm/qail_wasm.js";
+import { RateLimiter, checkRateLimit } from "./ratelimit.js";
 import {
     KNOWLEDGE_TOOLS,
     KNOWLEDGE_RESOURCES,
@@ -249,25 +250,22 @@ async function handleMcpPost(request: Request, env: Env, origin: string | null):
     // Rate limiting, not the CPU cap. `limits.cpu_ms` bounds one pathological
     // request; it does nothing about a flood of cheap ones. Parsing is
     // CPU-bound and this endpoint is public and unauthenticated.
-    if (env.MCP_RATE_LIMIT) {
-        const key = request.headers.get("CF-Connecting-IP") ?? "unknown";
-        const { success } = await env.MCP_RATE_LIMIT.limit({ key });
-        if (!success) {
-            return new Response(
-                JSON.stringify({
-                    jsonrpc: "2.0",
-                    id: null,
-                    error: { code: -32000, message: "Rate limit exceeded. Try again shortly." },
+    const rate = await checkRateLimit(env.RATE_LIMITER, request);
+    if (!rate.allowed) {
+        return new Response(
+            JSON.stringify({
+                jsonrpc: "2.0",
+                id: null,
+                error: { code: -32000, message: "Rate limit exceeded. Try again shortly." },
+            }),
+            {
+                status: 429,
+                headers: baseHeaders(origin, {
+                    "Content-Type": "application/json",
+                    "Retry-After": String(rate.retryAfter),
                 }),
-                {
-                    status: 429,
-                    headers: baseHeaders(origin, {
-                        "Content-Type": "application/json",
-                        "Retry-After": "60",
-                    }),
-                },
-            );
-        }
+            },
+        );
     }
 
     const declared = request.headers.get("MCP-Protocol-Version");
@@ -328,7 +326,7 @@ async function handleMcpPost(request: Request, env: Env, origin: string | null):
  * than crashing, and the absence is visible at /mcp/health.
  */
 interface Env {
-    MCP_RATE_LIMIT?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+    RATE_LIMITER?: DurableObjectNamespace;
 }
 
 /** Build metadata, for humans and for the docs-site drift check. */
@@ -341,7 +339,7 @@ function handleHealth(env: Env, origin: string | null): Response {
                 protocol_version: PROTOCOL_VERSION,
                 transport: "streamable-http",
                 stateless: true,
-                rate_limited: Boolean(env.MCP_RATE_LIMIT),
+                rate_limited: Boolean(env.RATE_LIMITER),
             },
             null,
             2,
@@ -349,6 +347,8 @@ function handleHealth(env: Env, origin: string | null): Response {
         { status: 200, headers: baseHeaders(origin, { "Content-Type": "application/json" }) },
     );
 }
+
+export { RateLimiter };
 
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
