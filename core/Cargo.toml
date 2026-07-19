@@ -35,6 +35,9 @@ toml = "1.1"
 proptest = "1.11.0"
 # Examples and tests may generate UUIDs; this never reaches the wasm build.
 uuid = { version = "1", features = ["serde", "v4"] }
+# Used by the knowledge_export example to walk the grammar and test sources.
+syn = { version = "2", features = ["full", "visit", "extra-traits", "parsing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [[example]]
 name = "test_multiline_sql"
