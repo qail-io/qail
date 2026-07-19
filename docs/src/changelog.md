@@ -4,12 +4,15 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v1.3.5)
+## Current Highlights (v1.3.6)
 
+- **PostgreSQL dependency correctness**: `cmov` `0.5.4` fixes incorrect AArch64 constant-time selection results in the dependency path used by PostgreSQL SCRAM authentication.
+- **Gateway dependency safety**: `crossbeam-epoch` `0.9.20` resolves RUSTSEC-2026-0204 in the metrics and cache dependency paths.
+- **Extension build tooling**: VSCE `3.9.2` resolves the `form-data` and `markdown-it` advisories without changing the shipped extension runtime.
 - **PostgreSQL io_uring opt-in security**: Linux `io_uring` plain-TCP transport no longer auto-enables on kernel support; enable it explicitly with `[postgres].io_uring = true`, `?io_uring=true`, driver/pool options, or `QAIL_PG_IO_BACKEND=io_uring`.
 - **Tokio remains the safe default**: building with the `qail-pg/io_uring` feature only makes the backend available; TLS, mTLS, and GSSENC paths continue to use Tokio transport.
 - **Workflow payment hardening**: charge side effects now default to stable workflow idempotency keys, support order-origin metadata, and store redacted payment display payloads for chat/notification use.
-- **Release line**: Rust workspace crates and install snippets are bumped to `1.3.5`.
+- **Release line**: Rust workspace crates and install snippets are bumped to `1.3.6`.
 
 ## v1.3.0 Highlights
 

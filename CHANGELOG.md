@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-07-20
+
+### Security
+- **PostgreSQL SCRAM dependency correctness:** Updated `cmov` to `0.5.4`, fixing incorrect constant-time selection results on AArch64 when high register bits are set. The dependency reaches `qail-pg` authentication through `postgres-protocol`.
+- **Gateway concurrency dependency safety:** Updated `crossbeam-epoch` to `0.9.20`, addressing the invalid pointer dereference reported as RUSTSEC-2026-0204 in the gateway's metrics and cache dependency paths.
+- **VS Code packaging dependencies:** Updated `form-data` to `4.0.6` and `markdown-it` to `14.3.0` through `@vscode/vsce` `3.9.2`. These dependencies are confined to extension build tooling.
+
+### Fixed
+- **Rust 1.97 release compatibility:** Updated formatting and Clippy findings so formatting, panic safety, workspace Clippy, and the Linux `io_uring` Clippy gate can pass on the release toolchain.
+
+### Changed
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.6`.
+
 ## [1.3.5] - 2026-06-29
 
 ### Fixed
