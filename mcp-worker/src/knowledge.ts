@@ -1576,3 +1576,211 @@ export function callKnowledgeTool(name: string, args: any): unknown {
 export function readKnowledgeResource(uri: string): string | null {
     return RESOURCE_BODIES[uri] ?? null;
 }
+
+/**
+ * Action verbs whose parse failures must be taught from the verb's OWN
+ * constructs, not from whatever token the parser choked on.
+ *
+ * `add` is the load-bearing case. A naive INSERT/upsert — `add users values ...`
+ * or `add ... conflict (col) update ...` — chokes the parser on the `values`
+ * token, and `values` ALSO names the SET/UPDATE assignment clause. Tail-word
+ * matching therefore hands an INSERT author the UPDATE `values` grammar (and, via
+ * the examples, two SET queries), steering them the exact wrong way. Priming the
+ * candidate list with the insert/conflict constructs — ranked ahead of anything
+ * derived from the tail word — makes the INSERT/ADD grammar win instead.
+ */
+const ACTION_CONSTRUCTS: Record<string, string[]> = Object.assign(
+    Object.create(null) as Record<string, string[]>,
+    {
+        add: ["insert_values", "on_conflict", "conflict_update", "conflict"],
+    },
+);
+
+/**
+ * Curated verified examples for actions the generated corpus cannot cover.
+ *
+ * The verified-example corpus (docs/generated/verified-examples.json) carries NO
+ * `add`/INSERT pair: every bare-`values` add form the exporter tried transpiles to
+ * invalid SQL ("Invalid insert column") because it omits the required `fields`
+ * list, so none survived verification (see qail://core/cheatsheet, "Inserts and
+ * upserts"). That leaves an agent who fails an insert/upsert with only SET/UPDATE
+ * examples to copy — the wrong direction. These two forms WERE run through
+ * qail_transpile_query (postgres) and produce exactly the SQL shown; they give the
+ * one thing the corpus cannot, a working `add`-starting example.
+ */
+const CURATED_EXAMPLES: Record<string, { input: string; sql: string }[]> = Object.assign(
+    Object.create(null) as Record<string, { input: string; sql: string }[]>,
+    {
+        add: [
+            {
+                input: 'add users fields name, email values "Alice", "alice@example.com"',
+                sql: "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') RETURNING *",
+            },
+            {
+                input:
+                    'add users fields name, email values "Alice", "alice@example.com" conflict (email) update name = "Alice"',
+                sql:
+                    "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') ON CONFLICT (email) DO UPDATE SET name = 'Alice' RETURNING *",
+            },
+        ],
+    },
+);
+
+/**
+ * Turn a raw WASM parse failure into a corpus-derived "how to fix" block, or
+ * null when there is nothing relevant to say.
+ *
+ * The four WASM query tools answer a bad snippet with the parser's own error
+ * ("Unexpected trailing content: '...'") and nothing else. A first-contact
+ * agent that has not already found qail_syntax / qail_examples cannot recover
+ * from that. This reconstructs the guidance those tools would have surfaced,
+ * from the same in-bundle corpus: the grammar sketch for the construct the
+ * parser choked on, plus up to two verified examples that exercise it.
+ *
+ * Pure over the corpus — it never calls the WASM side. It MUST NOT throw,
+ * because the caller appends its output to a live tool response: every corpus
+ * access sits inside one try/catch that degrades to null. A null return means
+ * "nothing relevant found, leave the raw parser error untouched".
+ */
+export function teachingForError(query: string, errorText: string): string | null {
+    try {
+        // A resource-limit rejection is not a grammar problem: no construct is at
+        // fault and the only fix is to shorten the input, so construct-oriented
+        // teaching would actively mislead (it would point at a nonexistent
+        // construct and invite re-submitting the same oversized query). Bail
+        // before building any of it.
+        if (/\binput too large\b/i.test(errorText)) return null;
+
+        // Two signals for the culprit construct: the query's leading ACTION word
+        // (add / get / set / ...) and the first word of the parser's
+        // trailing-content tail (where it actually choked). The action word is the
+        // stronger signal of *intent* and is ranked first; the tail word only says
+        // *where* parsing stopped and can name a construct that belongs to a
+        // different action — `values`, for one, is shared by INSERT and UPDATE, so
+        // trusting it turns an INSERT failure into UPDATE advice.
+        const tailMatch = /unexpected trailing content:\s*'([^']*)'/i.exec(errorText);
+        const tailWord = (tailMatch?.[1] ?? "").trim().split(/\s+/)[0] ?? "";
+        const actionWord = (query.trim().split(/\s+/)[0] ?? "").toLowerCase();
+
+        const candidates: string[] = [];
+        const seen = new Set<string>();
+        const pushCandidate = (c: string) => {
+            if (c && !seen.has(c)) {
+                seen.add(c);
+                candidates.push(c);
+            }
+        };
+        // Action-specific constructs first, then the action word itself, then the
+        // tail word — so the verb's own grammar always outranks the choke token.
+        for (const c of ACTION_CONSTRUCTS[actionWord] ?? []) pushCandidate(c);
+        for (const raw of [actionWord, tailWord]) {
+            if (!raw) continue;
+            for (const c of normalizeConstruct(raw)) pushCandidate(c);
+        }
+        if (candidates.length === 0) return null;
+
+        // Grammar sketch: the first production carrying a compact "Parse:" line,
+        // chosen in CANDIDATE priority order (not corpus order) so a higher-ranked
+        // candidate's production wins even when a lower-ranked one sits earlier in
+        // the corpus — the `add` case turns on this, since the SET/UPDATE `values`
+        // production precedes `insert_values` in the corpus and would otherwise be
+        // picked for an INSERT. An exact key match is tried for every candidate
+        // before any segment-overlap match. Productions whose sketch is on a "Parse
+        // ON CONFLICT ..." line (no colon straight after "Parse") have no compact
+        // one-line sketch, so the regex skips them — fine, a lower candidate fills in.
+        const sketchOf = (i: number): string | null => {
+            const m = /(?:^|\n)[ \t]*Parse:[ \t]*(.+)/i.exec(CHUNKS[i].content);
+            return m ? m[1].trim().slice(0, 200) : null;
+        };
+        const prodIdx = productionIndices();
+        let production: { key: string; sketch: string } | null = null;
+        for (const cand of candidates) {
+            for (const i of prodIdx) {
+                if (constructOf(CHUNKS[i]) !== cand) continue;
+                const sketch = sketchOf(i);
+                if (sketch === null) continue;
+                production = { key: cand, sketch };
+                break;
+            }
+            if (production) break;
+        }
+        if (!production) {
+            for (const cand of candidates) {
+                for (const i of prodIdx) {
+                    const key = constructOf(CHUNKS[i]);
+                    if (!constructMatches(key, cand)) continue;
+                    const sketch = sketchOf(i);
+                    if (sketch === null) continue;
+                    production = { key, sketch };
+                    break;
+                }
+                if (production) break;
+            }
+        }
+
+        // Up to two verified examples that exercise the construct, each rendered
+        // as its QAIL input line and the SQL the transpiler actually produced.
+        const render = (input: string, sql: string) =>
+            sql ? "  " + input + "\n    -> " + sql : "  " + input;
+        const examples: string[] = [];
+        for (const i of examplesForConstruct(candidates, 2)) {
+            const input = exampleInput(CHUNKS[i]);
+            if (!input) continue;
+            const content = CHUNKS[i].content;
+            const sep = content.indexOf("-- SQL:");
+            const sql = sep >= 0 ? content.slice(sep + "-- SQL:".length).trim() : "";
+            examples.push(render(input, sql));
+        }
+
+        // If the corpus has no example STARTING with this action verb, fall back to
+        // the curated set so an agent who attempted (say) an INSERT is shown an
+        // INSERT — never an UPDATE that merely shares the `values` keyword. This is
+        // what lets an `add ...` failure surface an `add ...` example at all, since
+        // the generated corpus contains none.
+        const curated = CURATED_EXAMPLES[actionWord] ?? [];
+        if (curated.length) {
+            const haveActionExample = examples.some((e) =>
+                e.trim().toLowerCase().startsWith(actionWord + " "),
+            );
+            if (!haveActionExample) {
+                examples.length = 0; // the corpus examples point the wrong direction here
+                for (const ex of curated.slice(0, 2)) examples.push(render(ex.input, ex.sql));
+            }
+        }
+
+        // Nothing recognisable in the corpus: let the caller keep the bare error
+        // rather than emit an empty, confidence-sapping "how to fix" with no fix.
+        if (!production && examples.length === 0) return null;
+
+        // Only claim the parser "rejected the trailing input" when it actually
+        // reported trailing content. Other failures (incomplete query, tokenizer
+        // error, size limit) have no such tail, and asserting one would be false —
+        // and would send an agent to fix a construct that isn't the problem.
+        const lines: string[] = [
+            "## How to fix",
+            tailMatch
+                ? "The parser accepted the start of your query and then rejected the trailing input quoted in the error above: that construct is either misspelled or not allowed in this position."
+                : "The query did not parse — it is likely incomplete, or uses a construct in a position the grammar does not allow.",
+        ];
+        if (production) {
+            lines.push("");
+            lines.push("Grammar for `" + production.key + "`:");
+            lines.push("  " + production.sketch);
+        }
+        if (examples.length) {
+            lines.push("");
+            lines.push("Verified examples:");
+            lines.push(...examples);
+        }
+        lines.push("");
+        lines.push("Correct the query to match, then re-validate it with qail_parse_query.");
+
+        const out = lines.join("\n");
+        // The caller appends this to a live response, so keep it bounded even if
+        // a corpus edit makes some chunk unexpectedly large.
+        return out.length > 1500 ? out.slice(0, 1490).trimEnd() + " ..." : out;
+    } catch {
+        // A malformed chunk must never turn a tool error into a Worker 500.
+        return null;
+    }
+}

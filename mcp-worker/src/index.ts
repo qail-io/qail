@@ -26,6 +26,7 @@ import {
     isKnowledgeTool,
     callKnowledgeTool,
     readKnowledgeResource,
+    teachingForError,
 } from "./knowledge.js";
 
 initSync({ module: wasmModule });
@@ -157,6 +158,41 @@ function wantsSse(request: Request): boolean {
 }
 
 /**
+ * Instructions returned from `initialize` over HTTP.
+ *
+ * The WASM crate carries its own instructions (mcp/src/lib.rs), but that string
+ * is written for the stdio server, which serves ONLY the six WASM tools — so it
+ * names qail://guide/* and qail_parse_query and nothing else. This Worker serves
+ * the knowledge half too, and a first-contact agent that never hears about
+ * qail_map or the qail://core resources misses the entire learning path. The
+ * HTTP `initialize` below therefore replaces just this one field; every other
+ * field of the WASM result is passed through untouched, and the stdio server's
+ * own instructions are left alone.
+ *
+ * Only the 11 real tools and the real resources are named — nothing else exists
+ * to call.
+ */
+const HTTP_INSTRUCTIONS =
+    "QAIL is a typed query AST with its own surface syntax that transpiles to SQL. " +
+    "Start with qail_map for a map of the repository and which tool answers which question. " +
+    "Learn the language from the qail://core/orientation and qail://core/cheatsheet resources. " +
+    "Use qail_syntax for a construct's grammar, qail_examples for verified working queries, and qail_search (then qail_doc) to find documentation. " +
+    "Validate any QAIL you write with qail_parse_query — it returns the parsed AST and the real SQL, or a parse error.";
+
+/**
+ * WASM query tools whose failure is a bare parser error. On isError these get a
+ * corpus-derived teaching block appended (see augmentQueryError). Deliberately
+ * excludes qail_schema_summary, which already teaches the brace dialect on
+ * failure, and qail_builder_cookbook, which never parses a query.
+ */
+const QUERY_TOOLS = new Set([
+    "qail_parse_query",
+    "qail_transpile_query",
+    "qail_explain_query",
+    "qail_format_query",
+]);
+
+/**
  * Route one JSON-RPC message between the two halves of this server.
  *
  * The compute tools (parse, transpile, explain, schema summary, cookbook) live
@@ -165,9 +201,10 @@ function wantsSse(request: Request): boolean {
  * Neither half knows about the other, so this function merges their `tools/list`
  * and `resources/list` output and routes calls to whichever half owns the name.
  *
- * Anything not explicitly handled here — initialize, ping, prompts, the compute
- * tools — falls through to WASM unchanged, so the stdio server and this one stay
- * behaviourally identical for everything they share.
+ * Anything not explicitly handled here — ping, prompts, the compute tools —
+ * falls through to WASM unchanged, so the stdio server and this one stay
+ * behaviourally identical for everything they share. `initialize` is a near
+ * pass-through: it reuses the WASM result and rewrites only the instructions.
  */
 function dispatch(body: string): string | undefined {
     let message: { id?: unknown; method?: unknown; params?: any };
@@ -188,6 +225,18 @@ function dispatch(body: string): string | undefined {
     const ok = (result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
 
     switch (method) {
+        case "initialize": {
+            // The stdio server's instructions name only its own WASM tools; an
+            // HTTP client has both halves, so return the SAME initialize result
+            // (protocolVersion, capabilities, serverInfo) with just the
+            // instructions rewritten for the real learning path. If WASM
+            // produced no result — it will for a well-formed initialize — fall
+            // through unchanged rather than inventing one.
+            const base = wasmResult(body);
+            if (base === undefined) return handle_rpc(body);
+            return ok({ ...base, instructions: HTTP_INSTRUCTIONS });
+        }
+
         case "tools/list": {
             const base = wasmResult(body);
             const tools = [...(base?.tools ?? []), ...KNOWLEDGE_TOOLS];
@@ -214,7 +263,17 @@ function dispatch(body: string): string | undefined {
                     });
                 }
             }
-            return handle_rpc(body);
+
+            // Everything else is a WASM tool. The query tools return a bare
+            // parser error on bad input, which a stuck agent cannot act on;
+            // augment just those with a corpus-derived teaching block. Every
+            // other WASM response — successes included — is passed through
+            // byte-for-byte.
+            const raw = handle_rpc(body);
+            if (raw !== undefined && typeof name === "string" && QUERY_TOOLS.has(name)) {
+                return augmentQueryError(raw, params);
+            }
+            return raw;
         }
 
         case "resources/read": {
@@ -244,6 +303,42 @@ function wasmResult(body: string): any {
     } catch {
         return undefined;
     }
+}
+
+/**
+ * Append a teaching block to a failed query-tool response, or return it as-is.
+ *
+ * Only a genuine tool error (result.isError === true) is augmented, and only
+ * when teachingForError finds something relevant in the corpus. A success, a
+ * non-error, a missing query argument, or an empty teaching all return the
+ * original serialized `raw` unchanged, so the happy path stays byte-identical to
+ * what WASM produced.
+ */
+function augmentQueryError(raw: string, params: any): string {
+    let parsed: any;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return raw;
+    }
+
+    const result = parsed?.result;
+    if (!result || result.isError !== true || !Array.isArray(result.content)) {
+        return raw;
+    }
+
+    const errorText = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+    const query = typeof params?.arguments?.query === "string" ? params.arguments.query : "";
+    if (!errorText || !query) return raw;
+
+    const teaching = teachingForError(query, errorText);
+    if (!teaching) return raw;
+
+    // Keep isError true — the parse still failed. The teaching is an ADDITIONAL
+    // content item, so a client that only reads content[0] still sees the exact
+    // same parser error it saw before this fix.
+    result.content.push({ type: "text", text: teaching });
+    return JSON.stringify(parsed);
 }
 
 async function handleMcpPost(request: Request, env: Env, origin: string | null): Promise<Response> {

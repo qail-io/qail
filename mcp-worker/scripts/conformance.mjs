@@ -562,6 +562,101 @@ async function contentCorrectness() {
     );
 }
 
+/** The QAIL input line of an nth content block, if the tool appended one. */
+function contentBlock(r, i) {
+    const content = r.json?.result?.content;
+    return Array.isArray(content) && content[i]?.text ? content[i].text : "";
+}
+
+async function teachingOnFailure() {
+    group("teaching on failure");
+
+    // The two upsert examples the teaching block prints are curated in
+    // knowledge.ts rather than mined from the corpus (the parser test suite has
+    // no valid `add` example — every bare-`values` form transpiles to invalid
+    // SQL). Curated means unverified by the build-time lint, so these two checks
+    // ARE that verification: they fail the moment the real transpiler stops
+    // producing the SQL the teaching block claims. If they drift, the server is
+    // teaching a query paired with SQL it no longer emits.
+    const insert = await callTool("qail_parse_query", {
+        query: 'add users fields name, email values "Alice", "alice@example.com"',
+    });
+    assert(
+        "curated insert example still parses",
+        insert.json?.result?.isError === false,
+        "isError false",
+        describeResponse(insert),
+    );
+    assertEqual(
+        "curated insert example SQL is current",
+        insert.json?.result?.structuredContent?.sql,
+        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') RETURNING *",
+    );
+
+    const upsert = await callTool("qail_parse_query", {
+        query:
+            'add users fields name, email values "Alice", "alice@example.com" conflict (email) update name = "Alice"',
+    });
+    assertEqual(
+        "curated upsert example SQL is current",
+        upsert.json?.result?.structuredContent?.sql,
+        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') ON CONFLICT (email) DO UPDATE SET name = 'Alice' RETURNING *",
+    );
+
+    // A naive Postgres-style upsert must be steered toward `add`, never `set`.
+    // The tail token is `values`, which also names the SET/UPDATE clause, so a
+    // corpus-order selection used to teach the UPDATE direction — the exact
+    // recovery failure this feature exists to prevent.
+    const naive = await callTool("qail_parse_query", {
+        query: 'add users values name = "Alice" conflict (email) update name = "Alice"',
+    });
+    const naiveTeaching = contentBlock(naive, 1);
+    assert(
+        "failed upsert is answered with a teaching block",
+        naive.json?.result?.isError === true && naiveTeaching.length > 0,
+        "isError true with an appended teaching content item",
+        `isError ${naive.json?.result?.isError}, ${(naive.json?.result?.content ?? []).length} content item(s)`,
+    );
+    assert(
+        "teaching steers a failed upsert toward add, not set",
+        naiveTeaching.length > 0 &&
+            (naiveTeaching.includes("add users") || naiveTeaching.toLowerCase().includes("insert/add")) &&
+            !naiveTeaching.includes("set users values"),
+        "an add/insert example and no SET/UPDATE example",
+        naiveTeaching.includes("set users values")
+            ? "a SET/UPDATE example — steering an attempted insert toward the wrong statement"
+            : "no add/insert example surfaced",
+    );
+
+    // Enrichment must not fire when there is nothing to teach.
+    const valid = await callTool("qail_parse_query", { query: "get users fields id where active = true" });
+    assert(
+        "a valid query gets no teaching block",
+        valid.json?.result?.isError === false && (valid.json?.result?.content ?? []).length === 1,
+        "isError false with a single content item",
+        `isError ${valid.json?.result?.isError}, ${(valid.json?.result?.content ?? []).length} content item(s)`,
+    );
+
+    // A size-limit failure is not a construct failure; teaching that quotes a
+    // non-existent trailing token would send the agent to fix the wrong thing.
+    // The query must clear the parser's 64 KB limit while staying under the
+    // Worker's 128 KB body cap, so it uses unquoted filler — quoted text would
+    // double under JSON escaping and trip the 413 body guard before the parser
+    // ever sees it.
+    const oversize = await callTool("qail_parse_query", {
+        query: "get users fields " + "id, ".repeat(20000),
+    });
+    const oversizeText = toolText(oversize);
+    assert(
+        "a size-limit failure is not misdiagnosed as a construct error",
+        oversize.json?.result?.isError === true && !oversizeText.includes("trailing input quoted"),
+        "isError true with no trailing-content framing",
+        oversizeText.includes("trailing input quoted")
+            ? "teaching claims trailing content on an input-too-large error"
+            : "ok",
+    );
+}
+
 async function surfaceCounts() {
     group("surface counts");
 
@@ -735,6 +830,7 @@ async function main() {
     await protocolVersionNegotiation();
     await toolInputSchemaEnforcement();
     await contentCorrectness();
+    await teachingOnFailure();
     await surfaceCounts();
 
     if (opts.skipRateLimit) {
