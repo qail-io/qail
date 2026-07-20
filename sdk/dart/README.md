@@ -68,6 +68,24 @@ final qail = QailClient(QailConfig(
 `tokenProvider` is called per request, so single-flight refresh logic can live
 behind it.
 
+## Dynamic headers
+
+Use `headersProvider` when a header can change after the client is created:
+
+```dart
+final qail = QailClient(QailConfig(
+  url: 'https://engine.example.com',
+  headers: const {'X-App': 'deck'},
+  headersProvider: () => activeTenantId == null
+      ? const {}
+      : {'X-Impersonate-Tenant': activeTenantId!},
+));
+```
+
+The provider is evaluated for every HTTP request and WebSocket connection.
+Static `headers` are applied first, then provider headers, then any
+request-specific headers.
+
 ## Raw DSL, batch, transactions
 
 ```dart

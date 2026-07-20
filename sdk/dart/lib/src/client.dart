@@ -17,6 +17,12 @@ typedef WebSocketConnector = WebSocketChannel Function(
   Map<String, String> headers,
 );
 
+/// Supplies headers at request time.
+///
+/// Use this for values that can change after [QailClient] is constructed,
+/// such as an active tenant or locale.
+typedef HeadersProvider = Map<String, String> Function();
+
 /// Configuration for the Qail client.
 class QailConfig {
   const QailConfig({
@@ -24,6 +30,7 @@ class QailConfig {
     this.token,
     this.tokenProvider,
     this.headers = const {},
+    this.headersProvider,
     this.timeout = const Duration(seconds: 30),
     this.wsAuthMode,
     this.wsTokenQueryParam = 'access_token',
@@ -42,6 +49,11 @@ class QailConfig {
 
   /// Additional default headers sent with every request.
   final Map<String, String> headers;
+
+  /// Dynamic headers evaluated for every HTTP request and WebSocket connect.
+  ///
+  /// These override [headers]. Request-specific headers override both.
+  final HeadersProvider? headersProvider;
 
   /// Request timeout (default: 30 seconds).
   final Duration timeout;
@@ -222,7 +234,7 @@ class QailClient {
         if (!sub._alive) return;
 
         final uri = buildWebSocketUri(token);
-        final headers = <String, String>{...config.headers};
+        final headers = _resolveHeaders();
         if (wsAuthMode == WebSocketAuthMode.header && token != null) {
           headers['Authorization'] = 'Bearer $token';
         }
@@ -355,7 +367,7 @@ class QailClient {
     final request = http.Request(method, Uri.parse('$_baseUrl$path'));
 
     request.headers['Content-Type'] = contentType;
-    config.headers.forEach((k, v) => request.headers[k] = v);
+    _resolveHeaders().forEach((k, v) => request.headers[k] = v);
 
     final token = await _resolveToken();
     if (token != null) {
@@ -393,6 +405,11 @@ class QailClient {
 
   Future<String?> _resolveToken() async =>
       config.token ?? await config.tokenProvider?.call();
+
+  Map<String, String> _resolveHeaders() => {
+        ...config.headers,
+        ...?config.headersProvider?.call(),
+      };
 }
 
 // ─── Transaction Session ────────────────────────────────────────────

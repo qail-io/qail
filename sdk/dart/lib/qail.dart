@@ -8,5 +8,10 @@ library;
 export 'src/builders.dart'
     show DeleteBuilder, InsertBuilder, SelectBuilder, UpdateBuilder;
 export 'src/client.dart'
-    show QailClient, QailConfig, QailTxnSession, WebSocketConnector;
+    show
+        HeadersProvider,
+        QailClient,
+        QailConfig,
+        QailTxnSession,
+        WebSocketConnector;
 export 'src/models.dart';

@@ -73,6 +73,48 @@ void main() {
     await qail.health();
   });
 
+  test('headers provider is evaluated per request with explicit precedence',
+      () async {
+    var dynamicValue = 'first';
+    final seen = <Map<String, String>>[];
+    final qail = QailClient(QailConfig(
+      url: 'http://localhost:8080',
+      token: 'test-jwt',
+      headers: const {
+        'X-Static': 'static',
+        'X-Precedence': 'static',
+      },
+      headersProvider: () => {
+        'X-Dynamic': dynamicValue,
+        'X-Precedence': 'provider',
+      },
+      httpClient: MockClient((request) async {
+        seen.add(Map.of(request.headers));
+        return jsonResponse('{}');
+      }),
+    ));
+
+    await qail.requestJson<Map<String, dynamic>>(
+      'GET',
+      '/first',
+      extraHeaders: const {'X-Precedence': 'request'},
+      decode: (json) => json as Map<String, dynamic>,
+    );
+    dynamicValue = 'second';
+    await qail.requestJson<Map<String, dynamic>>(
+      'GET',
+      '/second',
+      decode: (json) => json as Map<String, dynamic>,
+    );
+
+    expect(seen[0]['X-Static'], 'static');
+    expect(seen[0]['X-Dynamic'], 'first');
+    expect(seen[0]['X-Precedence'], 'request');
+    expect(seen[0]['Authorization'], 'Bearer test-jwt');
+    expect(seen[1]['X-Dynamic'], 'second');
+    expect(seen[1]['X-Precedence'], 'provider');
+  });
+
   // ── Raw DSL ─────────────────────────────────────────────────────
 
   test('raw query', () async {
