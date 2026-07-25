@@ -39,7 +39,7 @@ fn reject_primary_key_update(
 
 fn build_branch_update_overlay_row(
     base_row: Option<Value>,
-    obj: &serde_json::Map<String, Value>,
+    obj: serde_json::Map<String, Value>,
     pk_column: &str,
     row_id: &str,
     tenant_column: &str,
@@ -55,7 +55,7 @@ fn build_branch_update_overlay_row(
         None => serde_json::Map::new(),
     };
     for (key, value) in obj {
-        overlay_obj.insert(key.clone(), value.clone());
+        overlay_obj.insert(key, value);
     }
     overlay_obj.insert(pk_column.to_string(), Value::String(row_id.to_string()));
     if let Some(tid) = tenant_id {
@@ -105,18 +105,19 @@ pub(crate) async fn update_handler(
     let body: Value =
         crate::json_input::decode_value(&body, crate::json_input::JsonInputLimits::default())
             .map_err(|e| ApiError::parse_error(e.to_string()))?;
-    let obj = body
-        .as_object()
-        .ok_or_else(|| ApiError::parse_error("Expected JSON object"))?;
+    let obj = match body {
+        Value::Object(obj) => obj,
+        _ => return Err(ApiError::parse_error("Expected JSON object")),
+    };
 
     if obj.is_empty() {
         return Err(ApiError::parse_error("No fields to update"));
     }
     // SECURITY: Fail closed on invalid JSON keys instead of silently skipping.
-    super::validate_mutation_payload_keys(obj, "update")?;
-    reject_primary_key_update(obj, &pk)?;
+    super::validate_mutation_payload_keys(&obj, "update")?;
+    reject_primary_key_update(&obj, &pk)?;
     if let Some(scope_column) = tenant_scope_column.as_deref() {
-        reject_tenant_column_update(obj, scope_column, auth.tenant_id.as_deref())?;
+        reject_tenant_column_update(&obj, scope_column, auth.tenant_id.as_deref())?;
     }
     if let Some(returning) = mutation_params.returning.as_deref() {
         parse_select_columns(returning).map_err(ApiError::parse_error)?;
@@ -136,7 +137,7 @@ pub(crate) async fn update_handler(
         );
     }
 
-    for (key, value) in obj {
+    for (key, value) in &obj {
         let qail_val = json_to_qail_value(value);
         cmd = cmd.set_value(key, qail_val);
     }
@@ -323,27 +324,35 @@ pub(crate) async fn update_handler(
         return Err(e);
     }
 
-    let returned_rows: Vec<Value> = rows.iter().map(row_to_json).collect();
-    let event_new = returned_rows.first().cloned();
-    let data = if response_requested_returning {
-        project_mutation_returning_rows(returned_rows, mutation_params.returning.as_deref())?
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| json!({"updated": true}))
+    let (data, event_new) = if response_requested_returning {
+        let returned_rows: Vec<Value> = rows.iter().map(row_to_json).collect();
+        let event_new = if has_update_triggers {
+            returned_rows.first().cloned()
+        } else {
+            None
+        };
+        let data =
+            project_mutation_returning_rows(returned_rows, mutation_params.returning.as_deref())?
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| json!({"updated": true}));
+        (data, event_new)
+    } else if has_update_triggers {
+        (json!({"updated": true}), rows.first().map(row_to_json))
     } else {
-        json!({"updated": true})
+        (json!({"updated": true}), None)
     };
 
     if has_update_triggers
-        && event_new.is_some()
+        && let Some(new_data) = event_new
         && let Err(e) = state
             .event_engine
             .enqueue_durable(
                 &mut conn,
                 &table_name,
                 OperationType::Update,
-                event_new.clone(),
-                old_data.clone(),
+                Some(new_data),
+                old_data,
             )
             .await
     {
@@ -429,7 +438,7 @@ mod tests {
         obj.insert("name".to_string(), json!("new-name"));
 
         let row =
-            build_branch_update_overlay_row(None, &obj, "id", "42", "tenant_id", Some("tenant-a"))
+            build_branch_update_overlay_row(None, obj, "id", "42", "tenant_id", Some("tenant-a"))
                 .unwrap();
         assert_eq!(row.get("id"), Some(&json!("42")));
         assert_eq!(row.get("tenant_id"), Some(&json!("tenant-a")));
@@ -448,7 +457,7 @@ mod tests {
                 "status": "draft",
                 "total": 42
             })),
-            &obj,
+            obj,
             "id",
             "order-1",
             "tenant_id",
@@ -475,7 +484,7 @@ mod tests {
 
         let row = build_branch_update_overlay_row(
             Some(json!({"id": "base-id", "tenant_id": "base-tenant"})),
-            &obj,
+            obj,
             "id",
             "path-id",
             "tenant_id",
@@ -495,7 +504,7 @@ mod tests {
 
         let row = build_branch_update_overlay_row(
             Some(json!({"id": "base-id", "tenant_id": "base-tenant"})),
-            &obj,
+            obj,
             "id",
             "path-id",
             "tenant_id",
@@ -514,7 +523,7 @@ mod tests {
 
         let err = build_branch_update_overlay_row(
             Some(json!(["not", "an", "object"])),
-            &obj,
+            obj,
             "id",
             "path-id",
             "tenant_id",

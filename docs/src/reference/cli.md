@@ -1,6 +1,6 @@
 # CLI Commands
 
-The `qail` command-line tool — v1.3.2.
+The `qail` command-line tool — v1.3.6.
 
 ## Installation
 
@@ -293,10 +293,10 @@ Interactive QAIL REPL — type queries, see SQL in real-time:
 
 ```bash
 qail repl
-# 🪝 QAIL REPL v0.15.8
+# QAIL REPL
 # Type QAIL queries, see SQL output.
 # qail> get users[active = true]
-# → SELECT * FROM users WHERE active = true
+# SELECT * FROM users WHERE active = true
 ```
 
 ### `qail types`

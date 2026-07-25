@@ -128,6 +128,12 @@ pub struct Column {
     pub foreign_key: Option<ForeignKey>,
     /// CHECK constraint (Phase 1)
     pub check: Option<CheckConstraint>,
+    /// Additional CHECK constraints on the same column.
+    ///
+    /// PostgreSQL allows multiple named CHECK constraints to reference one
+    /// column. `check` is kept as the primary/backward-compatible slot; this
+    /// vector preserves the remaining constraints for introspection and diff.
+    pub extra_checks: Vec<CheckConstraint>,
     /// GENERATED column (Phase 3)
     pub generated: Option<Generated>,
 }
@@ -1082,19 +1088,19 @@ impl Schema {
                     ));
                 }
 
-                if let Some(check) = &col.check
-                    && let Some(name) = &check.name
-                {
-                    if name.trim().is_empty() {
-                        errors.push(format!(
-                            "Constraint error: {}.{} has empty CHECK constraint name",
-                            table.name, col.name
-                        ));
-                    } else if !seen_constraint_names.insert(name.as_str()) {
-                        errors.push(format!(
-                            "Constraint error: table '{}' has duplicate constraint name '{}'",
-                            table.name, name
-                        ));
+                for check in col.checks() {
+                    if let Some(name) = &check.name {
+                        if name.trim().is_empty() {
+                            errors.push(format!(
+                                "Constraint error: {}.{} has empty CHECK constraint name",
+                                table.name, col.name
+                            ));
+                        } else if !seen_constraint_names.insert(name.as_str()) {
+                            errors.push(format!(
+                                "Constraint error: table '{}' has duplicate constraint name '{}'",
+                                table.name, name
+                            ));
+                        }
                     }
                 }
 
@@ -1124,7 +1130,7 @@ impl Schema {
                     }
                 }
 
-                if let Some(check) = &col.check {
+                for check in col.checks() {
                     for referenced in check_expr_column_references(&check.expr) {
                         let referenced_column = check_expr_reference_name(referenced);
                         if !table_columns.contains(referenced_column.as_str()) {
@@ -1493,6 +1499,7 @@ impl Column {
             default: None,
             foreign_key: None,
             check: None,
+            extra_checks: Vec::new(),
             generated: None,
         }
     }
@@ -1612,6 +1619,26 @@ impl Column {
             name: Some(name.into()),
         });
         self
+    }
+
+    /// Add another CHECK constraint to a column that already has one.
+    pub fn additional_check(mut self, expr: CheckExpr) -> Self {
+        self.extra_checks.push(CheckConstraint { expr, name: None });
+        self
+    }
+
+    /// Add another named CHECK constraint to a column that already has one.
+    pub fn additional_check_named(mut self, name: impl Into<String>, expr: CheckExpr) -> Self {
+        self.extra_checks.push(CheckConstraint {
+            expr,
+            name: Some(name.into()),
+        });
+        self
+    }
+
+    /// Iterate all CHECK constraints attached to this column.
+    pub fn checks(&self) -> impl Iterator<Item = &CheckConstraint> {
+        self.check.iter().chain(self.extra_checks.iter())
     }
 
     // ==================== Phase 2: DEFERRABLE ====================
@@ -1985,7 +2012,7 @@ pub fn to_qail_string(schema: &Schema) -> String {
                 }
                 constraints.push(fk_str);
             }
-            if let Some(ref check) = col.check {
+            for check in col.checks() {
                 constraints.push(format!("check({})", check_expr_str(&check.expr)));
                 if let Some(name) = &check.name {
                     constraints.push(format!("check_name {}", name));
@@ -2332,7 +2359,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 if let Some(ref fk) = col.foreign_key {
                     constraints.push(Constraint::References(foreign_key_to_sql(fk)));
                 }
-                if let Some(check) = &col.check {
+                for check in col.checks() {
                     let check_sql = check_expr_to_sql(&check.expr);
                     if let Some(name) = &check.name {
                         constraints.push(Constraint::Check(vec![format!(

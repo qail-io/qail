@@ -21,6 +21,7 @@ idle_timeout_secs = 600
 acquire_timeout_secs = 30
 connect_timeout_secs = 10
 test_on_acquire = false
+io_uring = false  # opt in only; plain TCP on Linux builds with qail-pg/io_uring
 
 [postgres.rls]
 default_role = "app_user"
@@ -176,6 +177,8 @@ require_scopes = ["orders:read"]
 ```
 
 Policy files may be TOML or JSON. When `enabled = true`, `path` is required.
+See [Access Policy](./access-policy.md) for the full operation, column, role,
+scope, and fail-closed semantics.
 
 ## Generated Files
 

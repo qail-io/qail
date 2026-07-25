@@ -4,6 +4,7 @@
 
 # Getting Started
 
+- [Platform Map](./platform-map.md)
 - [Installation](./getting-started/installation.md)
 - [Quick Start](./getting-started/quickstart.md)
 
@@ -22,6 +23,7 @@
 
 # Core Concepts
 
+- [QAIL Language Reference](./core/qail-language-reference.md)
 - [AST Builder API](./core/builder-api.md)
 - [Expression Types](./core/expressions.md)
 - [Expression Builders](./core/builders.md)
@@ -44,6 +46,8 @@
 - [Type System](./features/types.md)
 - [Type Safety](./features/type-safety.md)
 - [Row-Level Security (RLS)](./features/rls.md)
+- [Access Policy](./features/access-policy.md)
+- [Workflows](./features/workflows.md)
 - [Configuration](./features/configuration.md)
 # Reference
 

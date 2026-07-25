@@ -12,9 +12,7 @@ use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
-use crate::rest::filters::{
-    apply_filters, apply_sorting, parse_filters_checked, parse_identifier_csv,
-};
+use crate::rest::filters::{apply_sorting, parse_filters_checked, parse_identifier_csv};
 use crate::rest::types::{ListParams, ListResponse};
 
 fn parse_nested_search_columns(input: Option<&str>) -> Result<String, String> {
@@ -157,7 +155,7 @@ pub(crate) async fn nested_list_handler(
     // Parse and apply filters from query string
     let query_string = request.uri().query().unwrap_or("");
     let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
-    cmd = apply_filters(cmd, &filters);
+    cmd = crate::rest::filters::apply_filters_owned(cmd, filters);
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         cmd = cmd.filter(
             scope_column,

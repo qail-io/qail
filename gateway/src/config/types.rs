@@ -292,6 +292,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_pg_channel_binding")]
     pub pg_channel_binding: String,
 
+    /// Opt into Linux io_uring for plain TCP PostgreSQL transport.
+    ///
+    /// Disabled by default because some deployments disallow io_uring for
+    /// kernel attack-surface policy reasons. URL `?io_uring=` overrides this.
+    #[serde(default)]
+    pub pg_io_uring: bool,
+
     /// Tables to block from auto-REST endpoint generation.
     /// Blocked tables will not have any CRUD routes, cannot be referenced
     /// via `?expand=`, and cannot appear as nested route targets.

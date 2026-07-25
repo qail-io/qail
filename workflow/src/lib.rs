@@ -1,4 +1,4 @@
-//! # QAIL Workflow
+//! # QAIL Flow Engine
 //!
 //! Declarative state machine engine for multi-vertical workflows.
 //!
@@ -10,11 +10,13 @@
 //! ## Architecture
 //!
 //! ```text
-//! your-engine (domain states + executor impl)
+//! your app (domain states + executor impl)
 //!       ↓
-//! qail-workflow (state machine engine)
+//! qail-workflow (Flow Engine)
 //!       ↓
 //! qail-core (AST queries composed into steps)
+//!       ↓
+//! optional qail-workflow-postgres (Flow Ledger)
 //! ```
 //!
 //! ## Quick Start
@@ -51,6 +53,7 @@ pub mod context;
 pub mod engine;
 pub mod payment;
 pub mod registry;
+pub mod runtime;
 pub mod state;
 pub mod step;
 
@@ -62,12 +65,19 @@ pub use context::{
 };
 pub use engine::{
     LegacyQueryPayloadIssue, WorkflowError, WorkflowExecutor, collect_legacy_query_payload_issues,
-    resume_workflow, resume_workflow_with_event, run_workflow, timeout_workflow,
+    resume_workflow, resume_workflow_with_event, resume_workflow_with_event_and_options,
+    resume_workflow_with_options, run_workflow, run_workflow_with_options, timeout_due_workflows,
+    timeout_workflow, timeout_workflow_with_options,
 };
 pub use payment::{
-    ChargeRequest, ChargeResponse, ChargeStatus, Currency, PaymentError, PaymentEvent, PaymentKind,
-    PaymentProvider,
+    ChargeRequest, ChargeResponse, ChargeStatus, Currency, OrderOrigin, PaymentDisplay,
+    PaymentError, PaymentEvent, PaymentKind, PaymentProvider,
 };
 pub use registry::{StateTransition, WorkflowDefinition};
+pub use runtime::{
+    WorkflowLease, WorkflowLeaseOptions, WorkflowOperation, WorkflowOperationKind,
+    WorkflowOperationStatus, WorkflowRunOptions, WorkflowSideEffect, WorkflowSideEffectKind,
+    WorkflowSideEffectStatus, WorkflowTimeoutOutcome,
+};
 pub use state::State;
-pub use step::WorkflowStep;
+pub use step::{WorkflowBranchCondition, WorkflowStep};

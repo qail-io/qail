@@ -10,6 +10,35 @@ use serde::{Deserialize, Serialize};
 use crate::channel::ChannelKind;
 use crate::payment::PaymentKind;
 
+/// A branch predicate evaluated against one workflow context key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkflowBranchCondition {
+    /// Text equality. Strings compare directly; other JSON values compare by JSON text.
+    Equals(String),
+    /// Text inequality. Missing context does not match.
+    NotEquals(String),
+    /// Text membership. Strings compare directly; other JSON values compare by JSON text.
+    OneOf(Vec<String>),
+    /// Context key exists.
+    Exists,
+    /// Context key does not exist.
+    Missing,
+    /// Context key is JSON null.
+    Null,
+    /// Context key is a boolean with this value.
+    Bool(bool),
+    /// Numeric comparison.
+    NumberGt(i64),
+    /// Numeric comparison.
+    NumberGte(i64),
+    /// Numeric comparison.
+    NumberLt(i64),
+    /// Numeric comparison.
+    NumberLte(i64),
+    /// Text contains a substring.
+    StringContains(String),
+}
+
 /// A single step in a workflow execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowStep {
@@ -55,6 +84,16 @@ pub enum WorkflowStep {
         default: Vec<WorkflowStep>,
     },
 
+    /// Conditional branching with richer predicates.
+    BranchWhen {
+        /// Context key to evaluate
+        condition_key: String,
+        /// Ordered predicates and steps. The first matching predicate is selected.
+        branches: Vec<(WorkflowBranchCondition, Vec<WorkflowStep>)>,
+        /// Default steps if no predicate matches
+        default: Vec<WorkflowStep>,
+    },
+
     /// Execute steps for each item in a context list.
     ForEach {
         /// Context key containing a JSON array
@@ -78,7 +117,7 @@ pub enum WorkflowStep {
     /// Create a payment charge via a payment provider.
     ///
     /// Resolves amount and reference from context, calls the provider,
-    /// and stores the `ChargeResponse` in context for downstream steps.
+    /// and stores a redacted `PaymentDisplay` in context for downstream steps.
     Charge {
         /// Which payment provider to use
         provider: PaymentKind,
@@ -90,7 +129,10 @@ pub enum WorkflowStep {
         description_key: Option<String>,
         /// Optional context key for payment method override
         payment_method_key: Option<String>,
-        /// Optional key to store `ChargeResponse` in context
+        /// Optional context key for the order origin (`whatsapp`, `mcp`, `web`, `ios_app`, `android_app`, or `api`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order_origin_key: Option<String>,
+        /// Optional key to store redacted payment display details in context
         store_as: Option<String>,
     },
 }
@@ -182,6 +224,7 @@ impl WorkflowStep {
             reference_key: reference_key.into(),
             description_key: None,
             payment_method_key: None,
+            order_origin_key: None,
             store_as: store_as.map(String::from),
         }
     }
@@ -201,6 +244,28 @@ impl WorkflowStep {
             reference_key: reference_key.into(),
             description_key: description_key.map(String::from),
             payment_method_key: payment_method_key.map(String::from),
+            order_origin_key: None,
+            store_as: store_as.map(String::from),
+        }
+    }
+
+    /// Create a Charge step with explicit source-channel tracking.
+    pub fn charge_with_origin(
+        provider: PaymentKind,
+        amount_key: &str,
+        reference_key: &str,
+        description_key: Option<&str>,
+        payment_method_key: Option<&str>,
+        order_origin_key: Option<&str>,
+        store_as: Option<&str>,
+    ) -> Self {
+        WorkflowStep::Charge {
+            provider,
+            amount_key: amount_key.into(),
+            reference_key: reference_key.into(),
+            description_key: description_key.map(String::from),
+            payment_method_key: payment_method_key.map(String::from),
+            order_origin_key: order_origin_key.map(String::from),
             store_as: store_as.map(String::from),
         }
     }
@@ -217,6 +282,19 @@ impl WorkflowStep {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
+            default,
+        }
+    }
+
+    /// Create a BranchWhen step with richer predicates.
+    pub fn branch_when(
+        condition_key: &str,
+        branches: Vec<(WorkflowBranchCondition, Vec<WorkflowStep>)>,
+        default: Vec<WorkflowStep>,
+    ) -> Self {
+        WorkflowStep::BranchWhen {
+            condition_key: condition_key.into(),
+            branches,
             default,
         }
     }
@@ -290,6 +368,31 @@ mod tests {
                 assert_eq!(default.len(), 1);
             }
             _ => panic!("Expected Branch step"),
+        }
+    }
+
+    #[test]
+    fn test_branch_when_step() {
+        let step = WorkflowStep::branch_when(
+            "payment.attempts",
+            vec![(
+                WorkflowBranchCondition::NumberGte(3),
+                vec![WorkflowStep::log("Manual review")],
+            )],
+            vec![WorkflowStep::log("Retry")],
+        );
+        match step {
+            WorkflowStep::BranchWhen {
+                condition_key,
+                branches,
+                default,
+            } => {
+                assert_eq!(condition_key, "payment.attempts");
+                assert_eq!(branches.len(), 1);
+                assert_eq!(branches[0].0, WorkflowBranchCondition::NumberGte(3));
+                assert_eq!(default.len(), 1);
+            }
+            _ => panic!("Expected BranchWhen step"),
         }
     }
 

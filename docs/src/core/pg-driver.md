@@ -322,11 +322,10 @@ Do you need return values from each query?
 ### Example: Pipelined Inserts
 
 ```rust
-let commands: Vec<QailCmd> = users.iter().map(|u| {
+let commands: Vec<Qail> = users.iter().map(|u| {
     Qail::add("users")
-        .set("name", &u.name)
-        .set("email", &u.email)
-        .build()
+        .set_value("name", u.name.as_str())
+        .set_value("email", u.email.as_str())
 }).collect();
 
 // Fire-and-forget — fastest for bulk mutations

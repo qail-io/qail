@@ -222,7 +222,7 @@ fn build_qdrant_upsert(cmd: &Qail) -> Result<String, String> {
     let mut vector = cmd
         .vector
         .as_ref()
-        .map(|values| vector_to_json(&Value::Vector(values.clone())))
+        .map(|values| vector_values_to_json(values))
         .transpose()?;
     let mut payload_parts = Vec::new();
     let mut payload_fields = std::collections::HashSet::new();
@@ -369,7 +369,7 @@ fn build_qdrant_search(cmd: &Qail) -> Result<String, String> {
     let mut vector_json = cmd
         .vector
         .as_ref()
-        .map(|values| vector_to_json(&Value::Vector(values.clone())))
+        .map(|values| vector_values_to_json(values))
         .transpose()?;
 
     for cage in &cmd.cages {
@@ -628,9 +628,9 @@ fn build_filter(cmd: &Qail) -> Result<String, String> {
         }
     }
 
-    for group in should_groups {
+    for mut group in should_groups {
         if group.len() == 1 {
-            musts.push(group[0].clone());
+            musts.push(group.remove(0));
         } else {
             musts.push(format!("{{ \"should\": [{}] }}", group.join(", ")));
         }
@@ -753,16 +753,7 @@ fn numeric_filter_value(v: &Value) -> Result<String, String> {
 
 fn vector_to_json(v: &Value) -> Result<String, String> {
     let elems: Result<Vec<String>, String> = match v {
-        Value::Vector(values) => values
-            .iter()
-            .map(|value| {
-                if value.is_finite() {
-                    Ok(value.to_string())
-                } else {
-                    Err("Qdrant vector values must be finite numbers".to_string())
-                }
-            })
-            .collect(),
+        Value::Vector(values) => return vector_values_to_json(values),
         Value::Array(values) => values
             .iter()
             .map(|value| match value {
@@ -774,6 +765,25 @@ fn vector_to_json(v: &Value) -> Result<String, String> {
             .collect(),
         other => return Err(format!("Qdrant vector must be an array, got {other}")),
     };
+
+    let elems = elems?;
+    if elems.is_empty() {
+        return Err("Qdrant vector cannot be empty".to_string());
+    }
+    Ok(format!("[{}]", elems.join(", ")))
+}
+
+fn vector_values_to_json(values: &[f32]) -> Result<String, String> {
+    let elems: Result<Vec<String>, String> = values
+        .iter()
+        .map(|value| {
+            if value.is_finite() {
+                Ok(value.to_string())
+            } else {
+                Err("Qdrant vector values must be finite numbers".to_string())
+            }
+        })
+        .collect();
 
     let elems = elems?;
     if elems.is_empty() {

@@ -31,12 +31,16 @@ pub(super) fn generate_gss_token(
     Err("No GSS token provider configured".to_string())
 }
 
-pub(super) fn plain_connect_attempt_backend() -> &'static str {
+pub(super) fn plain_connect_attempt_backend(io_uring: bool) -> &'static str {
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     {
-        if should_try_uring_plain() {
+        if should_try_uring_plain(io_uring) {
             return CONNECT_BACKEND_IO_URING;
         }
+    }
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+    {
+        let _ = io_uring;
     }
     CONNECT_BACKEND_TOKIO
 }
@@ -267,6 +271,6 @@ pub(crate) fn parse_affected_rows(tag: &str) -> PgResult<u64> {
 }
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
-pub(super) fn should_try_uring_plain() -> bool {
-    super::super::io_backend::should_use_uring_plain_transport()
+pub(super) fn should_try_uring_plain(io_uring: bool) -> bool {
+    super::super::io_backend::should_use_uring_plain_transport(io_uring)
 }

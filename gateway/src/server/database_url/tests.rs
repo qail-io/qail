@@ -51,6 +51,53 @@ fn test_parse_database_url_decodes_user_password_and_database() {
     assert_eq!(cfg.user, "us@er");
     assert_eq!(cfg.password.as_deref(), Some("p@ss/word"));
     assert_eq!(cfg.database, "my/db");
+    assert!(!cfg.io_uring);
+}
+
+#[test]
+fn test_parse_database_url_uses_gateway_io_uring_default() {
+    let mut gateway = default_cfg();
+    gateway.pg_io_uring = true;
+
+    let cfg = parse_database_url("postgres://alice@db.internal:5432/app", &gateway)
+        .expect("expected valid URL");
+
+    assert!(cfg.io_uring);
+}
+
+#[test]
+fn test_parse_database_url_io_uring_query_overrides_gateway_default() {
+    let mut gateway = default_cfg();
+    gateway.pg_io_uring = true;
+
+    let cfg = parse_database_url(
+        "postgres://alice@db.internal:5432/app?io_uring=false",
+        &gateway,
+    )
+    .expect("expected valid URL");
+
+    assert!(!cfg.io_uring);
+
+    let cfg = parse_database_url(
+        "postgres://alice@db.internal:5432/app?io_uring=true",
+        &default_cfg(),
+    )
+    .expect("expected valid URL");
+
+    assert!(cfg.io_uring);
+}
+
+#[test]
+fn test_parse_database_url_rejects_invalid_io_uring_query() {
+    let err = match parse_database_url(
+        "postgres://alice@db.internal:5432/app?io_uring=auto",
+        &default_cfg(),
+    ) {
+        Ok(_) => panic!("expected invalid io_uring bool error"),
+        Err(e) => e,
+    };
+
+    assert!(err.to_string().contains("Invalid io_uring value"));
 }
 
 #[test]

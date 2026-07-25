@@ -73,6 +73,11 @@ pub struct PoolConfig {
     pub auth_settings: AuthSettings,
     /// GSSAPI session encryption mode (`gssencmode` URL parameter).
     pub gss_enc_mode: GssEncMode,
+    /// Opt into Linux io_uring for plain TCP transport.
+    ///
+    /// Disabled by default because some production environments disallow
+    /// io_uring for security policy reasons. TLS/mTLS/GSSENC paths ignore this.
+    pub io_uring: bool,
 }
 
 impl PoolConfig {
@@ -114,6 +119,7 @@ impl PoolConfig {
             gss_circuit_breaker_cooldown: Duration::from_secs(15),
             auth_settings: AuthSettings::scram_only(),
             gss_enc_mode: GssEncMode::Disable,
+            io_uring: false,
         }
     }
 
@@ -251,6 +257,15 @@ impl PoolConfig {
         self
     }
 
+    /// Opt into Linux io_uring for plain TCP transport.
+    ///
+    /// This only has an effect on Linux builds compiled with the `io_uring`
+    /// feature and when the connection uses plaintext TCP.
+    pub fn io_uring(mut self, enabled: bool) -> Self {
+        self.io_uring = enabled;
+        self
+    }
+
     /// Create a `PoolConfig` from a centralized `QailConfig`.
     ///
     /// Parses `postgres.url` for host/port/user/database/password
@@ -265,7 +280,8 @@ impl PoolConfig {
             .idle_timeout(Duration::from_secs(pg.idle_timeout_secs))
             .acquire_timeout(Duration::from_secs(pg.acquire_timeout_secs))
             .connect_timeout(Duration::from_secs(pg.connect_timeout_secs))
-            .test_on_acquire(pg.test_on_acquire);
+            .test_on_acquire(pg.test_on_acquire)
+            .io_uring(pg.io_uring);
 
         if let Some(ref pw) = password {
             config = config.password(pw);
@@ -273,6 +289,26 @@ impl PoolConfig {
 
         // Optional URL query params for enterprise auth/TLS settings.
         if let Some((_, query)) = pg.url.split_once('?') {
+            apply_url_query_params(&mut config, query, &host)?;
+        }
+
+        Ok(config)
+    }
+
+    /// Create a pool configuration directly from a PostgreSQL URL.
+    ///
+    /// This parses the same URL shape and query parameters as
+    /// [`crate::driver::PgDriver::connect_url`], then applies the pool builder
+    /// defaults for connection limits and timeouts.
+    pub fn from_url(url: &str) -> PgResult<Self> {
+        let (host, port, user, database, password) = parse_pg_url(url)?;
+        let mut config = PoolConfig::new(&host, port, &user, &database);
+
+        if let Some(ref pw) = password {
+            config = config.password(pw);
+        }
+
+        if let Some((_, query)) = url.split_once('?') {
             apply_url_query_params(&mut config, query, &host)?;
         }
 
@@ -313,6 +349,12 @@ pub(crate) fn apply_url_query_params(
                     PgError::Connection(format!("Invalid gssencmode value: {}", value))
                 })?;
                 config.gss_enc_mode = mode;
+            }
+            "io_uring" => {
+                let enabled = parse_bool_param(&value).ok_or_else(|| {
+                    PgError::Connection(format!("Invalid io_uring value: {}", value))
+                })?;
+                config.io_uring = enabled;
             }
             "sslrootcert" => {
                 let ca_pem = std::fs::read(&value).map_err(|e| {

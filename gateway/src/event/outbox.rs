@@ -428,8 +428,77 @@ WHERE id = $1
     .await
 }
 
+async fn mark_failed_or_retry(
+    pool: &PgPool,
+    item: &OutboxItem,
+    result: &WebhookDeliveryResult,
+) -> Result<(), PgError> {
+    let delivered_attempts = result.attempts.max(1);
+    let next_attempt = item.attempts.saturating_add(delivered_attempts);
+    let max_attempts = item.retry_count.min(MAX_WEBHOOK_RETRIES).saturating_add(1);
+    let exhausted = next_attempt >= max_attempts;
+    let status = if exhausted { "failed" } else { "retrying" };
+    let delay_secs = if exhausted {
+        0
+    } else {
+        retry_delay(next_attempt).as_secs()
+    };
+    let error = match result.error.as_ref() {
+        Some(error) => error.as_bytes().to_vec(),
+        None => result
+            .response_status
+            .map(|status| format!("Webhook HTTP status {}", status).into_bytes())
+            .unwrap_or_else(|| b"Webhook delivery failed".to_vec()),
+    };
+    let response_status = result.response_status.map(|s| s.to_string());
+
+    execute_outbox_update(
+        pool,
+        r#"
+UPDATE qail_webhook_outbox
+SET status = $2,
+    attempts = attempts + $3::int4,
+    response_status = $4::int4,
+    last_error = $5,
+    locked_at = NULL,
+    next_attempt_at = CASE
+        WHEN $2 = 'failed' THEN next_attempt_at
+        ELSE now() + ($6::int4 * interval '1 second')
+    END
+WHERE id = $1
+  AND status = 'delivering'
+  AND locked_at::text = $7
+"#,
+        &[
+            Some(item.id.as_bytes().to_vec()),
+            Some(status.as_bytes().to_vec()),
+            Some(delivered_attempts.to_string().into_bytes()),
+            response_status.map(String::into_bytes),
+            Some(error),
+            Some(delay_secs.to_string().into_bytes()),
+            Some(item.locked_at.as_bytes().to_vec()),
+        ],
+    )
+    .await
+}
+
+async fn execute_outbox_update(
+    pool: &PgPool,
+    sql: &str,
+    params: &[Option<Vec<u8>>],
+) -> Result<(), PgError> {
+    let mut conn = pool.acquire_system().await?;
+    let result = conn.query_rows_with_params(sql, params).await;
+    match result {
+        Ok(_) => conn.release_checked().await,
+        Err(e) => {
+            let _ = conn.rollback_and_release().await;
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -647,74 +716,5 @@ mod tests {
             parse_claimed_outbox_row(&attempts_row).expect_err("attempts must be non-negative");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("negative attempts"));
-    }
-}
-
-async fn mark_failed_or_retry(
-    pool: &PgPool,
-    item: &OutboxItem,
-    result: &WebhookDeliveryResult,
-) -> Result<(), PgError> {
-    let delivered_attempts = result.attempts.max(1);
-    let next_attempt = item.attempts.saturating_add(delivered_attempts);
-    let max_attempts = item.retry_count.min(MAX_WEBHOOK_RETRIES).saturating_add(1);
-    let exhausted = next_attempt >= max_attempts;
-    let status = if exhausted { "failed" } else { "retrying" };
-    let delay_secs = if exhausted {
-        0
-    } else {
-        retry_delay(next_attempt).as_secs()
-    };
-    let error = result.error.clone().unwrap_or_else(|| {
-        result
-            .response_status
-            .map(|status| format!("Webhook HTTP status {}", status))
-            .unwrap_or_else(|| "Webhook delivery failed".to_string())
-    });
-    let response_status = result.response_status.map(|s| s.to_string());
-
-    execute_outbox_update(
-        pool,
-        r#"
-UPDATE qail_webhook_outbox
-SET status = $2,
-    attempts = attempts + $3::int4,
-    response_status = $4::int4,
-    last_error = $5,
-    locked_at = NULL,
-    next_attempt_at = CASE
-        WHEN $2 = 'failed' THEN next_attempt_at
-        ELSE now() + ($6::int4 * interval '1 second')
-    END
-WHERE id = $1
-  AND status = 'delivering'
-  AND locked_at::text = $7
-"#,
-        &[
-            Some(item.id.as_bytes().to_vec()),
-            Some(status.as_bytes().to_vec()),
-            Some(delivered_attempts.to_string().into_bytes()),
-            response_status.map(String::into_bytes),
-            Some(error.into_bytes()),
-            Some(delay_secs.to_string().into_bytes()),
-            Some(item.locked_at.as_bytes().to_vec()),
-        ],
-    )
-    .await
-}
-
-async fn execute_outbox_update(
-    pool: &PgPool,
-    sql: &str,
-    params: &[Option<Vec<u8>>],
-) -> Result<(), PgError> {
-    let mut conn = pool.acquire_system().await?;
-    let result = conn.query_rows_with_params(sql, params).await;
-    match result {
-        Ok(_) => conn.release_checked().await,
-        Err(e) => {
-            let _ = conn.rollback_and_release().await;
-            Err(e)
-        }
     }
 }

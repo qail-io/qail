@@ -207,6 +207,12 @@ pub struct ConnectOptions {
     pub gss_token_provider_ex: Option<GssTokenProviderEx>,
     /// Password-auth policy.
     pub auth: AuthSettings,
+    /// Opt into Linux io_uring for plain TCP transport.
+    ///
+    /// This is ignored for TLS, mTLS, Unix sockets, and GSSENC paths.
+    /// Defaults to false so deployments must explicitly accept the kernel
+    /// attack-surface tradeoff.
+    pub io_uring: bool,
     /// Additional startup parameters sent in StartupMessage.
     /// Example: `replication=database` for logical replication mode.
     pub startup_params: Vec<(String, String)>,
@@ -231,6 +237,7 @@ impl std::fmt::Debug for ConnectOptions {
                 &self.gss_token_provider_ex.as_ref().map(|_| "<configured>"),
             )
             .field("auth", &self.auth)
+            .field("io_uring", &self.io_uring)
             .field("startup_params_count", &self.startup_params.len())
             .finish()
     }
@@ -255,6 +262,12 @@ impl ConnectOptions {
             .retain(|(k, _)| !k.eq_ignore_ascii_case("replication"));
         self.startup_params
             .push(("replication".to_string(), "database".to_string()));
+        self
+    }
+
+    /// Opt into Linux io_uring for plain TCP transport.
+    pub fn with_io_uring(mut self, enabled: bool) -> Self {
+        self.io_uring = enabled;
         self
     }
 }

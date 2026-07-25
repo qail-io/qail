@@ -138,7 +138,7 @@ fn table_check_signatures(
         .iter()
         .filter(|column| existing_column_names.contains(column.name.as_str()))
     {
-        if let Some(signature) = check_signature(&column.check) {
+        for signature in check_signatures(column) {
             signatures
                 .entry(signature)
                 .or_default()
@@ -385,6 +385,15 @@ fn is_safe_existing_column_type_change(old: &ColumnType, new: &ColumnType) -> bo
             new_len >= old_len
         }
         (ColumnType::Varchar(Some(_)), ColumnType::Varchar(None)) => true,
+        (ColumnType::Decimal(Some(_)), ColumnType::Decimal(None)) => true,
+        (
+            ColumnType::Decimal(Some((old_precision, old_scale))),
+            ColumnType::Decimal(Some((new_precision, new_scale))),
+        ) => {
+            let old_integer_digits = old_precision.saturating_sub(*old_scale);
+            let new_integer_digits = new_precision.saturating_sub(*new_scale);
+            new_integer_digits >= old_integer_digits && new_scale >= old_scale
+        }
         (old, ColumnType::Int | ColumnType::BigInt) if is_smallint_type(old) => true,
         _ => false,
     }
@@ -542,12 +551,15 @@ fn new_check_column_additions_requiring_validation(old: &Schema, new: &Schema) -
         };
 
         for new_col in new_columns(old_table, new_table) {
-            let Some(check) = &new_col.check else {
+            let checks = new_col.checks().collect::<Vec<_>>();
+            if checks.is_empty() {
                 continue;
-            };
+            }
 
             if column_has_value_source(new_col)
-                || check_expr_requires_existing_row_validation(&check.expr)
+                || checks
+                    .iter()
+                    .any(|check| check_expr_requires_existing_row_validation(&check.expr))
             {
                 changes.push(format!("{}.{}", table_name, new_col.name));
             }
@@ -629,10 +641,11 @@ fn existing_table_rls_downgrades(old: &Schema, new: &Schema) -> Vec<String> {
     changes
 }
 
-fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
-    check
-        .as_ref()
+fn check_signatures(column: &super::schema::Column) -> Vec<String> {
+    column
+        .checks()
         .map(|check| normalize_index_sql_fragment(&check_expr_to_sql(&check.expr)))
+        .collect()
 }
 
 fn foreign_key_signature(fk: &Option<super::schema::ForeignKey>) -> Option<String> {
@@ -1324,7 +1337,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                 if let Some(ref fk) = col.foreign_key {
                     constraints.push(Constraint::References(foreign_key_to_sql(fk)));
                 }
-                if let Some(check) = &col.check {
+                for check in col.checks() {
                     let check_sql = check_expr_to_sql(&check.expr);
                     if let Some(name) = &check.name {
                         constraints.push(Constraint::Check(vec![format!(
@@ -1453,7 +1466,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         if let Some(fk) = &col.foreign_key {
                             constraints.push(Constraint::References(foreign_key_to_sql(fk)));
                         }
-                        if let Some(check) = &col.check {
+                        for check in col.checks() {
                             let check_sql = check_expr_to_sql(&check.expr);
                             if let Some(name) = &check.name {
                                 constraints.push(Constraint::Check(vec![format!(
@@ -2153,6 +2166,39 @@ mod tests {
     }
 
     #[test]
+    fn state_diff_preserves_multiple_checks_on_one_column() {
+        use super::super::schema::CheckComparisonOp;
+
+        let column = Column::new("module", ColumnType::Text)
+            .check_named(
+                "tenant_modules_no_legacy_fastboat",
+                CheckExpr::TextCompare {
+                    column: "module".to_string(),
+                    op: CheckComparisonOp::NotEqual,
+                    value: "fastboat".to_string(),
+                },
+            )
+            .additional_check_named(
+                "tenant_modules_no_legacy_charter",
+                CheckExpr::TextCompare {
+                    column: "module".to_string(),
+                    op: CheckComparisonOp::NotEqual,
+                    value: "charter".to_string(),
+                },
+            );
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("tenant_modules").column(column.clone()));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("tenant_modules").column(column));
+
+        let cmds = diff_schemas_checked(&old, &new)
+            .expect("matching multi-check columns should not drift");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
     fn state_diff_checked_rejects_existing_column_unique_addition() {
         use super::super::types::ColumnType;
 
@@ -2561,6 +2607,51 @@ table agents {
             type_cmd.to_sql(),
             "ALTER TABLE events ALTER COLUMN counter TYPE BIGINT"
         );
+    }
+
+    #[test]
+    fn state_diff_checked_allows_safe_decimal_typmod_widening() {
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("prices").column(Column::new("amount", ColumnType::Decimal(Some((12, 6))))),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("prices").column(Column::new("amount", ColumnType::Decimal(None))),
+        );
+
+        let cmds =
+            diff_schemas_checked(&old, &new).expect("DECIMAL(p,s) -> DECIMAL should be safe");
+        let type_cmd = cmds
+            .iter()
+            .find(|cmd| cmd.action == Action::AlterType && cmd.table == "prices")
+            .expect("ALTER TYPE command should be present");
+
+        assert_eq!(
+            type_cmd.to_sql(),
+            "ALTER TABLE prices ALTER COLUMN amount TYPE DECIMAL"
+        );
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_decimal_typmod_narrowing() {
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("prices").column(Column::new("amount", ColumnType::Decimal(None))),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("prices").column(Column::new("amount", ColumnType::Decimal(Some((12, 6))))),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("DECIMAL -> DECIMAL(p,s) needs explicit validation");
+        assert!(err.contains("existing column types"));
+        assert!(err.contains("prices.amount"));
     }
 
     #[test]

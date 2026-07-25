@@ -15,6 +15,7 @@ mod manager;
 mod reaper;
 
 pub use error::TransactionError;
+pub(crate) use manager::TransactionSessionCreate;
 pub use reaper::spawn_reaper;
 
 /// A single transaction session holding a pinned database connection.

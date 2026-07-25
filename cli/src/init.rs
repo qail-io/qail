@@ -414,6 +414,7 @@ url = "{}"
 # acquire_timeout_secs = 30
 # connect_timeout_secs = 10
 # test_on_acquire = false
+# io_uring = false  # opt in only; plain TCP on Linux builds with qail-pg/io_uring
 
 # [postgres.rls]
 # default_role = "app_user"
@@ -443,8 +444,8 @@ grpc = "{}:6334"
 # destructive = "require-flag"     # deny | require-flag | allow
 # lock_risk = "require-flag"       # deny | require-flag | allow
 # lock_risk_max_score = 90          # 0..100
-# require_shadow_receipt = true
-# allow_no_shadow_receipt = true
+# require_shadow_receipt = true       # state-diff migrate up only; folder apply uses phase guardrails
+# allow_no_shadow_receipt = true      # state-diff migrate up override
 # receipt_validation = "error"      # warn | error
 #
 # [gateway]

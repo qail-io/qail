@@ -144,9 +144,8 @@ pub(crate) async fn get_by_id_handler(
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
-        let single = vec![data.clone()];
         let _proof = crate::tenant_guard::verify_tenant_boundary(
-            &single,
+            std::slice::from_ref(&data),
             tenant_id,
             scope_column,
             &table_name,
@@ -158,12 +157,10 @@ pub(crate) async fn get_by_id_handler(
         })?;
     }
     if strip_tenant_scope_column && let Some((scope_column, _)) = tenant_scope.as_ref() {
-        let mut single = vec![data];
-        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut single, scope_column);
-        data = single
-            .into_iter()
-            .next()
-            .ok_or_else(|| ApiError::internal("Missing REST GET row after tenant strip"))?;
+        crate::tenant_guard::strip_tenant_column_from_json_rows(
+            std::slice::from_mut(&mut data),
+            scope_column,
+        );
     }
 
     Ok(Json(SingleResponse { data }))

@@ -22,6 +22,15 @@ fn test_select_with_where() {
 }
 
 #[test]
+fn test_count_action_uses_count_projection() {
+    let cmd = parse("count users fields id, email where active = true").unwrap();
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT COUNT(*) FROM users WHERE active = true"
+    );
+}
+
+#[test]
 fn test_in_literal_list_uses_sql_in() {
     let cmd = parse("get users fields * where name in (\"O'Reilly\", \"Ada\")").unwrap();
     assert_eq!(

@@ -11,7 +11,9 @@ repositories {
     mavenCentral()
 }
 
-val ktorVersion = "3.0.3"
+// Pinned to 2.3.9 to match the Sailtix-Android app classpath (Ktor 2.x and 3.x
+// are binary-incompatible; a composite build resolves both to a single version).
+val ktorVersion = "2.3.9"
 
 dependencies {
     // Ktor client (lightweight HTTP)
@@ -35,6 +37,15 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// Target Java 17 bytecode (matching Sailtix-Android) using whatever JDK runs the
+// build, rather than a jvmToolchain(...) that would force a specific JDK download.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 kotlin {
-    jvmToolchain(25)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }

@@ -53,9 +53,9 @@ pub async fn execute_query(
     extensions: axum::http::Extensions,
     request: axum::extract::Request,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let headers = request.headers().clone();
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+    let (parts, body) = request.into_parts();
+    let auth = authenticate_request(state.as_ref(), &parts.headers).await?;
+    let body = axum::body::to_bytes(body, state.config.max_request_body_bytes)
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let query_text = std::str::from_utf8(&body)
@@ -104,7 +104,7 @@ pub async fn execute_query(
     }
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
-    execute_qail_cmd(&state, &auth, &cmd, tenant_guard_plan.as_ref(), &extensions).await
+    execute_qail_cmd(&state, &auth, cmd, tenant_guard_plan.as_ref(), &extensions).await
 }
 
 /// Execute a streaming export query (POST /qail/export).
@@ -115,9 +115,9 @@ pub async fn execute_query_export(
     State(state): State<Arc<GatewayState>>,
     request: axum::extract::Request,
 ) -> Result<Response, ApiError> {
-    let headers = request.headers().clone();
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
+    let (parts, body) = request.into_parts();
+    let auth = authenticate_request(state.as_ref(), &parts.headers).await?;
+    let body = axum::body::to_bytes(body, state.config.max_request_body_bytes)
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let query_text = std::str::from_utf8(&body)
@@ -231,7 +231,7 @@ pub async fn execute_query_export(
         }
     }
 
-    let cmd_for_stream = cmd.clone();
+    let cmd_for_stream = cmd;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
     tokio::spawn(async move {

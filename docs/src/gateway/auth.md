@@ -1,6 +1,8 @@
 # Authentication & Security
 
-The gateway provides multiple layers of security: JWT authentication, PostgreSQL Row-Level Security integration, a YAML policy engine, and query allow-listing.
+The gateway provides multiple layers of security: JWT authentication,
+PostgreSQL Row-Level Security integration, native operation/column access
+policy, gateway route policy compatibility, and query allow-listing.
 
 > **Note:** Webhook-based authentication has been removed. JWT (`JWT_SECRET`) is the only supported authentication mechanism. If your reverse proxy needs to authenticate, forward user identity within the JWT — not via custom headers.
 
@@ -19,10 +21,10 @@ export JWT_SECRET="your-hs256-secret"
 The extracted claims (`tenant_id`, `user_id`, `role`) are set as PostgreSQL session variables before every query, enabling native RLS enforcement:
 
 ```sql
-set_config('app.current_tenant_id', '<from JWT>', false);
-set_config('app.current_user_id', '<from JWT>', false);
-set_config('app.current_agent_id', '<from JWT agent_id claim>', false);
-set_config('app.is_super_admin', 'false', false);
+set_config('app.current_tenant_id', '<from JWT>', true);
+set_config('app.current_user_id', '<from JWT>', true);
+set_config('app.current_agent_id', '<from JWT agent_id claim>', true);
+set_config('app.is_super_admin', 'false', true);
 ```
 
 ---
@@ -48,14 +50,15 @@ curl \
 
 ## Row-Level Security (RLS)
 
-Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables before each query:
+Every query is scoped to the authenticated tenant through PostgreSQL's native
+RLS. The gateway sets transaction-local session variables before each query:
 
 ```sql
 -- Automatically executed before every query:
-set_config('app.current_tenant_id', '<from JWT>', false);
-set_config('app.current_user_id', '<from JWT>', false);
-set_config('app.current_agent_id', '<from JWT agent_id claim>', false);
-set_config('app.is_super_admin', 'false', false);
+set_config('app.current_tenant_id', '<from JWT>', true);
+set_config('app.current_user_id', '<from JWT>', true);
+set_config('app.current_agent_id', '<from JWT agent_id claim>', true);
+set_config('app.is_super_admin', 'false', true);
 ```
 
 Your PostgreSQL RLS policies reference these variables:
@@ -69,32 +72,69 @@ ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders FORCE ROW LEVEL SECURITY;
 ```
 
-**No manual WHERE clauses needed.** The gateway + RLS combination provides database-level multi-tenancy.
+The gateway + RLS combination provides database-level multi-tenancy when the
+database policies are enabled and the app role cannot bypass RLS.
 
 > **Important:** Your application database role must be a non-superuser with `NOBYPASSRLS`. Superusers bypass RLS even with `FORCE ROW LEVEL SECURITY`.
 
 ---
 
-## YAML Policy Engine
+## Native Access Policy
 
-Fine-grained access control per table, per role:
+Fine-grained operation and column control is handled by the native access
+policy in `qail_core::access`. Enable it in `qail.toml`:
+
+```toml
+[access]
+enabled = true
+path = "access-policy.toml"
+```
+
+Example `access-policy.toml`:
+
+```toml
+default_decision = "deny"
+
+[tables.orders]
+operations = ["read", "update"]
+read_columns = { only = ["id", "status", "total", "created_at"] }
+write_columns = { only = ["status"] }
+returning_columns = { only = ["id", "status"] }
+require_any_role = ["operator", "administrator"]
+require_scopes = ["orders:read"]
+
+[tables.users]
+operations = ["read"]
+read_columns = { only = ["id", "email", "display_name"] }
+require_any_role = ["administrator"]
+require_scopes = ["users:read"]
+```
+
+Policy files may be TOML or JSON. They are checked against the QAIL AST before
+execution. See [Access Policy](../features/access-policy.md) for full
+semantics, including MERGE/source-query handling and fail-closed expression
+rules.
+
+> Migration note: `operator_id` JWT claims are preserved in extra claims but are
+> not mapped into `tenant_id`. Use a `tenant_id` claim for tenant scope.
+
+## Gateway Policy Compatibility
+
+The gateway still supports the older YAML route policy engine through
+`[gateway].policy` / `policy_path` for compatibility with existing deployments:
 
 ```yaml
 policies:
-  - name: orders_agent_read
+  - name: orders_operator_read
     table: orders
-    role: agent
+    role: operator
     operations: [read]
     filter: "tenant_id = $tenant_id"
     allowed_columns: ["id", "status", "total", "created_at"]
-  - name: orders_viewer_read
-    table: orders
-    role: viewer
-    operations: [read]
-    allowed_columns: ["id", "status"]
 ```
 
-> Migration note: `operator_id` JWT claims are preserved in extra claims but are not mapped into `tenant_id`. Use a `tenant_id` claim for tenant scope.
+For new deployments, prefer native `[access]` policy for vertical permissions
+because it lives in `qail-core` and checks the AST command directly.
 
 ### Column Permissions
 
@@ -238,10 +278,10 @@ database_url = "postgresql://app@db.internal:5432/app\
 
 | Threat | Traditional REST | QAIL Gateway |
 |--------|-----------------|-------------|
-| SQL injection | Possible (one mistake) | **Impossible** (binary AST) |
-| Tenant data leak | Missing WHERE clause | **RLS auto-injected** |
-| N+1 catastrophe | Default behavior | **Structurally impossible** |
-| Over-fetching | Manual column control | **Policy-enforced** |
+| SQL injection | Possible (one mistake) | **Prevented on AST path** |
+| Tenant data leak | Missing WHERE clause | **RLS context set before execution** |
+| N+1 catastrophe | Default behavior | **JOIN/expand plus scanner guardrails** |
+| Over-fetching | Manual column control | **Native access policy column rules** |
 | Query abuse | Rate limiting only | **Allow-list + rate limit** |
 
 ---

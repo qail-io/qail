@@ -138,7 +138,7 @@ qail sync generate
 
 ---
 
-## 3. Drift Detection (v0.15.8)
+## 3. Drift Detection
 
 Compare a live database against a `.qail` schema file to find unexpected drift:
 
@@ -161,7 +161,7 @@ If drift exists, it shows categorized changes with risk levels:
 
 ---
 
-## 4. Migration Reset (v0.15.8)
+## 4. Migration Reset
 
 Nuclear option for development — drops everything and recreates from schema:
 
@@ -177,7 +177,7 @@ qail migrate reset schema.qail postgres://...
 
 ---
 
-## 5. Migration Status (v0.15.8)
+## 5. Migration Status
 
 Rich tabular view of migration history:
 

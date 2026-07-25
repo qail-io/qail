@@ -201,11 +201,12 @@ impl GrpcClient {
             (guard.sender.clone(), guard.generation)
         };
 
-        #[allow(clippy::collapsible_if)]
-        if let Some(sender) = maybe_sender {
-            if let Ok(ready) = sender.ready().await {
-                return Ok(ready);
-            }
+        let initial_ready = match maybe_sender {
+            Some(sender) => Some(sender.ready().await),
+            None => None,
+        };
+        if let Some(Ok(ready)) = initial_ready {
+            return Ok(ready);
         }
 
         // Slow path: reconnect (re-acquire lock for mutation)

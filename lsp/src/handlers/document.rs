@@ -5,49 +5,45 @@ use tower_lsp::lsp_types::*;
 
 impl QailLanguageServer {
     pub async fn handle_did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
-        let text = params.text_document.text.clone();
-        let version = params.text_document.version;
+        let TextDocumentItem {
+            uri: document_uri,
+            text,
+            version,
+            ..
+        } = params.text_document;
+        let uri = document_uri.to_string();
 
         self.try_load_schema_from_uri(&uri);
+        let diagnostics = self.get_diagnostics(&text, &uri);
 
         if let Ok(mut docs) = self.documents.write() {
-            docs.insert(
-                uri.clone(),
-                OpenDocument {
-                    text: text.clone(),
-                    version,
-                },
-            );
+            docs.insert(uri, OpenDocument { text, version });
         }
 
-        let diagnostics = self.get_diagnostics(&text, &uri);
         self.client
-            .publish_diagnostics(params.text_document.uri, diagnostics, Some(version))
+            .publish_diagnostics(document_uri, diagnostics, Some(version))
             .await;
     }
 
     pub async fn handle_did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
-        let version = params.text_document.version;
+        let VersionedTextDocumentIdentifier {
+            uri: document_uri,
+            version,
+        } = params.text_document;
+        let uri = document_uri.to_string();
 
-        if let Some(change) = params.content_changes.last() {
-            let text = change.text.clone();
+        if let Some(change) = params.content_changes.into_iter().last() {
+            let text = change.text;
 
             self.try_load_schema_from_uri(&uri);
+            let diagnostics = self.get_diagnostics(&text, &uri);
 
             let should_apply_change = if let Ok(mut docs) = self.documents.write() {
                 let current_version = docs.get(&uri).map(|doc| doc.version);
                 if !should_apply_version(current_version, version) {
                     false
                 } else {
-                    docs.insert(
-                        uri.clone(),
-                        OpenDocument {
-                            text: text.clone(),
-                            version,
-                        },
-                    );
+                    docs.insert(uri.clone(), OpenDocument { text, version });
                     true
                 }
             } else {
@@ -58,9 +54,8 @@ impl QailLanguageServer {
                 return;
             }
 
-            let diagnostics = self.get_diagnostics(&text, &uri);
             self.client
-                .publish_diagnostics(params.text_document.uri, diagnostics, Some(version))
+                .publish_diagnostics(document_uri, diagnostics, Some(version))
                 .await;
 
             if is_schema_uri(&uri) {

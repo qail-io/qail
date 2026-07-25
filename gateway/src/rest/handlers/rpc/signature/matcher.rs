@@ -180,11 +180,7 @@ pub(super) fn signature_matches_call_shape(
 }
 
 pub(super) fn format_signature_brief(signature: &RpcCallableSignature) -> String {
-    let identity = if signature.identity_args.is_empty() {
-        "".to_string()
-    } else {
-        signature.identity_args.clone()
-    };
+    let identity = signature.identity_args.as_str();
     if signature.result_type.is_empty() {
         format!("({})", identity)
     } else {

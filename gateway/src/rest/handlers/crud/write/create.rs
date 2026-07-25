@@ -1,29 +1,34 @@
 use super::*;
 
 fn normalize_create_object_for_tenant(
-    obj: &serde_json::Map<String, Value>,
+    mut obj: serde_json::Map<String, Value>,
     tenant_column: &str,
     tenant_id: Option<&str>,
 ) -> Result<serde_json::Map<String, Value>, ApiError> {
     let Some(tid) = tenant_id else {
-        return Ok(obj.clone());
+        return Ok(obj);
     };
 
-    let mut normalized = obj.clone();
-    for (key, existing) in obj {
+    let tenant_value = Value::String(tid.to_string());
+    let mut tenant_keys = Vec::new();
+    for (key, existing) in &obj {
         if !identifier_matches_column(key, tenant_column) {
             continue;
         }
-        if existing != &Value::String(tid.to_string()) {
+        if existing != &tenant_value {
             return Err(ApiError::forbidden(format!(
                 "Field '{}' must match authenticated tenant context",
                 tenant_column
             )));
         }
-        normalized.remove(key);
+        tenant_keys.push(key.clone());
     }
-    normalized.insert(tenant_column.to_string(), Value::String(tid.to_string()));
-    Ok(normalized)
+
+    for key in tenant_keys {
+        obj.remove(&key);
+    }
+    obj.insert(tenant_column.to_string(), tenant_value);
+    Ok(obj)
 }
 
 fn pk_to_overlay_key(value: &Value) -> Option<String> {
@@ -342,23 +347,20 @@ pub(crate) async fn create_handler(
         crate::json_input::decode_value(&body, crate::json_input::JsonInputLimits::default())
             .map_err(|e| ApiError::parse_error(e.to_string()))?;
 
-    // Detect batch vs single
-    let is_batch = body.is_array();
-    let objects: Vec<&serde_json::Map<String, Value>> = if is_batch {
-        let arr = body
-            .as_array()
-            .ok_or_else(|| ApiError::parse_error("Expected JSON array body"))?;
-        arr.iter()
-            .map(|v| {
-                v.as_object()
-                    .ok_or_else(|| ApiError::parse_error("Batch items must be JSON objects"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        vec![
-            body.as_object()
-                .ok_or_else(|| ApiError::parse_error("Expected JSON object or array"))?,
-        ]
+    // Detect batch vs single.
+    let (is_batch, objects): (bool, Vec<serde_json::Map<String, Value>>) = match body {
+        Value::Array(values) => {
+            let objects = values
+                .into_iter()
+                .map(|value| match value {
+                    Value::Object(obj) => Ok(obj),
+                    _ => Err(ApiError::parse_error("Batch items must be JSON objects")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (true, objects)
+        }
+        Value::Object(obj) => (false, vec![obj]),
+        _ => return Err(ApiError::parse_error("Expected JSON object or array")),
     };
 
     if objects.is_empty() {
@@ -386,12 +388,12 @@ pub(crate) async fn create_handler(
     }
 
     let normalized_objects: Vec<serde_json::Map<String, Value>> = objects
-        .iter()
+        .into_iter()
         .map(|obj| match tenant_scope.as_ref() {
             Some((scope_column, tenant_id)) => {
                 normalize_create_object_for_tenant(obj, scope_column, Some(tenant_id))
             }
-            None => Ok((*obj).clone()),
+            None => Ok(obj),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -419,16 +421,16 @@ pub(crate) async fn create_handler(
     // Branch CoW Write: redirect inserts to overlay table
     if let Some(branch_name) = branch_ctx.branch_name() {
         let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
-        for obj in &normalized_objects {
-            let row_data: Value = Value::Object(obj.clone());
+        for obj in normalized_objects {
             let pk_col = table.primary_key.as_deref().unwrap_or("id");
-            let row_pk = match branch_insert_overlay_key(obj, pk_col) {
+            let row_pk = match branch_insert_overlay_key(&obj, pk_col) {
                 Ok(row_pk) => row_pk,
                 Err(e) => {
                     let _ = conn.rollback_and_release().await;
                     return Err(e);
                 }
             };
+            let row_data = Value::Object(obj);
 
             let overlay_result = redirect_to_overlay(
                 &mut conn,
@@ -684,6 +686,9 @@ pub(crate) async fn create_handler(
         }
     }
 
+    let has_results = !all_results.is_empty();
+    let response_needs_rows = response_requested_returning && !prefer.wants_minimal();
+
     if !classified_upsert_events.is_empty() {
         for (operation, new_data, old_data) in classified_upsert_events {
             if let Err(e) = state
@@ -695,16 +700,20 @@ pub(crate) async fn create_handler(
                 return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
             }
         }
-    } else {
-        let event_new = if all_results.is_empty() {
+    } else if has_create_triggers {
+        let event_new = if !has_results {
             None
-        } else if is_batch {
+        } else if response_needs_rows && is_batch {
             Some(json!(all_results.clone()))
-        } else {
+        } else if response_needs_rows {
             all_results.first().cloned()
+        } else if is_batch {
+            Some(Value::Array(std::mem::take(&mut all_results)))
+        } else {
+            Some(all_results.remove(0))
         };
 
-        if let Some(new_data) = event_new.clone()
+        if let Some(new_data) = event_new
             && let Err(e) = state
                 .event_engine
                 .enqueue_durable(
@@ -728,7 +737,7 @@ pub(crate) async fn create_handler(
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
 
-    let response_status = if all_results.is_empty() && ignored_conflict_noops > 0 {
+    let response_status = if !has_results && ignored_conflict_noops > 0 {
         StatusCode::OK
     } else {
         StatusCode::CREATED
@@ -742,10 +751,7 @@ pub(crate) async fn create_handler(
 
     if is_batch {
         let response_results = if response_requested_returning {
-            project_mutation_returning_rows(
-                all_results.clone(),
-                mutation_params.returning.as_deref(),
-            )?
+            project_mutation_returning_rows(all_results, mutation_params.returning.as_deref())?
         } else {
             Vec::new()
         };
@@ -759,15 +765,12 @@ pub(crate) async fn create_handler(
         ))
     } else {
         let data = if response_requested_returning {
-            project_mutation_returning_rows(
-                all_results.clone(),
-                mutation_params.returning.as_deref(),
-            )?
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| json!({"created": false}))
+            project_mutation_returning_rows(all_results, mutation_params.returning.as_deref())?
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| json!({"created": false}))
         } else {
-            json!({"created": !all_results.is_empty()})
+            json!({"created": has_results})
         };
         Ok((response_status, Json(json!({ "data": data }))))
     }
@@ -808,7 +811,7 @@ mod tests {
         obj.insert("name".to_string(), json!("alice"));
 
         let normalized =
-            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
+            normalize_create_object_for_tenant(obj, "tenant_id", Some("tenant_a")).unwrap();
         assert_eq!(
             normalized.get("tenant_id"),
             Some(&Value::String("tenant_a".to_string()))
@@ -821,7 +824,7 @@ mod tests {
         obj.insert("tenant_id".to_string(), json!("tenant_b"));
 
         let err =
-            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
+            normalize_create_object_for_tenant(obj, "tenant_id", Some("tenant_a")).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
@@ -831,7 +834,7 @@ mod tests {
         obj.insert("tenant_id".to_string(), json!("tenant_b"));
         obj.insert("name".to_string(), json!("shared-row"));
 
-        let normalized = normalize_create_object_for_tenant(&obj, "tenant_id", None).unwrap();
+        let normalized = normalize_create_object_for_tenant(obj, "tenant_id", None).unwrap();
 
         assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_b")));
         assert_eq!(normalized.get("name"), Some(&json!("shared-row")));
@@ -843,7 +846,7 @@ mod tests {
         obj.insert("Tenant_ID".to_string(), json!("tenant_b"));
 
         let err =
-            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
+            normalize_create_object_for_tenant(obj, "tenant_id", Some("tenant_a")).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
@@ -854,7 +857,7 @@ mod tests {
         obj.insert("name".to_string(), json!("alice"));
 
         let normalized =
-            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
+            normalize_create_object_for_tenant(obj, "tenant_id", Some("tenant_a")).unwrap();
         assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_a")));
         assert_eq!(normalized.get("name"), Some(&json!("alice")));
     }
@@ -866,7 +869,7 @@ mod tests {
         obj.insert("name".to_string(), json!("alice"));
 
         let normalized =
-            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
+            normalize_create_object_for_tenant(obj, "tenant_id", Some("tenant_a")).unwrap();
         assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_a")));
         assert!(!normalized.contains_key("Tenant_ID"));
     }

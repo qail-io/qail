@@ -160,7 +160,7 @@ pub async fn migrate_down(
             "  {} {} {}",
             format!("[{}/{}]", i + 1, cmds.len()).cyan(),
             format!("{}", cmd.action).yellow(),
-            &cmd.table
+            cmd.table
         );
 
         sql_down_all.push_str(&cmd.to_sql());

@@ -188,6 +188,7 @@ impl Default for GatewayConfig {
             tenant_rate_limit_burst: 100,
             pg_sslmode: "prefer".to_string(),
             pg_channel_binding: "prefer".to_string(),
+            pg_io_uring: false,
             blocked_tables: Vec::new(),
             allowed_tables: Vec::new(),
             txn_session_timeout_secs: 30,

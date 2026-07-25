@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Remote MCP server:** Added the public, stateless Streamable HTTP service at `https://dev.qail.io/mcp`, backed by the same QAIL parser compiled to WebAssembly plus source-derived documentation, resources, and prompts.
+- **Dart SDK (`sdk/dart`):** pure-Dart client for Flutter and server-side Dart, mirroring the Swift/Kotlin surface — fluent builders, raw DSL (`/qail`, `/qail/fast`, `/qail/batch`), transactions, realtime WebSocket subscribe, raw HTTP verbs, and structured `QailError`. Typed rows use explicit `fromJson` decoders (Dart generics are not reified). WS auth mode resolves per platform: `header` on `dart:io`, `query` on web (browsers cannot set handshake headers).
+- **TypeScript SDK:** `queryFast()` (`/qail/fast`), transactions (`beginTxn()` → query/commit/rollback/savepoint with `X-Transaction-Id`), and `ResponseMetadata`/`request_id` on responses and errors.
+
+### Fixed
+- **MCP release freshness:** Regenerated the public MCP knowledge corpus and Worker metadata from the v1.3.6 tree so the service no longer advertises or teaches v1.3.5 after the security release.
+- **TypeScript SDK drift (breaking, `@qail/client` 0.2.0):** realigned response shapes with the gateway — `QueryResponse` is `{rows, count, metadata?}` (was `{data, rows_affected, columns}`), `MutationResponse` is `{data, count?, metadata?}` (was `rows_affected`), `batch()` sends the `{"queries": [...]}` envelope and returns `BatchResponse {results, total, success, metadata?}` (was a raw array body returning `BatchResult[]`), `QailError.detail` renamed to `details`.
+
+## [1.3.6] - 2026-07-20
+
+### Security
+- **PostgreSQL SCRAM dependency correctness:** Updated `cmov` to `0.5.4`, fixing incorrect constant-time selection results on AArch64 when high register bits are set. The dependency reaches `qail-pg` authentication through `postgres-protocol`.
+- **Gateway concurrency dependency safety:** Updated `crossbeam-epoch` to `0.9.20`, addressing the invalid pointer dereference reported as RUSTSEC-2026-0204 in the gateway's metrics and cache dependency paths.
+- **VS Code packaging dependencies:** Updated `form-data` to `4.0.6` and `markdown-it` to `14.3.0` through `@vscode/vsce` `3.9.2`. These dependencies are confined to extension build tooling.
+
+### Fixed
+- **Rust 1.97 release compatibility:** Updated formatting and Clippy findings so formatting, panic safety, workspace Clippy, and the Linux `io_uring` Clippy gate can pass on the release toolchain.
+
+### Changed
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.6`.
+
+## [1.3.5] - 2026-06-29
+
+### Fixed
+- **CI formatting compatibility:** Applied the Rust stable `1.96.0` rustfmt shape required by the GitHub Actions formatting job.
+
+### Changed
+- **Runtime audit hardening:** Continued the unsafe panic/clone audit across core, gateway, LSP, Qdrant, and transaction paths, including production clippy suppression cleanup, lower-copy REST/event handling, LSP schema/document cache clone reductions, and safer owned-value conversion paths.
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.5`.
+
+## [1.3.4] - 2026-06-22
+
+### Security
+- **PostgreSQL io_uring transport is now explicit opt-in:** Linux `io_uring` plain-TCP transport no longer auto-enables just because the kernel and `qail-pg/io_uring` feature support it. Tokio remains the default backend unless `[postgres].io_uring = true`, `?io_uring=true`, `PoolConfig::io_uring(true)`, `ConnectOptions::with_io_uring(true)`, or `QAIL_PG_IO_BACKEND=io_uring` explicitly opts in.
+
+### Added
+- **Workflow payment origin metadata:** Charge workflow steps can now carry an `order_origin` such as `whatsapp`, `mcp`, `web`, `ios_app`, `android_app`, or `api` so providers and downstream order records keep channels separated.
+
+### Fixed
+- **Workflow charge idempotency and display safety:** Charge side effects now default their provider idempotency key to the stable workflow side-effect operation id when the app does not provide one, and stored charge context uses redacted display-safe payment payloads instead of provider raw data.
+
+### Changed
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.4`.
+
+## [1.3.3] - 2026-06-18
+
+### Added
+- **PostgreSQL workflow storage backend:** Added `qail-workflow-postgres` as the Flow Ledger storage layer for persisted workflow state, leases, operation idempotency, side-effect replay, and timeout due-row discovery.
+- **Workflow production documentation:** Expanded public crate and mdBook docs with the platform map, native access-policy semantics, tenant-first RLS boundaries, and Flow Engine/Flow Ledger operational guidance.
+
+### Fixed
+- **Workflow ledger invariants:** Hardened Postgres-backed workflow storage around stale started ledgers, failed side effects, timeout claim clocks, scheduler-scoped timeout operations, lease owner fencing, and timeout fallback checkpoint scheduling.
+- **Side-effect replay identity:** Scoped workflow side-effect operation IDs by state generation so workflows that revisit the same state/step path do not collide with completed work from an older generation.
+- **Timeout fallback execution:** Timeout fallback replay now respects deadline budgeting instead of overrunning caller-provided timeout windows.
+
+### Changed
+- **Repository hygiene:** Removed stale tracked local artifacts from the repository root, including the placeholder `qail.toml`, misplaced Grafana `log` dump, and ignored `.cargo` linker override. Refreshed `PERFORMANCE.md` as a current benchmark entry point instead of stale `v0.14.x` numbers.
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.3.3`.
+
 ## [1.3.2] - 2026-06-12
 
 ### Fixed

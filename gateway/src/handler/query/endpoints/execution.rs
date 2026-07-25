@@ -5,11 +5,10 @@ use super::*;
 pub(super) async fn execute_qail_cmd_fast(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
-    cmd: &qail_core::ast::Qail,
+    mut cmd: qail_core::ast::Qail,
     tenant_guard_plan: Option<&crate::tenant_guard::TenantGuardPlan>,
     extensions: &axum::http::Extensions,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
-    let mut cmd = cmd.clone();
     state.optimize_qail_for_execution(&mut cmd);
     crate::access::check_access_policy(state.as_ref(), auth, &cmd)?;
     let is_read_only = command_is_read_only_for_release(&cmd);
@@ -134,11 +133,10 @@ pub(super) async fn execute_qail_cmd_fast(
 pub(super) async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
-    cmd: &qail_core::ast::Qail,
+    mut cmd: qail_core::ast::Qail,
     tenant_guard_plan: Option<&crate::tenant_guard::TenantGuardPlan>,
     extensions: &axum::http::Extensions,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    let mut cmd = cmd.clone();
     state.optimize_qail_for_execution(&mut cmd);
     crate::access::check_access_policy(state.as_ref(), auth, &cmd)?;
 
@@ -163,7 +161,7 @@ pub(super) async fn execute_qail_cmd(
     ) {
         #[cfg(feature = "qdrant")]
         {
-            return execute_qdrant_cmd(state, auth, &cmd).await;
+            return execute_qdrant_cmd(state, auth, cmd).await;
         }
         #[cfg(not(feature = "qdrant"))]
         {

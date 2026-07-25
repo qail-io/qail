@@ -6,7 +6,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.3.2-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.3.6-green)](CHANGELOG.md)
 
 ---
 
@@ -16,8 +16,8 @@ If you are searching for a **Rust PostgreSQL driver**, start with `qail-pg` + `q
 
 ```toml
 [dependencies]
-qail-core = "1.3.2"
-qail-pg = "1.3.2"
+qail-core = "1.3.6"
+qail-pg = "1.3.6"
 ```
 
 ```rust
@@ -37,18 +37,24 @@ let rows = driver.fetch_all(&query).await?;
 
 ## Product Map
 
-| Component | Use it for | Primary audience |
+| Concept | Crate | Use it for | Primary audience |
 |---|---|---|
-| `qail-pg` | PostgreSQL driver (wire protocol, pooling, pipeline, COPY) | Backend app code |
-| `qail-core` | Typed AST, parser, validator, RLS model, transpiler | Query/model layer |
-| `qail-gateway` | Optional auto-REST + WebSocket server | API platform teams |
-| `qail` (CLI) | Schema pull/diff, migrations, codegen, lint | DevEx and CI |
+| AST Kernel | `qail-core` | Typed AST, parser, validator, RLS model, native access policy | Query/model layer |
+| Postgres Driver | `qail-pg` | PostgreSQL wire protocol, pooling, pipeline, COPY, LISTEN/NOTIFY | Backend app code |
+| Access Gateway | `qail-gateway` | AutoREST, WebSocket, OpenAPI, auth/RLS/policy enforcement | API platform teams |
+| SchemaOps CLI | `qail` | Schema pull/diff, phased migrations, codegen, lint | DevEx and CI |
+| Flow Engine | `qail-workflow` | Declarative state-machine workflows, waits, retries, side-effect checkpoints | App orchestration |
+| Flow Ledger | `qail-workflow-postgres` | PostgreSQL workflow state, leases, idempotency, side-effect replay, timeouts | Durable workflow execution |
+| Vector Bridge | `qail-qdrant` | Qdrant vector search and AST-compatible filters | AI/vector workloads |
 
 ## Choose Your Mode
 
 1. Driver mode: add `qail-pg` and execute AST queries in your app.
 2. Gateway mode: run `qail-gateway` when you want auto-generated REST/WebSocket.
 3. Tooling mode: use `qail` CLI for schema and migration workflows.
+4. Workflow mode: add `qail-workflow` and optionally `qail-workflow-postgres`
+   when app workflows need durable resume, timeout, lease, and side-effect
+   replay semantics.
 
 ## qail-pg vs tokio-postgres vs sqlx
 
@@ -242,7 +248,7 @@ GET    /api/{table}/_aggregate  # count, sum, avg, min, max
 - ✅ WebSocket subscriptions + live queries
 - ✅ Event triggers (mutation → webhook with retry)
 - ✅ JWT auth (HS256/RS256) + API key auth
-- ✅ YAML policy engine + column permissions
+- ✅ Native access policy + column permissions
 - ✅ Query allow-listing + complexity limits
 - ✅ Prometheus metrics + request tracing
 - ✅ NDJSON streaming + cursor pagination
@@ -261,7 +267,7 @@ qail.rs/
 ├── encoder/    Wire protocol encoder + FFI/runtime internals
 ├── qdrant/     Qdrant vector DB driver (optional)
 ├── workflow/   Workflow engine
-└── sdk/        Direct SDKs (TypeScript, Swift, Kotlin)
+└── sdk/        Direct SDKs (TypeScript, Swift, Kotlin, Dart)
 ```
 
 ---
@@ -273,9 +279,12 @@ qail.rs/
 | TypeScript | ✅ Supported | `npm install @qail/client` |
 | Swift | ✅ Supported | Source package in `sdk/swift` |
 | Kotlin | ✅ Supported | Gradle module in `sdk/kotlin` |
+| Dart | ✅ Supported | Pub package in `sdk/dart` |
 | Node.js native binding | ⏸ Deferred | Not shipped yet |
 
-`tenant_id` is the runtime contract across gateway and RLS paths. Legacy `operator_id` runtime compatibility aliases were removed in `v0.26.0`.
+`tenant_id` is the runtime contract across gateway and RLS paths. Legacy
+`agent_id`/operator-style identity is treated as a secondary scope only when a
+tenant scope is already present.
 
 ---
 

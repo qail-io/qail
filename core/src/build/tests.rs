@@ -3634,6 +3634,42 @@ async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsCon
 }
 
 #[test]
+fn test_rls_detection_with_rls_policy_in_chain() {
+    let content = r#"
+async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
+    let cmd = Qail::get("orders").columns(["id"]).with_rls_policy(ctx);
+    let _ = conn.fetch_all_uncached(&cmd).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_rls,
+        "with_rls_policy declares deliberate policy-delegated scoping and must satisfy the audit"
+    );
+}
+
+#[test]
+fn test_rls_detection_late_with_rls_policy_on_bound_query_var() {
+    let content = r#"
+async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
+    let cmd = Qail::get("orders").columns(["id"]);
+    let _ = conn.fetch_all_uncached(&cmd.with_rls_policy(ctx)).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_rls,
+        "a late with_rls_policy on the bound query variable must satisfy the audit"
+    );
+}
+
+#[test]
 fn test_rls_detection_late_rls_on_bound_query_var() {
     let content = r#"
 async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {

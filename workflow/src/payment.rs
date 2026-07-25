@@ -8,6 +8,53 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+// ─── Order Origin ──────────────────────────────────────────────────
+
+/// Source channel that created the order or checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderOrigin {
+    /// Order was created from a WhatsApp conversation.
+    WhatsApp,
+    /// Order was created through an MCP/ChatGPT tool flow.
+    Mcp,
+    /// Order was created from a web checkout.
+    Web,
+    /// Order was created from the native iOS app.
+    IosApp,
+    /// Order was created from the native Android app.
+    AndroidApp,
+    /// Order was created by a direct API/backend integration.
+    Api,
+}
+
+impl OrderOrigin {
+    /// Parse an order origin from a workflow context string.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "whatsapp" | "wa" => Some(Self::WhatsApp),
+            "mcp" | "chatgpt" | "chatgpt_mcp" | "chatgpt-mcp" => Some(Self::Mcp),
+            "web" | "checkout" => Some(Self::Web),
+            "ios" | "ios_app" | "ios-app" | "iphone" | "ipad" => Some(Self::IosApp),
+            "android" | "android_app" | "android-app" => Some(Self::AndroidApp),
+            "api" | "backend" => Some(Self::Api),
+            _ => None,
+        }
+    }
+
+    /// Stable lowercase value for logging, metadata, and provider payloads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WhatsApp => "whatsapp",
+            Self::Mcp => "mcp",
+            Self::Web => "web",
+            Self::IosApp => "ios_app",
+            Self::AndroidApp => "android_app",
+            Self::Api => "api",
+        }
+    }
+}
+
 // ─── Payment Kind ───────────────────────────────────────────────────
 
 /// Supported payment provider types.
@@ -59,6 +106,12 @@ pub struct ChargeRequest {
     pub description: Option<String>,
     /// Desired payment method (e.g. "QRIS", "VIRTUAL_ACCOUNT", "CARD", "EWALLET").
     pub payment_method: Option<String>,
+    /// Source channel that created the order or checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_origin: Option<OrderOrigin>,
+    /// Stable idempotency key to pass through to the payment provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     /// Return URL after payment (for redirect-based flows).
     pub return_url: Option<String>,
     /// Arbitrary metadata passed through to the provider.
@@ -80,8 +133,63 @@ pub struct ChargeResponse {
     pub payment_code: Option<String>,
     /// When this charge expires.
     pub expires_at: Option<String>,
-    /// Raw provider response for debugging.
+    /// Raw provider response for internal debugging.
+    ///
+    /// Do not expose this field to chat, WhatsApp, email, or other user-facing
+    /// channels. Use [`ChargeResponse::display_for`] instead.
     pub raw: Option<serde_json::Value>,
+}
+
+/// Payment details safe to show in chat or notification channels.
+///
+/// This intentionally omits provider `raw` data and cardholder data. For card
+/// payments, expose only `redirect_url` and keep collection on the PSP page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentDisplay {
+    /// Provider-assigned charge/payment ID.
+    pub charge_id: String,
+    /// Current status of the charge.
+    pub status: ChargeStatus,
+    /// Amount in smallest currency unit (e.g. IDR whole).
+    pub amount: i64,
+    /// Currency.
+    pub currency: Currency,
+    /// Unique reference for this charge (e.g. order ID, booking ID).
+    pub reference_id: String,
+    /// Human-readable description shown to payer.
+    pub description: Option<String>,
+    /// Desired payment method (e.g. "QRIS", "VIRTUAL_ACCOUNT", "CARD", "EWALLET").
+    pub payment_method: Option<String>,
+    /// Source channel that created the order or checkout.
+    pub order_origin: Option<OrderOrigin>,
+    /// Redirect URL (for card/ewallet flows).
+    pub redirect_url: Option<String>,
+    /// QR code content string (for QRIS).
+    pub qr_code: Option<String>,
+    /// Virtual account number or payment code.
+    pub payment_code: Option<String>,
+    /// When this charge expires.
+    pub expires_at: Option<String>,
+}
+
+impl ChargeResponse {
+    /// Build a redacted display object from the original charge request.
+    pub fn display_for(&self, request: &ChargeRequest) -> PaymentDisplay {
+        PaymentDisplay {
+            charge_id: self.charge_id.clone(),
+            status: self.status,
+            amount: request.amount,
+            currency: request.currency,
+            reference_id: request.reference_id.clone(),
+            description: request.description.clone(),
+            payment_method: request.payment_method.clone(),
+            order_origin: request.order_origin,
+            redirect_url: self.redirect_url.clone(),
+            qr_code: self.qr_code.clone(),
+            payment_code: self.payment_code.clone(),
+            expires_at: self.expires_at.clone(),
+        }
+    }
 }
 
 /// Status of a payment charge.
@@ -130,6 +238,9 @@ pub struct PaymentEvent {
     pub reference_id: Option<String>,
     /// Payment method used (e.g. "BCA_VA", "QRIS").
     pub payment_method: Option<String>,
+    /// Source channel that created the order or checkout, if echoed by metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_origin: Option<OrderOrigin>,
     /// Arbitrary metadata from the provider.
     pub metadata: Option<serde_json::Value>,
 }
@@ -239,6 +350,8 @@ mod tests {
             reference_id: "booking-001".into(),
             description: Some("Ferry ticket Bali-Nusa Penida".into()),
             payment_method: Some("QRIS".into()),
+            order_origin: Some(OrderOrigin::WhatsApp),
+            idempotency_key: Some("charge:booking-001".into()),
             return_url: None,
             metadata: None,
         };
@@ -246,6 +359,11 @@ mod tests {
         let restored: ChargeRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.amount, 150_000);
         assert_eq!(restored.reference_id, "booking-001");
+        assert_eq!(restored.order_origin, Some(OrderOrigin::WhatsApp));
+        assert_eq!(
+            restored.idempotency_key.as_deref(),
+            Some("charge:booking-001")
+        );
     }
 
     #[test]
@@ -273,16 +391,63 @@ mod tests {
             amount: Some(150_000),
             reference_id: Some("booking-001".into()),
             payment_method: Some("QRIS".into()),
+            order_origin: Some(OrderOrigin::WhatsApp),
             metadata: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let restored: PaymentEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.status, ChargeStatus::Paid);
+        assert_eq!(restored.order_origin, Some(OrderOrigin::WhatsApp));
     }
 
     #[test]
     fn test_payment_kind_display() {
         assert_eq!(PaymentKind::Xendit.to_string(), "xendit");
+    }
+
+    #[test]
+    fn test_order_origin_parse() {
+        assert_eq!(OrderOrigin::parse("whatsapp"), Some(OrderOrigin::WhatsApp));
+        assert_eq!(OrderOrigin::parse("wa"), Some(OrderOrigin::WhatsApp));
+        assert_eq!(OrderOrigin::parse("mcp"), Some(OrderOrigin::Mcp));
+        assert_eq!(OrderOrigin::parse("chatgpt"), Some(OrderOrigin::Mcp));
+        assert_eq!(OrderOrigin::parse("ios"), Some(OrderOrigin::IosApp));
+        assert_eq!(
+            OrderOrigin::parse("android-app"),
+            Some(OrderOrigin::AndroidApp)
+        );
+        assert_eq!(OrderOrigin::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_payment_display_omits_raw_provider_data() {
+        let req = ChargeRequest {
+            amount: 150_000,
+            currency: Currency::IDR,
+            reference_id: "booking-001".into(),
+            description: Some("Ferry ticket Bali-Nusa Penida".into()),
+            payment_method: Some("QRIS".into()),
+            order_origin: Some(OrderOrigin::Mcp),
+            idempotency_key: Some("idem-1".into()),
+            return_url: None,
+            metadata: None,
+        };
+        let res = ChargeResponse {
+            charge_id: "xendit-abc123".into(),
+            status: ChargeStatus::Pending,
+            redirect_url: None,
+            qr_code: Some("00020101021226610014ID.CO.XENDIT".into()),
+            payment_code: None,
+            expires_at: Some("2026-02-13T16:00:00Z".into()),
+            raw: Some(serde_json::json!({"secret": "do-not-show"})),
+        };
+        let display = res.display_for(&req);
+        let value = serde_json::to_value(display).unwrap();
+        assert!(value.get("raw").is_none());
+        assert_eq!(
+            value.get("order_origin").and_then(|v| v.as_str()),
+            Some("mcp")
+        );
     }
 
     #[test]

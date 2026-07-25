@@ -52,6 +52,23 @@ fn test_make_with_default_numeric() {
 }
 
 #[test]
+fn test_make_with_casted_default_value() {
+    let q = "make tenant_settings office_hours:jsonb:default='{}'::jsonb";
+    let cmd = parse(q).unwrap();
+
+    assert_eq!(cmd.action, Action::Make);
+    if let Expr::Def { constraints, .. } = &cmd.columns[0] {
+        assert!(
+            constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::Default(v) if v == "'{}'::jsonb"))
+        );
+    } else {
+        panic!("Expected Expr::Def");
+    }
+}
+
+#[test]
 fn test_make_with_check_constraint() {
     let q = "make orders status:varchar:check=pending";
     // note: parser simplified check constraint to single token in taking_while1 or similar?

@@ -1,8 +1,8 @@
 //! PostgreSQL Driver Module (Layer 3: Async I/O)
 //!
-//! Auto-detects the best I/O backend:
-//! - Linux 5.1+: io_uring (fastest)
-//! - Linux < 5.1 / macOS / Windows: tokio
+//! Uses Tokio I/O by default. Linux `io_uring` plain-TCP transport is available
+//! only when compiled with the `io_uring` feature and explicitly enabled by
+//! config or `QAIL_PG_IO_BACKEND=io_uring`.
 //!
 //! Submodules:
 //! - `types` — Core types (PgError, PgRow, ColumnInfo, ResultFormat)

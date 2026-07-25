@@ -195,6 +195,7 @@ impl GatewayConfig {
             tenant_rate_limit_burst: 100,
             pg_sslmode: "prefer".to_string(),
             pg_channel_binding: "prefer".to_string(),
+            pg_io_uring: qail.postgres.io_uring,
             blocked_tables: qail
                 .gateway
                 .as_ref()
@@ -297,5 +298,15 @@ rpc_allowlist_path = "rpc.allow"
         let cfg = GatewayConfig::from_qail_config(&qail);
 
         assert!(cfg.access_policy_path.is_none());
+    }
+
+    #[test]
+    fn from_qail_config_maps_postgres_io_uring() {
+        let mut qail = qail_core::config::QailConfig::default();
+        qail.postgres.io_uring = true;
+
+        let cfg = GatewayConfig::from_qail_config(&qail);
+
+        assert!(cfg.pg_io_uring);
     }
 }

@@ -51,9 +51,20 @@ export interface SingleResponse<T = Record<string, unknown>> {
     data: T;
 }
 
+/** Metadata included in successful API responses */
+export interface ResponseMetadata {
+    /** Request ID for tracing */
+    request_id: string;
+    /** Execution time in milliseconds (server-side) */
+    duration_ms?: number;
+    /** Continuation token for paginated backends with opaque offsets */
+    next_page_offset?: unknown;
+}
+
 export interface MutationResponse<T = Record<string, unknown>> {
     data: T;
-    rows_affected: number;
+    count?: number;
+    metadata?: ResponseMetadata;
 }
 
 export interface BatchResult<T = Record<string, unknown>> {
@@ -64,15 +75,49 @@ export interface BatchResult<T = Record<string, unknown>> {
     error?: string;
 }
 
+/** Batch query response from `POST /qail/batch` */
+export interface BatchResponse<T = Record<string, unknown>> {
+    results: BatchResult<T>[];
+    total: number;
+    success: number;
+    metadata?: ResponseMetadata;
+}
+
+/** Raw DSL query response from `POST /qail` */
 export interface QueryResponse<T = Record<string, unknown>> {
-    data: T[];
-    rows_affected: number;
-    columns: string[];
+    rows: T[];
+    count: number;
+    metadata?: ResponseMetadata;
+}
+
+/** Fast query response (array-of-arrays) from `POST /qail/fast` */
+export interface FastQueryResponse {
+    rows: unknown[][];
+    count: number;
+    metadata?: ResponseMetadata;
 }
 
 export interface HealthResponse {
     status: string;
     version: string;
+    pool_active?: number;
+    pool_idle?: number;
+}
+
+/** Transaction session start response */
+export interface TxnBeginResponse {
+    txn_id: string;
+}
+
+/** Transaction session end response */
+export interface TxnEndResponse {
+    status: string;
+}
+
+/** Savepoint response */
+export interface SavepointResponse {
+    action: string;
+    name: string;
 }
 
 export interface AggregateResponse {
@@ -87,10 +132,11 @@ export class QailError extends Error {
         message: string,
         public status: number,
         public code: string,
-        public detail?: string,
+        public details?: string,
         public hint?: string,
         public table?: string,
         public column?: string,
+        public requestId?: string,
     ) {
         super(message);
         this.name = 'QailError';
@@ -159,9 +205,14 @@ export class QailClient {
         return this.request('POST', '/qail', dsl, 'text/plain');
     }
 
+    /** Execute raw Qail DSL via fast protocol (array-of-arrays) */
+    async queryFast(dsl: string): Promise<FastQueryResponse> {
+        return this.request('POST', '/qail/fast', dsl, 'text/plain');
+    }
+
     /** Execute a batch of Qail DSL queries */
-    async batch<T = Record<string, unknown>>(queries: string[]): Promise<BatchResult<T>[]> {
-        return this.request('POST', '/qail/batch', JSON.stringify(queries));
+    async batch<T = Record<string, unknown>>(queries: string[]): Promise<BatchResponse<T>> {
+        return this.request('POST', '/qail/batch', JSON.stringify({ queries }));
     }
 
     // ── Utilities ───────────────────────────────────────────────────
@@ -195,6 +246,14 @@ export class QailClient {
      */
     async generateTypes(): Promise<string> {
         return this.requestText('GET', '/api/_schema/typescript');
+    }
+
+    // ── Transactions ────────────────────────────────────────────────
+
+    /** Start a new transaction session */
+    async beginTxn(): Promise<QailTxnSession> {
+        const res = await this.request<TxnBeginResponse>('POST', '/txn/begin');
+        return new QailTxnSession(this, res.txn_id);
     }
 
     // ── Realtime (WebSocket) ────────────────────────────────────────
@@ -267,10 +326,12 @@ export class QailClient {
         path: string,
         body?: string,
         contentType?: string,
+        extraHeaders?: Record<string, string>,
     ): Promise<R> {
         const headers: Record<string, string> = {
             ...this.defaultHeaders,
             'Content-Type': contentType ?? 'application/json',
+            ...extraHeaders,
         };
 
         const token = await this.resolveToken();
@@ -301,6 +362,7 @@ export class QailClient {
                     parsed.hint,
                     parsed.table,
                     parsed.column,
+                    parsed.request_id,
                 );
             }
 
@@ -364,6 +426,44 @@ export class QailClient {
             url.searchParams.set(this.wsTokenQueryParam, token);
         }
         return url.toString();
+    }
+}
+
+// ─── Transaction Session ────────────────────────────────────────────
+
+/** Handle for an active transaction session */
+export class QailTxnSession {
+    constructor(
+        private client: QailClient,
+        public readonly txnId: string,
+    ) { }
+
+    /** Execute a query within this transaction */
+    async query<T = Record<string, unknown>>(dsl: string): Promise<QueryResponse<T>> {
+        return this.client.request('POST', '/txn/query', dsl, 'text/plain', {
+            'X-Transaction-Id': this.txnId,
+        });
+    }
+
+    /** Commit the transaction */
+    async commit(): Promise<TxnEndResponse> {
+        return this.client.request('POST', '/txn/commit', undefined, undefined, {
+            'X-Transaction-Id': this.txnId,
+        });
+    }
+
+    /** Rollback the transaction */
+    async rollback(): Promise<TxnEndResponse> {
+        return this.client.request('POST', '/txn/rollback', undefined, undefined, {
+            'X-Transaction-Id': this.txnId,
+        });
+    }
+
+    /** Create or release a savepoint within this transaction */
+    async savepoint(action: string, name: string): Promise<SavepointResponse> {
+        return this.client.request('POST', '/txn/savepoint', JSON.stringify({ action, name }), undefined, {
+            'X-Transaction-Id': this.txnId,
+        });
     }
 }
 

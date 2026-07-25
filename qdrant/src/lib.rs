@@ -1,8 +1,11 @@
-//! QAIL driver for Qdrant vector database.
+//! QAIL Vector Bridge for Qdrant.
 //!
-//! ⚠️ **BETA** - This crate is under active development. API may change.
+//! `qail-qdrant` provides Qdrant vector search, collection, upsert, delete, and
+//! payload filter operations with QAIL-compatible filter semantics.
 //!
-//! Native Rust driver with zero-copy gRPC and AST-based query building.
+//! This crate does not use SQL. The SQL string/SQL bytes distinction applies to
+//! the PostgreSQL crates (`qail-core` and `qail-pg`), while this crate maps
+//! filter intent to Qdrant request models.
 //!
 //! # Example
 //! ```ignore

@@ -34,6 +34,36 @@ pub(crate) fn apply_filters(
     cmd
 }
 
+/// Apply parsed filters to a Qail command, consuming filter values.
+pub(crate) fn apply_filters_owned(
+    mut cmd: qail_core::ast::Qail,
+    filters: Vec<(String, Operator, QailValue)>,
+) -> qail_core::ast::Qail {
+    for (column, op, value) in filters {
+        match op {
+            Operator::IsNull => {
+                cmd = cmd.is_null(&column);
+            }
+            Operator::IsNotNull => {
+                cmd = cmd.is_not_null(&column);
+            }
+            Operator::In | Operator::NotIn => {
+                if let QailValue::Array(vals) = value {
+                    if matches!(op, Operator::In) {
+                        cmd = cmd.in_vals(&column, vals);
+                    } else {
+                        cmd = cmd.filter(&column, Operator::NotIn, QailValue::Array(vals));
+                    }
+                }
+            }
+            _ => {
+                cmd = cmd.filter(&column, op, value);
+            }
+        }
+    }
+    cmd
+}
+
 /// Qualify unqualified base-table filter columns after flat JOIN expansion.
 ///
 /// TextSearch stores a validated CSV column list in `Expr::Named`, so each

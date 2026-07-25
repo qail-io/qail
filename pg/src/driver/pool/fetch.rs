@@ -221,6 +221,71 @@ impl PooledConnection {
         self.conn_mut()?.copy_out_raw_stream(&sql, on_chunk).await
     }
 
+    /// Execute a QAIL mutation command and return the affected row count.
+    ///
+    /// This is the pooled equivalent of [`crate::driver::PgDriver::execute`].
+    /// It uses the extended AST wire path and never interpolates values into SQL.
+    pub async fn execute(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<u64> {
+        use crate::protocol::AstEncoder;
+
+        let conn = self.conn_mut()?;
+
+        AstEncoder::encode_cmd_reuse_into(
+            cmd,
+            &mut conn.sql_buf,
+            &mut conn.params_buf,
+            &mut conn.write_buf,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+
+        conn.flush_write_buf().await?;
+
+        let mut affected = 0u64;
+        let mut error: Option<PgError> = None;
+        let mut flow =
+            ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_describe_portal_execute());
+
+        loop {
+            let msg = conn.recv().await?;
+            if let Err(err) = flow.validate(&msg, "pool execute mutation", error.is_some()) {
+                return return_with_desync(conn, err);
+            }
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::RowDescription(_) => {}
+                crate::protocol::BackendMessage::DataRow(_) => {}
+                crate::protocol::BackendMessage::NoData => {}
+                crate::protocol::BackendMessage::CommandComplete(tag) => {
+                    if error.is_none() {
+                        match crate::driver::parse_affected_rows(&tag) {
+                            Ok(parsed) => affected = parsed,
+                            Err(err) => return return_with_desync(conn, err),
+                        }
+                    }
+                }
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(affected);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::QueryServer(err.into()));
+                    }
+                }
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return return_with_desync(
+                        conn,
+                        unexpected_backend_message("pool execute mutation", &other),
+                    );
+                }
+            }
+        }
+    }
+
     /// Execute a QAIL command and fetch all rows (UNCACHED) with explicit result format.
     pub async fn fetch_all_uncached_with_format(
         &mut self,

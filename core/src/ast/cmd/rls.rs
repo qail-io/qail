@@ -277,20 +277,63 @@ impl Qail {
         }
     }
 
+    /// Declare that this query's tenant isolation is DELIBERATELY delegated to
+    /// the database's row-level-security policies (Phase 2 session variable +
+    /// Phase 3 `CREATE POLICY`) instead of AST injection.
+    ///
+    /// Use this for queries that are *intentionally cross-tenant by policy* —
+    /// e.g. a reseller storefront reading an operator's rows through a
+    /// contract-scope policy (`... OR tenant_id IN (SELECT principal_tenant_id
+    /// FROM tenant_contracts ...)`), or an insert whose payload `tenant_id`
+    /// must NOT be overwritten with the session tenant (settlement/payout
+    /// attribution). Calling [`Qail::with_rls`] on such a query would inject
+    /// `WHERE tenant_col = ctx.tenant` (hiding the policy-granted rows) or
+    /// overwrite the payload tenant; leaving the query bare trips the
+    /// build-time RLS audit. This marker is the explicit, auditable middle
+    /// ground: the AST is left untouched and the audit treats the query as
+    /// consciously scoped.
+    ///
+    /// The `RlsContext` argument is not applied to the AST — it documents (and
+    /// type-checks) which session context the caller runs the query under.
+    /// Policy delegation only isolates when the connection was acquired with
+    /// an RLS context (`acquire_with_rls`) so `app.current_tenant_id` is set
+    /// for the policies to read; it is NOT a bypass.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Reseller storefront reads the operator's package via the
+    /// // charter contract-scope DB policy — do NOT inject
+    /// // WHERE tenant_id = <reseller>.
+    /// let ctx = tenant.to_rls_context();
+    /// let query = Qail::get("charter_packages")
+    ///     .eq("slug", slug)
+    ///     .with_rls_policy(&ctx);
+    /// ```
+    #[must_use]
+    pub fn with_rls_policy(self, _ctx: &RlsContext) -> Self {
+        self
+    }
+
+    fn scope_boxed_query_rls(query: &mut Box<Qail>, ctx: &RlsContext) -> QailBuildResult<()> {
+        let nested = std::mem::take(query.as_mut());
+        **query = nested.with_rls(ctx)?;
+        Ok(())
+    }
+
     fn scope_nested_rls(mut self, ctx: &RlsContext) -> QailBuildResult<Self> {
         for cte in &mut self.ctes {
-            *cte.base_query = cte.base_query.as_ref().clone().with_rls(ctx)?;
+            Self::scope_boxed_query_rls(&mut cte.base_query, ctx)?;
             if let Some(ref mut recursive_query) = cte.recursive_query {
-                **recursive_query = recursive_query.as_ref().clone().with_rls(ctx)?;
+                Self::scope_boxed_query_rls(recursive_query, ctx)?;
             }
         }
 
         if let Some(ref mut source_query) = self.source_query {
-            **source_query = source_query.as_ref().clone().with_rls(ctx)?;
+            Self::scope_boxed_query_rls(source_query, ctx)?;
         }
 
         for (_, set_query) in &mut self.set_ops {
-            **set_query = set_query.as_ref().clone().with_rls(ctx)?;
+            Self::scope_boxed_query_rls(set_query, ctx)?;
         }
 
         self.scope_embedded_expr_rls(ctx)?;
@@ -306,7 +349,7 @@ impl Qail {
                 }
             }
             Value::Subquery(query) => {
-                **query = query.as_ref().clone().with_rls(ctx)?;
+                Self::scope_boxed_query_rls(query, ctx)?;
             }
             Value::Expr(expr) => Self::scope_expr_nested_rls(expr, ctx)?,
             _ => {}
@@ -385,7 +428,7 @@ impl Qail {
             }
             Expr::FieldAccess { expr, .. } => Self::scope_expr_nested_rls(expr, ctx)?,
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
-                **query = query.as_ref().clone().with_rls(ctx)?;
+                Self::scope_boxed_query_rls(query, ctx)?;
             }
             Expr::Star
             | Expr::Named(_)
@@ -712,7 +755,7 @@ impl Qail {
             return Ok(());
         };
 
-        let scoped_query = query.as_ref().clone().with_rls(ctx)?;
+        let scoped_query = std::mem::take(query.as_mut()).with_rls(ctx)?;
         let scoped_query = ensure_merge_query_source_projects_tenant(
             scoped_query,
             &target_table,

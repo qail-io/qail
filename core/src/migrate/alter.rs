@@ -19,7 +19,7 @@ use super::types::ColumnType;
 #[derive(Debug, Clone)]
 pub enum AlterOp {
     /// ADD COLUMN.
-    AddColumn(Column),
+    AddColumn(Box<Column>),
     /// DROP COLUMN \[CASCADE\].
     DropColumn {
         /// Column name.
@@ -145,7 +145,7 @@ impl AlterTable {
 
     /// ADD COLUMN
     pub fn add_column(mut self, col: Column) -> Self {
-        self.ops.push(AlterOp::AddColumn(col));
+        self.ops.push(AlterOp::AddColumn(Box::new(col)));
         self
     }
 

@@ -2,19 +2,44 @@
 
 > **The AST-Native Query Compiler with Built-in Row-Level Security**
 
-QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
+QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via PostgreSQL RLS context setup.
 
-## Latest Updates (June 2026)
+## Product Map
 
-- QAIL is now on the `v1.3.2` stable line across the Rust workspace crates and CLI.
+| Concept | Crate | Purpose |
+|---------|-------|---------|
+| AST Kernel | `qail-core` | Typed AST, parser, expressions, RLS context, native access policy |
+| Postgres Driver | `qail-pg` | Async PostgreSQL wire-protocol execution |
+| Access Gateway | `qail-gateway` | AutoREST, WebSocket, OpenAPI, auth/RLS/policy enforcement |
+| SchemaOps CLI | `qail` | Schema pull, live drift diff, phased migrations, lint, codegen |
+| Flow Engine | `qail-workflow` | Declarative workflow state machines |
+| Flow Ledger | `qail-workflow-postgres` | PostgreSQL workflow leases, state, idempotency, side effects, timeouts |
+| Vector Bridge | `qail-qdrant` | Qdrant vector search with AST-compatible filters |
+
+For a deeper orientation, read the [Platform Map](./platform-map.md). It
+explains which crate owns each safety boundary and which surface to choose for
+driver, gateway, schema, workflow, or vector workloads.
+
+## Latest Updates (July 2026)
+
+- QAIL is now on the `v1.3.6` stable line across the Rust workspace crates and CLI.
+- PostgreSQL SCRAM dependencies now resolve `cmov` `0.5.4`, and gateway
+  metrics/cache dependencies resolve `crossbeam-epoch` `0.9.20`.
+- Linux `io_uring` transport is now explicit opt-in; Tokio remains the default
+  unless `[postgres].io_uring = true`, `?io_uring=true`, driver/pool options,
+  or `QAIL_PG_IO_BACKEND=io_uring` enables it.
 - The public API is the AST/DSL path: `Qail::get/add/set/del`, typed expressions, relation helpers, RLS contexts, and driver/pool execution.
 - Compatibility aliases that hid fallible behavior were removed: use `with_rls(&ctx)?` and `join_on(...)?` directly.
 - Legacy raw SQL builder APIs remain out of the normal runtime path; use AST-native commands and session AST helpers instead.
 - PostgreSQL cancel-key APIs are bytes-native, matching protocol `3.0` and `3.2` behavior.
 - Native vertical access policy is now first-class through `qail_core::access` and optional `[access]` config for operation and column permissions alongside PostgreSQL RLS.
-- PostgreSQL prepared statement caching, NOTIFY flushing, MERGE/source-query access checks, and strict migration verification were hardened in the latest audit pass.
-- Gateway numeric preservation, Qdrant vector encoding, workflow branch cursors, and SDK route-segment encoding now have focused regression coverage.
+- Workflow charge side effects now carry stable idempotency keys, origin
+  metadata, and redacted display payloads for payment/chat surfaces.
 - Migration docs use the expand/backfill/contract apply model instead of presenting up/down as the primary workflow.
+
+Read [Access Policy](./features/access-policy.md) for the vertical permission
+model and [Workflows](./features/workflows.md) for Flow Engine / Flow Ledger
+production semantics.
 
 ## Philosophy: AST = Meaning
 
@@ -35,7 +60,7 @@ Some search engines still surface old QAIL pages showing symbolic forms such as 
 
 Those pages are from historical pre-1.0 releases and are not the current API guidance.
 
-Current QAIL `1.3.2` application code should use the native AST/DSL path:
+Current QAIL `1.3.6` application code should use the native AST/DSL path:
 
 ```rust
 let query = Qail::get("users")
@@ -72,7 +97,7 @@ let cmd = Qail::get("users")
 
 // Execute with qail-pg driver
 let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
-let rows = driver.query(&cmd).await?;
+let rows = driver.fetch_all(&cmd).await?;
 ```
 
 ## Current Status (Production Ready, Actively Hardened)
@@ -134,7 +159,7 @@ QAIL is **AST-first**, not SQL-string-first. Many traditional SQL "security feat
 // SQL String (vulnerable):
 let sql = format!("SELECT * FROM users WHERE id = {}", user_input);
 
-// QAIL AST (impossible to inject):
+// QAIL AST (structure is not interpolated from user text):
 Qail::get("users").filter("id", Operator::Eq, user_input)
 // user_input becomes Value::Int(123) or Value::Text("...") 
 // — never interpolated into a string

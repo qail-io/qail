@@ -903,6 +903,7 @@ impl PgPool {
             gss_token_provider: config.gss_token_provider,
             gss_token_provider_ex: config.gss_token_provider_ex.clone(),
             auth: config.auth_settings,
+            io_uring: config.io_uring,
             startup_params: Vec::new(),
         };
 

@@ -16,7 +16,7 @@ use qail_core::validator::Validator;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -42,7 +42,7 @@ pub struct OpenDocument {
 pub struct WorkspaceSchemaCache {
     pub schema_path: PathBuf,
     pub schema_watch_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
-    pub validator: Option<Validator>,
+    pub validator: Option<Arc<Validator>>,
     pub build_schema: Option<BuildSchema>,
 }
 
@@ -122,7 +122,7 @@ impl QailLanguageServer {
 
         let validator = Schema::from_qail_schema(&content)
             .ok()
-            .map(|schema| schema.to_validator());
+            .map(|schema| Arc::new(schema.to_validator()));
         let build_schema = BuildSchema::parse(&content).ok();
 
         if let Ok(mut schemas) = self.schemas.write() {
@@ -138,7 +138,7 @@ impl QailLanguageServer {
         }
     }
 
-    pub(crate) fn schema_validator_for_uri(&self, uri: &str) -> Option<Validator> {
+    pub(crate) fn schema_validator_for_uri(&self, uri: &str) -> Option<Arc<Validator>> {
         let root = self.try_load_schema_from_uri(uri)?;
         self.schemas.read().ok()?.get(&root)?.validator.clone()
     }
@@ -158,12 +158,9 @@ impl QailLanguageServer {
         extract_text_query_at_position(content, position)
     }
 
-    pub(crate) fn get_document(&self, uri: &str) -> Option<String> {
-        self.documents
-            .read()
-            .ok()?
-            .get(uri)
-            .map(|doc| doc.text.clone())
+    pub(crate) fn with_document<R>(&self, uri: &str, f: impl FnOnce(&str) -> R) -> Option<R> {
+        let docs = self.documents.read().ok()?;
+        Some(f(&docs.get(uri)?.text))
     }
 
     /// Get diagnostics for a document. Pass the file URI to enable N+1 detection for `.rs` files.

@@ -46,18 +46,21 @@ Every connection follows a strict lifecycle:
 
 ```
 acquire_with_rls(ctx)
-  → set_config('app.current_tenant_id', '...', false)
-  → set_config('app.current_user_id', '...', false)
-  → set_config('app.current_agent_id', '...', false)
-  → set_config('app.is_super_admin', '...', false)
+  → BEGIN
+  → SET LOCAL statement_timeout = ...
+  → set_config('app.current_tenant_id', '...', true)
+  → set_config('app.current_user_id', '...', true)
+  → set_config('app.current_agent_id', '...', true)
+  → set_config('app.is_super_admin', '...', true)
   → execute queries (RLS policies filter rows automatically)
   → release()
-      → DISCARD ALL (clears ALL server-side state)
-      → clear client-side caches
+      → COMMIT (resets transaction-local GUCs and SET LOCAL values)
       → return to pool
 ```
 
-`DISCARD ALL` destroys prepared statements, temp tables, GUCs, and all session state. This guarantees zero state leakage between tenants sharing the same physical connection.
+Transaction-local settings reset on `COMMIT`. Prepared statement caches remain
+available for performance, while tenant/user context is set again on every
+RLS-aware checkout.
 
 ## Pool Stats
 

@@ -1,10 +1,27 @@
-//! PostgreSQL driver with AST-native wire encoding.
+//! QAIL Postgres Driver.
 //!
-//! **Features:** Zero-alloc encoding, LRU cache (100 max), connection pooling, COPY protocol.
+//! `qail-pg` executes `qail-core` AST commands through the native PostgreSQL
+//! wire protocol. It owns connection I/O, TLS, authentication, pooling,
+//! prepared AST execution, pipeline execution, COPY, LISTEN/NOTIFY, and
+//! PostgreSQL type conversion.
+//!
+//! The normal application path is:
+//!
+//! ```text
+//! qail_core::Qail AST -> qail_pg::PgDriver/PgPool -> PostgreSQL wire protocol
+//! ```
+//!
+//! SQL text may still appear in debugging, EXPLAIN output, or server-side
+//! PostgreSQL parse/plan behavior, but application code should build `Qail`
+//! commands instead of concatenating SQL strings.
 //!
 //! ```ignore
+//! use qail_core::prelude::*;
+//! use qail_pg::PgDriver;
+//!
 //! let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
-//! let rows = driver.fetch_all(&Qail::get("users").limit(10)).await?;
+//! let cmd = Qail::get("users").columns(["id", "email"]).limit(10);
+//! let rows = driver.fetch_all(&cmd).await?;
 //! ```
 
 #![deny(deprecated)]

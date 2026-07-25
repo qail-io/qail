@@ -167,6 +167,12 @@ pub struct PostgresConfig {
     /// Whether to test connections on acquire.
     pub test_on_acquire: bool,
 
+    /// Opt into Linux io_uring for plain TCP PostgreSQL transport.
+    ///
+    /// Disabled by default because some deployments disallow io_uring for
+    /// kernel attack-surface policy reasons.
+    pub io_uring: bool,
+
     /// RLS defaults.
     pub rls: Option<RlsConfig>,
 
@@ -184,6 +190,7 @@ impl Default for PostgresConfig {
             acquire_timeout_secs: default_acquire_timeout(),
             connect_timeout_secs: default_connect_timeout(),
             test_on_acquire: false,
+            io_uring: false,
             rls: None,
             ssh: None,
         }
@@ -502,6 +509,9 @@ fn parse_postgres(root: &toml::Table) -> ConfigResult<PostgresConfig> {
     }
     if let Some(v) = opt_bool(tbl, "postgres", "test_on_acquire")? {
         cfg.test_on_acquire = v;
+    }
+    if let Some(v) = opt_bool(tbl, "postgres", "io_uring")? {
+        cfg.io_uring = v;
     }
     cfg.ssh = opt_string(tbl, "postgres", "ssh")?;
 
@@ -910,6 +920,7 @@ url = "postgres://localhost/test"
 max_connections = 25
 min_connections = 5
 idle_timeout_secs = 300
+io_uring = true
 
 [postgres.rls]
 default_role = "app_user"
@@ -944,6 +955,7 @@ embedding_model = "candle:bert-base"
         assert_eq!(config.project.schema_strict_manifest, Some(true));
         assert_eq!(config.postgres.max_connections, 25);
         assert_eq!(config.postgres.min_connections, 5);
+        assert!(config.postgres.io_uring);
 
         let rls = config.postgres.rls.unwrap();
         assert_eq!(rls.default_role.unwrap(), "app_user");
@@ -985,6 +997,7 @@ url = "postgres://localhost/legacy"
         assert_eq!(config.postgres.url, "postgres://localhost/legacy");
         // All new fields should have defaults
         assert_eq!(config.postgres.max_connections, 10);
+        assert!(!config.postgres.io_uring);
         assert!(config.postgres.rls.is_none());
         assert!(config.qdrant.is_none());
         assert!(config.gateway.is_none());

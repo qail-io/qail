@@ -113,6 +113,7 @@ impl PgConnection {
             gss_token_provider,
             gss_token_provider_ex,
             auth,
+            io_uring,
             startup_params,
         } = options;
 
@@ -146,6 +147,7 @@ impl PgConnection {
                     auth_settings: auth,
                     gss_token_provider,
                     gss_token_provider_ex,
+                    io_uring,
                     protocol_minor: Self::default_protocol_minor(),
                     startup_params: startup_params.clone(),
                 },
@@ -172,6 +174,7 @@ impl PgConnection {
                             auth_settings: auth,
                             gss_token_provider,
                             gss_token_provider_ex: gss_token_provider_ex.clone(),
+                            io_uring,
                             protocol_minor: default_minor,
                             startup_params: startup_params.clone(),
                         };
@@ -280,6 +283,7 @@ impl PgConnection {
                     auth_settings: auth,
                     gss_token_provider,
                     gss_token_provider_ex,
+                    io_uring,
                     protocol_minor: Self::default_protocol_minor(),
                     startup_params: startup_params.clone(),
                 })
@@ -296,6 +300,7 @@ impl PgConnection {
                         auth_settings: auth,
                         gss_token_provider,
                         gss_token_provider_ex,
+                        io_uring,
                         protocol_minor: Self::default_protocol_minor(),
                         startup_params: startup_params.clone(),
                     },
@@ -314,6 +319,7 @@ impl PgConnection {
                         auth_settings: auth,
                         gss_token_provider,
                         gss_token_provider_ex: gss_token_provider_ex.clone(),
+                        io_uring,
                         protocol_minor: Self::default_protocol_minor(),
                         startup_params: startup_params.clone(),
                     },
@@ -334,6 +340,7 @@ impl PgConnection {
                             auth_settings: auth,
                             gss_token_provider,
                             gss_token_provider_ex,
+                            io_uring,
                             protocol_minor: Self::default_protocol_minor(),
                             startup_params: startup_params.clone(),
                         })
@@ -504,6 +511,7 @@ impl PgConnection {
             auth_settings,
             gss_token_provider: None,
             gss_token_provider_ex: None,
+            io_uring: false,
             protocol_minor: Self::default_protocol_minor(),
             startup_params: Vec::new(),
         })
@@ -527,7 +535,7 @@ impl PgConnection {
         params: ConnectParams<'_>,
     ) -> PgResult<Self> {
         let connect_started = Instant::now();
-        let attempt_backend = plain_connect_attempt_backend();
+        let attempt_backend = plain_connect_attempt_backend(params.io_uring);
         record_connect_attempt(CONNECT_TRANSPORT_PLAIN, attempt_backend);
         let result = tokio::time::timeout(
             DEFAULT_CONNECT_TIMEOUT,
@@ -564,12 +572,13 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            io_uring,
             protocol_minor,
             startup_params,
         } = params;
         let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
         let addr = socket_addr(host, port);
-        let stream = Self::connect_plain_stream(&addr).await?;
+        let stream = Self::connect_plain_stream(&addr, io_uring).await?;
 
         let mut conn = Self {
             stream,
@@ -613,13 +622,13 @@ impl PgConnection {
         Ok(conn)
     }
 
-    async fn connect_plain_stream(addr: &str) -> PgResult<PgStream> {
+    async fn connect_plain_stream(addr: &str, io_uring: bool) -> PgResult<PgStream> {
         let tcp_stream = TcpStream::connect(addr).await?;
         tcp_stream.set_nodelay(true)?;
 
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            if should_try_uring_plain() {
+            if should_try_uring_plain(io_uring) {
                 let std_stream = tcp_stream.into_std()?;
                 let fallback_std = std_stream.try_clone()?;
                 match super::super::uring::UringTcpStream::from_std(std_stream) {
@@ -642,6 +651,10 @@ impl PgConnection {
                     }
                 }
             }
+        }
+        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+        {
+            let _ = io_uring;
         }
 
         Ok(PgStream::Tcp(tcp_stream))
@@ -688,6 +701,7 @@ impl PgConnection {
                 auth_settings,
                 gss_token_provider: None,
                 gss_token_provider_ex: None,
+                io_uring: false,
                 protocol_minor: Self::default_protocol_minor(),
                 startup_params: Vec::new(),
             },
@@ -752,6 +766,7 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            io_uring: _,
             protocol_minor,
             startup_params,
         } = params;
@@ -908,6 +923,7 @@ impl PgConnection {
                 auth_settings,
                 gss_token_provider: None,
                 gss_token_provider_ex: None,
+                io_uring: false,
                 protocol_minor: Self::default_protocol_minor(),
                 startup_params: Vec::new(),
             },
@@ -972,6 +988,7 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            io_uring: _,
             protocol_minor,
             startup_params,
         } = params;

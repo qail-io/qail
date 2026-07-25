@@ -33,9 +33,9 @@ table users {
     id          uuid primary_key
     email       text not_null unique
     name        text
-    active      boolean default(true)
+    active      boolean default true
     age         integer
-    created_at  timestamptz default(now())
+    created_at  timestamptz default now()
 }
 ```
 

@@ -552,11 +552,12 @@ fn insert_payload_entry(
     value: PayloadValue,
     label: &str,
 ) -> QdrantResult<()> {
-    if payload.insert(key.clone(), value).is_some() {
+    if payload.contains_key(&key) {
         return Err(QdrantError::Decode(format!(
             "Duplicate payload key in {label}: {key}"
         )));
     }
+    payload.insert(key, value);
     Ok(())
 }
 

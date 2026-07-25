@@ -67,7 +67,8 @@ pub(super) fn parse_database_url(
         ));
     }
 
-    let mut config = PoolConfig::new(host, port, &user, &database);
+    let mut config =
+        PoolConfig::new(host, port, &user, &database).io_uring(gateway_config.pg_io_uring);
 
     if let Some(mode) = TlsMode::parse_sslmode(&gateway_config.pg_sslmode) {
         config = config.tls_mode(mode);
@@ -138,6 +139,12 @@ pub(super) fn parse_database_url(
                     )));
                 }
                 auth_settings.channel_binding = mode;
+            }
+            "io_uring" => {
+                let enabled = parse_bool_query(value.as_ref()).ok_or_else(|| {
+                    GatewayError::Config(format!("Invalid io_uring value: {}", value))
+                })?;
+                config = config.io_uring(enabled);
             }
             "auth_scram" => {
                 let enabled = parse_bool_query(value.as_ref()).ok_or_else(|| {

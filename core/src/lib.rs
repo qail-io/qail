@@ -1,10 +1,27 @@
-//! Type-safe SQL query builder with AST-native design.
+//! QAIL AST Kernel.
 //!
-//! Build queries as typed AST, not strings. Zero SQL injection risk.
+//! Build database intent as typed AST, not application-assembled SQL strings.
+//! The AST can then be validated, policy-checked, formatted, encoded for a
+//! driver, or inspected by tooling.
+//!
+//! Main concepts:
+//!
+//! - `Qail`: the primary command builder for `get`, `add`, `set`, `del`,
+//!   `put`, `merge_into`, CTEs, filters, projections, and returning clauses.
+//! - `access`: native table/operation/column policy checks.
+//! - `rls`: tenant/user/super-admin execution context witnesses.
+//! - `migrate`: `schema.qail` parsing, diffing, and migration model types.
+//! - `build`: source scanner helpers for stale schema references and N+1
+//!   diagnostics.
 //!
 //! ```ignore
-//! use qail_core::ast::{Qail, Operator};
-//! let cmd = Qail::get("users").column("name").filter("active", Operator::Eq, true);
+//! use qail_core::prelude::*;
+//!
+//! let ctx = RlsContext::tenant("018f6a60-4d5f-7a9d-9f4c-7dd8c338f1d2");
+//! let cmd = Qail::get("users")
+//!     .columns(["id", "email"])
+//!     .eq("active", true)
+//!     .with_rls(&ctx)?;
 //! ```
 
 /// Native vertical access policy checks for QAIL commands.
