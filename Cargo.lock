@@ -2208,7 +2208,7 @@ dependencies = [
  "postgres-protocol",
  "proptest",
  "qail-core",
- "rand 0.9.3",
+ "rand 0.10.1",
  "rustls-native-certs",
  "ryu",
  "sha2 0.10.9",
