@@ -63,6 +63,7 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
             function_def: None,
             trigger_def: None,
             policy_def: None,
+            view_security_invoker: false,
         },
     ))
 }
@@ -347,6 +348,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
             function_def: None,
             trigger_def: None,
             policy_def: None,
+            view_security_invoker: false,
         },
     ))
 }

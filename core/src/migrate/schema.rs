@@ -754,6 +754,18 @@ pub struct ViewDef {
     pub query: String,
     /// Whether this is a MATERIALIZED VIEW.
     pub materialized: bool,
+    /// `WITH (security_invoker = true)` — evaluate the base tables with the
+    /// CALLER's privileges instead of the view owner's.
+    ///
+    /// Without it Postgres checks the base tables as the view OWNER, so any
+    /// row-level security on them is bypassed: a tenant selecting through the
+    /// view sees every tenant's rows. Set this on any view over an
+    /// RLS-protected table. Leave it off only for views that are deliberately
+    /// owner-rights (a public projection that must be readable with no tenant
+    /// context) — and say so in a comment, because the default is the unsafe
+    /// direction. Requires PostgreSQL 15+; ignored on MATERIALIZED views,
+    /// which Postgres does not support it for.
+    pub security_invoker: bool,
 }
 
 impl ViewDef {
@@ -763,12 +775,19 @@ impl ViewDef {
             name: name.into(),
             query: query.into(),
             materialized: false,
+            security_invoker: false,
         }
     }
 
     /// Mark as MATERIALIZED VIEW.
     pub fn materialized(mut self) -> Self {
         self.materialized = true;
+        self
+    }
+
+    /// Evaluate base tables with the caller's privileges so their RLS applies.
+    pub fn security_invoker(mut self) -> Self {
+        self.security_invoker = true;
         self
     }
 }
@@ -2134,7 +2153,15 @@ pub fn to_qail_string(schema: &Schema) -> String {
             "view"
         };
         let body = dollar_quote_qail_body(&view.query);
-        output.push_str(&format!("{} {} {}\n\n", prefix, view.name, body));
+        let modifier = if view.security_invoker {
+            " security_invoker"
+        } else {
+            ""
+        };
+        output.push_str(&format!(
+            "{} {}{} {}\n\n",
+            prefix, view.name, modifier, body
+        ));
     }
 
     // Functions

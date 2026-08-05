@@ -112,6 +112,34 @@ pub fn lookup_tenant_column(table: &str) -> Option<String> {
     registry.get(table).map(|s| s.to_string())
 }
 
+/// Whether [`crate::ast::Qail::with_rls`] will actually scope a query on `relation`.
+///
+/// `with_rls` is a NO-OP for any relation the registry does not know: it
+/// returns the query untouched, so the call site reads as scoped while the SQL
+/// is not. That is the intended behaviour for genuinely global reference data,
+/// but it FAILS OPEN — a typo, a renamed table, a differently-named tenant
+/// column, or a VIEW (never registered, since [`load_tenant_tables`] only scans
+/// `table` blocks for a literal `tenant_id`) all silently produce an unscoped
+/// query.
+///
+/// Use this to assert scoping where it is load-bearing, and in build-time
+/// audits to enumerate `with_rls` call sites that scope nothing:
+///
+/// ```ignore
+/// debug_assert!(
+///     qail_core::rls::tenant::scoping_applies("orders"),
+///     "orders must be tenant-registered or this read leaks across tenants",
+/// );
+/// ```
+///
+/// Views deserve particular care: they cannot carry RLS themselves, and unless
+/// they are declared `security_invoker` Postgres evaluates their base tables as
+/// the view OWNER, bypassing those tables' policies too. A view read through
+/// `with_rls` therefore has NEITHER layer of protection.
+pub fn scoping_applies(relation: &str) -> bool {
+    lookup_tenant_column(relation).is_some()
+}
+
 /// Load tenant tables from a schema.qail file.
 /// Auto-detects tables with `tenant_id` columns.
 /// Returns the number of tenant tables found.

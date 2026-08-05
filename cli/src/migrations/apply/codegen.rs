@@ -649,6 +649,9 @@ fn compile_views_strict(views: &[ViewDef]) -> Result<Vec<Qail>> {
             },
             table: view.name.clone(),
             payload: Some(query.to_string()),
+            // Postgres has no security_invoker for MATERIALIZED views, so the
+            // flag only rides along on plain ones.
+            view_security_invoker: view.security_invoker && !view.materialized,
             ..Default::default()
         });
     }

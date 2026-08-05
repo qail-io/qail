@@ -715,6 +715,34 @@ fn test_alter_set_default_rejects_invalid_fragments() {
 }
 
 #[test]
+fn test_view_security_invoker_emits_with_clause() {
+    let plain = Qail {
+        action: Action::CreateView,
+        table: "tenant_rows".to_string(),
+        payload: Some("SELECT * FROM orders".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        plain.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE VIEW tenant_rows AS SELECT * FROM orders",
+        "owner-rights stays the default — matching Postgres"
+    );
+
+    let invoker = Qail {
+        action: Action::CreateView,
+        table: "tenant_rows".to_string(),
+        payload: Some("SELECT * FROM orders".to_string()),
+        view_security_invoker: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        invoker.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE VIEW tenant_rows WITH (security_invoker = true) AS SELECT * FROM orders",
+        "without this clause the view reads its base tables as the OWNER and bypasses their RLS"
+    );
+}
+
+#[test]
 fn test_view_payload_fragments_reject_invalid_fragments() {
     let safe = Qail {
         action: Action::CreateView,

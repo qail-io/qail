@@ -1479,7 +1479,17 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
     };
 
     if let Some((dollar_pos, delimiter)) = find_dollar_delimiter(rest) {
-        let name = rest[..dollar_pos].trim();
+        let mut name = rest[..dollar_pos].trim();
+        // `view <name> [security_invoker] $$ … $$` — the modifier makes the
+        // view evaluate its base tables with the caller's rights so their RLS
+        // still applies (see ViewDef::security_invoker).
+        let mut security_invoker = false;
+        if let Some(stripped) = name.strip_suffix("security_invoker") {
+            if stripped.is_empty() || stripped.ends_with(char::is_whitespace) {
+                security_invoker = true;
+                name = stripped.trim();
+            }
+        }
         if name.is_empty() {
             return Err("view name is required".to_string());
         }
@@ -1496,6 +1506,9 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
         let mut view = ViewDef::new(name, body.trim());
         if materialized {
             view = view.materialized();
+        }
+        if security_invoker {
+            view = view.security_invoker();
         }
         Ok(view)
     } else {
@@ -4211,6 +4224,45 @@ index idx_name_lower on users ((lower(name)))
         assert_eq!(schema.views[0].name, "active_users");
         assert!(schema.views[0].query.contains("SELECT * FROM users"));
         assert!(!schema.views[0].materialized);
+        // Owner-rights is still the parse default — it is Postgres's default,
+        // and silently flipping it would change the meaning of every existing
+        // schema on the next apply.
+        assert!(!schema.views[0].security_invoker);
+    }
+
+    #[test]
+    fn test_parse_view_security_invoker() {
+        let input = "view tenant_rows security_invoker $$ SELECT * FROM orders $$";
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.views.len(), 1);
+        assert_eq!(schema.views[0].name, "tenant_rows");
+        assert!(schema.views[0].security_invoker);
+        assert!(schema.views[0].query.contains("SELECT * FROM orders"));
+    }
+
+    #[test]
+    fn test_view_security_invoker_round_trips_through_qail_text() {
+        // pull → schema.qail → apply must preserve the flag; dropping it on a
+        // round-trip would silently re-open the RLS bypass it exists to close.
+        let input = "view tenant_rows security_invoker $$ SELECT * FROM orders $$";
+        let schema = parse_qail(input).unwrap();
+        let rendered = crate::migrate::schema::to_qail_string(&schema);
+        assert!(
+            rendered.contains("view tenant_rows security_invoker"),
+            "security_invoker lost when rendering back to qail: {rendered}"
+        );
+        let reparsed = parse_qail(&rendered).unwrap();
+        assert!(reparsed.views[0].security_invoker);
+    }
+
+    #[test]
+    fn test_parse_view_name_ending_in_security_invoker_is_not_a_modifier() {
+        // A view legitimately NAMED `..._security_invoker` must not have its
+        // name eaten by the modifier check.
+        let input = "view audit_security_invoker $$ SELECT 1 $$";
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.views[0].name, "audit_security_invoker");
+        assert!(!schema.views[0].security_invoker);
     }
 
     #[test]

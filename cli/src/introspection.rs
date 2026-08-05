@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use qail_core::ast::{Condition, Expr, JoinKind, Operator, Qail, Value};
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{Deferrable, FkAction};
-use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
+use qail_core::migrate::schema::{Grant, Privilege, SchemaFunctionDef, SchemaTriggerDef, ViewDef};
 use qail_core::migrate::{
     CheckConstraint, Column, ForeignKey, Generated, Index, MultiColumnForeignKey, Schema, Table,
     to_qail_string,
@@ -16,6 +16,128 @@ use qail_core::migrate::{
 use qail_pg::driver::PgDriver;
 
 use crate::util::{parse_pg_url, redact_url};
+
+/// One parsed entry of a Postgres `aclitem[]`, rendered as
+/// `grantee=privileges/grantor` (an empty grantee means `PUBLIC`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AclEntry {
+    /// Role receiving the privileges; `None` for `PUBLIC`.
+    pub grantee: Option<String>,
+    /// Raw privilege letters, grant-option markers stripped.
+    pub letters: String,
+    /// Any privilege carried `WITH GRANT OPTION` (a `*` suffix).
+    pub has_grant_option: bool,
+}
+
+/// Split a `relacl` text rendering into its entries.
+///
+/// Postgres renders the array as `{alice=arwd/bob,=r/bob}`. Role names may be
+/// double-quoted when they need it, and a quoted name can itself contain a
+/// comma or an `=`, so this walks the string rather than splitting on
+/// punctuation.
+pub(crate) fn parse_acl_array(raw: &str) -> Vec<AclEntry> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .map(str::trim)
+    else {
+        return Vec::new();
+    };
+    if inner.is_empty() {
+        return Vec::new();
+    }
+
+    // Single pass: split on commas outside double quotes, and remember where
+    // the `=` separator was. The split point has to be recorded DURING the scan
+    // — once the quotes are stripped, a `=` inside a quoted role name is
+    // indistinguishable from the separator, and searching afterwards would cut
+    // the name in half.
+    let mut items: Vec<(String, Option<usize>)> = Vec::new();
+    let mut current = String::new();
+    let mut eq_at: Option<usize> = None;
+    let mut in_quotes = false;
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                // Escaped character inside a quoted name — take it verbatim.
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                items.push((std::mem::take(&mut current), eq_at.take()));
+            }
+            '=' if !in_quotes && eq_at.is_none() => {
+                eq_at = Some(current.len());
+                current.push(ch);
+            }
+            _ => current.push(ch),
+        }
+    }
+    items.push((current, eq_at));
+
+    items
+        .into_iter()
+        .filter_map(|(item, eq_at)| {
+            if item.trim().is_empty() {
+                return None;
+            }
+            // `grantee=privs/grantor`; the grantor half is not modelled.
+            let eq_at = eq_at?;
+            let grantee = item[..eq_at].trim();
+            let privs = item[eq_at + 1..].split('/').next().unwrap_or("");
+            Some(AclEntry {
+                grantee: (!grantee.is_empty()).then(|| grantee.to_string()),
+                letters: privs.replace('*', ""),
+                has_grant_option: privs.contains('*'),
+            })
+        })
+        .collect()
+}
+
+/// Map Postgres privilege letters onto the modelled [`Privilege`] set.
+///
+/// Returns `All` when the letters cover every privilege the relation kind can
+/// carry, so a fully-granted table round-trips as `grant all` rather than an
+/// enumeration that would drift the moment Postgres adds a privilege letter
+/// (as 17 did with MAINTAIN).
+///
+/// Letters with no modelled equivalent — TRUNCATE, REFERENCES, TRIGGER,
+/// MAINTAIN — are reported separately rather than dropped, because a silently
+/// narrowed grant is exactly the kind of schema drift that looks fine until
+/// production denies a query.
+pub(crate) fn privileges_from_acl_letters(
+    letters: &str,
+    relkind: &str,
+) -> (Vec<Privilege>, Vec<char>) {
+    // Full privilege sets per relation kind (PostgreSQL 17+).
+    let full: &str = match relkind {
+        "S" => "rwU",
+        _ => "arwdDxtm",
+    };
+    let present: std::collections::BTreeSet<char> = letters.chars().collect();
+    if full.chars().all(|c| present.contains(&c)) {
+        return (vec![Privilege::All], Vec::new());
+    }
+
+    let mut privileges = Vec::new();
+    let mut unmodelled = Vec::new();
+    for ch in letters.chars() {
+        match ch {
+            'r' => privileges.push(Privilege::Select),
+            'a' => privileges.push(Privilege::Insert),
+            'w' => privileges.push(Privilege::Update),
+            'd' => privileges.push(Privilege::Delete),
+            'U' => privileges.push(Privilege::Usage),
+            'X' => privileges.push(Privilege::Execute),
+            other => unmodelled.push(other),
+        }
+    }
+    (privileges, unmodelled)
+}
 
 fn parse_required_i32(raw: Option<String>, label: &str) -> Result<i32> {
     let raw = raw.ok_or_else(|| anyhow!("Missing {label}"))?;
@@ -1014,6 +1136,107 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         });
     }
 
+    // ── 10b. Grants (AST-native) ─────────────────────────────────────────
+    //
+    // Privileges were previously not introspected at all, which made
+    // `schema.qail` silent about who can read what. A relation created without
+    // a grant to the application role therefore looked perfectly healthy in the
+    // schema and failed only in production, at runtime, as
+    // `[42501] permission denied` — with nothing in the schema to diff against.
+    //
+    // Only non-owner entries are emitted: the owner's ACL is implied by
+    // ownership and Postgres recreates it, so recording it would add a line per
+    // relation that says nothing.
+    let acl_cmd = Qail::get("pg_catalog.pg_class")
+        .columns(["relname", "relacl", "relkind", "relowner"])
+        .filter("relnamespace", Operator::Eq, public_namespace_oid.clone())
+        .filter(
+            "relkind",
+            Operator::In,
+            Value::Array(vec![
+                Value::String("r".into()),
+                Value::String("v".into()),
+                Value::String("m".into()),
+                Value::String("S".into()),
+            ]),
+        );
+    let acl_rows = driver
+        .fetch_all(&acl_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query relation privileges: {}", e))?;
+
+    // relowner is an OID; resolve to role names so owner entries can be skipped.
+    let role_cmd = Qail::get("pg_catalog.pg_roles").columns(["oid", "rolname"]);
+    let role_rows = driver
+        .fetch_all(&role_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query roles: {}", e))?;
+    let role_by_oid: std::collections::HashMap<String, String> = role_rows
+        .iter()
+        .map(|row| (row.text(0), row.text(1)))
+        .collect();
+
+    let mut grants: Vec<Grant> = Vec::new();
+    let mut acl_warnings: Vec<String> = Vec::new();
+    for row in &acl_rows {
+        let relname = row.text(0);
+        let relacl = row.text(1);
+        let relkind = row.text(2);
+        let owner = role_by_oid.get(&row.text(3)).cloned().unwrap_or_default();
+
+        for entry in parse_acl_array(&relacl) {
+            let grantee = entry.grantee.clone().unwrap_or_else(|| "public".to_string());
+            if grantee == owner {
+                continue;
+            }
+            let (privileges, unmodelled) = privileges_from_acl_letters(&entry.letters, &relkind);
+            if !unmodelled.is_empty() {
+                acl_warnings.push(format!(
+                    "{relname}: {grantee} holds {} which schema.qail cannot express",
+                    unmodelled
+                        .iter()
+                        .map(|c| match c {
+                            'D' => "TRUNCATE",
+                            'x' => "REFERENCES",
+                            't' => "TRIGGER",
+                            'm' => "MAINTAIN",
+                            _ => "an unknown privilege",
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if entry.has_grant_option {
+                acl_warnings.push(format!(
+                    "{relname}: {grantee} holds WITH GRANT OPTION, which schema.qail cannot express"
+                ));
+            }
+            if !privileges.is_empty() {
+                grants.push(Grant::new(privileges, &relname, grantee));
+            }
+        }
+    }
+    // Stable order so a pull produces a reviewable diff instead of churn.
+    grants.sort_by(|a, b| {
+        a.on_object
+            .cmp(&b.on_object)
+            .then_with(|| a.to_role.cmp(&b.to_role))
+    });
+    if !acl_warnings.is_empty() {
+        eprintln!(
+            "{} {} privilege detail(s) could not be represented in schema.qail:",
+            "⚠".yellow(),
+            acl_warnings.len()
+        );
+        for warning in &acl_warnings {
+            eprintln!("    {warning}");
+        }
+        eprintln!(
+            "    {}",
+            "These stay in the database but will NOT be recreated from schema.qail.".dimmed()
+        );
+    }
+
     // ── 11. Views (AST-native) ───────────────────────────────────────────
     let view_cmd = Qail::get("pg_views")
         .columns(["viewname", "definition"])
@@ -1024,11 +1247,36 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query views: {}", e))?;
 
+    // `pg_views` carries no storage options, so read `security_invoker` off
+    // pg_class. Without this the flag is silently dropped on every pull and a
+    // round-trip would quietly downgrade a caller-rights view back to the
+    // owner-rights default — i.e. re-open the RLS bypass it was set to close.
+    let view_opts_cmd = Qail::get("pg_catalog.pg_class")
+        .columns(["relname", "reloptions"])
+        .filter("relkind", Operator::Eq, "v")
+        .filter("relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let view_opts_rows = driver
+        .fetch_all(&view_opts_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query view options: {}", e))?;
+    let security_invoker_views: std::collections::HashSet<String> = view_opts_rows
+        .iter()
+        .filter(|row| {
+            let opts = row.text(1).to_ascii_lowercase();
+            opts.replace(' ', "").contains("security_invoker=true")
+        })
+        .map(|row| row.text(0))
+        .collect();
+
     let mut views: Vec<ViewDef> = Vec::new();
     for row in view_rows {
         let name = row.text(0);
         let query = row.text(1).trim().trim_end_matches(';').to_string();
-        views.push(ViewDef::new(&name, query));
+        let mut view = ViewDef::new(&name, query);
+        if security_invoker_views.contains(&name) {
+            view = view.security_invoker();
+        }
+        views.push(view);
     }
 
     // ── 12. Materialized Views (AST-native) ─────────────────────────────
@@ -1464,6 +1712,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     schema.extensions = extensions;
     schema.sequences = sequences;
     schema.views = views;
+    schema.grants = grants;
     schema.functions = functions;
     schema.triggers = triggers;
     schema.policies = policies;
@@ -2968,5 +3217,99 @@ mod tests {
         );
 
         assert!(resolved.is_none());
+    }
+
+    // ── Privilege introspection ─────────────────────────────────────────
+    //
+    // Every literal below is a real `relacl` rendering taken from the Sailtix
+    // production database, so these lock in the shapes that actually occur.
+
+    #[test]
+    fn test_parse_acl_array_real_world_table() {
+        let entries = parse_acl_array("{qail_masterx=arwdDxtm/qail_masterx,app_user=arwd/qail_masterx}");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].grantee.as_deref(), Some("qail_masterx"));
+        assert_eq!(entries[0].letters, "arwdDxtm");
+        assert_eq!(entries[1].grantee.as_deref(), Some("app_user"));
+        assert_eq!(entries[1].letters, "arwd");
+        assert!(!entries[1].has_grant_option);
+    }
+
+    #[test]
+    fn test_parse_acl_array_public_grantee_and_grant_option() {
+        // An empty grantee is PUBLIC; `*` marks WITH GRANT OPTION.
+        let entries = parse_acl_array("{=r/bob,alice=a*w/bob}");
+        assert_eq!(entries[0].grantee, None);
+        assert_eq!(entries[0].letters, "r");
+        assert_eq!(entries[1].grantee.as_deref(), Some("alice"));
+        assert_eq!(entries[1].letters, "aw", "grant-option markers are stripped from the letters");
+        assert!(entries[1].has_grant_option);
+    }
+
+    #[test]
+    fn test_parse_acl_array_quoted_role_containing_comma() {
+        // Quoted role names may contain the very characters we split on.
+        let entries = parse_acl_array("{\"odd,role=x\"=arwd/owner}");
+        assert_eq!(entries.len(), 1, "must not split inside a quoted role name");
+        assert_eq!(entries[0].grantee.as_deref(), Some("odd,role=x"));
+        assert_eq!(entries[0].letters, "arwd");
+    }
+
+    #[test]
+    fn test_parse_acl_array_empty_and_malformed() {
+        assert!(parse_acl_array("{}").is_empty());
+        assert!(parse_acl_array("").is_empty(), "a NULL relacl reads back as empty text");
+        assert!(parse_acl_array("not-an-array").is_empty());
+    }
+
+    #[test]
+    fn test_privileges_from_acl_letters_maps_crud() {
+        let (privs, unmodelled) = privileges_from_acl_letters("arwd", "r");
+        assert_eq!(
+            privs,
+            vec![
+                Privilege::Insert,
+                Privilege::Select,
+                Privilege::Update,
+                Privilege::Delete
+            ]
+        );
+        assert!(unmodelled.is_empty());
+    }
+
+    #[test]
+    fn test_privileges_from_acl_letters_collapses_full_set_to_all() {
+        // The full table set collapses rather than enumerating, so a new
+        // Postgres privilege letter cannot silently narrow the grant.
+        let (privs, unmodelled) = privileges_from_acl_letters("arwdDxtm", "r");
+        assert_eq!(privs, vec![Privilege::All]);
+        assert!(unmodelled.is_empty());
+
+        // Sequences have a different full set.
+        let (seq_privs, _) = privileges_from_acl_letters("rwU", "S");
+        assert_eq!(seq_privs, vec![Privilege::All]);
+    }
+
+    #[test]
+    fn test_privileges_from_acl_letters_reports_unmodelled() {
+        // TRUNCATE/REFERENCES/TRIGGER have no schema.qail spelling. They must
+        // be reported, never silently dropped.
+        let (privs, unmodelled) = privileges_from_acl_letters("rDxt", "r");
+        assert_eq!(privs, vec![Privilege::Select]);
+        assert_eq!(unmodelled, vec!['D', 'x', 't']);
+    }
+
+    #[test]
+    fn test_select_only_grant_survives_round_trip() {
+        // The exact shape of the fix for whatsapp_contacts_platform: a
+        // SELECT-only grant on a view must render and reparse intact.
+        let (privs, _) = privileges_from_acl_letters("r", "v");
+        let mut schema = qail_core::migrate::Schema::new();
+        schema.add_grant(Grant::new(privs, "whatsapp_contacts_platform", "app_user"));
+        let rendered = qail_core::migrate::to_qail_string(&schema);
+        assert!(
+            rendered.contains("grant select on whatsapp_contacts_platform to app_user"),
+            "grant missing from rendered schema: {rendered}"
+        );
     }
 }

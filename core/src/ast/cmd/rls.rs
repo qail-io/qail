@@ -210,6 +210,22 @@ impl Qail {
     /// - **Unregistered tables** → no-op (not a tenant table)
     /// - **DDL/etc** → no-op
     ///
+    /// # ⚠️ Unregistered relations FAIL OPEN
+    ///
+    /// The unregistered case returns the query **unscoped**, which makes this
+    /// call site *look* protected while emitting SQL that is not. The registry
+    /// is populated by scanning `schema.qail` for `table` blocks carrying a
+    /// literal `tenant_id`, so a renamed table, a differently-named tenant
+    /// column, or **any view** falls through silently.
+    ///
+    /// Views are the sharp edge: they cannot carry RLS of their own, and unless
+    /// declared `security_invoker` Postgres evaluates their base tables with the
+    /// view OWNER's rights — bypassing those tables' policies as well. A view
+    /// read under `with_rls` has neither layer.
+    ///
+    /// Assert it where scoping is load-bearing, with
+    /// [`crate::rls::tenant::scoping_applies`].
+    ///
     /// # Example
     /// ```ignore
     /// let ctx = RlsContext::tenant("tenant-uuid");

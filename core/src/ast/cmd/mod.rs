@@ -87,6 +87,14 @@ pub struct Qail {
     pub trigger_def: Option<crate::ast::TriggerDef>,
     /// RLS policy definition.
     pub policy_def: Option<crate::migrate::policy::RlsPolicy>,
+    /// `CREATE VIEW … WITH (security_invoker = true)`.
+    ///
+    /// Postgres evaluates a plain view against its base tables with the VIEW
+    /// OWNER's privileges, so row-level security on those tables is checked as
+    /// the owner rather than the caller — a view over an RLS-protected table is
+    /// an RLS bypass unless this is set. Only meaningful for [`Action::CreateView`].
+    #[serde(default)]
+    pub view_security_invoker: bool,
 }
 
 /// Common Table Expression (WITH clause) definition.
@@ -264,6 +272,7 @@ impl Default for Qail {
             function_def: None,
             trigger_def: None,
             policy_def: None,
+            view_security_invoker: false,
         }
     }
 }

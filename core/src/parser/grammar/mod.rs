@@ -320,6 +320,7 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             function_def: None,
             trigger_def: None,
             policy_def: None,
+            view_security_invoker: false,
         },
     ))
 }

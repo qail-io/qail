@@ -232,18 +232,29 @@ impl ToSql for Qail {
             }
             // Views
             Action::CreateView => {
+                // A plain view runs against its base tables with the view
+                // OWNER's rights, so RLS on those tables is evaluated as the
+                // owner and effectively bypassed. `security_invoker` makes
+                // Postgres use the CALLER's rights instead (PG15+).
+                let opts = if self.view_security_invoker {
+                    " WITH (security_invoker = true)"
+                } else {
+                    ""
+                };
                 if let Some(source) = &self.source_query {
                     format!(
-                        "CREATE VIEW {} AS {}",
+                        "CREATE VIEW {}{} AS {}",
                         escape_identifier(&self.table),
+                        opts,
                         source.to_sql_with_dialect(dialect)
                     )
                 } else if let Some(query) = &self.payload {
                     match checked_sql_query_fragment(query, "view query") {
                         Ok(query) => {
                             format!(
-                                "CREATE VIEW {} AS {}",
+                                "CREATE VIEW {}{} AS {}",
                                 escape_identifier(&self.table),
+                                opts,
                                 query
                             )
                         }
@@ -251,8 +262,9 @@ impl ToSql for Qail {
                     }
                 } else {
                     format!(
-                        "CREATE VIEW {} AS {}",
+                        "CREATE VIEW {}{} AS {}",
                         escape_identifier(&self.table),
+                        opts,
                         dml::select::build_select(self, dialect)
                     )
                 }
