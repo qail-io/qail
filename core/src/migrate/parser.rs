@@ -1484,11 +1484,11 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
         // view evaluate its base tables with the caller's rights so their RLS
         // still applies (see ViewDef::security_invoker).
         let mut security_invoker = false;
-        if let Some(stripped) = name.strip_suffix("security_invoker") {
-            if stripped.is_empty() || stripped.ends_with(char::is_whitespace) {
-                security_invoker = true;
-                name = stripped.trim();
-            }
+        if let Some(stripped) = name.strip_suffix("security_invoker")
+            && (stripped.is_empty() || stripped.ends_with(char::is_whitespace))
+        {
+            security_invoker = true;
+            name = stripped.trim();
         }
         if name.is_empty() {
             return Err("view name is required".to_string());

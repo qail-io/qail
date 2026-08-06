@@ -1185,7 +1185,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let owner = role_by_oid.get(&row.text(3)).cloned().unwrap_or_default();
 
         for entry in parse_acl_array(&relacl) {
-            let grantee = entry.grantee.clone().unwrap_or_else(|| "public".to_string());
+            let grantee = entry
+                .grantee
+                .clone()
+                .unwrap_or_else(|| "public".to_string());
             if grantee == owner {
                 continue;
             }
@@ -3226,7 +3229,8 @@ mod tests {
 
     #[test]
     fn test_parse_acl_array_real_world_table() {
-        let entries = parse_acl_array("{qail_masterx=arwdDxtm/qail_masterx,app_user=arwd/qail_masterx}");
+        let entries =
+            parse_acl_array("{qail_masterx=arwdDxtm/qail_masterx,app_user=arwd/qail_masterx}");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].grantee.as_deref(), Some("qail_masterx"));
         assert_eq!(entries[0].letters, "arwdDxtm");
@@ -3242,7 +3246,10 @@ mod tests {
         assert_eq!(entries[0].grantee, None);
         assert_eq!(entries[0].letters, "r");
         assert_eq!(entries[1].grantee.as_deref(), Some("alice"));
-        assert_eq!(entries[1].letters, "aw", "grant-option markers are stripped from the letters");
+        assert_eq!(
+            entries[1].letters, "aw",
+            "grant-option markers are stripped from the letters"
+        );
         assert!(entries[1].has_grant_option);
     }
 
@@ -3258,7 +3265,10 @@ mod tests {
     #[test]
     fn test_parse_acl_array_empty_and_malformed() {
         assert!(parse_acl_array("{}").is_empty());
-        assert!(parse_acl_array("").is_empty(), "a NULL relacl reads back as empty text");
+        assert!(
+            parse_acl_array("").is_empty(),
+            "a NULL relacl reads back as empty text"
+        );
         assert!(parse_acl_array("not-an-array").is_empty());
     }
 
