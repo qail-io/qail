@@ -3,7 +3,7 @@
  * Protocol + rate-limit conformance suite for the QAIL MCP Worker.
  *
  *   node scripts/conformance.mjs [--url https://dev.qail.io/mcp] [--skip-ratelimit]
- *                                [--ratelimit-probe] [--fresh] [--expect-version 1.3.6]
+ *                                [--ratelimit-probe] [--fresh] [--expect-version 1.4.0]
  *
  * Node builtins only (global `fetch`, `Promise.all`). No dependencies.
  *
@@ -355,7 +355,7 @@ async function transportSemantics() {
     assert(
         "health.qail_version is a semver",
         typeof healthJson.qail_version === "string" && /^\d+\.\d+\.\d+/.test(healthJson.qail_version),
-        "a semver like 1.3.6",
+        "a semver like 1.4.0",
         healthJson.qail_version,
     );
     // Pinned only when CI passes the workspace version in, so the deployed wasm

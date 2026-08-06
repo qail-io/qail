@@ -133,7 +133,7 @@ curl -s https://dev.qail.io/mcp/health
 Expected exactly:
 
 ```json
-{"status":"ok","qail_version":"1.3.6","protocol_version":"2025-06-18",
+{"status":"ok","qail_version":"1.4.0","protocol_version":"2025-06-18",
  "transport":"streamable-http","stateless":true,"rate_limited":true}
 ```
 

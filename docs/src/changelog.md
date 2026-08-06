@@ -4,7 +4,14 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v1.3.6)
+## Current Highlights (v1.4.0)
+
+- **Views can declare `security_invoker`**: `view <name> security_invoker $$ … $$` parses, renders, compiles to `CREATE VIEW … WITH (security_invoker = true)`, and survives `qail pull` by being read back from `pg_class.reloptions`. Without it, a view over an RLS-protected table evaluates that table's policies as the *view owner* and silently bypasses them. Owner-rights stays the default, matching PostgreSQL.
+- **`qail pull` introspects grants**: `relacl` is parsed into `schema.grants`, so a relation missing a grant to the application role is now visible in `schema.qail` instead of failing at runtime as `[42501] permission denied` with nothing to diff. Recovered 229 grants on a live 217-table database that previously showed zero. Privileges with no `schema.qail` spelling are reported on stderr rather than dropped.
+- **`rls::tenant::scoping_applies()`**: callers and audits can assert that tenant scoping actually applied — `with_rls` fails *open* on unregistered relations, returning the query unscoped while the call site reads as scoped.
+- **Release line**: Rust workspace crates and install snippets are bumped to `1.4.0`.
+
+## v1.3.6 Highlights
 
 - **PostgreSQL dependency correctness**: `cmov` `0.5.4` fixes incorrect AArch64 constant-time selection results in the dependency path used by PostgreSQL SCRAM authentication.
 - **Gateway dependency safety**: `crossbeam-epoch` `0.9.20` resolves RUSTSEC-2026-0204 in the metrics and cache dependency paths.

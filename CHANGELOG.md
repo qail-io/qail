@@ -7,14 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-07
+
 ### Added
+- **View privilege model (`security_invoker`):** Views can now declare `view <name> security_invoker $$ … $$`. A plain PostgreSQL view reads its base tables with the *view owner's* privileges, so a view over an RLS-protected table evaluates that table's policies as the owner and silently bypasses them. Views previously had no way to express otherwise — no field on `ViewDef`, no DSL syntax, nothing in the emitted SQL. The flag now parses, renders back out, compiles to `CREATE VIEW … WITH (security_invoker = true)`, and is read back from `pg_class.reloptions` on `qail pull`. That last part is load-bearing: `pg_views` carries no storage options, so without it a pull would drop the flag and the next apply would quietly re-open the bypass. Owner-rights remains the default, matching PostgreSQL — flipping it would change the meaning of every existing schema on its next apply, including views that are deliberately owner-rights because they serve public reads with no tenant context.
+- **Grant introspection in `qail pull`:** `pull` previously introspected no privileges at all, so `schema.qail` was silent about who can read what. A relation created without a grant to the application role looked perfectly healthy in the schema and failed only at runtime as `[42501] permission denied`, with nothing to diff against. `relacl` is now parsed into `schema.grants` (non-owner entries only; the owner's is implied by ownership). Verified against a live 217-table database: **229 grants recovered where there were previously zero.** Privileges with no `schema.qail` spelling — `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN`, `WITH GRANT OPTION` — are reported on stderr rather than dropped, since a silently narrowed grant is the same class of bug.
+- **`rls::tenant::scoping_applies()`:** lets call sites and audits assert that tenant scoping was actually applied. Documents that `with_rls` **fails open** on unregistered relations — it returns the query unscoped while the call site reads as scoped.
 - **Remote MCP server:** Added the public, stateless Streamable HTTP service at `https://dev.qail.io/mcp`, backed by the same QAIL parser compiled to WebAssembly plus source-derived documentation, resources, and prompts.
 - **Dart SDK (`sdk/dart`):** pure-Dart client for Flutter and server-side Dart, mirroring the Swift/Kotlin surface — fluent builders, raw DSL (`/qail`, `/qail/fast`, `/qail/batch`), transactions, realtime WebSocket subscribe, raw HTTP verbs, and structured `QailError`. Typed rows use explicit `fromJson` decoders (Dart generics are not reified). WS auth mode resolves per platform: `header` on `dart:io`, `query` on web (browsers cannot set handshake headers).
 - **TypeScript SDK:** `queryFast()` (`/qail/fast`), transactions (`beginTxn()` → query/commit/rollback/savepoint with `X-Transaction-Id`), and `ResponseMetadata`/`request_id` on responses and errors.
 
 ### Fixed
+- **`aclitem` parser, quoted role names:** the parser now records the `=` separator during the scan rather than searching for it afterwards. A quoted role name may contain both a comma and an `=`, and splitting after quote-stripping cut such a name in half.
 - **MCP release freshness:** Regenerated the public MCP knowledge corpus and Worker metadata from the v1.3.6 tree so the service no longer advertises or teaches v1.3.5 after the security release.
 - **TypeScript SDK drift (breaking, `@qail/client` 0.2.0):** realigned response shapes with the gateway — `QueryResponse` is `{rows, count, metadata?}` (was `{data, rows_affected, columns}`), `MutationResponse` is `{data, count?, metadata?}` (was `rows_affected`), `batch()` sends the `{"queries": [...]}` envelope and returns `BatchResponse {results, total, success, metadata?}` (was a raw array body returning `BatchResult[]`), `QailError.detail` renamed to `details`.
+
+### Changed
+- **Versioning/docs:** Bumped the Rust workspace crates and current install/docs references to `1.4.0`.
 
 ## [1.3.6] - 2026-07-20
 

@@ -22,7 +22,7 @@ driver, gateway, schema, workflow, or vector workloads.
 
 ## Latest Updates (July 2026)
 
-- QAIL is now on the `v1.3.6` stable line across the Rust workspace crates and CLI.
+- QAIL is now on the `v1.4.0` stable line across the Rust workspace crates and CLI.
 - PostgreSQL SCRAM dependencies now resolve `cmov` `0.5.4`, and gateway
   metrics/cache dependencies resolve `crossbeam-epoch` `0.9.20`.
 - Linux `io_uring` transport is now explicit opt-in; Tokio remains the default
@@ -60,7 +60,7 @@ Some search engines still surface old QAIL pages showing symbolic forms such as 
 
 Those pages are from historical pre-1.0 releases and are not the current API guidance.
 
-Current QAIL `1.3.6` application code should use the native AST/DSL path:
+Current QAIL `1.4.0` application code should use the native AST/DSL path:
 
 ```rust
 let query = Qail::get("users")
