@@ -7,6 +7,7 @@
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.4.0-green)](CHANGELOG.md)
+[![Claude for Open Source](https://img.shields.io/badge/supported%20by-Claude%20for%20Open%20Source-d97757)](https://claude.com/contact-sales/claude-for-oss)
 
 ---
 
@@ -98,6 +99,21 @@ let query = Qail::get("users")
 
 let rows = driver.fetch_all(&query).await?;
 ```
+
+---
+
+## Production Use
+
+Qail is extracted from and hardened against live systems, not built as a demo:
+
+- **[sailtix.com](https://sailtix.com)** — fast-boat booking platform for Indonesia. Search, booking, payments, and multi-tenant operator settlement run on `qail-pg` + `qail-gateway`, with schema lineage managed by the `qail` CLI.
+- **[Deck by Qail](https://deck.qail.io)** — operator orders + CRM app on the App Store and Google Play, built on the Qail Gateway auto-REST plane and the Dart SDK.
+
+The RLS model, the N+1 analyzer, and the fail-closed migration engine were each shaped by real incidents in these systems before landing as features.
+
+### Support
+
+Qail's development is supported by Anthropic's [Claude for Open Source](https://claude.com/contact-sales/claude-for-oss) program.
 
 ---
 
