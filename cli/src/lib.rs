@@ -37,6 +37,7 @@ pub mod init;
 pub mod introspection;
 pub mod lint;
 pub mod migrations;
+pub mod project;
 #[cfg(feature = "repl")]
 pub mod repl;
 pub mod resolve;

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Migration policy no longer depends on the invocation directory, and no longer fails open.** `load_migration_policy()` read a bare relative `"qail.toml"` against the process working directory and turned a missing file into the default `require-flag` — which `--allow-destructive` satisfies. A `destructive = "deny"` could therefore be bypassed by running from a directory the policy file did not cover, with nothing printed to say the policy had not loaded. The second, sharper case needed no wrong directory at all: a `qail.toml` that resolves the project but declares no `[migrations.policy]` hit the same silent fallback, so a `deny` living in a sibling config governed only the paths that happened to run beside it. Three changes close this:
+  - The policy is resolved by walking from the current directory to the filesystem root, taking the nearest `qail.toml` that declares `[migrations.policy]`; a nearer file without one no longer masks an ancestor that has one. This matches the existing ancestor walks in the LSP and `schema_tools`, which `policy.rs` was the sole holdout from.
+  - Destructive operations **fail closed** when no file declares a policy. The permissive default is fine for a project that never drops anything; it is not a safe silent answer to "may I drop this column?". Non-destructive migrations are unaffected — the guard fires only once a destructive operation is detected, and the error names the file it read and the table to add.
+  - Every run prints the resolved policy and its source file, and warns when several `qail.toml` files on the walked path declare conflicting policies rather than silently picking a winner.
+
+  **Behavior change:** a destructive migration that previously ran under `--allow-destructive` with no `[migrations.policy]` declared anywhere will now be refused until a policy is declared. The receipt already recorded `policy_destructive`, but only after apply — an audit record, not a preflight check.
+
+- **`migrations_dir` is resolved against the file that declares it.** `resolve_deltas_dir()` read the same bare relative `"qail.toml"`, then resolved the declared `migrations_dir` against the *process working directory* rather than the config's own directory. A perfectly ordinary `migrations_dir = "../db/deltas"` in a subdirectory config therefore named a different directory depending on where `qail` ran, and `qail migrate apply` from anywhere that was not the project root failed with `No deltas/ directory found`. Three silent fallbacks are gone with it:
+  - Read and parse failures were swallowed by `if let Ok(…)`, so a malformed `qail.toml` quietly resolved to the default `deltas/` — applying a different set of migrations than the config named, with no diagnostic.
+  - A `migrations_dir` that was declared but did not exist also fell through to `deltas/`. It is now an error naming both the declared value and the path it resolved to.
+  - The `deltas/` default is now located beside the project config rather than relative to the working directory.
+
+  Resolution walks ancestors and prefers the nearest `qail.toml` that declares `migrations_dir`, so a nearer config that declares none no longer masks an ancestor that does — the same rule the policy lookup uses, via a shared `project::ancestor_configs` walk so the two cannot drift apart.
+
+  **Behavior change:** commands that previously failed with `No deltas/ directory found` when run from a subdirectory now resolve the project's migrations, and a malformed or wrong `migrations_dir` is an error instead of a silent fallback.
+
 ## [1.4.0] - 2026-08-07
 
 ### Added

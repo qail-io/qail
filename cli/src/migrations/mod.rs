@@ -38,7 +38,10 @@ pub use down::migrate_down;
 pub use failpoint::maybe_failpoint;
 pub use lock::acquire_migration_lock;
 pub use plan::migrate_plan;
-pub use policy::{EnforcementMode, MigrationPolicy, ReceiptValidationMode, load_migration_policy};
+pub use policy::{
+    EnforcementMode, MigrationPolicy, PolicyResolution, ReceiptValidationMode,
+    ensure_destructive_policy_declared, load_migration_policy, resolve_migration_policy,
+};
 pub use receipt::{
     MigrationReceipt, ReceiptSignatureStatus, StoredMigrationReceipt,
     ensure_migration_receipt_columns, now_epoch_ms, runtime_actor, runtime_git_sha,
@@ -51,6 +54,7 @@ pub use up::{MigrateUpOptions, migrate_up};
 #[cfg(feature = "watch")]
 pub use watch::watch_schema;
 
+use anyhow::Context;
 use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_core::parser::schema::Schema;
 use qail_core::transpiler::ToSql;
@@ -59,47 +63,95 @@ use std::path::{Path, PathBuf};
 
 /// Resolve the deltas directory for migration files.
 ///
-/// Resolution order:
-/// 1. `migrations_dir` from `qail.toml` `[project]` section (if set)
-/// 2. `deltas/` (Qail default)
+/// Resolution order, walking from the current directory to the filesystem root:
+/// 1. `migrations_dir` from the nearest `qail.toml` `[project]` that declares it
+/// 2. `deltas/` beside the nearest `qail.toml`, or in the current directory when
+///    there is no config at all
 ///
-/// Returns the resolved path, or an error if none exist and `create` is false.
+/// A declared `migrations_dir` is resolved against the directory of the file
+/// that declared it, so `migrations_dir = "../db/deltas"` names the same
+/// directory no matter where `qail` was invoked from.
 pub fn resolve_deltas_dir(create_if_missing: bool) -> anyhow::Result<PathBuf> {
-    // 1. Check qail.toml for explicit override
-    if let Ok(content) = std::fs::read_to_string("qail.toml")
-        && let Ok(config) = toml::from_str::<toml::Value>(&content)
-        && let Some(dir) = config
-            .get("project")
-            .and_then(|p| p.get("migrations_dir"))
-            .and_then(|v| v.as_str())
-    {
-        let path = PathBuf::from(dir);
-        if path.exists() || create_if_missing {
-            if create_if_missing && !path.exists() {
-                std::fs::create_dir_all(&path)?;
-            }
+    let cwd = crate::project::current_dir()?;
+    resolve_deltas_dir_from(&cwd, create_if_missing)
+}
+
+/// [`resolve_deltas_dir`], starting the walk at `start` instead of the current
+/// directory.
+pub fn resolve_deltas_dir_from(start: &Path, create_if_missing: bool) -> anyhow::Result<PathBuf> {
+    let configs = crate::project::ancestor_configs(start);
+
+    // 1. The nearest qail.toml that declares [project].migrations_dir wins. A
+    //    nearer file that declares none does not mask an ancestor that does.
+    for config_path in &configs {
+        let Some(declared) = declared_migrations_dir(config_path)? else {
+            continue;
+        };
+        let path = crate::project::config_root(config_path).join(&declared);
+
+        if path.is_dir() {
             return Ok(path);
         }
+        if create_if_missing {
+            std::fs::create_dir_all(&path).with_context(|| {
+                format!("Failed to create migrations_dir '{}'", path.display())
+            })?;
+            return Ok(path);
+        }
+        // Declared but absent. Falling back to `deltas/` here would run a
+        // different set of migrations than the config asked for.
+        anyhow::bail!(
+            "migrations_dir '{}' declared in {} resolves to '{}', which does not exist.\n\
+             Create that directory, correct the path, or run 'qail init'.",
+            declared,
+            config_path.display(),
+            path.display()
+        );
     }
 
-    // 2. Qail default: deltas/
-    let deltas = Path::new("deltas");
-    if deltas.exists() {
-        return Ok(deltas.to_path_buf());
-    }
+    // 2. Default: `deltas/` beside the project config, else the starting dir.
+    let base = configs
+        .first()
+        .map(|config| crate::project::config_root(config).to_path_buf())
+        .unwrap_or_else(|| start.to_path_buf());
+    let deltas = base.join("deltas");
 
-    // None exist — create the default if requested
+    if deltas.is_dir() {
+        return Ok(deltas);
+    }
     if create_if_missing {
-        std::fs::create_dir_all(deltas)?;
-        return Ok(deltas.to_path_buf());
+        std::fs::create_dir_all(&deltas)
+            .with_context(|| format!("Failed to create '{}'", deltas.display()))?;
+        return Ok(deltas);
     }
 
     anyhow::bail!(
-        "No deltas/ directory found. Run 'qail init' first.\n\
+        "No deltas/ directory found (looked for '{}'). Run 'qail init' first.\n\
          Tip: Set a custom path in qail.toml:\n\
          [project]\n\
-         migrations_dir = \"my_deltas\""
+         migrations_dir = \"my_deltas\"",
+        deltas.display()
     )
+}
+
+/// Read `[project].migrations_dir` out of one `qail.toml`.
+///
+/// Returns `None` when the file declares no `migrations_dir`. A file that
+/// cannot be read or parsed is an error rather than a silent fallback — a
+/// malformed config that quietly resolves to the default `deltas/` would apply
+/// a different set of migrations than the one it names.
+fn declared_migrations_dir(config_path: &Path) -> anyhow::Result<Option<String>> {
+    let content = std::fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+
+    let config: toml::Value = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", config_path.display(), e))?;
+
+    Ok(config
+        .get("project")
+        .and_then(|project| project.get("migrations_dir"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string))
 }
 
 /// Migration table schema in QAIL format (AST-native).
@@ -278,8 +330,129 @@ pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::stable_cmds_checksum;
+    use super::{resolve_deltas_dir_from, stable_cmds_checksum};
+    use crate::project::TempTree;
     use qail_core::ast::{Action, Expr, IndexDef, Qail};
+
+    /// The shape in engine.qail.io: the deltas live at the repo root, and the
+    /// gateway config reaches them with a `..`. That `..` is written relative to
+    /// the gateway directory, so resolving it against the working directory
+    /// gives a different answer depending on where `qail` was run.
+    #[test]
+    fn migrations_dir_resolves_against_the_declaring_file() {
+        let tree = TempTree::new();
+        tree.dir("db/deltas");
+        tree.write(
+            "gateway/qail.toml",
+            "[project]\nmigrations_dir = \"../db/deltas\"\n",
+        );
+        let deep = tree.dir("gateway/sub/deeper");
+
+        for start in [tree.path("gateway"), deep] {
+            let resolved = resolve_deltas_dir_from(&start, false).expect("resolve");
+            assert_eq!(
+                resolved.canonicalize().expect("canonicalize"),
+                tree.path("db/deltas").canonicalize().expect("canonicalize"),
+                "'..' must be relative to the config, not the cwd (from {})",
+                start.display()
+            );
+        }
+    }
+
+    #[test]
+    fn deltas_dir_is_the_same_from_any_subdirectory() {
+        let tree = TempTree::new();
+        tree.dir("db/deltas");
+        tree.write("qail.toml", "[project]\nmigrations_dir = \"db/deltas\"\n");
+        let nested = tree.dir("workers/src/domains");
+
+        let from_root = resolve_deltas_dir_from(&tree.path(""), false).expect("resolve");
+        let from_nested = resolve_deltas_dir_from(&nested, false).expect("resolve");
+
+        assert_eq!(from_root, from_nested);
+    }
+
+    #[test]
+    fn nearer_config_without_migrations_dir_does_not_mask_an_ancestor() {
+        let tree = TempTree::new();
+        tree.dir("db/deltas");
+        tree.write("qail.toml", "[project]\nmigrations_dir = \"db/deltas\"\n");
+        tree.write("gateway/qail.toml", "[project]\nname = \"gateway\"\n");
+
+        let resolved = resolve_deltas_dir_from(&tree.path("gateway"), false).expect("resolve");
+
+        assert_eq!(
+            resolved.canonicalize().expect("canonicalize"),
+            tree.path("db/deltas").canonicalize().expect("canonicalize")
+        );
+    }
+
+    #[test]
+    fn declared_but_missing_dir_is_an_error_not_a_silent_default() {
+        let tree = TempTree::new();
+        // A `deltas/` that would be picked up by the default branch.
+        tree.dir("deltas");
+        tree.write("qail.toml", "[project]\nmigrations_dir = \"db/deltas\"\n");
+
+        let err = resolve_deltas_dir_from(&tree.path(""), false)
+            .expect_err("a declared path that does not exist must not fall back");
+
+        let msg = err.to_string();
+        assert!(msg.contains("db/deltas"), "{msg}");
+        assert!(msg.contains("does not exist"), "{msg}");
+    }
+
+    #[test]
+    fn declared_dir_is_created_when_requested() {
+        let tree = TempTree::new();
+        tree.write("qail.toml", "[project]\nmigrations_dir = \"db/deltas\"\n");
+
+        let resolved = resolve_deltas_dir_from(&tree.path(""), true).expect("resolve");
+
+        assert!(resolved.is_dir(), "create_if_missing must create the path");
+        assert_eq!(resolved, tree.path("db/deltas"));
+    }
+
+    #[test]
+    fn default_deltas_sits_beside_the_config() {
+        let tree = TempTree::new();
+        tree.dir("deltas");
+        tree.write("qail.toml", "[project]\nname = \"t\"\n");
+        let nested = tree.dir("gateway/sub");
+
+        let resolved = resolve_deltas_dir_from(&nested, false).expect("resolve");
+
+        assert_eq!(
+            resolved.canonicalize().expect("canonicalize"),
+            tree.path("deltas").canonicalize().expect("canonicalize"),
+            "the default must be the project's deltas/, not one relative to cwd"
+        );
+    }
+
+    #[test]
+    fn a_malformed_config_is_an_error_not_a_silent_default() {
+        let tree = TempTree::new();
+        tree.dir("deltas");
+        tree.write("qail.toml", "[project\nmigrations_dir = broken");
+
+        let err = resolve_deltas_dir_from(&tree.path(""), false)
+            .expect_err("a malformed config must not silently resolve to deltas/");
+
+        assert!(err.to_string().contains("qail.toml"), "{err}");
+    }
+
+    #[test]
+    fn missing_deltas_reports_where_it_looked() {
+        let tree = TempTree::new();
+        tree.write("qail.toml", "[project]\nname = \"t\"\n");
+
+        let err = resolve_deltas_dir_from(&tree.path(""), false).expect_err("nothing to resolve");
+
+        assert!(
+            err.to_string().contains("deltas"),
+            "the error must name the path it searched: {err}"
+        );
+    }
 
     #[test]
     fn stable_checksum_distinguishes_column_renames() {

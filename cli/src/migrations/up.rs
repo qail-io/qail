@@ -9,9 +9,9 @@ use qail_pg::driver::PgDriver;
 use crate::migrations::risk::preflight_lock_risk;
 use crate::migrations::verify::post_apply_verify;
 use crate::migrations::{
-    EnforcementMode, MigrationReceipt, acquire_migration_lock, ensure_migration_table,
-    load_migration_policy, now_epoch_ms, runtime_actor, runtime_git_sha, stable_cmds_checksum,
-    write_migration_receipt,
+    EnforcementMode, MigrationReceipt, acquire_migration_lock, ensure_destructive_policy_declared,
+    ensure_migration_table, load_migration_policy, now_epoch_ms, runtime_actor, runtime_git_sha,
+    stable_cmds_checksum, write_migration_receipt,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -273,6 +273,15 @@ pub async fn migrate_up(
 
     if has_destructive {
         display_impact(&impacts);
+
+        let destructive_detail = impacts
+            .iter()
+            .filter(|i| i.is_destructive)
+            .take(4)
+            .map(|i| format!("{} {}", i.operation, i.table))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ensure_destructive_policy_declared(&policy, &destructive_detail)?;
 
         match policy.destructive {
             EnforcementMode::Deny => {

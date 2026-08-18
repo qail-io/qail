@@ -9,9 +9,10 @@ use crate::colors::*;
 use crate::migrations::risk::preflight_lock_risk;
 use crate::migrations::{
     EnforcementMode, MigrationPolicy, MigrationReceipt, ReceiptSignatureStatus,
-    ReceiptValidationMode, StoredMigrationReceipt, acquire_migration_lock, ensure_migration_table,
-    load_migration_policy, maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha,
-    stable_cmds_checksum, verify_stored_receipt_signature, write_migration_receipt,
+    ReceiptValidationMode, StoredMigrationReceipt, acquire_migration_lock,
+    ensure_destructive_policy_declared, ensure_migration_table, load_migration_policy,
+    maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha, stable_cmds_checksum,
+    verify_stored_receipt_signature, write_migration_receipt,
 };
 use crate::shadow::has_verified_shadow_receipt_with_driver;
 use crate::util::parse_pg_url;
@@ -443,7 +444,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
             enforce_apply_destructive_policy(
                 &mig.display_name,
                 &destructive_ops,
-                policy.destructive,
+                &policy,
                 allow_destructive,
             )?;
         }
@@ -452,7 +453,7 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
             enforce_apply_down_destructive_policy(
                 &mig.display_name,
                 &cmds,
-                policy.destructive,
+                &policy,
                 allow_destructive,
             )?;
         }
@@ -594,7 +595,7 @@ fn should_run_apply_lock_risk_preflight(direction: MigrateDirection, cmds: &[Qai
 fn enforce_apply_destructive_policy(
     migration_name: &str,
     destructive_ops: &[String],
-    policy_mode: EnforcementMode,
+    policy: &MigrationPolicy,
     allow_destructive: bool,
 ) -> Result<()> {
     if destructive_ops.is_empty() {
@@ -607,7 +608,10 @@ fn enforce_apply_destructive_policy(
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
-    match policy_mode {
+
+    ensure_destructive_policy_declared(policy, &detail)?;
+
+    match policy.destructive {
         EnforcementMode::Deny => bail!(
             "Migration blocked: destructive operations are disabled by migrations.policy.destructive=deny (migration '{}'; examples: {}).",
             migration_name,
@@ -638,16 +642,11 @@ fn enforce_apply_destructive_policy(
 fn enforce_apply_down_destructive_policy(
     migration_name: &str,
     cmds: &[Qail],
-    policy_mode: EnforcementMode,
+    policy: &MigrationPolicy,
     allow_destructive: bool,
 ) -> Result<()> {
     let destructive_ops = obvious_destructive_ops(cmds);
-    enforce_apply_destructive_policy(
-        migration_name,
-        &destructive_ops,
-        policy_mode,
-        allow_destructive,
-    )
+    enforce_apply_destructive_policy(migration_name, &destructive_ops, policy, allow_destructive)
 }
 
 fn obvious_destructive_ops(cmds: &[Qail]) -> Vec<String> {
@@ -2545,11 +2544,43 @@ mod tests {
         assert!(foreign_key_constraint_matches(live, &expected));
     }
 
+    /// A policy someone actually declared, with the given destructive mode.
+    ///
+    /// Resolution and the undeclared case are covered in `migrations::policy`;
+    /// these cases exercise the modes themselves.
+    fn declared(destructive: EnforcementMode) -> MigrationPolicy {
+        MigrationPolicy {
+            destructive,
+            declared: true,
+            source: Some(PathBuf::from("/test/qail.toml")),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn destructive_policy_passes_when_no_destructive_ops() {
-        let result =
-            enforce_apply_destructive_policy("001_init.up.qail", &[], EnforcementMode::Deny, false);
+        let result = enforce_apply_destructive_policy(
+            "001_init.up.qail",
+            &[],
+            &declared(EnforcementMode::Deny),
+            false,
+        );
         assert!(result.is_ok(), "no-op should pass regardless of policy");
+    }
+
+    #[test]
+    fn destructive_policy_undeclared_blocks_even_with_flag() {
+        let err = enforce_apply_destructive_policy(
+            "002_drop_users.up.qail",
+            &[String::from("DROP TABLE users")],
+            &MigrationPolicy::default(),
+            true,
+        )
+        .expect_err("an undeclared policy must not be satisfied by the flag");
+        assert!(
+            err.to_string().contains("[migrations.policy]"),
+            "error should say what to declare, got: {err}"
+        );
     }
 
     #[test]
@@ -2557,7 +2588,7 @@ mod tests {
         let err = enforce_apply_destructive_policy(
             "002_drop_users.up.qail",
             &[String::from("DROP TABLE users")],
-            EnforcementMode::RequireFlag,
+            &declared(EnforcementMode::RequireFlag),
             false,
         )
         .expect_err("require-flag should block without --allow-destructive");
@@ -2572,7 +2603,7 @@ mod tests {
         let result = enforce_apply_destructive_policy(
             "002_drop_users.up.qail",
             &[String::from("DROP TABLE users")],
-            EnforcementMode::RequireFlag,
+            &declared(EnforcementMode::RequireFlag),
             true,
         );
         assert!(
@@ -2586,7 +2617,7 @@ mod tests {
         let err = enforce_apply_destructive_policy(
             "002_drop_users.up.qail",
             &[String::from("DROP TABLE users")],
-            EnforcementMode::Deny,
+            &declared(EnforcementMode::Deny),
             true,
         )
         .expect_err("deny mode must always block destructive migrations");
@@ -2609,7 +2640,7 @@ mod tests {
         let err = enforce_apply_down_destructive_policy(
             "001_demo.down.qail",
             &cmds,
-            EnforcementMode::Deny,
+            &declared(EnforcementMode::Deny),
             false,
         )
         .expect_err("deny policy should block destructive down migration before execution");
@@ -2632,7 +2663,7 @@ mod tests {
         let err = enforce_apply_down_destructive_policy(
             "001_demo.down.qail",
             &cmds,
-            EnforcementMode::RequireFlag,
+            &declared(EnforcementMode::RequireFlag),
             false,
         )
         .expect_err("require-flag policy should block destructive down migration without flag");
