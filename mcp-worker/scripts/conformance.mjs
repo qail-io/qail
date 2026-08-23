@@ -355,7 +355,7 @@ async function transportSemantics() {
     assert(
         "health.qail_version is a semver",
         typeof healthJson.qail_version === "string" && /^\d+\.\d+\.\d+/.test(healthJson.qail_version),
-        "a semver like 1.4.0",
+        "a semver like 2.0.0-rc.1",
         healthJson.qail_version,
     );
     // Pinned only when CI passes the workspace version in, so the deployed wasm

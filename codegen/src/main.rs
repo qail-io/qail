@@ -932,6 +932,50 @@ pub struct Demo {
         assert_eq!(parsed_struct.fields[1].name, "payload");
         assert_eq!(parsed_struct.fields[1].ty, "Option<Box<Qail>>");
     }
+
+    #[test]
+    fn generated_zig_has_no_trailing_whitespace_for_empty_doc_lines() {
+        // Regression: the emitters used to write "/// " for empty doc lines,
+        // which made the committed qail-zig generated files fail
+        // `git diff --check` (whitespace errors).
+        let s = RustStruct {
+            name: "Demo".to_string(),
+            doc: "First line.\n\nAfter a blank line.".to_string(),
+            fields: vec![StructField {
+                name: "field".to_string(),
+                doc: "Field first.\n\nField after blank.".to_string(),
+                ty: "String".to_string(),
+            }],
+        };
+        let out = gen_zig_struct(&s, None);
+        assert!(out.contains("///\n"), "blank doc lines survive: {out}");
+        for line in out.lines() {
+            assert_eq!(
+                line,
+                line.trim_end(),
+                "generated line carries trailing whitespace: {line:?}"
+            );
+        }
+
+        let e = RustEnum {
+            name: "DemoKind".to_string(),
+            doc: "Docs.\n\nMore.".to_string(),
+            variants: vec![EnumVariant {
+                name: "A".to_string(),
+                doc: "Variant.\n\nMore.".to_string(),
+                fields: vec![],
+            }],
+        };
+        for out in [gen_zig_enum(&e), gen_zig_tagged_union(&e)] {
+            for line in out.lines() {
+                assert_eq!(
+                    line,
+                    line.trim_end(),
+                    "generated enum line carries trailing whitespace: {line:?}"
+                );
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -943,14 +987,30 @@ fn gen_zig_enum(e: &RustEnum) -> String {
     let mut out = String::new();
     if !e.doc.is_empty() {
         for line in e.doc.lines() {
-            let _ = writeln!(out, "///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
+            let _ = writeln!(
+                out,
+                "///{}",
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", line)
+                }
+            );
         }
     }
     let _ = writeln!(out, "pub const {} = enum {{", e.name);
     for v in &e.variants {
         if !v.doc.is_empty() {
             for line in v.doc.lines() {
-                let _ = writeln!(out, "    ///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
+                let _ = writeln!(
+                    out,
+                    "    ///{}",
+                    if line.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", line)
+                    }
+                );
             }
         }
         let zig_name = to_snake_case(&v.name);
@@ -970,14 +1030,30 @@ fn gen_zig_tagged_union(e: &RustEnum) -> String {
     let mut out = String::new();
     if !e.doc.is_empty() {
         for line in e.doc.lines() {
-            let _ = writeln!(out, "///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
+            let _ = writeln!(
+                out,
+                "///{}",
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", line)
+                }
+            );
         }
     }
     let _ = writeln!(out, "pub const {} = union(enum) {{", e.name);
     for v in &e.variants {
         if !v.doc.is_empty() {
             for line in v.doc.lines() {
-                let _ = writeln!(out, "    ///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
+                let _ = writeln!(
+                    out,
+                    "    ///{}",
+                    if line.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", line)
+                    }
+                );
             }
         }
         let zig_name = to_snake_case(&v.name);
@@ -1007,14 +1083,30 @@ fn gen_zig_struct(s: &RustStruct, name_override: Option<&str>) -> String {
     let name = name_override.unwrap_or(&s.name);
     if !s.doc.is_empty() {
         for line in s.doc.lines() {
-            let _ = writeln!(out, "///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
+            let _ = writeln!(
+                out,
+                "///{}",
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", line)
+                }
+            );
         }
     }
     let _ = writeln!(out, "pub const {} = struct {{", name);
     for field in &s.fields {
         if !field.doc.is_empty() {
             for line in field.doc.lines() {
-                let _ = writeln!(out, "    ///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
+                let _ = writeln!(
+                    out,
+                    "    ///{}",
+                    if line.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", line)
+                    }
+                );
             }
         }
         let zig_ty = map_type(&field.ty);
