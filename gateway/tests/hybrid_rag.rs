@@ -1,4 +1,4 @@
-#![cfg(all(feature = "qdrant", feature = "legacy-raw-tests"))]
+#![cfg(all(feature = "qdrant", feature = "manual-tests"))]
 //! Hybrid PG + Qdrant integration test: simulates a RAG / semantic search workflow.
 //!
 //! **Scenario: Maritime Knowledge Base**

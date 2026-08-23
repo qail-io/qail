@@ -10,7 +10,6 @@ The gateway auto-discovers all tables and exposes them as REST endpoints under `
 | `GET` | `/api/{table}/:id` | Get by primary key |
 | `GET` | `/api/{table}/_explain` | EXPLAIN ANALYZE |
 | `GET` | `/api/{table}/aggregate` | Aggregations |
-| `GET` | `/api/{table}/_aggregate` | Aggregations (compat alias) |
 | `GET` | `/api/{table}/:id/{child}` | Nested resources (FK-based) |
 | `POST` | `/api/rpc/{function}` | Function RPC with JSON args |
 | `POST` | `/api/{table}` | Create (single or batch) |
@@ -171,7 +170,6 @@ GET /api/orders/aggregate?fn=avg&column=total             # AVG
 GET /api/orders/aggregate?fn=min&column=created_at        # MIN
 GET /api/orders/aggregate?fn=max&column=total             # MAX
 GET /api/orders/aggregate?fn=count&status=paid            # Filtered aggregation
-GET /api/orders/_aggregate?fn=count                        # Alias (compat)
 ```
 
 Supported functions: `count`, `sum`, `avg`, `min`, `max`.

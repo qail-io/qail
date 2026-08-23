@@ -39,15 +39,6 @@ pub enum EnterpriseAuthMechanism {
     Sspi,
 }
 
-/// Callback used to generate GSS/SSPI response tokens.
-///
-/// The callback receives:
-/// - negotiated enterprise auth mechanism
-/// - optional server challenge bytes (`None` for initial token)
-///
-/// It must return the client response token bytes to send in `GSSResponse`.
-pub type GssTokenProvider = fn(EnterpriseAuthMechanism, Option<&[u8]>) -> Result<Vec<u8>, String>;
-
 /// Structured token request for stateful Kerberos/GSS/SSPI providers.
 #[derive(Debug, Clone, Copy)]
 pub struct GssTokenRequest<'a> {
@@ -63,7 +54,7 @@ pub struct GssTokenRequest<'a> {
 ///
 /// Use this when the underlying auth stack needs per-handshake context between
 /// `AuthenticationGSS` and `AuthenticationGSSContinue` messages.
-pub type GssTokenProviderEx =
+pub type GssTokenProvider =
     Arc<dyn for<'a> Fn(GssTokenRequest<'a>) -> Result<Vec<u8>, String> + Send + Sync>;
 
 /// Password-auth mechanism policy.
@@ -201,10 +192,8 @@ pub struct ConnectOptions {
     pub tls_ca_cert_pem: Option<Vec<u8>>,
     /// Optional mTLS client certificate/key config.
     pub mtls: Option<TlsConfig>,
-    /// Optional callback for Kerberos/GSS/SSPI token generation.
-    pub gss_token_provider: Option<GssTokenProvider>,
     /// Optional stateful Kerberos/GSS/SSPI token provider.
-    pub gss_token_provider_ex: Option<GssTokenProviderEx>,
+    pub gss_token_provider: Option<GssTokenProvider>,
     /// Password-auth policy.
     pub auth: AuthSettings,
     /// Opt into Linux io_uring for plain TCP transport.
@@ -231,10 +220,6 @@ impl std::fmt::Debug for ConnectOptions {
             .field(
                 "gss_token_provider",
                 &self.gss_token_provider.as_ref().map(|_| "<configured>"),
-            )
-            .field(
-                "gss_token_provider_ex",
-                &self.gss_token_provider_ex.as_ref().map(|_| "<configured>"),
             )
             .field("auth", &self.auth)
             .field("io_uring", &self.io_uring)

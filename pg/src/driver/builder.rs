@@ -1,8 +1,7 @@
 //! PgDriverBuilder — ergonomic builder pattern for PgDriver connections.
 
 use super::auth_types::{
-    AuthSettings, ConnectOptions, GssEncMode, GssTokenProvider, GssTokenProviderEx,
-    ScramChannelBindingMode, TlsMode,
+    AuthSettings, ConnectOptions, GssEncMode, GssTokenProvider, ScramChannelBindingMode, TlsMode,
 };
 use super::core::PgDriver;
 use super::types::{PgError, PgResult};
@@ -120,15 +119,9 @@ impl PgDriverBuilder {
         self
     }
 
-    /// Set Kerberos/GSS/SSPI token provider callback.
+    /// Set a stateful Kerberos/GSS/SSPI token provider.
     pub fn gss_token_provider(mut self, provider: GssTokenProvider) -> Self {
         self.connect_options.gss_token_provider = Some(provider);
-        self
-    }
-
-    /// Set a stateful Kerberos/GSS/SSPI token provider.
-    pub fn gss_token_provider_ex(mut self, provider: GssTokenProviderEx) -> Self {
-        self.connect_options.gss_token_provider_ex = Some(provider);
         self
     }
 

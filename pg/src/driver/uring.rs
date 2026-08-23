@@ -5,7 +5,7 @@
 //! - Dedicated per-connection worker thread with a persistent `io_uring` ring
 //! - Integrates through `PgConnection` I/O helpers
 
-#![cfg(all(target_os = "linux", feature = "io_uring"))]
+#![cfg(all(target_os = "linux", feature = "native-io-uring"))]
 
 use io_uring::{IoUring, opcode, types};
 use std::io;

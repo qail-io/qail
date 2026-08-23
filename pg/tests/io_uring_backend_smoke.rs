@@ -1,4 +1,4 @@
-#![cfg(all(target_os = "linux", feature = "io_uring"))]
+#![cfg(all(target_os = "linux", feature = "native-io-uring"))]
 
 //! Linux io_uring transport smoke test.
 //!

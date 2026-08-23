@@ -288,3 +288,34 @@ fn test_parse_database_url_linux_krb5_requires_feature_on_linux() {
             .contains("requires gateway feature enterprise-gssapi on Linux")
     );
 }
+
+#[test]
+fn auth_mode_compat_alias_is_rejected_and_default_still_works() {
+    // 2.0: the 1.x `auth_mode=compat` alias is gone; `default` remains.
+    let err = match parse_database_url(
+        "postgres://alice@db.internal:5432/app?auth_mode=compat",
+        &default_cfg(),
+    ) {
+        Ok(_) => panic!("auth_mode=compat must be rejected in 2.0"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("Invalid auth_mode"), "{err}");
+
+    let cfg = parse_database_url(
+        "postgres://alice@db.internal:5432/app?auth_mode=default",
+        &default_cfg(),
+    )
+    .expect("auth_mode=default remains valid");
+    assert_eq!(
+        cfg.auth_settings,
+        qail_pg::AuthSettings::default(),
+        "default must still select AuthSettings::default()"
+    );
+
+    let cfg = parse_database_url(
+        "postgres://alice@db.internal:5432/app?auth_mode=scram_only",
+        &default_cfg(),
+    )
+    .expect("scram_only remains valid");
+    assert_eq!(cfg.auth_settings, qail_pg::AuthSettings::scram_only());
+}

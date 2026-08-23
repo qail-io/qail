@@ -17,7 +17,7 @@ pub enum IoBackend {
     Tokio,
     /// Linux io_uring capability (kernel 5.1+, requires `io_uring` feature).
     /// Capability does not yet imply active transport path.
-    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
     IoUring,
 }
 
@@ -25,7 +25,7 @@ impl std::fmt::Display for IoBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IoBackend::Tokio => write!(f, "tokio"),
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             IoBackend::IoUring => write!(f, "io_uring"),
         }
     }
@@ -33,7 +33,7 @@ impl std::fmt::Display for IoBackend {
 
 static DETECTED_BACKEND: OnceLock<IoBackend> = OnceLock::new();
 
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
+#[cfg(all(target_os = "linux", feature = "native-io-uring"))]
 fn probe_uring_support() -> Result<(), std::io::Error> {
     io_uring::IoUring::new(32).map(|_| ())
 }
@@ -44,7 +44,7 @@ fn probe_uring_support() -> Result<(), std::io::Error> {
 /// `QAIL_PG_IO_BACKEND=io_uring`; unset environment still reports Tokio.
 pub fn detect() -> IoBackend {
     *DETECTED_BACKEND.get_or_init(|| {
-        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
         {
             if should_use_uring_plain_transport(false) {
                 tracing::info!("qail-pg: using io_uring backend for plain TCP transport");
@@ -71,11 +71,11 @@ pub fn detect() -> IoBackend {
 /// Check if io_uring is available on this system
 #[inline]
 pub fn is_uring_available() -> bool {
-    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
     {
         probe_uring_support().is_ok()
     }
-    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+    #[cfg(not(all(target_os = "linux", feature = "native-io-uring")))]
     {
         false
     }
@@ -89,7 +89,7 @@ pub fn is_uring_available() -> bool {
 /// - unset/other → use the explicit connection config value
 #[inline]
 pub fn should_use_uring_plain_transport(config_enabled: bool) -> bool {
-    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
     {
         let backend = std::env::var("QAIL_PG_IO_BACKEND")
             .unwrap_or_default()
@@ -102,7 +102,7 @@ pub fn should_use_uring_plain_transport(config_enabled: bool) -> bool {
         }
         config_enabled && probe_uring_support().is_ok()
     }
-    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+    #[cfg(not(all(target_os = "linux", feature = "native-io-uring")))]
     {
         let _ = config_enabled;
         false
@@ -114,7 +114,7 @@ pub fn should_use_uring_plain_transport(config_enabled: bool) -> bool {
 pub fn backend_name() -> &'static str {
     match detect() {
         IoBackend::Tokio => "tokio",
-        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
         IoBackend::IoUring => "io_uring",
     }
 }

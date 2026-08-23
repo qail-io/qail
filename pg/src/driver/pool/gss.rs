@@ -37,7 +37,6 @@ pub(super) fn should_retry_gss_connect_error(
 
 fn is_gss_auth_enabled(config: &PoolConfig) -> bool {
     config.gss_token_provider.is_some()
-        || config.gss_token_provider_ex.is_some()
         || config.auth_settings.allow_kerberos_v5
         || config.auth_settings.allow_gssapi
         || config.auth_settings.allow_sspi

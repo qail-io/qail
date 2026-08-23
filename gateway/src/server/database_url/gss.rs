@@ -35,7 +35,7 @@ pub(super) fn apply_gss_provider(
             );
 
             let provider = linux_krb5_token_provider(gss_config).map_err(GatewayError::Config)?;
-            config = config.gss_token_provider_ex(provider);
+            config = config.gss_token_provider(provider);
             return Ok(config);
         }
         #[cfg(not(all(feature = "enterprise-gssapi", target_os = "linux")))]

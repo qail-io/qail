@@ -155,7 +155,7 @@ pub(super) const CONNECT_TRANSPORT_TLS: &str = "tls";
 pub(super) const CONNECT_TRANSPORT_MTLS: &str = "mtls";
 pub(super) const CONNECT_TRANSPORT_GSSENC: &str = "gssenc";
 pub(super) const CONNECT_BACKEND_TOKIO: &str = "tokio";
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
+#[cfg(all(target_os = "linux", feature = "native-io-uring"))]
 pub(super) const CONNECT_BACKEND_IO_URING: &str = "io_uring";
 
 /// TLS configuration for mutual TLS (client certificate authentication).
@@ -197,7 +197,6 @@ pub(super) struct ConnectParams<'a> {
     pub(super) password: Option<&'a str>,
     pub(super) auth_settings: AuthSettings,
     pub(super) gss_token_provider: Option<super::super::GssTokenProvider>,
-    pub(super) gss_token_provider_ex: Option<super::super::GssTokenProviderEx>,
     pub(super) io_uring: bool,
     pub(super) protocol_minor: u16,
     pub(super) startup_params: Vec<(String, String)>,

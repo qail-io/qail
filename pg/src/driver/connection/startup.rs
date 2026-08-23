@@ -3,9 +3,7 @@
 use super::helpers::{generate_gss_token, md5_password_message, select_scram_mechanism};
 use super::types::{GSS_SESSION_COUNTER, PgConnection, StartupAuthFlow};
 use crate::driver::stream::PgStream;
-use crate::driver::{
-    AuthSettings, EnterpriseAuthMechanism, GssTokenProvider, GssTokenProviderEx, PgError, PgResult,
-};
+use crate::driver::{AuthSettings, EnterpriseAuthMechanism, GssTokenProvider, PgError, PgResult};
 use crate::protocol::{BackendMessage, FrontendMessage, ScramClient, TransactionStatus};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
@@ -18,7 +16,6 @@ impl PgConnection {
         password: Option<&str>,
         auth_settings: AuthSettings,
         gss_token_provider: Option<GssTokenProvider>,
-        gss_token_provider_ex: Option<GssTokenProviderEx>,
     ) -> PgResult<()> {
         let mut scram_client: Option<ScramClient> = None;
         let mut startup_auth_flow: Option<StartupAuthFlow> = None;
@@ -78,9 +75,9 @@ impl PgConnection {
                         ));
                     }
 
-                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                    if gss_token_provider.is_none() {
                         return Err(PgError::Auth(
-                            "Kerberos V5 authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                            "Kerberos V5 authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider.".to_string(),
                         ));
                     }
 
@@ -88,8 +85,7 @@ impl PgConnection {
                         gss_session_id,
                         EnterpriseAuthMechanism::KerberosV5,
                         None,
-                        gss_token_provider,
-                        gss_token_provider_ex.as_ref(),
+                        gss_token_provider.as_ref(),
                     )
                     .map_err(|e| {
                         PgError::Auth(format!("Kerberos V5 token generation failed: {}", e))
@@ -114,9 +110,9 @@ impl PgConnection {
                         ));
                     }
 
-                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                    if gss_token_provider.is_none() {
                         return Err(PgError::Auth(
-                            "GSSAPI authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                            "GSSAPI authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider.".to_string(),
                         ));
                     }
 
@@ -124,8 +120,7 @@ impl PgConnection {
                         gss_session_id,
                         EnterpriseAuthMechanism::GssApi,
                         None,
-                        gss_token_provider,
-                        gss_token_provider_ex.as_ref(),
+                        gss_token_provider.as_ref(),
                     )
                     .map_err(|e| {
                         PgError::Auth(format!("GSSAPI initial token generation failed: {}", e))
@@ -162,9 +157,9 @@ impl PgConnection {
                         ));
                     }
 
-                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                    if gss_token_provider.is_none() {
                         return Err(PgError::Auth(
-                            "SSPI authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                            "SSPI authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider.".to_string(),
                         ));
                     }
 
@@ -172,8 +167,7 @@ impl PgConnection {
                         gss_session_id,
                         EnterpriseAuthMechanism::Sspi,
                         None,
-                        gss_token_provider,
-                        gss_token_provider_ex.as_ref(),
+                        gss_token_provider.as_ref(),
                     )
                     .map_err(|e| {
                         PgError::Auth(format!("SSPI initial token generation failed: {}", e))
@@ -206,9 +200,9 @@ impl PgConnection {
                         }
                     };
 
-                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                    if gss_token_provider.is_none() {
                         return Err(PgError::Auth(
-                            "Received GSSContinue but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                            "Received GSSContinue but no GSS token provider is configured. Set ConnectOptions.gss_token_provider.".to_string(),
                         ));
                     }
 
@@ -216,8 +210,7 @@ impl PgConnection {
                         gss_session_id,
                         mechanism,
                         Some(&server_token),
-                        gss_token_provider,
-                        gss_token_provider_ex.as_ref(),
+                        gss_token_provider.as_ref(),
                     )
                     .map_err(|e| {
                         PgError::Auth(format!("GSS continue token generation failed: {}", e))

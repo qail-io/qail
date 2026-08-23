@@ -359,7 +359,7 @@ mod tests {
     fn test_and_combinator() {
         let expr = and(
             tenant_check("tenant_id", "app.current_tenant_id", "uuid"),
-            tenant_check("agent_id", "app.current_agent_id", "uuid"),
+            tenant_check("user_id", "app.current_user_id", "uuid"),
         );
 
         assert!(

@@ -14,10 +14,8 @@ readme = "README.md"
 [features]
 default = []
 # Native Linux io_uring transport for plain TCP.
-# Backward-compatible feature used in cfg(feature = "io_uring") gates.
-io_uring = ["dep:io-uring"]
-# Preferred external name to signal native Linux backend intent.
-native-io-uring = ["io_uring"]
+# The 1.x `io_uring` alias feature was removed in 2.0.
+native-io-uring = ["dep:io-uring"]
 # Enable chrono DateTime parsing in PgRow::datetime()
 chrono = ["dep:chrono"]
 # Enable uuid::Uuid parsing in PgRow::uuid_typed()
@@ -56,7 +54,7 @@ chrono = { version = "0.4", optional = true }
 uuid = { version = "1.23", optional = true }
 
 # io_uring support (Linux only, opt-in via feature flag)
-# Use `--features io_uring` for native Linux builds
+# Use `--features native-io-uring` for native Linux builds
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
 

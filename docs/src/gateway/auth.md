@@ -23,7 +23,6 @@ The extracted claims (`tenant_id`, `user_id`, `role`) are set as PostgreSQL sess
 ```sql
 set_config('app.current_tenant_id', '<from JWT>', true);
 set_config('app.current_user_id', '<from JWT>', true);
-set_config('app.current_agent_id', '<from JWT agent_id claim>', true);
 set_config('app.is_super_admin', 'false', true);
 ```
 
@@ -57,7 +56,6 @@ RLS. The gateway sets transaction-local session variables before each query:
 -- Automatically executed before every query:
 set_config('app.current_tenant_id', '<from JWT>', true);
 set_config('app.current_user_id', '<from JWT>', true);
-set_config('app.current_agent_id', '<from JWT agent_id claim>', true);
 set_config('app.is_super_admin', 'false', true);
 ```
 

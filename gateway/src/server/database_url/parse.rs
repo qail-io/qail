@@ -207,9 +207,8 @@ pub(super) fn parse_database_url(
                     auth_settings = AuthSettings::scram_only();
                 } else if value.eq_ignore_ascii_case("gssapi_only") {
                     auth_settings = AuthSettings::gssapi_only();
-                } else if value.eq_ignore_ascii_case("compat")
-                    || value.eq_ignore_ascii_case("default")
-                {
+                } else if value.eq_ignore_ascii_case("default") {
+                    // The 1.x "compat" alias was removed in 2.0.
                     auth_settings = AuthSettings::default();
                 } else {
                     return Err(GatewayError::Config(format!(

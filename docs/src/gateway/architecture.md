@@ -49,7 +49,6 @@ Every HTTP request flows through a fixed, ordered pipeline:
  │     Sets PostgreSQL GUCs:                                 │
  │       set_config('app.current_tenant_id', '...', true)    │
  │       set_config('app.current_user_id', '...', true)      │
- │       set_config('app.current_agent_id', '...', true)     │
  │       set_config('app.is_super_admin', '...', true)       │
  ├───────────────────────────────────────────────────────────┤
  │  7. EXPLAIN Pre-Check (reads only)                        │

@@ -164,7 +164,6 @@ impl PgDriver {
             tls_ca_cert_pem: pool_cfg.tls_ca_cert_pem,
             mtls: pool_cfg.mtls,
             gss_token_provider: pool_cfg.gss_token_provider,
-            gss_token_provider_ex: pool_cfg.gss_token_provider_ex,
             auth: pool_cfg.auth_settings,
             io_uring: pool_cfg.io_uring,
             startup_params: Vec::new(),

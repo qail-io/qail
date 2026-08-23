@@ -41,37 +41,52 @@ fn test_jwt_validation() {
 }
 
 #[test]
-fn test_engine_style_jwt() {
-    // Engine JWT uses "user_id" instead of "sub" and may not have tenant_id
+fn user_id_alias_is_rejected_and_canonical_sub_succeeds() {
+    // 2.0: the 1.x engine-style `user_id` alias for `sub` is gone. A signed
+    // token that carries ONLY `user_id` must be rejected; the same claims
+    // with canonical `sub` must validate.
     let secret = "test-secret-key-12345";
     let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
-
-    // Simulate engine JWT payload: { "user_id": "...", "role": "SuperAdmin", "email": "..." }
-    let payload = serde_json::json!({
-        "user_id": "4fcc89a7-0753-4b8d-8457-71619533dbd8",
-        "email": "scootsuperadmin@qail.io",
-        "role": "SuperAdmin",
-        "exp": exp,
-        "iat": exp - 86400,
-    });
-
-    let token = encode(
-        &Header::default(),
-        &payload,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .unwrap();
-
     let config = JwtConfig {
         secret: Some(secret.to_string()),
         algorithm: Algorithm::HS256,
         ..Default::default()
     };
 
-    let auth = validate_jwt(&token, &config).unwrap();
+    let alias_payload = serde_json::json!({
+        "user_id": "4fcc89a7-0753-4b8d-8457-71619533dbd8",
+        "email": "scootsuperadmin@qail.io",
+        "role": "SuperAdmin",
+        "exp": exp,
+        "iat": exp - 86400,
+    });
+    let alias_token = encode(
+        &Header::default(),
+        &alias_payload,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .unwrap();
+    assert!(
+        validate_jwt(&alias_token, &config).is_err(),
+        "a signed token with only user_id (no sub) must be rejected in 2.0"
+    );
+
+    let sub_payload = serde_json::json!({
+        "sub": "4fcc89a7-0753-4b8d-8457-71619533dbd8",
+        "email": "scootsuperadmin@qail.io",
+        "role": "SuperAdmin",
+        "exp": exp,
+        "iat": exp - 86400,
+    });
+    let sub_token = encode(
+        &Header::default(),
+        &sub_payload,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .unwrap();
+    let auth = validate_jwt(&sub_token, &config).unwrap();
     assert_eq!(auth.user_id, "4fcc89a7-0753-4b8d-8457-71619533dbd8");
     assert_eq!(auth.role, "SuperAdmin");
-    // No tenant_id in engine JWT — will be resolved via startup user→tenant map
     assert_eq!(auth.tenant_id, None);
 }
 
@@ -627,45 +642,36 @@ fn legacy_agent_only_claim_does_not_satisfy_tenant_scope() {
 }
 
 #[test]
-fn legacy_agent_only_claim_is_not_promoted_to_rls_scope() {
-    let auth = AuthContext {
-        user_id: "agent-only-user".to_string(),
+fn agent_id_claim_cannot_alter_the_derived_rls_context() {
+    // 2.0: the agent identity plane is gone. A JWT `agent_id` claim is an
+    // ordinary flattened claim — with or without a tenant, the derived
+    // RlsContext must be identical to the same token without the claim.
+    let with_claim = |tenant: Option<&str>| AuthContext {
+        user_id: "claim-user".to_string(),
         role: "operator".to_string(),
-        tenant_id: None,
+        tenant_id: tenant.map(str::to_string),
         claims: {
             let mut claims = HashMap::new();
             claims.insert("agent_id".to_string(), serde_json::json!("legacy-agent"));
             claims
         },
     };
-
-    let rls = auth.to_rls_context();
-    assert!(
-        !rls.has_agent(),
-        "agent_id without tenant_id must not create an RLS scope"
-    );
-    assert!(
-        !rls.has_tenant(),
-        "agent-only claims must remain tenantless until tenant enrichment succeeds"
-    );
-}
-
-#[test]
-fn legacy_agent_claim_is_kept_as_secondary_scope_when_tenant_exists() {
-    let auth = AuthContext {
-        user_id: "tenant-agent-user".to_string(),
+    let without_claim = |tenant: Option<&str>| AuthContext {
+        user_id: "claim-user".to_string(),
         role: "operator".to_string(),
-        tenant_id: Some("tenant-123".to_string()),
-        claims: {
-            let mut claims = HashMap::new();
-            claims.insert("agent_id".to_string(), serde_json::json!("legacy-agent"));
-            claims
-        },
+        tenant_id: tenant.map(str::to_string),
+        claims: HashMap::new(),
     };
 
-    let rls = auth.to_rls_context();
+    for tenant in [None, Some("tenant-123")] {
+        assert_eq!(
+            with_claim(tenant).to_rls_context(),
+            without_claim(tenant).to_rls_context(),
+            "agent_id claim must not change the derived RLS context (tenant={tenant:?})"
+        );
+    }
+    let rls = with_claim(Some("tenant-123")).to_rls_context();
     assert_eq!(rls.tenant_id, "tenant-123");
-    assert_eq!(rls.agent_id, "legacy-agent");
 }
 
 #[test]

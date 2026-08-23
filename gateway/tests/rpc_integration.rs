@@ -9,12 +9,12 @@
 //!
 //! Run:
 //!   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/postgres" \
-//!     cargo test -p qail-gateway --features legacy-raw-tests --test rpc_integration -- --nocapture
+//!     cargo test -p qail-gateway --features manual-tests --test rpc_integration -- --nocapture
 //!
 //! These tests use a dedicated `qail_test` schema, isolated from application
 //! tables. The schema is dropped and recreated at the start of each test
 //! to avoid interference from previous runs.
-#![cfg(feature = "legacy-raw-tests")]
+#![cfg(feature = "manual-tests")]
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};

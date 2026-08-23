@@ -29,7 +29,7 @@ Client Request
 ┌─────────────────────────────────────┐
 │  to_rls_context()                   │
 │  → RlsContext { tenant_id,          │
-│    agent_id, is_super_admin }       │
+│    user_id, is_super_admin }        │
 └──────────────┬──────────────────────┘
                │
                ▼
@@ -118,7 +118,6 @@ The gateway maps `AuthContext` → `RlsContext` for Postgres-native RLS:
 | AuthContext field | RLS session variable | PostgreSQL usage |
 |---|---|---|
 | `tenant_id` | `app.current_tenant_id` | `current_setting('app.current_tenant_id')` |
-| `claims["agent_id"]` | `app.current_agent_id` | `current_setting('app.current_agent_id')` |
 | `role == "administrator" \| "Administrator"` | Super admin bypass | Skips RLS entirely |
 
 ### How It's Applied
@@ -129,7 +128,6 @@ BEGIN;
 SET LOCAL statement_timeout = 5000;
 SET LOCAL app.is_global = 'false';
 SELECT set_config('app.current_tenant_id', 'op-123', true),
-       set_config('app.current_agent_id', '', true),
        set_config('app.is_super_admin', 'false', true);
 
 -- Your query runs here (same roundtrip)
@@ -169,20 +167,13 @@ CREATE POLICY tenant_isolation ON orders
 
 If an existing schema still names its tenant column `operator_id`, compare that column to `app.current_tenant_id`; do not use the removed `app.current_operator_id` session key.
 
-### Agent-scoped access
+### Agent-scoped access (removed in 2.0)
 
-```sql
-CREATE POLICY agent_orders ON orders
-  FOR SELECT
-  TO app_user
-  USING (
-    tenant_id = current_setting('app.current_tenant_id')::uuid
-    AND (
-      current_setting('app.current_agent_id') = ''
-      OR agent_id = current_setting('app.current_agent_id')::uuid
-    )
-  );
-```
+The `app.current_agent_id` session variable is no longer set. Policies that
+still reference it read `NULL` via `current_setting('app.current_agent_id',
+true)` (their agent branch never matches) — and THROW if they omit
+`missing_ok=true`. Migrate such policies to `app.current_user_id` or drop the
+branch before deploying v2.
 
 ### In QAIL schema syntax
 

@@ -44,13 +44,13 @@ mod row;
 mod stream;
 mod transaction;
 mod types;
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
+#[cfg(all(target_os = "linux", feature = "native-io-uring"))]
 mod uring;
 
 // ── Public API ──────────────────────────────────────────────────────
 pub use auth_types::{
     AuthSettings, ConnectOptions, EnterpriseAuthMechanism, GssEncMode, GssTokenProvider,
-    GssTokenProviderEx, GssTokenRequest, ScramChannelBindingMode, TlsMode,
+    GssTokenRequest, ScramChannelBindingMode, TlsMode,
 };
 pub use auto_mode::{AutoCountPath, AutoCountPlan};
 pub use builder::PgDriverBuilder;

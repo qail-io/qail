@@ -19,8 +19,8 @@ pub use policy::{authenticate_request, ensure_request_auth, ensure_tenant_rate_l
 /// JWT claims structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
-    /// Accepts both standard JWT "sub" and engine-style "user_id"
-    #[serde(alias = "user_id")]
+    /// Standard JWT subject. The 1.x `user_id` alias was removed in 2.0 —
+    /// tokens must carry canonical `sub`.
     pub sub: String,
     /// Token expiration time (Unix timestamp).
     pub exp: usize,

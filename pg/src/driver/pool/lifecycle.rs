@@ -620,8 +620,7 @@ impl PgPool {
     /// Acquire a connection for system-level operations (no tenant context).
     ///
     /// Sets RLS session variables to maximally restrictive values:
-    /// - `app.current_tenant_id = ''`
-    /// - `app.current_agent_id = ''`  
+    /// - `app.current_tenant_id` = nil UUID
     /// - `app.is_super_admin = false`
     ///
     /// Use this for startup introspection, migrations, and health checks
@@ -900,8 +899,7 @@ impl PgPool {
             gss_enc_mode: config.gss_enc_mode,
             tls_ca_cert_pem: config.tls_ca_cert_pem.clone(),
             mtls: config.mtls.clone(),
-            gss_token_provider: config.gss_token_provider,
-            gss_token_provider_ex: config.gss_token_provider_ex.clone(),
+            gss_token_provider: config.gss_token_provider.clone(),
             auth: config.auth_settings,
             io_uring: config.io_uring,
             startup_params: Vec::new(),

@@ -208,7 +208,6 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 // Declare the complete registry once at application startup.
 qail_core::rls::init_scope_registries_from_tables(&[("bookings", "tenant_id")], &[])?;
 let ctx = RlsContext::tenant(tenant_id);            // Single tenant (preferred)
-let ctx = RlsContext::tenant_and_agent(tenant_id, agent_id); // Agent/reseller within tenant
 let ctx = RlsContext::global();                     // Shared data (tenant_id IS NULL)
 let token = SuperAdminToken::for_system_process("admin");
 let ctx = RlsContext::super_admin(token);           // Full bypass (internal only)
@@ -260,7 +259,7 @@ POST   /api/{table}
 PATCH  /api/{table}/:id
 DELETE /api/{table}/:id
 GET    /api/{table}/_explain    # EXPLAIN ANALYZE
-GET    /api/{table}/_aggregate  # count, sum, avg, min, max
+GET    /api/{table}/aggregate   # count, sum, avg, min, max
 ```
 
 **A complete REST API layer for PostgreSQL:**

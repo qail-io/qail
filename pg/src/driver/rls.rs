@@ -36,21 +36,18 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     // Every UUID-shaped GUC gets the nil UUID when absent — unconditionally.
     // An empty string reaches policies as `''::uuid` and THROWS (PostgreSQL
     // does not short-circuit OR), so a user-only context on a tenant-policy
-    // table, or a tenant context on an `agent_id = ...::uuid` policy, would
-    // fail every query instead of simply matching nothing.
+    // table would fail every query instead of simply matching nothing.
+    //
+    // 2.0: `app.current_agent_id` is no longer set — the agent identity
+    // plane was removed. Policies still referencing it read NULL via
+    // `current_setting(..., true)` and their agent branch never matches.
     let nil_uuid = "00000000-0000-0000-0000-000000000000";
     let t_id_raw = if ctx.tenant_id.is_empty() {
         nil_uuid
     } else {
         &ctx.tenant_id
     };
-    let ag_id_raw = if ctx.agent_id.is_empty() {
-        nil_uuid
-    } else {
-        &ctx.agent_id
-    };
     let t_id = quote_guc_literal(t_id_raw);
-    let ag_id = quote_guc_literal(ag_id_raw);
     let u_id_raw = if ctx.user_id().is_empty() {
         nil_uuid
     } else {
@@ -63,9 +60,8 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
         "BEGIN; SET LOCAL app.is_global = {}; \
          SELECT set_config('app.current_user_id', {}, true), \
                 set_config('app.current_tenant_id', {}, true), \
-                set_config('app.current_agent_id', {}, true), \
                 set_config('app.is_super_admin', {}, true)",
-        is_global, u_id, t_id, ag_id, is_super_admin,
+        is_global, u_id, t_id, is_super_admin,
     )
 }
 
@@ -89,21 +85,18 @@ pub(crate) fn context_to_sql_with_timeouts(
     // Every UUID-shaped GUC gets the nil UUID when absent — unconditionally.
     // An empty string reaches policies as `''::uuid` and THROWS (PostgreSQL
     // does not short-circuit OR), so a user-only context on a tenant-policy
-    // table, or a tenant context on an `agent_id = ...::uuid` policy, would
-    // fail every query instead of simply matching nothing.
+    // table would fail every query instead of simply matching nothing.
+    //
+    // 2.0: `app.current_agent_id` is no longer set — the agent identity
+    // plane was removed. Policies still referencing it read NULL via
+    // `current_setting(..., true)` and their agent branch never matches.
     let nil_uuid = "00000000-0000-0000-0000-000000000000";
     let t_id_raw = if ctx.tenant_id.is_empty() {
         nil_uuid
     } else {
         &ctx.tenant_id
     };
-    let ag_id_raw = if ctx.agent_id.is_empty() {
-        nil_uuid
-    } else {
-        &ctx.agent_id
-    };
     let t_id = quote_guc_literal(t_id_raw);
-    let ag_id = quote_guc_literal(ag_id_raw);
     let u_id_raw = if ctx.user_id().is_empty() {
         nil_uuid
     } else {
@@ -124,9 +117,8 @@ pub(crate) fn context_to_sql_with_timeouts(
          SET LOCAL app.is_global = {}; \
          SELECT set_config('app.current_user_id', {}, true), \
                 set_config('app.current_tenant_id', {}, true), \
-                set_config('app.current_agent_id', {}, true), \
                 set_config('app.is_super_admin', {}, true)",
-        statement_timeout_ms, lock_clause, is_global, u_id, t_id, ag_id, is_super_admin,
+        statement_timeout_ms, lock_clause, is_global, u_id, t_id, is_super_admin,
     )
 }
 
@@ -207,16 +199,13 @@ mod tests {
     }
 
     #[test]
-    fn test_context_to_sql_user_only_nils_tenant_and_agent() {
+    fn test_context_to_sql_user_only_nils_tenant() {
         // A user-only context (consumer marketplace shape) must never reach a
         // `tenant_id = current_setting(...)::uuid` policy as '' — that throws.
         let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
         let sql = context_to_sql(&ctx);
         assert!(sql.contains(
             "set_config('app.current_tenant_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
-        ));
-        assert!(sql.contains(
-            "set_config('app.current_agent_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
         ));
         assert!(
             !sql.contains("$qail_guc$$qail_guc$"),
@@ -225,13 +214,30 @@ mod tests {
     }
 
     #[test]
-    fn test_context_to_sql_tenant_only_nils_agent() {
-        let ctx = RlsContext::tenant("abc-123");
-        let sql = context_to_sql_with_timeouts(&ctx, 1000, 0);
-        assert!(sql.contains(
-            "set_config('app.current_agent_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
-        ));
-        assert!(!sql.contains("$qail_guc$$qail_guc$"));
+    fn generated_rls_setup_sql_never_sets_agent_guc() {
+        // 2.0: the agent identity plane is gone. NO context shape may emit
+        // `app.current_agent_id` — policies that still reference it must read
+        // NULL, never a stale or attacker-influenced value.
+        let contexts = [
+            RlsContext::tenant("abc-123"),
+            RlsContext::user("550e8400-e29b-41d4-a716-446655440000"),
+            RlsContext::tenant("abc-123").with_user("u-1"),
+            RlsContext::global(),
+            RlsContext::empty(),
+            RlsContext::super_admin(SuperAdminToken::for_system_process("agent_guc_test")),
+        ];
+        for ctx in contexts {
+            for sql in [
+                context_to_sql(&ctx),
+                context_to_sql_with_timeouts(&ctx, 1000, 0),
+            ] {
+                assert!(
+                    !sql.contains("current_agent_id") && !sql.to_lowercase().contains("agent"),
+                    "RLS setup SQL must not reference the agent GUC: {sql}"
+                );
+                assert!(!sql.contains("$qail_guc$$qail_guc$"));
+            }
+        }
     }
 
     #[test]

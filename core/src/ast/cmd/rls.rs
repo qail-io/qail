@@ -1980,12 +1980,12 @@ mod tests {
     }
 
     #[test]
-    fn test_with_rls_agent_only_fails_closed_on_tenant_table() {
+    fn test_with_rls_empty_context_fails_closed_on_tenant_table() {
         seal_tenant_table("_rls_noops_orders", "tenant_id");
 
-        // Agent-only context without tenant_id: the table is registered for
+        // A context without tenant_id: the table is registered for
         // tenant scope, so running it unscoped would be the silent false-green.
-        let ctx = RlsContext::agent("ag-only");
+        let ctx = RlsContext::user("u-no-tenant");
         let err = Qail::get("_rls_noops_orders")
             .with_rls(&ctx)
             .expect_err("missing tenant on a registered table must fail closed");

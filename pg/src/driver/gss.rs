@@ -2,7 +2,7 @@
 //!
 //! This module is intentionally behind `enterprise-gssapi` + Linux cfg.
 
-use super::{EnterpriseAuthMechanism, GssTokenProviderEx, GssTokenRequest};
+use super::{EnterpriseAuthMechanism, GssTokenProvider, GssTokenRequest};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
@@ -147,7 +147,7 @@ fn prune_stale_sessions(sessions: &mut HashMap<u64, TrackedSession>) {
 /// - crate built with `enterprise-gssapi` feature on Linux
 pub fn linux_krb5_token_provider(
     config: LinuxKrb5ProviderConfig,
-) -> Result<GssTokenProviderEx, String> {
+) -> Result<GssTokenProvider, String> {
     let target_name = linux_krb5_preflight(&config)?.target_name;
     let sessions: Arc<Mutex<HashMap<u64, TrackedSession>>> = Arc::new(Mutex::new(HashMap::new()));
 

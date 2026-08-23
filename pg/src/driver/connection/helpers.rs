@@ -1,20 +1,19 @@
 //! Free helper functions — GSS token gen, metrics, MD5 password, SCRAM selection, Drop.
 
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
+#[cfg(all(target_os = "linux", feature = "native-io-uring"))]
 use super::types::CONNECT_BACKEND_IO_URING;
 use super::types::{CONNECT_BACKEND_TOKIO, PgConnection};
 use crate::driver::stream::PgStream;
 use crate::driver::{
-    EnterpriseAuthMechanism, GssTokenProvider, GssTokenProviderEx, GssTokenRequest, PgError,
-    PgResult, ScramChannelBindingMode,
+    EnterpriseAuthMechanism, GssTokenProvider, GssTokenRequest, PgError, PgResult,
+    ScramChannelBindingMode,
 };
 
 pub(super) fn generate_gss_token(
     session_id: u64,
     mechanism: EnterpriseAuthMechanism,
     server_token: Option<&[u8]>,
-    legacy_provider: Option<GssTokenProvider>,
-    stateful_provider: Option<&GssTokenProviderEx>,
+    stateful_provider: Option<&GssTokenProvider>,
 ) -> Result<Vec<u8>, String> {
     if let Some(provider) = stateful_provider {
         return provider(GssTokenRequest {
@@ -24,21 +23,17 @@ pub(super) fn generate_gss_token(
         });
     }
 
-    if let Some(provider) = legacy_provider {
-        return provider(mechanism, server_token);
-    }
-
     Err("No GSS token provider configured".to_string())
 }
 
 pub(super) fn plain_connect_attempt_backend(io_uring: bool) -> &'static str {
-    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
     {
         if should_try_uring_plain(io_uring) {
             return CONNECT_BACKEND_IO_URING;
         }
     }
-    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+    #[cfg(not(all(target_os = "linux", feature = "native-io-uring")))]
     {
         let _ = io_uring;
     }
@@ -48,7 +43,7 @@ pub(super) fn plain_connect_attempt_backend(io_uring: bool) -> &'static str {
 pub(crate) fn connect_backend_for_stream(stream: &PgStream) -> &'static str {
     match stream {
         PgStream::Tcp(_) => CONNECT_BACKEND_TOKIO,
-        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
         PgStream::Uring(_) => CONNECT_BACKEND_IO_URING,
         PgStream::Tls(_) => CONNECT_BACKEND_TOKIO,
         #[cfg(unix)]
@@ -201,7 +196,7 @@ impl Drop for PgConnection {
                 // try_write is non-blocking
                 let _ = tcp.try_write(&terminate);
             }
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             PgStream::Uring(stream) => {
                 // io_uring transport owns I/O in a dedicated worker thread;
                 // terminate packet in Drop is not viable, but force socket
@@ -270,7 +265,7 @@ pub(crate) fn parse_affected_rows(tag: &str) -> PgResult<u64> {
     })
 }
 
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
+#[cfg(all(target_os = "linux", feature = "native-io-uring"))]
 pub(super) fn should_try_uring_plain(io_uring: bool) -> bool {
     super::super::io_backend::should_use_uring_plain_transport(io_uring)
 }

@@ -1,8 +1,8 @@
 //! Pool configuration, URL parsing, and builder.
 
 use crate::driver::{
-    AuthSettings, GssEncMode, GssTokenProvider, GssTokenProviderEx, PgError, PgResult,
-    ScramChannelBindingMode, TlsConfig, TlsMode,
+    AuthSettings, GssEncMode, GssTokenProvider, PgError, PgResult, ScramChannelBindingMode,
+    TlsConfig, TlsMode,
 };
 use std::time::Duration;
 
@@ -55,10 +55,8 @@ pub struct PoolConfig {
     pub tls_ca_cert_pem: Option<Vec<u8>>,
     /// Optional mTLS client certificate/key configuration.
     pub mtls: Option<TlsConfig>,
-    /// Optional callback for Kerberos/GSS/SSPI token generation.
-    pub gss_token_provider: Option<GssTokenProvider>,
     /// Optional stateful callback for Kerberos/GSS/SSPI token generation.
-    pub gss_token_provider_ex: Option<GssTokenProviderEx>,
+    pub gss_token_provider: Option<GssTokenProvider>,
     /// Number of retries for transient GSS/Kerberos connection failures.
     pub gss_connect_retries: usize,
     /// Base delay for GSS/Kerberos connect retry backoff.
@@ -111,7 +109,6 @@ impl PoolConfig {
             tls_ca_cert_pem: None,
             mtls: None,
             gss_token_provider: None,
-            gss_token_provider_ex: None,
             gss_connect_retries: 2,
             gss_retry_base_delay: Duration::from_millis(150),
             gss_circuit_breaker_threshold: 8,
@@ -209,15 +206,9 @@ impl PoolConfig {
         self
     }
 
-    /// Set Kerberos/GSS/SSPI token provider callback.
+    /// Set a stateful Kerberos/GSS/SSPI token provider.
     pub fn gss_token_provider(mut self, provider: GssTokenProvider) -> Self {
         self.gss_token_provider = Some(provider);
-        self
-    }
-
-    /// Set a stateful Kerberos/GSS/SSPI token provider.
-    pub fn gss_token_provider_ex(mut self, provider: GssTokenProviderEx) -> Self {
-        self.gss_token_provider_ex = Some(provider);
         self
     }
 
@@ -561,7 +552,7 @@ pub(crate) fn apply_url_query_params(
                     },
                 )
                 .map_err(PgError::Auth)?;
-                config.gss_token_provider_ex = Some(provider);
+                config.gss_token_provider = Some(provider);
             }
             #[cfg(not(all(feature = "enterprise-gssapi", target_os = "linux")))]
             {

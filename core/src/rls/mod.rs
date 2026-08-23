@@ -414,10 +414,6 @@ pub struct RlsContext {
     /// Empty string means no tenant scope.
     pub tenant_id: String,
 
-    /// Legacy: The agent (reseller) this context is scoped to.
-    /// Empty string means no agent scope.
-    pub agent_id: String,
-
     /// When true, the current user is a platform super admin
     /// and should bypass tenant isolation.
     ///
@@ -440,29 +436,6 @@ impl RlsContext {
     pub fn tenant(tenant_id: &str) -> Self {
         Self {
             tenant_id: tenant_id.to_string(),
-            agent_id: String::new(),
-            is_super_admin: false,
-            is_global: false,
-            user_id: String::new(),
-        }
-    }
-
-    /// Create a context scoped to a specific agent (reseller).
-    pub fn agent(agent_id: &str) -> Self {
-        Self {
-            tenant_id: String::new(),
-            agent_id: agent_id.to_string(),
-            is_super_admin: false,
-            is_global: false,
-            user_id: String::new(),
-        }
-    }
-
-    /// Create a context scoped to both tenant and agent.
-    pub fn tenant_and_agent(tenant_id: &str, agent_id: &str) -> Self {
-        Self {
-            tenant_id: tenant_id.to_string(),
-            agent_id: agent_id.to_string(),
             is_super_admin: false,
             is_global: false,
             user_id: String::new(),
@@ -476,7 +449,6 @@ impl RlsContext {
     pub fn global() -> Self {
         Self {
             tenant_id: String::new(),
-            agent_id: String::new(),
             is_super_admin: false,
             is_global: true,
             user_id: String::new(),
@@ -494,7 +466,6 @@ impl RlsContext {
         let nil = "00000000-0000-0000-0000-000000000000".to_string();
         Self {
             tenant_id: nil,
-            agent_id: String::new(),
             is_super_admin: true,
             is_global: false,
             user_id: String::new(),
@@ -508,7 +479,6 @@ impl RlsContext {
     pub fn empty() -> Self {
         Self {
             tenant_id: String::new(),
-            agent_id: String::new(),
             is_super_admin: false,
             is_global: false,
             user_id: String::new(),
@@ -523,7 +493,6 @@ impl RlsContext {
     pub fn user(user_id: &str) -> Self {
         Self {
             tenant_id: String::new(),
-            agent_id: String::new(),
             is_super_admin: false,
             is_global: false,
             user_id: user_id.to_string(),
@@ -532,7 +501,7 @@ impl RlsContext {
 
     /// Attach an authenticated user ID to an existing tenant/global context.
     ///
-    /// User scope is orthogonal to tenant/agent scope: PostgreSQL policies can
+    /// User scope is orthogonal to tenant scope: PostgreSQL policies can
     /// use both `app.current_tenant_id` and `app.current_user_id`.
     pub fn with_user(mut self, user_id: &str) -> Self {
         self.user_id = user_id.to_string();
@@ -542,11 +511,6 @@ impl RlsContext {
     /// Returns true if this context has a tenant scope.
     pub fn has_tenant(&self) -> bool {
         !self.tenant_id.is_empty()
-    }
-
-    /// Returns true if this context has an agent scope.
-    pub fn has_agent(&self) -> bool {
-        !self.agent_id.is_empty()
     }
 
     /// Returns true if this context has a user scope.
@@ -817,17 +781,8 @@ mod tests {
     fn test_tenant_context() {
         let ctx = RlsContext::tenant("t-123");
         assert_eq!(ctx.tenant_id, "t-123");
-        assert!(ctx.agent_id.is_empty());
         assert!(!ctx.bypasses_rls());
         assert!(ctx.has_tenant());
-    }
-
-    #[test]
-    fn test_agent_context_sets_tenant() {
-        let ctx = RlsContext::agent("ag-456");
-        assert!(ctx.tenant_id.is_empty());
-        assert_eq!(ctx.agent_id, "ag-456");
-        assert!(ctx.has_agent());
     }
 
     #[test]
@@ -843,14 +798,6 @@ mod tests {
         let token = SuperAdminToken::for_auth("test");
         let ctx = RlsContext::super_admin(token);
         assert!(ctx.bypasses_rls());
-    }
-
-    #[test]
-    fn test_tenant_and_agent() {
-        let ctx = RlsContext::tenant_and_agent("tenant-1", "ag-2");
-        assert_eq!(ctx.tenant_id, "tenant-1");
-        assert!(ctx.has_agent());
-        assert!(!ctx.bypasses_rls());
     }
 
     #[test]
@@ -876,7 +823,6 @@ mod tests {
     fn test_empty_context() {
         let ctx = RlsContext::empty();
         assert!(!ctx.has_tenant());
-        assert!(!ctx.has_agent());
         assert!(!ctx.bypasses_rls());
         assert!(!ctx.is_global());
     }
@@ -885,7 +831,6 @@ mod tests {
     fn test_global_context() {
         let ctx = RlsContext::global();
         assert!(!ctx.has_tenant());
-        assert!(!ctx.has_agent());
         assert!(!ctx.bypasses_rls());
         assert!(ctx.is_global());
         assert_eq!(ctx.to_string(), "RlsContext(global)");
@@ -926,7 +871,6 @@ mod tests {
     fn test_user_context() {
         let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
         assert!(!ctx.has_tenant());
-        assert!(!ctx.has_agent());
         assert!(!ctx.bypasses_rls());
         assert!(!ctx.is_global());
         assert!(ctx.has_user());

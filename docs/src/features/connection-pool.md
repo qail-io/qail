@@ -50,7 +50,6 @@ acquire_with_rls(ctx)
   → SET LOCAL statement_timeout = ...
   → set_config('app.current_tenant_id', '...', true)
   → set_config('app.current_user_id', '...', true)
-  → set_config('app.current_agent_id', '...', true)
   → set_config('app.is_super_admin', '...', true)
   → execute queries (RLS policies filter rows automatically)
   → release()

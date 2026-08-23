@@ -415,7 +415,7 @@ impl PgConnection {
         match &self.stream {
             PgStream::Tcp(_) => false,
             PgStream::Tls(_) => true,
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             PgStream::Uring(_) => false,
             #[cfg(unix)]
             PgStream::Unix(_) => false,
@@ -597,7 +597,7 @@ impl PgConnection {
                     }
                 }
             }
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             PgStream::Uring(stream) => {
                 match tokio::time::timeout(DEFAULT_WRITE_TIMEOUT, stream.write_all(bytes)).await {
                     Ok(Ok(())) => Ok(()),
@@ -697,7 +697,7 @@ impl PgConnection {
                     }
                 }
             }
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             PgStream::Uring(stream) => {
                 match tokio::time::timeout(DEFAULT_WRITE_TIMEOUT, stream.flush()).await {
                     Ok(Ok(())) => Ok(()),
@@ -938,7 +938,7 @@ impl PgConnection {
                     }
                 }
             }
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             PgStream::Uring(stream) => {
                 match tokio::time::timeout(DEFAULT_READ_TIMEOUT, stream.read_into(buffer, 131072))
                     .await
@@ -1010,7 +1010,7 @@ impl PgConnection {
         let read_result = match stream {
             PgStream::Tcp(stream) => stream.read_buf(buffer).await,
             PgStream::Tls(stream) => stream.read_buf(buffer).await,
-            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
             PgStream::Uring(stream) => stream.read_into(buffer, 131072).await,
             #[cfg(unix)]
             PgStream::Unix(stream) => stream.read_buf(buffer).await,

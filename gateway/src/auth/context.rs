@@ -140,9 +140,12 @@ impl AuthContext {
     ///
     /// Mapping:
     /// - `tenant_id` → tenant scope
-    /// - `claims["agent_id"]` → secondary legacy scope only when tenant_id exists
     /// - explicit platform-admin claim + role `administrator` + empty tenant
     ///   scope → `is_super_admin`
+    ///
+    /// 2.0: a JWT `agent_id` claim is an ordinary flattened claim — it no
+    /// longer influences the derived `RlsContext` (the agent identity plane
+    /// was removed).
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
         // Only platform-level administrators (no tenant scope) bypass RLS.
         // Tenant-scoped roles (including tenant-bound "administrator") use tenant filtering.
@@ -161,21 +164,7 @@ impl AuthContext {
         }
 
         let tenant_id = self.tenant_id.clone().unwrap_or_default();
-        let agent_id = if tenant_id.is_empty() {
-            String::new()
-        } else {
-            self.claims
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-
-        let rls = if !agent_id.is_empty() {
-            qail_core::rls::RlsContext::tenant_and_agent(&tenant_id, &agent_id)
-        } else {
-            qail_core::rls::RlsContext::tenant(&tenant_id)
-        };
+        let rls = qail_core::rls::RlsContext::tenant(&tenant_id);
 
         if self.is_authenticated() {
             rls.with_user(&self.user_id)
@@ -203,10 +192,9 @@ impl AuthContext {
             "tenant_id": self.tenant_id,
             "platform_admin": self.is_platform_admin(),
             "rls": {
-                "agent_id": self.claims
-                    .get("agent_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(""),
+                // 2.0: agent_id no longer influences the RLS context; tokens
+                // that differ only in claims still fingerprint differently
+                // via the full "claims" list below.
                 "super_admin": self.is_platform_admin(),
             },
             "claims": claims,

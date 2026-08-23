@@ -81,7 +81,7 @@ sha2 = "0.10"
 default = ["qdrant"]
 qdrant = ["dep:qail-qdrant"]
 enterprise-gssapi = ["qail-pg/enterprise-gssapi"]
-legacy-raw-tests = []
+manual-tests = []
 
 [dev-dependencies]
 tokio-test = "0.4"

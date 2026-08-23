@@ -211,16 +211,16 @@ jobs:
           key: io-uring-linux
 
       - name: Check qail-pg with io_uring
-        run: cargo check -p qail-pg --features io_uring
+        run: cargo check -p qail-pg --features native-io-uring
 
       - name: Unit tests qail-pg with io_uring
-        run: cargo test -p qail-pg --lib --features io_uring
+        run: cargo test -p qail-pg --lib --features native-io-uring
 
       - name: Linux io_uring backend smoke test
-        run: cargo test -p qail-pg --test io_uring_backend_smoke --features io_uring
+        run: cargo test -p qail-pg --test io_uring_backend_smoke --features native-io-uring
 
       - name: Clippy qail-pg with io_uring
-        run: cargo clippy -p qail-pg --features io_uring -- -D warnings
+        run: cargo clippy -p qail-pg --features native-io-uring -- -D warnings
 
       - name: Assert backend-labeled connect metrics are wired
         run: |

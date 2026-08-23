@@ -21,7 +21,6 @@ PATCH  /api/{table}/:id          # Update
 DELETE /api/{table}/:id          # Delete
 GET    /api/{table}/_explain     # EXPLAIN ANALYZE
 GET    /api/{table}/aggregate    # Aggregations
-GET    /api/{table}/_aggregate   # Aggregations (compat alias)
 GET    /api/{table}/:id/{child}  # Nested resources (FK-based)
 POST   /api/rpc/{function}       # Function RPC with JSON args
 ```
@@ -144,7 +143,6 @@ GET /api/orders/aggregate?fn=avg&column=total             # AVG
 GET /api/orders/aggregate?fn=min&column=created_at        # MIN
 GET /api/orders/aggregate?fn=max&column=total             # MAX
 GET /api/orders/aggregate?fn=count&status=paid            # Filtered aggregation
-GET /api/orders/_aggregate?fn=count                        # Alias (compat)
 ```
 
 ## Function RPC
@@ -184,8 +182,8 @@ curl \
 
 Every query is scoped to the authenticated tenant via PostgreSQL's native RLS.
 The gateway sets transaction-local session variables
-(`app.current_tenant_id`, `app.current_user_id`, `app.current_agent_id`,
-`app.is_super_admin`) before each query.
+(`app.current_tenant_id`, `app.current_user_id`, `app.is_super_admin`)
+before each query.
 
 ### Native Access Policy
 
@@ -213,8 +211,8 @@ The gateway still supports the older YAML route policy engine for compatibility,
 but new deployments should prefer native access policy because it checks the
 QAIL AST directly.
 
-> `tenant_id` is the primary runtime scope. A legacy `agent_id` claim is only a
-> secondary scope when `tenant_id` is present.
+> `tenant_id` is the primary runtime scope. Since 2.0 an `agent_id` claim is an
+> ordinary claim with no effect on the RLS context.
 
 ### Query Allow-Listing
 

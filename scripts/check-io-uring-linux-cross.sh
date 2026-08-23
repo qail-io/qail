@@ -48,4 +48,4 @@ ZIG_LOCAL_CACHE_DIR="${LOCAL_CACHE_DIR}" \
 ZIG_GLOBAL_CACHE_DIR="${GLOBAL_CACHE_DIR}" \
 CC_x86_64_unknown_linux_gnu="${TOOLCHAIN_DIR}/zig-cc-linux-gnu" \
 CXX_x86_64_unknown_linux_gnu="${TOOLCHAIN_DIR}/zig-cxx-linux-gnu" \
-  cargo check -p qail-pg --features io_uring --target x86_64-unknown-linux-gnu
+  cargo check -p qail-pg --features native-io-uring --target x86_64-unknown-linux-gnu

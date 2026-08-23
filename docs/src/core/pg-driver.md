@@ -177,7 +177,7 @@ let provider = Arc::new(move |req: GssTokenRequest<'_>| -> Result<Vec<u8>, Strin
 
 let options = ConnectOptions {
     auth: AuthSettings::gssapi_only(),
-    gss_token_provider_ex: Some(provider),
+    gss_token_provider: Some(provider),
     ..Default::default()
 };
 
@@ -215,7 +215,7 @@ it is not an identity broker and does not replace enterprise SSO tooling.
 
     let options = ConnectOptions {
         auth: AuthSettings::gssapi_only(),
-        gss_token_provider_ex: Some(provider),
+        gss_token_provider: Some(provider),
         ..Default::default()
     };
 
@@ -367,7 +367,7 @@ let idle = pool.idle_count().await;
 ```rust
 use qail_core::RlsContext;
 
-let ctx = RlsContext::tenant_and_agent("tenant-123", "agent-456");
+let ctx = RlsContext::tenant("tenant-123");
 
 // Acquire + set RLS context in one call
 // Call release() after query work to reset context and return to pool

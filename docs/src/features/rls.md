@@ -108,8 +108,6 @@ names such as `user_id` or `seller_id`.
 |-------------|-------|----------|
 | `RlsContext::tenant(id)` | One tenant | Normal SaaS tenant scope |
 | `RlsContext::tenant(id).with_user(user_id)` | Tenant plus end user | Tenant dashboards with user-owned rows |
-| `RlsContext::tenant_and_agent(tenant, agent)` | Tenant plus secondary agent/reseller | Legacy reseller/operator policies inside a tenant |
-| `RlsContext::agent(id)` | Agent only | Legacy driver-level scope; prefer tenant-based contexts for gateway apps |
 | `RlsContext::user(id)` | User only | Auth flows or user-scoped policies before tenant is known |
 | `RlsContext::global()` | Shared/platform rows | `tenant_id IS NULL` style reference data |
 | `RlsContext::empty()` | No tenant scope | Startup introspection, migrations, health checks |
@@ -119,7 +117,7 @@ names such as `user_id` or `seller_id`.
 through a named constructor such as `for_system_process`, `for_webhook`, or
 `for_auth`, which makes bypass intent visible at the call site.
 
-`RlsContext::empty()`, `agent(...)`, or `user(...)` cannot scope a registered
+`RlsContext::empty()` or `user(...)` cannot scope a registered
 tenant table. Likewise, a context without a user cannot scope an owner table.
 Those mismatches are build errors, not no-ops.
 
@@ -135,7 +133,6 @@ SET LOCAL app.is_global = 'false';
 SELECT
   set_config('app.current_user_id',   '<user>',   true),
   set_config('app.current_tenant_id', '<tenant>', true),
-  set_config('app.current_agent_id',  '<agent>',  true),
   set_config('app.is_super_admin',    'false',    true);
 ```
 
