@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-rc.1] - 2026-08-24
+
 ### Removed (2.0 — migration notes)
 
 Every item below is a public surface that 1.x retained for compatibility and 2.0 deletes. Nothing in the workspace consumed them.

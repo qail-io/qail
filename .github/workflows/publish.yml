@@ -61,6 +61,7 @@ jobs:
             workflow/Cargo.toml
             workflow-postgres/Cargo.toml
             mcp/Cargo.toml
+            wasm/Cargo.toml
           )
 
           expected_version=""
@@ -93,7 +94,7 @@ jobs:
               echo "::error::internal dependency version drift: $line"
               exit 1
             fi
-          done < <(grep -RInE 'qail-(core|pg|qdrant|gateway|lsp|workflow)[^=]*=.*version = "' ./*/Cargo.toml || true)
+          done < <(grep -RInE 'qail-(core|pg|qdrant|gateway|lsp|mcp|workflow)[^=]*=.*version = "' ./*/Cargo.toml || true)
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -116,7 +117,7 @@ jobs:
           # internal dependencies are visible in crates.io. Those dry-runs happen
           # immediately before each real publish in the final publish job.
           mkdir -p target
-          for crate in qail-pg qail-qdrant qail; do
+          for crate in qail-pg qail-qdrant qail-workflow qail-workflow-postgres qail-gateway qail; do
             cargo package -p "$crate" --list > "target/package-$crate.files"
             test -s "target/package-$crate.files"
           done
@@ -308,6 +309,9 @@ jobs:
             return "$status"
           }
 
+          # Complete dependency graph. Every crate waits for registry
+          # visibility before anything downstream consumes it. qail-lsp,
+          # qail-mcp and qail-wasm are deliberately NOT published.
           publish_crate qail-core
           wait_for_crate qail-core
 
@@ -316,5 +320,14 @@ jobs:
 
           publish_crate qail-qdrant
           wait_for_crate qail-qdrant
+
+          publish_crate qail-workflow
+          wait_for_crate qail-workflow
+
+          publish_crate qail-workflow-postgres
+          wait_for_crate qail-workflow-postgres
+
+          publish_crate qail-gateway
+          wait_for_crate qail-gateway
 
           publish_crate qail
