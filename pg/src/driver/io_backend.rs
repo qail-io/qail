@@ -4,7 +4,7 @@
 //!
 //! Current rollout:
 //! - Tokio remains the universal default.
-//! - On Linux with `io_uring` feature, plain TCP transport can use io_uring
+//! - On Linux with the `native-io-uring` feature, plain TCP transport can use io_uring
 //!   only when explicitly enabled by config or environment policy.
 //! - TLS/mTLS/GSSENC still use the Tokio stream path.
 
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 pub enum IoBackend {
     /// Tokio-based async I/O (cross-platform default).
     Tokio,
-    /// Linux io_uring capability (kernel 5.1+, requires `io_uring` feature).
+    /// Linux io_uring capability (kernel 5.1+, requires `native-io-uring` feature).
     /// Capability does not yet imply active transport path.
     #[cfg(all(target_os = "linux", feature = "native-io-uring"))]
     IoUring,
