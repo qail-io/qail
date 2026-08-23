@@ -618,7 +618,7 @@ fn decode_bytea_hex_text(bytes: &[u8]) -> Result<Vec<u8>, TypeError> {
     }
 
     let mut out = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.chunks_exact(2) {
+    for pair in hex.as_chunks::<2>().0 {
         let hi = decode_hex_nibble(pair[0])?;
         let lo = decode_hex_nibble(pair[1])?;
         out.push((hi << 4) | lo);

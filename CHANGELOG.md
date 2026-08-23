@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Updated `h2` to `0.4.16`, fixing RUSTSEC-2026-0258 (unbounded empty DATA frames).
+- Updated the TypeScript SDK's transitive `nanoid` dependency to `3.3.18`, fixing GHSA-2v37-7h3g-55p8.
 
 ### Added
 - **Owner (user) scope for RLS.** A table may declare `owner <column>` inside its block in `schema.qail` (beside `enable_rls`). `with_rls()` then injects `<column> = ctx.user_id` — filter on reads/updates/deletes, payload on inserts, owner-column mutation refused on updates — alongside any tenant scope (both predicates AND), on the primary relation, on nested CTE/subquery/set-op relations, and on JOINed relations (INNER/LEFT/LATERAL via ON, CROSS via WHERE; RIGHT/FULL refused with `RlsJoinKindUnsupported`). Owner columns are declared, never inferred from names like `user_id`. Runtime registry: `qail_core::rls::owner`. MERGE on an owner-scoped table returns `RlsOwnerMergeUnsupported` rather than running unscoped.
