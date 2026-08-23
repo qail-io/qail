@@ -4,12 +4,18 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v1.4.0)
+## Current Highlights (v2.0.0-rc.1)
+
+- **RLS scope hardening**: `with_rls()` fails closed on registered tables, scope registries are declared once at the application boundary (`init_scope_registries` / `declare_policy_only_isolation`), owner (`owner <column>`) scoping joins tenant scoping, and `ON CONFLICT DO UPDATE` carries the scope predicate via `OnConflict.where_conditions`.
+- **1.x compatibility surfaces removed**: the `qail-encoder` C ABI, SQLite/DynamoDB/MongoDB transpilers, the agent identity plane (`app.current_agent_id`), the function-pointer GSS callback, the JWT `user_id` alias, `auth_mode=compat`, deprecated SDK aliases, and the `io_uring` feature alias. See the repository CHANGELOG `[2.0.0-rc.1]` section for per-item migration notes.
+- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.0-rc.1`; `qail-workflow`, `qail-workflow-postgres` and `qail-gateway` join the crates.io publish set.
+
+## v1.4.0 Highlights
 
 - **Views can declare `security_invoker`**: `view <name> security_invoker $$ … $$` parses, renders, compiles to `CREATE VIEW … WITH (security_invoker = true)`, and survives `qail pull` by being read back from `pg_class.reloptions`. Without it, a view over an RLS-protected table evaluates that table's policies as the *view owner* and silently bypasses them. Owner-rights stays the default, matching PostgreSQL.
 - **`qail pull` introspects grants**: `relacl` is parsed into `schema.grants`, so a relation missing a grant to the application role is now visible in `schema.qail` instead of failing at runtime as `[42501] permission denied` with nothing to diff. Recovered 229 grants on a live 217-table database that previously showed zero. Privileges with no `schema.qail` spelling are reported on stderr rather than dropped.
-- **`rls::tenant::scoping_applies()`**: callers and audits can assert that tenant scoping actually applied — `with_rls` fails *open* on unregistered relations, returning the query unscoped while the call site reads as scoped.
-- **Release line**: Rust workspace crates and install snippets are bumped to `1.4.0`.
+- **`rls::tenant::scoping_applies()`**: callers and audits can assert that tenant scoping actually applied — in 1.4, `with_rls` failed *open* on unregistered relations (2.0 fails closed).
+- **Release line**: Rust workspace crates and install snippets were bumped to `1.4.0`.
 
 ## v1.3.6 Highlights
 

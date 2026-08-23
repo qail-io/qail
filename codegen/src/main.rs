@@ -943,14 +943,14 @@ fn gen_zig_enum(e: &RustEnum) -> String {
     let mut out = String::new();
     if !e.doc.is_empty() {
         for line in e.doc.lines() {
-            let _ = writeln!(out, "/// {}", line);
+            let _ = writeln!(out, "///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
         }
     }
     let _ = writeln!(out, "pub const {} = enum {{", e.name);
     for v in &e.variants {
         if !v.doc.is_empty() {
             for line in v.doc.lines() {
-                let _ = writeln!(out, "    /// {}", line);
+                let _ = writeln!(out, "    ///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
             }
         }
         let zig_name = to_snake_case(&v.name);
@@ -970,14 +970,14 @@ fn gen_zig_tagged_union(e: &RustEnum) -> String {
     let mut out = String::new();
     if !e.doc.is_empty() {
         for line in e.doc.lines() {
-            let _ = writeln!(out, "/// {}", line);
+            let _ = writeln!(out, "///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
         }
     }
     let _ = writeln!(out, "pub const {} = union(enum) {{", e.name);
     for v in &e.variants {
         if !v.doc.is_empty() {
             for line in v.doc.lines() {
-                let _ = writeln!(out, "    /// {}", line);
+                let _ = writeln!(out, "    ///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
             }
         }
         let zig_name = to_snake_case(&v.name);
@@ -1007,14 +1007,14 @@ fn gen_zig_struct(s: &RustStruct, name_override: Option<&str>) -> String {
     let name = name_override.unwrap_or(&s.name);
     if !s.doc.is_empty() {
         for line in s.doc.lines() {
-            let _ = writeln!(out, "/// {}", line);
+            let _ = writeln!(out, "///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
         }
     }
     let _ = writeln!(out, "pub const {} = struct {{", name);
     for field in &s.fields {
         if !field.doc.is_empty() {
             for line in field.doc.lines() {
-                let _ = writeln!(out, "    /// {}", line);
+                let _ = writeln!(out, "    ///{}", if line.is_empty() { String::new() } else { format!(" {}", line) });
             }
         }
         let zig_ty = map_type(&field.ty);

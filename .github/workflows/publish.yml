@@ -259,6 +259,23 @@ jobs:
 
           version="${GITHUB_REF_NAME#v}"
 
+          crate_exists_on_registry() {
+            local crate="$1"
+            cargo info --registry crates-io "$crate" >/dev/null 2>&1
+          }
+
+          # Trusted publishing (crates-io-auth-action) can only publish NEW
+          # VERSIONS of existing crates — a crate's FIRST release must be
+          # published manually by an owner before trusted publishing can be
+          # configured for it. Abort before publishing ANYTHING so a missing
+          # bootstrap never leaves a partial release on the registry.
+          for crate in qail-core qail-pg qail-qdrant qail-workflow qail-workflow-postgres qail-gateway qail; do
+            if ! crate_exists_on_registry "$crate"; then
+              echo "::error::$crate has never been published to crates.io. Bootstrap it manually first (cargo publish -p $crate as an owner), configure trusted publishing for it, then re-run this workflow. Aborting before any crate is published."
+              exit 1
+            fi
+          done
+
           crate_available() {
             local crate="$1"
             cargo info --registry crates-io "$crate@$version" >/dev/null 2>&1
@@ -273,7 +290,6 @@ jobs:
               fi
               echo "Waiting for $crate@$version to become visible in crates.io (attempt $attempt/20)"
               sleep 30
-              cargo update || true
             done
             echo "::error::$crate@$version was not visible in crates.io after waiting"
             return 1
