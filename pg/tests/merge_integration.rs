@@ -325,8 +325,7 @@ async fn test_merge_with_rls_scopes_update_insert_and_by_source_delete() -> PgRe
     let target = test_table("qail_merge_rls_target");
     let source = test_table("qail_merge_rls_source");
     create_merge_tables(&mut driver, &target, &source).await?;
-    // Boundary API: registers AND seals the process `Initialized`; the
-    // low-level `register_tenant_table` is mode-neutral.
+    // Boundary API: registers the tables AND seals the process `Initialized`.
     qail_core::rls::init_scope_registries_from_tables(
         &[(&target, "tenant_id"), (&source, "tenant_id")],
         &[],
