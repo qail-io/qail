@@ -34,6 +34,20 @@ const HARD_MAX_TOKENS = 1200;
 const skipped = [];
 const log = (...a) => console.log(...a);
 
+// Build from the repository snapshot, not from ignored or untracked files in a
+// developer's working tree. Otherwise a local schema.qail (which is commonly
+// ignored) can silently enter the corpus and make the Linux drift gate disagree
+// with a locally generated artifact.
+const TRACKED_PATHS = new Set(
+  execFileSync("git", ["-C", REPO, "ls-files", "-z"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+    .split("\0")
+    .filter(Boolean)
+);
+
 // ---------------------------------------------------------------- utilities
 
 function estTokens(s) {
@@ -64,7 +78,7 @@ function walk(absDir, filterFn, out = []) {
       walk(abs, filterFn, out);
     } else if (entry.isFile()) {
       const rel = relative(REPO, abs).split(sep).join("/");
-      if (filterFn(rel)) out.push({ abs, rel });
+      if (TRACKED_PATHS.has(rel) && filterFn(rel)) out.push({ abs, rel });
     }
   }
   return out;
@@ -343,6 +357,7 @@ const addAll = (cs) => cs.forEach((c) => corpus.push(c));
   const files = readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith(".md"))
     .map((e) => ({ abs: join(dir, e.name), rel: `docs/${e.name}` }))
+    .filter(({ rel }) => TRACKED_PATHS.has(rel))
     .sort((a, b) => a.rel.localeCompare(b.rel));
   for (const { abs, rel } of files) {
     const text = readTextFile(abs, rel);
@@ -412,6 +427,7 @@ const addAll = (cs) => cs.forEach((c) => corpus.push(c));
   const files = readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith(".rs"))
     .map((e) => ({ abs: join(dir, e.name), rel: `core/examples/${e.name}` }))
+    .filter(({ rel }) => TRACKED_PATHS.has(rel))
     .sort((a, b) => a.rel.localeCompare(b.rel));
   if (files.length === 0) throw new Error("no rust examples found under core/examples");
   for (const { abs, rel } of files) {
