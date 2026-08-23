@@ -287,7 +287,6 @@ qail.rs/
 ├── pg/         PostgreSQL driver (binary wire protocol, connection pool)
 ├── gateway/    Auto-REST API server (Axum)
 ├── cli/        qail exec, pull, diff, migrate, types
-├── encoder/    Wire protocol encoder + FFI/runtime internals
 ├── qdrant/     Qdrant vector DB driver (optional)
 ├── workflow/   Workflow engine
 └── sdk/        Direct SDKs (TypeScript, Swift, Kotlin, Dart)

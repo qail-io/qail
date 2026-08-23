@@ -51,7 +51,7 @@ Tools:
 
 - `qail_parse_query`: parse QAIL v2 syntax into AST, formatted QAIL, and SQL.
 - `qail_format_query`: parse and pretty-print a QAIL query.
-- `qail_transpile_query`: transpile QAIL to PostgreSQL or SQLite SQL.
+- `qail_transpile_query`: transpile QAIL to PostgreSQL SQL.
 - `qail_explain_query`: summarize the parsed AST in LLM-friendly terms.
 - `qail_schema_summary`: parse and summarize a `schema.qail` document.
 - `qail_builder_cookbook`: return focused AST builder examples.

@@ -357,7 +357,7 @@ qail worker --interval 1000 --batch 100
 | Flag | Description |
 |------|-------------|
 | `-f, --format` | Output format (`sql`, `ast`, `json`) |
-| `-d, --dialect` | Target SQL dialect (`postgres`, `sqlite`; SQLite is compatibility-only) |
+| `-d, --dialect` | Target SQL dialect (`postgres` — the only SQL target since 2.0) |
 | `-v, --verbose` | Verbose output |
 | `--version` | Show version |
 | `--help` | Show help |

@@ -59,7 +59,7 @@ pub fn build_upsert(cmd: &Qail, dialect: Dialect) -> String {
 
     // 4. Build CONFLICT part
     match dialect {
-        Dialect::Postgres | Dialect::SQLite => {
+        Dialect::Postgres => {
             let conflict_target = pk_cols
                 .iter()
                 .map(|c| generator.quote_identifier(c))

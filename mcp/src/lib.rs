@@ -218,7 +218,7 @@ fn tools() -> Vec<Value> {
                     },
                     "dialect": {
                         "type": "string",
-                        "enum": ["postgres", "sqlite"],
+                        "enum": ["postgres"],
                         "default": "postgres",
                         "description": "SQL dialect used for generated SQL."
                     },
@@ -271,7 +271,7 @@ fn tools() -> Vec<Value> {
                     },
                     "dialect": {
                         "type": "string",
-                        "enum": ["postgres", "sqlite"],
+                        "enum": ["postgres"],
                         "default": "postgres"
                     },
                     "parameterized": {
@@ -765,15 +765,15 @@ fn dialect_arg(args: &Value) -> Result<Dialect, String> {
 
     match dialect.as_str() {
         "postgres" | "postgresql" => Ok(Dialect::Postgres),
-        "sqlite" => Ok(Dialect::SQLite),
-        other => Err(format!("Unsupported dialect: {other}")),
+        other => Err(format!(
+            "Unsupported dialect: {other} (PostgreSQL is the only SQL target since 2.0)"
+        )),
     }
 }
 
 fn dialect_name(dialect: Dialect) -> &'static str {
     match dialect {
         Dialect::Postgres => "postgres",
-        Dialect::SQLite => "sqlite",
     }
 }
 

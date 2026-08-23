@@ -5,7 +5,7 @@
 pub mod conditions;
 /// DDL statement transpilation (CREATE TABLE, ALTER TABLE, etc.).
 pub mod ddl;
-/// SQL dialect selection (PostgreSQL primary; SQLite compatibility retained).
+/// SQL dialect selection (PostgreSQL).
 pub mod dialect;
 /// DML statement transpilation (INSERT, UPDATE, DELETE).
 pub mod dml;
@@ -17,10 +17,8 @@ pub mod sql;
 /// Transpiler traits (SqlGenerator, escape_identifier).
 pub mod traits;
 
-/// NoSQL/vector transpilers.
+/// Vector-search transpilers.
 pub mod nosql;
-pub use nosql::dynamo::ToDynamo;
-pub use nosql::mongo::ToMongo;
 pub use nosql::qdrant::ToQdrant;
 
 #[cfg(test)]

@@ -9,8 +9,6 @@ import kotlinx.serialization.Serializable
 enum class FilterOp(val value: String) {
     EQ("eq"),
     NE("ne"),
-    @Deprecated("Use NE instead")
-    NEQ("ne"),
     GT("gt"), GTE("gte"),
     LT("lt"), LTE("lte"),
     LIKE("like"), ILIKE("ilike"),
@@ -18,9 +16,7 @@ enum class FilterOp(val value: String) {
     NOT_IN("not_in"),
     IS_NULL("is_null"),
     IS_NOT_NULL("is_not_null"),
-    CONTAINS("contains"),
-    @Deprecated("Use IS_NULL / IS_NOT_NULL instead")
-    IS("is");
+    CONTAINS("contains");
 }
 
 // ─── Responses ──────────────────────────────────────────────────────

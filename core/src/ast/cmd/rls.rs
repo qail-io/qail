@@ -1275,12 +1275,12 @@ mod tests {
     // one table registered. The low-level `register_*` helpers are
     // mode-neutral and would leave `with_rls` at `RlsRegistryUninitialized`.
 
-    fn register_tenant_table(table: &str, column: &str) {
+    fn seal_tenant_table(table: &str, column: &str) {
         crate::rls::init_scope_registries_from_tables(&[(table, column)], &[])
             .expect("boundary registration");
     }
 
-    fn register_owner_table(table: &str, column: &str) {
+    fn seal_owner_table(table: &str, column: &str) {
         crate::rls::init_scope_registries_from_tables(&[], &[(table, column)])
             .expect("boundary registration");
     }
@@ -1288,14 +1288,14 @@ mod tests {
     /// `with_rls` on an unregistered table must be a no-op ONLY once the
     /// process is sealed `Initialized` by a real registration.
     fn ensure_initialized() {
-        register_tenant_table("_rls_tests_sentinel", "tenant_id");
+        seal_tenant_table("_rls_tests_sentinel", "tenant_id");
     }
 
     // ── Owner scope + fail-closed ────────────────────────────────────
 
     #[test]
     fn owner_scope_injects_user_filter_on_get() {
-        register_owner_table("_rls_owner_listings", "seller_id");
+        seal_owner_table("_rls_owner_listings", "seller_id");
         let ctx = RlsContext::user("u-1");
         let sql = Qail::get("_rls_owner_listings")
             .with_rls(&ctx)
@@ -1306,7 +1306,7 @@ mod tests {
 
     #[test]
     fn owner_scope_sets_payload_on_add_and_filters_set() {
-        register_owner_table("_rls_owner_posts", "author_id");
+        seal_owner_table("_rls_owner_posts", "author_id");
         let ctx = RlsContext::user("u-9");
         let add = Qail::add("_rls_owner_posts")
             .set_value("title", "hi")
@@ -1334,8 +1334,8 @@ mod tests {
 
     #[test]
     fn tenant_and_owner_scopes_are_anded() {
-        register_tenant_table("_rls_both_notes", "tenant_id");
-        register_owner_table("_rls_both_notes", "user_id");
+        seal_tenant_table("_rls_both_notes", "tenant_id");
+        seal_owner_table("_rls_both_notes", "user_id");
         let ctx = RlsContext::tenant("t-1").with_user("u-1");
         let sql = Qail::get("_rls_both_notes")
             .with_rls(&ctx)
@@ -1348,7 +1348,7 @@ mod tests {
 
     #[test]
     fn registered_tenant_table_fails_closed_without_tenant() {
-        register_tenant_table("_rls_fc_orders", "tenant_id");
+        seal_tenant_table("_rls_fc_orders", "tenant_id");
         let err = Qail::get("_rls_fc_orders")
             .with_rls(&RlsContext::user("u-1"))
             .expect_err("user-only context on a tenant table must not silently run unscoped");
@@ -1396,7 +1396,7 @@ mod tests {
 
     #[test]
     fn registered_owner_table_fails_closed_without_user() {
-        register_owner_table("_rls_fc_listings", "seller_id");
+        seal_owner_table("_rls_fc_listings", "seller_id");
         let err = Qail::get("_rls_fc_listings")
             .with_rls(&RlsContext::tenant("t-1"))
             .expect_err("tenant-only context on an owner table must fail closed");
@@ -1414,7 +1414,7 @@ mod tests {
 
     #[test]
     fn owner_scope_rejects_merge_explicitly() {
-        register_owner_table("_rls_owner_merge", "owner_id");
+        seal_owner_table("_rls_owner_merge", "owner_id");
         let ctx = RlsContext::user("u-1");
         let err = Qail::merge_into("_rls_owner_merge")
             .with_rls(&ctx)
@@ -1438,7 +1438,7 @@ mod tests {
 
     #[test]
     fn super_admin_bypasses_owner_scope() {
-        register_owner_table("_rls_owner_admin", "seller_id");
+        seal_owner_table("_rls_owner_admin", "seller_id");
         let token = crate::rls::SuperAdminToken::for_system_process("owner_test");
         let sql = Qail::get("_rls_owner_admin")
             .with_rls(&RlsContext::super_admin(token))
@@ -1451,7 +1451,7 @@ mod tests {
 
     #[test]
     fn owner_table_inside_cte_is_scoped_even_when_outer_is_unregistered() {
-        register_owner_table("_rls_cte_inner_listings", "seller_id");
+        seal_owner_table("_rls_cte_inner_listings", "seller_id");
         let ctx = RlsContext::user("u-1");
         let inner = Qail::get("_rls_cte_inner_listings");
         let sql = Qail::get("mine")
@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn tenant_table_inside_cte_fails_closed_under_user_only_context() {
-        register_tenant_table("_rls_cte_inner_orders", "tenant_id");
+        seal_tenant_table("_rls_cte_inner_orders", "tenant_id");
         let inner = Qail::get("_rls_cte_inner_orders");
         let err = Qail::get("mine")
             .with("mine", inner)
@@ -1481,7 +1481,7 @@ mod tests {
 
     #[test]
     fn joined_owner_relation_gets_on_predicate() {
-        register_owner_table("_rls_join_threads", "owner_id");
+        seal_owner_table("_rls_join_threads", "owner_id");
         let ctx = RlsContext::user("u-7");
         let sql = Qail::get("_rls_join_msgs")
             .join(
@@ -1498,7 +1498,7 @@ mod tests {
 
     #[test]
     fn joined_tenant_relation_under_global_ctx_gets_is_null() {
-        register_tenant_table("_rls_join_refs", "tenant_id");
+        seal_tenant_table("_rls_join_refs", "tenant_id");
         let sql = Qail::get("_rls_join_main")
             .join(
                 JoinKind::Left,
@@ -1514,7 +1514,7 @@ mod tests {
 
     #[test]
     fn joined_registered_relation_via_full_join_is_refused() {
-        register_tenant_table("_rls_join_full", "tenant_id");
+        seal_tenant_table("_rls_join_full", "tenant_id");
         let err = Qail::get("_rls_join_main2")
             .join(
                 JoinKind::Full,
@@ -1529,7 +1529,7 @@ mod tests {
 
     #[test]
     fn joined_registered_relation_fails_closed_without_scope() {
-        register_owner_table("_rls_join_owned", "owner_id");
+        seal_owner_table("_rls_join_owned", "owner_id");
         let err = Qail::get("_rls_join_main3")
             .join(
                 JoinKind::Inner,
@@ -1547,9 +1547,9 @@ mod tests {
 
     #[test]
     fn multiple_cross_joined_registered_relations_keep_every_predicate() {
-        register_tenant_table("_rls_cross_a", "tenant_id");
-        register_tenant_table("_rls_cross_b", "tenant_id");
-        register_tenant_table("_rls_cross_main", "tenant_id");
+        seal_tenant_table("_rls_cross_a", "tenant_id");
+        seal_tenant_table("_rls_cross_b", "tenant_id");
+        seal_tenant_table("_rls_cross_main", "tenant_id");
         let ctx = RlsContext::tenant("t1");
         let mut q = Qail::get("_rls_cross_main");
         for t in ["_rls_cross_a a", "_rls_cross_b b"] {
@@ -1569,9 +1569,9 @@ mod tests {
 
     #[test]
     fn multiple_cross_joined_registered_relations_keep_every_predicate_under_global() {
-        register_tenant_table("_rls_gcross_a", "tenant_id");
-        register_tenant_table("_rls_gcross_b", "tenant_id");
-        register_tenant_table("_rls_gcross_main", "tenant_id");
+        seal_tenant_table("_rls_gcross_a", "tenant_id");
+        seal_tenant_table("_rls_gcross_b", "tenant_id");
+        seal_tenant_table("_rls_gcross_main", "tenant_id");
         let mut q = Qail::get("_rls_gcross_main");
         for t in ["_rls_gcross_a a", "_rls_gcross_b b"] {
             q.joins.push(crate::ast::Join {
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn user_supplied_unqualified_scope_filter_is_replaced_not_duplicated() {
-        register_tenant_table("_rls_dedup_orders", "tenant_id");
+        seal_tenant_table("_rls_dedup_orders", "tenant_id");
         let sql = Qail::get("_rls_dedup_orders")
             .eq("tenant_id", "spoofed")
             .with_rls(&RlsContext::tenant("t1"))
@@ -1601,8 +1601,8 @@ mod tests {
 
     #[test]
     fn on_conflict_where_subquery_on_registered_table_is_scoped() {
-        register_tenant_table("_rls_ocw_target", "tenant_id");
-        register_tenant_table("_rls_ocw_inner", "tenant_id");
+        seal_tenant_table("_rls_ocw_target", "tenant_id");
+        seal_tenant_table("_rls_ocw_inner", "tenant_id");
         let ctx = RlsContext::tenant("t1");
         let mut q = Qail::add("_rls_ocw_target")
             .columns(["id"])
@@ -1631,7 +1631,7 @@ mod tests {
 
     #[test]
     fn on_conflict_do_update_is_gated_by_owner_scope() {
-        register_owner_table("_rls_upsert_devices", "user_id");
+        seal_owner_table("_rls_upsert_devices", "user_id");
         let ctx = RlsContext::user("u-3");
         let sql = Qail::add("_rls_upsert_devices")
             .columns(["token", "platform"])
@@ -1653,7 +1653,7 @@ mod tests {
 
     #[test]
     fn on_conflict_do_update_cannot_reassign_scope_column() {
-        register_tenant_table("_rls_upsert_tenanted", "tenant_id");
+        seal_tenant_table("_rls_upsert_tenanted", "tenant_id");
         let ctx = RlsContext::tenant("t-1");
         let err = Qail::add("_rls_upsert_tenanted")
             .columns(["id"])
@@ -1672,7 +1672,7 @@ mod tests {
 
     #[test]
     fn on_conflict_do_nothing_is_untouched() {
-        register_tenant_table("_rls_upsert_nothing", "tenant_id");
+        seal_tenant_table("_rls_upsert_nothing", "tenant_id");
         let sql = Qail::add("_rls_upsert_nothing")
             .columns(["id"])
             .values(vec![Value::String("x".into())])
@@ -1686,7 +1686,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_injects_filter_on_get() {
-        register_tenant_table("_rls_get_orders", "tenant_id");
+        seal_tenant_table("_rls_get_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-123");
         let query = Qail::get("_rls_get_orders")
@@ -1711,7 +1711,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_resolves_primary_table_alias_on_get() {
-        register_tenant_table("_rls_alias_get_orders", "tenant_id");
+        seal_tenant_table("_rls_alias_get_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-alias");
         let query = Qail::get("_rls_alias_get_orders")
@@ -1732,7 +1732,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_injects_payload_on_add() {
-        register_tenant_table("_rls_add_orders", "tenant_id");
+        seal_tenant_table("_rls_add_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-456");
         let query = Qail::add("_rls_add_orders")
@@ -1758,7 +1758,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_noop_for_super_admin() {
-        register_tenant_table("_rls_admin_orders", "tenant_id");
+        seal_tenant_table("_rls_admin_orders", "tenant_id");
 
         let token = crate::rls::SuperAdminToken::for_system_process("test_super_admin_noop");
         let ctx = RlsContext::super_admin(token);
@@ -1793,7 +1793,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_noop_for_ddl() {
-        register_tenant_table("_rls_ddl_orders", "tenant_id");
+        seal_tenant_table("_rls_ddl_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-000");
         let query = Qail {
@@ -1808,7 +1808,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_appends_to_existing_filter() {
-        register_tenant_table("_rls_merge_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-merge");
         let query = Qail::get("_rls_merge_orders")
@@ -1831,7 +1831,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_does_not_merge_tenant_scope_into_or_filter_cage() {
-        register_tenant_table("_rls_or_orders", "tenant_id");
+        seal_tenant_table("_rls_or_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-or");
         let query = Qail::get("_rls_or_orders")
@@ -1884,7 +1884,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_on_set_injects_filter() {
-        register_tenant_table("_rls_set_orders", "tenant_id");
+        seal_tenant_table("_rls_set_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-set");
         let query = Qail::set("_rls_set_orders")
@@ -1909,7 +1909,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_resolves_primary_table_alias_on_set() {
-        register_tenant_table("_rls_alias_set_orders", "tenant_id");
+        seal_tenant_table("_rls_alias_set_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-set-alias");
         let query = Qail::set("_rls_alias_set_orders")
@@ -1931,7 +1931,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_on_set_rejects_tenant_column_update() {
-        register_tenant_table("_rls_set_tenant_rewrite_orders", "tenant_id");
+        seal_tenant_table("_rls_set_tenant_rewrite_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-a");
         let err = Qail::set("_rls_set_tenant_rewrite_orders")
@@ -1952,7 +1952,7 @@ mod tests {
         ];
 
         for (action, table) in actions {
-            register_tenant_table(table, "tenant_id");
+            seal_tenant_table(table, "tenant_id");
 
             let ctx = RlsContext::tenant("tenant-read-like");
             let query = Qail {
@@ -1981,7 +1981,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_agent_only_fails_closed_on_tenant_table() {
-        register_tenant_table("_rls_noops_orders", "tenant_id");
+        seal_tenant_table("_rls_noops_orders", "tenant_id");
 
         // Agent-only context without tenant_id: the table is registered for
         // tenant scope, so running it unscoped would be the silent false-green.
@@ -2003,7 +2003,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_global_injects_is_null_filter() {
-        register_tenant_table("_rls_global_get_orders", "tenant_id");
+        seal_tenant_table("_rls_global_get_orders", "tenant_id");
 
         let ctx = RlsContext::global();
         let query = Qail::get("_rls_global_get_orders")
@@ -2029,7 +2029,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_global_injects_null_payload_on_add() {
-        register_tenant_table("_rls_global_add_catalog", "tenant_id");
+        seal_tenant_table("_rls_global_add_catalog", "tenant_id");
 
         let ctx = RlsContext::global();
         let query = Qail::add("_rls_global_add_catalog")
@@ -2055,8 +2055,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_expression_subquery() {
-        register_tenant_table("_rls_expr_orders", "tenant_id");
-        register_tenant_table("_rls_expr_invoices", "tenant_id");
+        seal_tenant_table("_rls_expr_orders", "tenant_id");
+        seal_tenant_table("_rls_expr_invoices", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-expr");
         let mut query = Qail::get("_rls_expr_orders").columns(["id"]);
@@ -2088,8 +2088,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_condition_value_subquery() {
-        register_tenant_table("_rls_condition_orders", "tenant_id");
-        register_tenant_table("_rls_condition_invoices", "tenant_id");
+        seal_tenant_table("_rls_condition_orders", "tenant_id");
+        seal_tenant_table("_rls_condition_invoices", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-condition");
         let query = Qail::get("_rls_condition_orders")
@@ -2127,8 +2127,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_merge_on_and_insert_action() {
-        register_tenant_table("_rls_merge_upsert_orders", "tenant_id");
-        register_tenant_table("_rls_merge_source_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_upsert_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-merge");
         let query = Qail::merge_into("_rls_merge_upsert_orders")
@@ -2167,8 +2167,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_merge_inline_source_alias() {
-        register_tenant_table("_rls_merge_inline_target_orders", "tenant_id");
-        register_tenant_table("_rls_merge_inline_source_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_inline_target_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_inline_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-inline");
         let query = Qail::merge_into("_rls_merge_inline_target_orders")
@@ -2205,8 +2205,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_merge_query_source() {
-        register_tenant_table("_rls_merge_query_target_orders", "tenant_id");
-        register_tenant_table("_rls_merge_query_source_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_query_target_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_query_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-query");
         let source = Qail::get("_rls_merge_query_source_orders").columns(["id", "status"]);
@@ -2264,8 +2264,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_aliased_merge_query_source_table() {
-        register_tenant_table("_rls_merge_query_alias_target_orders", "tenant_id");
-        register_tenant_table("_rls_merge_query_alias_source_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_query_alias_target_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_query_alias_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-query-alias");
         let source = Qail::get("_rls_merge_query_alias_source_orders")
@@ -2299,8 +2299,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_cte_backed_merge_source() {
-        register_tenant_table("_rls_merge_cte_target_orders", "tenant_id");
-        register_tenant_table("_rls_merge_cte_source_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_cte_target_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_cte_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-cte");
         let incoming =
@@ -2347,7 +2347,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_cte_alias_queries_before_table_lookup() {
-        register_tenant_table("_rls_cte_alias_source_orders", "tenant_id");
+        seal_tenant_table("_rls_cte_alias_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-alias");
         let query = Qail::get("incoming")
@@ -2373,8 +2373,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_rejects_merge_tenant_column_update() {
-        register_tenant_table("_rls_merge_tenant_rewrite_orders", "tenant_id");
-        register_tenant_table("_rls_merge_tenant_rewrite_source", "tenant_id");
+        seal_tenant_table("_rls_merge_tenant_rewrite_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_tenant_rewrite_source", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-a");
         let err = Qail::merge_into("_rls_merge_tenant_rewrite_orders")
@@ -2389,8 +2389,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_global_scopes_merge_query_source() {
-        register_tenant_table("_rls_global_merge_query_target", "tenant_id");
-        register_tenant_table("_rls_global_merge_query_source", "tenant_id");
+        seal_tenant_table("_rls_global_merge_query_target", "tenant_id");
+        seal_tenant_table("_rls_global_merge_query_source", "tenant_id");
 
         let source = Qail::get("_rls_global_merge_query_source").columns(["id", "name"]);
         let query = Qail::merge_into("_rls_global_merge_query_target")
@@ -2439,8 +2439,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_rejects_merge_query_source_without_tenant_projection() {
-        register_tenant_table("_rls_merge_aggregate_target", "tenant_id");
-        register_tenant_table("_rls_merge_aggregate_source", "tenant_id");
+        seal_tenant_table("_rls_merge_aggregate_target", "tenant_id");
+        seal_tenant_table("_rls_merge_aggregate_source", "tenant_id");
 
         let mut source = Qail::get("_rls_merge_aggregate_source");
         source.columns.push(Expr::Aggregate {
@@ -2464,8 +2464,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_scopes_merge_by_source_delete_without_target_only_on_predicate() {
-        register_tenant_table("_rls_merge_prune_orders", "tenant_id");
-        register_tenant_table("_rls_merge_prune_source_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_prune_orders", "tenant_id");
+        seal_tenant_table("_rls_merge_prune_source_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-prune");
         let query = Qail::merge_into("_rls_merge_prune_orders")
@@ -2493,8 +2493,8 @@ mod tests {
 
     #[test]
     fn test_with_rls_global_scopes_merge_to_null_tenant() {
-        register_tenant_table("_rls_global_merge_catalog", "tenant_id");
-        register_tenant_table("_rls_global_merge_source", "tenant_id");
+        seal_tenant_table("_rls_global_merge_catalog", "tenant_id");
+        seal_tenant_table("_rls_global_merge_source", "tenant_id");
 
         let query = Qail::merge_into("_rls_global_merge_catalog")
             .using_table_as("_rls_global_merge_source", "s")
@@ -2528,7 +2528,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_is_idempotent_on_filter_scope() {
-        register_tenant_table("_rls_idempotent_get_orders", "tenant_id");
+        seal_tenant_table("_rls_idempotent_get_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-idempotent");
         let query = Qail::get("_rls_idempotent_get_orders")
@@ -2553,7 +2553,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_add_positional_payload_aligns_insert_columns() {
-        register_tenant_table("_rls_positional_add_orders", "tenant_id");
+        seal_tenant_table("_rls_positional_add_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-positional");
         let query = Qail::add("_rls_positional_add_orders")
@@ -2575,7 +2575,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_add_positional_payload_overrides_existing_tenant_column_value() {
-        register_tenant_table("_rls_positional_add_override_orders", "tenant_id");
+        seal_tenant_table("_rls_positional_add_override_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-final");
         let query = Qail::add("_rls_positional_add_override_orders")
@@ -2595,7 +2595,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_add_positional_payload_without_columns_errors() {
-        register_tenant_table("_rls_positional_add_without_columns_orders", "tenant_id");
+        seal_tenant_table("_rls_positional_add_without_columns_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-without-columns");
         let err = Qail::add("_rls_positional_add_without_columns_orders")
@@ -2608,7 +2608,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_replaces_qualified_tenant_filter() {
-        register_tenant_table("_rls_qualified_tenant_filter_orders", "tenant_id");
+        seal_tenant_table("_rls_qualified_tenant_filter_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("tenant-final");
         let query = Qail::get("_rls_qualified_tenant_filter_orders")

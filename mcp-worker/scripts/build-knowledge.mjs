@@ -120,7 +120,6 @@ function areaFor(rel) {
   if (rel.startsWith("cli/")) return "cli";
   if (rel.startsWith("workflow")) return "workflow";
   if (rel.startsWith("qdrant/")) return "qdrant";
-  if (rel.startsWith("encoder/")) return "encoder";
   if (rel.startsWith("lsp/")) return "lsp";
   if (rel.startsWith("mcp/")) return "mcp";
   if (rel.startsWith("examples/schema")) return "core";
@@ -369,7 +368,7 @@ const addAll = (cs) => cs.forEach((c) => corpus.push(c));
 
 // 3. crate READMEs
 {
-  const crates = ["core", "pg", "gateway", "qdrant", "workflow", "workflow-postgres", "encoder", "cli", "lsp", "mcp"];
+  const crates = ["core", "pg", "gateway", "qdrant", "workflow", "workflow-postgres", "cli", "lsp", "mcp"];
   for (const c of crates) {
     const rel = `${c}/README.md`;
     const abs = join(REPO, rel);

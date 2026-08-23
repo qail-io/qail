@@ -74,14 +74,12 @@ enum OutputFormat {
 #[derive(Clone, ValueEnum)]
 enum CliDialect {
     Postgres,
-    Sqlite,
 }
 
 impl From<CliDialect> for Dialect {
     fn from(val: CliDialect) -> Self {
         match val {
             CliDialect::Postgres => Dialect::Postgres,
-            CliDialect::Sqlite => Dialect::SQLite,
         }
     }
 }

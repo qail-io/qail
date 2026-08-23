@@ -1,18 +1,16 @@
 use crate::transpiler::sql::postgres::PostgresGenerator;
-use crate::transpiler::sql::sqlite::SqliteGenerator;
 use crate::transpiler::traits::SqlGenerator;
 
 /// SQL dialect selection for transpilation.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// PostgreSQL is the only SQL target. The enum is kept so
+/// `to_sql_with_dialect` remains a stable call shape; the 1.x `SQLite`
+/// variant was removed in 2.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dialect {
-    /// PostgreSQL dialect (default).
+    /// PostgreSQL dialect.
     #[default]
     Postgres,
-    /// SQLite dialect compatibility surface.
-    ///
-    /// PostgreSQL is the supported SQL runtime; this variant remains so 1.x
-    /// consumers that selected SQLite still compile.
-    SQLite,
 }
 
 impl Dialect {
@@ -20,7 +18,6 @@ impl Dialect {
     pub fn generator(&self) -> Box<dyn SqlGenerator> {
         match self {
             Dialect::Postgres => Box::new(PostgresGenerator),
-            Dialect::SQLite => Box::new(SqliteGenerator),
         }
     }
 }

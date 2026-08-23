@@ -4610,19 +4610,25 @@ fn load_scope_registries_populates_both_registries_from_migrate_schema() {
     assert_eq!(counts.tenant, 2);
     assert_eq!(counts.owner, 2);
     assert_eq!(
-        crate::rls::tenant::lookup_tenant_column("_reg_t_orders").as_deref(),
-        Some("tenant_id")
+        crate::rls::tenant::try_lookup_tenant_column("_reg_t_orders"),
+        Ok(Some("tenant_id".to_string()))
     );
     assert_eq!(
-        crate::rls::owner::lookup_owner_column("_reg_o_listings").as_deref(),
-        Some("seller_id")
+        crate::rls::owner::try_lookup_owner_column("_reg_o_listings"),
+        Ok(Some("seller_id".to_string()))
     );
     assert_eq!(
-        crate::rls::owner::lookup_owner_column("_reg_both_notes").as_deref(),
-        Some("user_id")
+        crate::rls::owner::try_lookup_owner_column("_reg_both_notes"),
+        Ok(Some("user_id".to_string()))
     );
-    assert!(crate::rls::tenant::lookup_tenant_column("_reg_none_ref").is_none());
-    assert!(crate::rls::owner::lookup_owner_column("_reg_none_ref").is_none());
+    assert_eq!(
+        crate::rls::tenant::try_lookup_tenant_column("_reg_none_ref"),
+        Ok(None)
+    );
+    assert_eq!(
+        crate::rls::owner::try_lookup_owner_column("_reg_none_ref"),
+        Ok(None)
+    );
 }
 
 #[test]

@@ -723,7 +723,7 @@ fn set_operand_has_branch_clauses(cmd: &Qail) -> bool {
 
 fn wrap_set_operand_sql(sql: String, dialect: Dialect) -> String {
     match dialect {
-        Dialect::Postgres | Dialect::SQLite => format!("({sql})"),
+        Dialect::Postgres => format!("({sql})"),
     }
 }
 

@@ -87,12 +87,12 @@ impl std::error::Error for ScopeModeConflict {}
 /// [`init_scope_registries_from_tables`] (which populate the registries and
 /// refuse to seal if nothing was registered) and
 /// [`declare_no_scoped_tables`] (an explicit, reasoned declaration that the
-/// schema has none). The low-level `register_*` helpers are mode-neutral.
+/// schema has none). Crate-internal registration helpers are mode-neutral.
 /// Exposing `declare_initialized` on the global would let a caller publish
 /// `Initialized` over empty registries — the original silent no-op, one
-/// line away. The type stays public so tests can drive a local instance.
+/// line away. The type is crate-private; tests drive a local instance.
 #[derive(Debug)]
-pub struct ScopeModeCoordinator {
+pub(crate) struct ScopeModeCoordinator {
     state: std::sync::atomic::AtomicU8,
     policy_only_reason: std::sync::OnceLock<&'static str>,
 }
@@ -103,7 +103,7 @@ const MODE_POLICY_ONLY: u8 = 2;
 
 impl ScopeModeCoordinator {
     /// A fresh, unsealed coordinator.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             state: std::sync::atomic::AtomicU8::new(MODE_UNINITIALIZED),
             policy_only_reason: std::sync::OnceLock::new(),
@@ -119,7 +119,7 @@ impl ScopeModeCoordinator {
     }
 
     /// Current mode.
-    pub fn state(&self) -> ScopeRegistryState {
+    pub(crate) fn state(&self) -> ScopeRegistryState {
         Self::decode(self.state.load(std::sync::atomic::Ordering::Acquire))
     }
 
@@ -160,7 +160,7 @@ impl ScopeModeCoordinator {
     }
 
     /// The reason recorded by a successful [`Self::declare_policy_only`].
-    pub fn policy_only_reason(&self) -> Option<&'static str> {
+    pub(crate) fn policy_only_reason(&self) -> Option<&'static str> {
         if self.state() == ScopeRegistryState::PolicyOnly {
             self.policy_only_reason.get().copied()
         } else {
@@ -634,14 +634,14 @@ mod tests {
         // `Initialized` via a real registration, which is exactly the only
         // sealed state this test must ever observe.
         let before = scope_registry_state();
-        tenant::register_tenant_tables(&[]);
-        owner::register_owner_tables(&[]);
+        tenant::try_register_tenant_tables(&[]).unwrap();
+        owner::try_register_owner_tables(&[]).unwrap();
         assert_eq!(
             scope_registry_state(),
             before,
             "empty low-level registration must not change the mode"
         );
-        tenant::register_tenant_table("_mode_neutral_probe", "tenant_id");
+        tenant::try_register_tenant_tables(&[("_mode_neutral_probe", "tenant_id")]).unwrap();
         assert_eq!(
             scope_registry_state(),
             before,

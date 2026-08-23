@@ -11,8 +11,6 @@ public enum FilterOp: String, Sendable {
     case isNull = "is_null"
     case isNotNull = "is_not_null"
     case contains
-    @available(*, deprecated, message: "Use .ne instead.")
-    public static let neq: FilterOp = .ne
 }
 
 // MARK: - Sort Direction

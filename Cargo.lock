@@ -2127,14 +2127,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qail-encoder"
-version = "1.4.0"
-dependencies = [
- "qail-core",
- "qail-pg",
-]
-
-[[package]]
 name = "qail-gateway"
 version = "1.4.0"
 dependencies = [

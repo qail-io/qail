@@ -7,6 +7,4 @@
 //! - `features`: DDL, Upsert, JSON operations, advanced features
 
 mod core;
-mod dialects;
 mod features;
-mod nosql;

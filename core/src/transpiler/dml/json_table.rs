@@ -84,17 +84,6 @@ pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
         Dialect::Postgres => {
             build_postgres_json_table(&*generator, source_table, &source_ref, &path, &column_defs)
         }
-        Dialect::SQLite => format!(
-            "SELECT jt.* FROM {}, JSON_TABLE({}, '{}' COLUMNS ({})) AS jt",
-            if source_table == "_" {
-                "dual".to_string()
-            } else {
-                generator.quote_identifier(source_table)
-            },
-            source_ref,
-            path,
-            column_defs.join(", ")
-        ),
     }
 }
 

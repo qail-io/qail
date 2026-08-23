@@ -11,13 +11,18 @@
 //! `schema.qail`. Inferring by name would turn a foreign key into an
 //! isolation boundary by accident.
 //!
+//! Like the tenant registry it is private and populated only through the
+//! boundary APIs in [`crate::rls`]; the only public read is the fallible
+//! [`try_lookup_owner_column`].
+//!
 //! # Example
 //! ```
-//! use qail_core::rls::owner::{register_owner_table, lookup_owner_column};
+//! use qail_core::rls::owner::try_lookup_owner_column;
 //!
-//! register_owner_table("listings", "seller_id");
-//! assert_eq!(lookup_owner_column("listings"), Some("seller_id".to_string()));
-//! assert_eq!(lookup_owner_column("migrations"), None);
+//! qail_core::rls::init_scope_registries_from_tables(&[], &[("listings", "seller_id")])
+//!     .expect("scope registries seal");
+//! assert_eq!(try_lookup_owner_column("listings"), Ok(Some("seller_id".to_string())));
+//! assert_eq!(try_lookup_owner_column("migrations"), Ok(None));
 //! ```
 
 use std::collections::HashMap;
@@ -26,57 +31,29 @@ use std::sync::RwLock;
 
 /// Registry of tables that participate in owner-scope isolation.
 #[derive(Debug, Default)]
-pub struct OwnerRegistry {
+pub(crate) struct OwnerRegistry {
     tables: HashMap<String, String>,
 }
 
 impl OwnerRegistry {
     /// Create an empty registry.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Register a table as owner-scoped.
-    pub fn register(&mut self, table: impl Into<String>, column: impl Into<String>) {
+    pub(crate) fn register(&mut self, table: impl Into<String>, column: impl Into<String>) {
         self.tables.insert(table.into(), column.into());
     }
 
     /// Lookup the owner column for a table.
-    pub fn get(&self, table: &str) -> Option<&str> {
+    pub(crate) fn get(&self, table: &str) -> Option<&str> {
         self.tables.get(table).map(|s| s.as_str())
     }
 
-    /// Check if a table is owner-scoped.
-    pub fn is_owner_table(&self, table: &str) -> bool {
-        self.tables.contains_key(table)
-    }
-
     /// Number of registered owner tables.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.tables.len()
-    }
-
-    /// Returns true if no tables are registered.
-    pub fn is_empty(&self) -> bool {
-        self.tables.is_empty()
-    }
-
-    /// Get all registered owner tables.
-    pub fn tables(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.tables.iter().map(|(k, v)| (k.as_str(), v.as_str()))
-    }
-
-    /// Load owner tables from a parsed build::Schema.
-    ///
-    /// Only tables with an explicit `owner <column>` declaration register.
-    pub fn from_build_schema(schema: &crate::build::Schema) -> Self {
-        let mut registry = Self::new();
-        for table in schema.tables.values() {
-            if let Some(column) = table.owner_column.as_deref() {
-                registry.register(&table.name, column);
-            }
-        }
-        registry
     }
 }
 
@@ -85,13 +62,6 @@ impl OwnerRegistry {
 /// scoping metadata.
 static OWNER_TABLES: LazyLock<RwLock<OwnerRegistry>> =
     LazyLock::new(|| RwLock::new(OwnerRegistry::new()));
-
-/// Register a single table as owner-scoped at runtime. Mode-neutral.
-pub fn register_owner_table(table: &str, column: &str) {
-    if let Ok(mut reg) = OWNER_TABLES.write() {
-        reg.register(table, column);
-    }
-}
 
 /// Fallible bulk registration against an explicit lock. A poisoned lock is
 /// an error — never silently discarded. Parameterised on the lock so a test
@@ -117,28 +87,7 @@ pub(crate) fn count_in(lock: &RwLock<OwnerRegistry>) -> Result<usize, String> {
         .map_err(|e| format!("owner registry lock poisoned: {}", e))
 }
 
-/// Bulk-register into the process registry, propagating a poisoned lock.
-pub(crate) fn try_register_owner_tables(tables: &[(&str, &str)]) -> Result<usize, String> {
-    register_into(&OWNER_TABLES, tables)
-}
-
-/// Number of owner-registered tables, or an error if the lock is poisoned.
-pub(crate) fn try_owner_table_count() -> Result<usize, String> {
-    count_in(&OWNER_TABLES)
-}
-
-/// Lookup the owner column for a table.
-/// Returns `None` if not an owner-scoped table.
-pub fn lookup_owner_column(table: &str) -> Option<String> {
-    try_lookup_owner_column(table).ok().flatten()
-}
-
-/// Fallible lookup: `Ok(None)` = not registered, `Err` = registry cannot be
-/// read. `Qail::with_rls` MUST use this form (see the tenant counterpart).
-pub fn try_lookup_owner_column(table: &str) -> Result<Option<String>, String> {
-    lookup_in(&OWNER_TABLES, table)
-}
-
+/// Fallible lookup against an explicit lock.
 pub(crate) fn lookup_in(
     lock: &RwLock<OwnerRegistry>,
     table: &str,
@@ -149,27 +98,23 @@ pub(crate) fn lookup_in(
     Ok(registry.get(table).map(|s| s.to_string()))
 }
 
-/// Load owner tables from a `schema.qail` file into the global registry.
-///
-/// Returns the number of tables registered.
-pub fn load_owner_tables(path: &str) -> Result<usize, String> {
-    let schema = crate::build::Schema::parse_file(path)?;
-    let loaded = OwnerRegistry::from_build_schema(&schema);
-    let count = loaded.len();
-    let mut registry = OWNER_TABLES
-        .write()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    for (table, column) in loaded.tables() {
-        registry.register(table, column);
-    }
-    Ok(count)
+/// Bulk-register into the process registry, propagating a poisoned lock.
+pub(crate) fn try_register_owner_tables(tables: &[(&str, &str)]) -> Result<usize, String> {
+    register_into(&OWNER_TABLES, tables)
+}
+
+/// Number of owner-registered tables, or an error if the lock is poisoned.
+pub(crate) fn try_owner_table_count() -> Result<usize, String> {
+    count_in(&OWNER_TABLES)
 }
 
 /// Register owner tables from the canonical migrate-parser schema
 /// (`qail_core::migrate::parse_qail`). See [`crate::rls::init_scope_registries`].
 ///
 /// Populates only; a poisoned lock is an error, never a count of zero.
-pub fn register_from_migrate_schema(schema: &crate::migrate::Schema) -> Result<usize, String> {
+pub(crate) fn register_from_migrate_schema(
+    schema: &crate::migrate::Schema,
+) -> Result<usize, String> {
     let mut reg = OWNER_TABLES
         .write()
         .map_err(|e| format!("owner registry lock poisoned: {}", e))?;
@@ -183,13 +128,13 @@ pub fn register_from_migrate_schema(schema: &crate::migrate::Schema) -> Result<u
     Ok(count)
 }
 
-/// Bulk-register multiple owner tables at once. Mode-neutral.
-pub fn register_owner_tables(tables: &[(&str, &str)]) {
-    if let Ok(mut reg) = OWNER_TABLES.write() {
-        for (table, column) in tables {
-            reg.register(*table, *column);
-        }
-    }
+/// Fallible lookup of the owner column for `table`.
+///
+/// `Ok(None)` = not registered; `Err` = the registry cannot be read.
+/// `Qail::with_rls` uses this form (see the tenant counterpart). There is
+/// no infallible form.
+pub fn try_lookup_owner_column(table: &str) -> Result<Option<String>, String> {
+    lookup_in(&OWNER_TABLES, table)
 }
 
 #[cfg(test)]
@@ -199,37 +144,48 @@ mod tests {
     #[test]
     fn registry_round_trips_owner_column() {
         let mut reg = OwnerRegistry::new();
-        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
         reg.register("listings", "seller_id");
         assert_eq!(reg.get("listings"), Some("seller_id"));
-        assert!(reg.is_owner_table("listings"));
-        assert!(!reg.is_owner_table("orders"));
+        assert_eq!(reg.get("orders"), None);
         assert_eq!(reg.len(), 1);
     }
 
     #[test]
-    fn build_schema_only_registers_declared_owner_columns() {
-        let schema = crate::build::Schema::parse(
-            "table listings {\n  id UUID\n  seller_id UUID\n  owner seller_id\n}\n\
-             table messages {\n  id UUID\n  user_id UUID\n}\n",
+    fn migrate_schema_only_registers_declared_owner_columns() {
+        let schema = crate::migrate::parse_qail(
+            "table _o_listings {\n  id UUID primary_key\n  seller_id UUID\n  owner seller_id\n}\n\
+             table _o_messages {\n  id UUID primary_key\n  user_id UUID\n}\n",
         )
         .expect("schema parses");
-        let reg = OwnerRegistry::from_build_schema(&schema);
-        assert_eq!(reg.get("listings"), Some("seller_id"));
+        let lock = RwLock::new(OwnerRegistry::new());
+        // Mirror register_from_migrate_schema against a local lock.
+        let declared: Vec<(&str, &str)> = schema
+            .tables
+            .iter()
+            .filter_map(|(n, t)| t.owner_column.as_deref().map(|c| (n.as_str(), c)))
+            .collect();
+        assert_eq!(register_into(&lock, &declared), Ok(1));
         assert_eq!(
-            reg.get("messages"),
-            None,
+            lookup_in(&lock, "_o_listings"),
+            Ok(Some("seller_id".to_string()))
+        );
+        assert_eq!(
+            lookup_in(&lock, "_o_messages"),
+            Ok(None),
             "a column named user_id must never be inferred as an owner scope"
         );
+        assert_eq!(register_from_migrate_schema(&schema), Ok(1));
     }
 
     #[test]
-    fn global_registry_lookup() {
-        register_owner_table("_owner_test_t1", "author_id");
+    fn global_lookup_is_fallible_and_distinguishes_unregistered() {
+        crate::rls::init_scope_registries_from_tables(&[], &[("_owner_global_probe", "author_id")])
+            .expect("boundary registration");
         assert_eq!(
-            lookup_owner_column("_owner_test_t1"),
-            Some("author_id".to_string())
+            try_lookup_owner_column("_owner_global_probe"),
+            Ok(Some("author_id".to_string()))
         );
-        assert_eq!(lookup_owner_column("_owner_test_missing"), None);
+        assert_eq!(try_lookup_owner_column("_owner_global_missing"), Ok(None));
     }
 }

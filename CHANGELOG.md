@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed (2.0 — migration notes)
+
+Every item below is a public surface that 1.x retained for compatibility and 2.0 deletes. Nothing in the workspace consumed them.
+
+- **`qail-encoder` crate (C ABI).** The 23 exported C functions, the `libqail_*` static-library release matrix (`build-libs.yml`, the `build-static-libraries` job and its assets in `publish.yml`) and the crate's workspace membership are gone. *Migration:* there is no C ABI in 2.0. Embed via the Rust crates, the WASM binding (`wasm/`), or a SDK; the internal system GSS FFI is unaffected.
+- **SQLite, DynamoDB and MongoDB transpilers.** `Dialect::SQLite`, `transpiler::ToDynamo`, `transpiler::ToMongo`, the `sqlite` value of the CLI `--dialect` flag and of the MCP `qail_transpile_query` / `qail_explain_query` `dialect` argument. PostgreSQL is the only SQL target; `ToQdrant` is unchanged. *Migration:* `Dialect` now has the single variant `Postgres`; `to_sql_with_dialect(Dialect::default())` keeps working. Remove any `Dialect::SQLite` match arms and `dialect: "sqlite"` tool arguments.
+- **Deprecated SDK aliases.** Swift `FilterOp.neq`; Kotlin `FilterOp.NEQ` and `FilterOp.IS`. *Migration:* `.ne` / `NE`; `IS_NULL` / `IS_NOT_NULL`.
+- **RLS registry compatibility conveniences.** The infallible `rls::tenant::lookup_tenant_column` / `rls::owner::lookup_owner_column` (a poisoned registry read as `None`, i.e. "unregistered"), the mode-neutral `register_tenant_table(s)` / `register_owner_table(s)` / `load_tenant_tables` / `load_owner_tables`, the `TenantRegistry` / `OwnerRegistry` types, and `ScopeModeCoordinator`. *Migration:* register at the application boundary with `rls::init_scope_registries(&schema)` or `rls::init_scope_registries_from_tables(tenant, owner)` (or `declare_no_scoped_tables` / `declare_policy_only_isolation`); read with the fallible `rls::tenant::try_lookup_tenant_column` / `rls::owner::try_lookup_owner_column` (`Result<Option<String>, String>`). `rls::tenant::scoping_applies` is now fallible (`Result<bool, String>`) for the same reason.
+
 ### Security
 - Updated `h2` to `0.4.16`, fixing RUSTSEC-2026-0258 (unbounded empty DATA frames).
 - Updated the TypeScript SDK's transitive `nanoid` dependency to `3.3.18`, fixing GHSA-2v37-7h3g-55p8.
