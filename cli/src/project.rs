@@ -29,7 +29,8 @@ pub fn config_root(config_path: &Path) -> &Path {
 
 /// The current directory, with a message that says what it was needed for.
 pub fn current_dir() -> Result<PathBuf> {
-    std::env::current_dir().context("Failed to determine the current directory for qail.toml lookup")
+    std::env::current_dir()
+        .context("Failed to determine the current directory for qail.toml lookup")
 }
 
 /// A temp directory tree, removed on drop.
@@ -46,8 +47,7 @@ impl TempTree {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
 
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("qail-cfg-test-{}-{}", std::process::id(), n));
+        let root = std::env::temp_dir().join(format!("qail-cfg-test-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&root).expect("create temp root");
         Self(root)
     }

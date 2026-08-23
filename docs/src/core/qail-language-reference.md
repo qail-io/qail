@@ -853,8 +853,10 @@ different purposes, and **they do not accept exactly the same options**:
 
 Both accept: `primary_key`, `not_null`, `nullable`, `unique`, `default <expr>`,
 `references <table>(<col>)`, `on_delete` / `on_update` actions, `generated_identity`,
-`generated_by_default_identity`, plus the `enable_rls` and `force_rls` table-block lines and
-the top-level `extension` / `index` / `unique index` forms.
+`generated_by_default_identity`, plus the `enable_rls`, `force_rls`, and
+`owner <column>` table-block lines and the top-level `extension` / `index` /
+`unique index` forms. `owner <column>` declares user-shaped AST isolation and
+is never inferred from the column name.
 
 Two options are **codegen-only**:
 

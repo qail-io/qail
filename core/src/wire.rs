@@ -389,6 +389,14 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                 validate_expr_limits(expr, depth + 1, state)?;
             }
         }
+        ensure_len(
+            "qail.on_conflict.where_conditions",
+            on_conflict.where_conditions.len(),
+            MAX_AST_COLLECTION_LEN,
+        )?;
+        for cond in &on_conflict.where_conditions {
+            validate_condition_limits(cond, depth + 1, state)?;
+        }
     }
 
     if let Some(merge) = &cmd.merge {

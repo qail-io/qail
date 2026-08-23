@@ -8,7 +8,6 @@
 use qail_core::ast::{Expr, Operator, Qail};
 use qail_core::parser::parse;
 use qail_core::rls::RlsContext;
-use qail_core::rls::tenant::register_tenant_table;
 use qail_pg::{PgDriver, PgError, PgResult};
 use uuid::Uuid;
 
@@ -326,8 +325,13 @@ async fn test_merge_with_rls_scopes_update_insert_and_by_source_delete() -> PgRe
     let target = test_table("qail_merge_rls_target");
     let source = test_table("qail_merge_rls_source");
     create_merge_tables(&mut driver, &target, &source).await?;
-    register_tenant_table(&target, "tenant_id");
-    register_tenant_table(&source, "tenant_id");
+    // Boundary API: registers AND seals the process `Initialized`; the
+    // low-level `register_tenant_table` is mode-neutral.
+    qail_core::rls::init_scope_registries_from_tables(
+        &[(&target, "tenant_id"), (&source, "tenant_id")],
+        &[],
+    )
+    .expect("scope registries seal");
 
     driver
         .execute_simple(&format!(

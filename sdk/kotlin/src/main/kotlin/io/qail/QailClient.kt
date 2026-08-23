@@ -200,9 +200,9 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
                         header(HttpHeaders.Authorization, "Bearer $token")
                     }
                 }) {
-                    // Send listen command
+                    // Send the gateway's canonical subscribe message.
                     val cmd = kotlinx.serialization.json.buildJsonObject {
-                        put("action", kotlinx.serialization.json.JsonPrimitive("listen"))
+                        put("type", kotlinx.serialization.json.JsonPrimitive("subscribe"))
                         put("channel", kotlinx.serialization.json.JsonPrimitive(channel))
                     }
                     send(Frame.Text(json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), cmd)))

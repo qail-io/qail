@@ -50,7 +50,38 @@ pub(super) fn load_schema_registry(config: &GatewayConfig) -> Result<SchemaRegis
             crate::config::validate_config_path(schema_path, config.config_root.as_deref())
                 .map_err(GatewayError::Config)?;
         tracing::info!("Loading schema from: {}", canonical.display());
-        schema.load_from_file(canonical.to_str().unwrap_or(schema_path))?;
+        let path = canonical.to_str().unwrap_or(schema_path);
+        schema.load_from_file(path)?;
+
+        // Standalone gateway IS the application boundary: declare the AST
+        // scope registries here. The embedded constructor deliberately does
+        // not — the host binary decides whether `.with_rls()` injects.
+        let content = qail_core::schema_source::read_qail_schema_source(path)
+            .map_err(|e| GatewayError::Schema(format!("Failed to read schema: {}", e)))?;
+        let parsed = qail_core::migrate::parse_qail(&content)
+            .map_err(|e| GatewayError::Schema(format!("Failed to parse .qail schema: {}", e)))?;
+        match qail_core::rls::init_scope_registries(&parsed) {
+            Ok(scopes) => tracing::info!(
+                "RLS scope registries: {} tenant-scoped, {} owner-scoped tables",
+                scopes.tenant,
+                scopes.owner
+            ),
+            // A schema with no tenant_id / owner tables is legitimate for a
+            // gateway (it never calls `.with_rls()` itself); declare that
+            // explicitly rather than leaving the process undeclared.
+            Err(qail_core::rls::ScopeInitError::NoScopedTables) => {
+                qail_core::rls::declare_no_scoped_tables(
+                    "gateway schema.qail declares no tenant_id or owner tables",
+                )
+                .map_err(|e| GatewayError::Config(format!("RLS scope registries: {}", e)))?;
+                tracing::warn!(
+                    "RLS scope registries: schema declares no tenant- or owner-scoped tables; AST injection is a no-op"
+                );
+            }
+            Err(e) => {
+                return Err(GatewayError::Config(format!("RLS scope registries: {}", e)));
+            }
+        }
     }
     Ok(schema)
 }

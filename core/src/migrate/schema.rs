@@ -107,6 +107,11 @@ pub struct Table {
     pub enable_rls: bool,
     /// FORCE ROW LEVEL SECURITY
     pub force_rls: bool,
+    /// Owner column for user-scoped isolation (`owner <column>` attribute).
+    ///
+    /// Runtime metadata only — it emits no DDL. It drives the owner
+    /// registry so `with_rls` injects `<column> = app.current_user_id`.
+    pub owner_column: Option<String>,
 }
 
 /// A column definition with compile-time type safety.
@@ -1470,7 +1475,14 @@ impl Table {
             multi_column_fks: Vec::new(),
             enable_rls: false,
             force_rls: false,
+            owner_column: None,
         }
+    }
+
+    /// Declare the owner column (builder pattern).
+    pub fn owner(mut self, column: impl Into<String>) -> Self {
+        self.owner_column = Some(column.into());
+        self
     }
 
     /// Add a column (builder pattern).
@@ -2090,6 +2102,9 @@ pub fn to_qail_string(schema: &Schema) -> String {
         }
         if table.force_rls {
             output.push_str("  force_rls\n");
+        }
+        if let Some(owner) = &table.owner_column {
+            output.push_str(&format!("  owner {}\n", owner));
         }
         output.push_str("}\n\n");
     }

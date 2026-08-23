@@ -248,7 +248,7 @@ class QailClient {
         sub._attach(wsChannel);
 
         wsChannel.sink
-            .add(jsonEncode({'action': 'listen', 'channel': channel}));
+            .add(jsonEncode({'type': 'subscribe', 'channel': channel}));
 
         await for (final frame in wsChannel.stream) {
           if (!sub._alive) break;
@@ -487,7 +487,7 @@ class _WebSocketSubscription implements QailSubscription {
     final ws = _ws;
     if (ws != null) {
       try {
-        ws.sink.add(jsonEncode({'action': 'unlisten', 'channel': _channel}));
+        ws.sink.add(jsonEncode({'type': 'unsubscribe', 'channel': _channel}));
       } catch (_) {
         // Sink already closed.
       }

@@ -47,7 +47,10 @@ cargo doc --no-deps --open
 ## 1.0 API Notes
 
 - Use `Qail::get/add/set/del` and typed builder methods for normal database work.
-- Use `with_rls(&ctx)?`; the older `try_with_rls()` alias is removed.
+- Declare the process isolation mode at startup with `init_scope_registries`,
+  `init_scope_registries_from_tables`, `declare_policy_only_isolation`, or
+  `declare_no_scoped_tables`, then use `with_rls(&ctx)?`.
+- The older `try_with_rls()` alias is removed.
 - Use `join_on(...)?` for schema-driven relation joins; the older `try_join_on()` alias is removed.
 - Use bytes-native PostgreSQL cancel-key APIs instead of legacy `i32` wrappers.
 - Keep `QailBuildError` structured; broad string conversion is no longer part of the stable API.

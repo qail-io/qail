@@ -1,6 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::auth::AuthContext;
+use qail_core::rls::channel::ChannelScope;
 
 use super::super::listener::listener_rpc;
 use super::super::{
@@ -10,8 +11,26 @@ use super::super::{
     tracked_channel_count,
 };
 
+/// The identity a manual subscription is scoped under.
+///
+/// Tenant-shaped deployments scope on the tenant. A tenant-less authenticated
+/// user (consumer marketplace shape) scopes on their own user id, so the
+/// derived channel is per-recipient: a producer that wants both parties of a
+/// chat to hear an event NOTIFYs each party's channel, and no client can
+/// listen outside its own scope. Mirrors `qail_core::rls::channel::scoped_channel_for`.
+fn subscription_scope(auth: &AuthContext) -> Option<(ChannelScope, &str)> {
+    match auth.tenant_id.as_deref() {
+        Some(tid) if !tid.is_empty() => Some((ChannelScope::Tenant, tid)),
+        _ if auth.is_authenticated() && !auth.user_id.is_empty() => {
+            Some((ChannelScope::User, auth.user_id.as_str()))
+        }
+        _ => None,
+    }
+}
+
 pub(super) async fn handle_subscribe(
     channel: String,
+    state: &std::sync::Arc<crate::GatewayState>,
     tx: &mpsc::Sender<WsServerMessage>,
     listener_tx: &mpsc::UnboundedSender<ListenControl>,
     auth: &AuthContext,
@@ -19,39 +38,34 @@ pub(super) async fn handle_subscribe(
 ) {
     tracing::debug!("User {} subscribing to channel: {}", auth.user_id, channel);
 
-    let tenant_id = match &auth.tenant_id {
-        Some(tid) if !tid.is_empty() => tid,
-        _ => {
-            let _ = tx
-                .send(WsServerMessage::Error {
-                    message: "Subscribe requires authenticated tenant context".to_string(),
-                })
-                .await;
-            return;
-        }
-    };
-
-    if channel.is_empty()
-        || !channel
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    let Some((scope, id)) = subscription_scope(auth) else {
         let _ = tx
             .send(WsServerMessage::Error {
-                message: "Invalid channel name — ASCII alphanumeric and underscores only"
-                    .to_string(),
+                message: "Subscribe requires an authenticated tenant or user context".to_string(),
             })
             .await;
         return;
-    }
+    };
 
-    let scoped_channel = match build_manual_notify_channel(tenant_id, &channel) {
+    let scoped_channel = match build_manual_notify_channel(scope, id, &channel) {
         Ok(scoped) => scoped,
         Err(message) => {
             let _ = tx.send(WsServerMessage::Error { message }).await;
             return;
         }
     };
+
+    // Authorization happens BEFORE LISTEN: once channel policies exist, a
+    // fragment that matches none is denied and never reaches PostgreSQL.
+    if let Err(e) = state.policy_engine.authorize_channel(auth, &channel) {
+        tracing::warn!("WS Subscribe denied by channel policy: {}", e);
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: "Channel not allowed by policy".to_string(),
+            })
+            .await;
+        return;
+    }
 
     if conn_state.manual_subscriptions.contains(&scoped_channel) {
         let _ = tx.send(WsServerMessage::Subscribed { channel }).await;
@@ -108,18 +122,19 @@ pub(super) async fn handle_unsubscribe(
         channel
     );
 
-    let scoped_channel = match &auth.tenant_id {
-        Some(tid) if !tid.is_empty() => match build_manual_notify_channel(tid, &channel) {
+    let scoped_channel = match subscription_scope(auth) {
+        Some((scope, id)) => match build_manual_notify_channel(scope, id, &channel) {
             Ok(scoped) => scoped,
             Err(_) => {
                 let _ = tx.send(WsServerMessage::Unsubscribed { channel }).await;
                 return;
             }
         },
-        _ => {
+        None => {
             let _ = tx
                 .send(WsServerMessage::Error {
-                    message: "Unsubscribe requires authenticated tenant context".to_string(),
+                    message: "Unsubscribe requires an authenticated tenant or user context"
+                        .to_string(),
                 })
                 .await;
             return;

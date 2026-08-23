@@ -2404,3 +2404,179 @@ fn test_apply_policies_denies_unmapped_action_when_policies_exist() {
         "unmapped actions must be denied when policy engine is enabled"
     );
 }
+
+fn channel_auth(user: &str, role: &str, tenant: Option<&str>) -> AuthContext {
+    AuthContext {
+        user_id: user.to_string(),
+        role: role.to_string(),
+        tenant_id: tenant.map(str::to_string),
+        claims: std::collections::HashMap::new(),
+    }
+}
+
+#[test]
+fn channel_policies_absent_allows_any_fragment() {
+    let engine = PolicyEngine::new();
+    assert!(!engine.has_channel_policies());
+    assert!(
+        engine
+            .authorize_channel(&channel_auth("u1", "user", None), "anything_goes")
+            .is_ok()
+    );
+}
+
+#[test]
+fn channel_policies_present_default_deny_unmatched() {
+    let mut engine = PolicyEngine::new();
+    engine.add_channel_policy(ChannelPolicyDef {
+        name: "own_chat".to_string(),
+        pattern: "chat_$user_id_*".to_string(),
+        role: None,
+    });
+    let me = channel_auth("11111111-aaaa-bbbb-cccc-222222222222", "user", None);
+
+    assert!(
+        engine
+            .authorize_channel(&me, "chat_11111111-aaaa-bbbb-cccc-222222222222_thread9")
+            .is_ok()
+    );
+    let err = engine
+        .authorize_channel(&me, "chat_99999999-aaaa-bbbb-cccc-222222222222_thread9")
+        .expect_err("another user's chat must be denied");
+    assert!(
+        matches!(err, crate::error::GatewayError::AccessDenied(_)),
+        "{err:?}"
+    );
+    assert!(
+        engine.authorize_channel(&me, "sold_whatever").is_err(),
+        "unmatched fragment is denied once any channel policy exists"
+    );
+}
+
+#[test]
+fn channel_policies_respect_role_requirement() {
+    let mut engine = PolicyEngine::new();
+    engine.add_channel_policy(ChannelPolicyDef {
+        name: "seller_sold".to_string(),
+        pattern: "sold_$user_id".to_string(),
+        role: Some("seller".to_string()),
+    });
+    assert!(
+        engine
+            .authorize_channel(&channel_auth("s1", "seller", None), "sold_s1")
+            .is_ok()
+    );
+    assert!(
+        engine
+            .authorize_channel(&channel_auth("s1", "buyer", None), "sold_s1")
+            .is_err(),
+        "role mismatch must not match the policy"
+    );
+}
+
+#[test]
+fn channel_policies_expand_tenant_and_custom_claims() {
+    let mut engine = PolicyEngine::new();
+    engine.add_channel_policy(ChannelPolicyDef {
+        name: "tenant_feed".to_string(),
+        pattern: "feed_$tenant_id_$team".to_string(),
+        role: None,
+    });
+    let mut auth = channel_auth("u1", "user", Some("acme"));
+    auth.claims.insert(
+        "team".to_string(),
+        serde_json::Value::String("ops".to_string()),
+    );
+    assert!(engine.authorize_channel(&auth, "feed_acme_ops").is_ok());
+    assert!(engine.authorize_channel(&auth, "feed_acme_eng").is_err());
+    // A missing tenant leaves `$tenant_id` literal — it can never match a real id.
+    let no_tenant = channel_auth("u1", "user", None);
+    assert!(
+        engine
+            .authorize_channel(&no_tenant, "feed_acme_ops")
+            .is_err()
+    );
+}
+
+#[test]
+fn channel_pattern_glob_semantics() {
+    fn m(pattern: &str, fragment: &str) -> bool {
+        let engine = {
+            let mut e = PolicyEngine::new();
+            e.add_channel_policy(ChannelPolicyDef {
+                name: "p".into(),
+                pattern: pattern.into(),
+                role: None,
+            });
+            e
+        };
+        engine
+            .authorize_channel(&channel_auth("u", "user", None), fragment)
+            .is_ok()
+    }
+    assert!(m("chat_*", "chat_"));
+    assert!(m("chat_*", "chat_abc_def"));
+    assert!(!m("chat_*", "chats"));
+    assert!(m("*_done", "job_42_done"));
+    assert!(m("a*b*c", "a-b-c"));
+    assert!(!m("a*b*c", "a-c-b"));
+    assert!(m("exact", "exact"));
+    assert!(!m("exact", "exact_"));
+    assert!(m("**x", "abx"));
+}
+
+#[test]
+fn channel_claim_values_never_become_wildcards() {
+    let mut engine = PolicyEngine::new();
+    engine.add_channel_policy(ChannelPolicyDef {
+        name: "own_chat".to_string(),
+        pattern: "chat_$user_id_*".to_string(),
+        role: None,
+    });
+    // A forged/odd claim containing `*` must be matched literally.
+    let star_user = channel_auth("*", "user", None);
+    assert!(
+        engine
+            .authorize_channel(&star_user, "chat_victim_thread")
+            .is_err(),
+        "user_id='*' must not widen the pattern to every chat"
+    );
+    assert!(
+        engine
+            .authorize_channel(&star_user, "chat_*_thread")
+            .is_ok(),
+        "…but still matches its own literal id"
+    );
+
+    let mut claim_auth = channel_auth("u1", "user", None);
+    claim_auth.claims.insert(
+        "team".to_string(),
+        serde_json::Value::String("*".to_string()),
+    );
+    engine.add_channel_policy(ChannelPolicyDef {
+        name: "team".to_string(),
+        pattern: "feed_$team".to_string(),
+        role: None,
+    });
+    assert!(engine.authorize_channel(&claim_auth, "feed_ops").is_err());
+    assert!(engine.authorize_channel(&claim_auth, "feed_*").is_ok());
+}
+
+#[test]
+fn channel_policies_load_from_yaml() {
+    let yaml = r#"
+policies: []
+channel_policies:
+  - name: own_chat
+    pattern: "chat_$user_id_*"
+  - name: seller_sold
+    pattern: "sold_$user_id"
+    role: seller
+"#;
+    let config: PolicyConfig = serde_yaml::from_str(yaml).expect("parses");
+    assert_eq!(config.channel_policies.len(), 2);
+    assert_eq!(config.channel_policies[1].role.as_deref(), Some("seller"));
+
+    let legacy: PolicyConfig = serde_yaml::from_str("policies: []\n").expect("parses");
+    assert!(legacy.channel_policies.is_empty(), "field is optional");
+}

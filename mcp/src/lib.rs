@@ -1013,6 +1013,7 @@ fn schema_summary(schema: &Schema) -> Value {
                 "name": table.name,
                 "enableRls": table.enable_rls,
                 "forceRls": table.force_rls,
+                "ownerColumn": table.owner_column,
                 "columns": table.columns.iter().map(|column| {
                     json!({
                         "name": column.name,
@@ -1149,13 +1150,16 @@ table posts {
   tenant_id uuid not_null
   user_id uuid not_null references users(id) on_delete cascade
   title text not_null
+  owner user_id
   enable_rls
 }
 
 index posts_user_id on posts (user_id)
 ```
 
-Note `not_null` (underscore), not `not null`.
+Note `not_null` (underscore), not `not null`. `owner <column>` is an explicit
+user-scope declaration; a column named `user_id` or `seller_id` is not inferred
+as an isolation boundary.
 
 An older **paren** dialect (`table users ( id uuid primary_key, ... )`, with
 commas and trailing `) enable_rls`) still appears in some CLI paths. It is
@@ -1183,6 +1187,7 @@ use qail_core::prelude::*;
 use qail_core::rls::RlsContext;
 
 let ctx = RlsContext::tenant(tenant_id);
+qail_core::rls::init_scope_registries_from_tables(&[("orders", "tenant_id")], &[])?;
 let query = Qail::get("orders").columns(["id", "status"]).with_rls(&ctx)?;
 ```
 "#;
@@ -1276,6 +1281,7 @@ const BUILDER_COOKBOOK_RLS: &str = r#"# RLS
 use qail_core::prelude::*;
 use qail_core::rls::RlsContext;
 
+qail_core::rls::init_scope_registries_from_tables(&[("bookings", "tenant_id")], &[])?;
 let ctx = RlsContext::tenant(tenant_id);
 
 let query = Qail::get("bookings")
@@ -1284,8 +1290,14 @@ let query = Qail::get("bookings")
     .with_rls(&ctx)?;
 ```
 
+`with_rls()` refuses to run until the process declares its isolation mode.
+Prefer `init_scope_registries(&schema)` when a canonical schema is available;
+use `init_scope_registries_from_tables` for embedded/programmatic applications.
+`declare_policy_only_isolation(reason)` and `declare_no_scoped_tables(reason)`
+are the explicit no-injection alternatives.
+
 Use `RlsContext::global()` only for shared data and `RlsContext::super_admin`
-only for internal privileged flows.
+only for internal privileged flows. Owner-scoped tables require a user context.
 "#;
 
 const BUILDER_COOKBOOK_EXPRESSIONS: &str = r#"# Expressions
@@ -1307,14 +1319,16 @@ table users {
   id uuid primary_key default gen_random_uuid()
   tenant_id uuid not_null
   email text unique not_null
+  owner id
   enable_rls
 }
 
 unique index users_email on users (email)
 ```
 
-Note `not_null` (underscore) and that table-level flags such as `enable_rls`
-live inside the braces. The older paren form is legacy — do not write it.
+Note `not_null` (underscore) and that table-level declarations such as
+`owner <column>` and `enable_rls` live inside the braces. Owner scope is
+explicit, never inferred. The older paren form is legacy — do not write it.
 
 Call `qail_schema_summary` with the schema source to inspect what qail-core
 parses.
@@ -1389,7 +1403,7 @@ mod tests {
                 "table users {\n",
                 "  id uuid primary_key default gen_random_uuid()\n",
                 "  tenant_id uuid not_null references tenants(id) on_delete cascade\n",
-                "  enable_rls\n  force_rls\n",
+                "  owner id\n  enable_rls\n  force_rls\n",
                 "}\n"
             )
         }));
@@ -1404,6 +1418,7 @@ mod tests {
         assert_eq!(users["name"], "users");
         assert_eq!(users["enableRls"], true);
         assert_eq!(users["forceRls"], true);
+        assert_eq!(users["ownerColumn"], "id");
 
         let tenant_fk = &users["columns"][1]["references"];
         assert_eq!(tenant_fk["table"], "tenants");

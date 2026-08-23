@@ -189,6 +189,25 @@ pub fn validate_against_schema_diagnostics(
             )));
         }
 
+        // RLS Audit (false-green): `.with_rls()` is present but the table
+        // registers NEITHER a tenant column NOR an `owner=` column, so the
+        // call injects nothing at runtime. `.with_rls_policy()` is the
+        // explicit opt-out for policy-delegated isolation and is exempt.
+        if schema.is_rls_table(&query.table) && query.has_rls && !query.rls_policy_delegated {
+            let scopes_nothing = schema
+                .table(&query.table)
+                .is_some_and(|t| !t.has_column("tenant_id") && t.owner_column.is_none());
+            if scopes_nothing {
+                push_unique(ValidationDiagnostic::rls_warning(format!(
+                    "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\").with_rls() scopes NOTHING — table is `rls` but declares no tenant_id column and no owner=<column>; isolation rests entirely on DB policies (use .with_rls_policy() to declare that, or add owner=)",
+                    query.file,
+                    query.line,
+                    query.action.to_lowercase(),
+                    query.table
+                )));
+            }
+        }
+
         // SuperAdmin Audit: warn if file uses for_system_process() and queries
         // a table that has tenant_id (tenant-scoped). This catches cases where
         // acquire_with_rls(SuperAdmin) bypasses tenant isolation at the

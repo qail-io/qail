@@ -168,7 +168,7 @@ let unlisten = Qail::unlisten("orders");
 | `.update_from([...])` | UPDATE ... FROM tables |
 | `.delete_using([...])` | DELETE ... USING tables |
 | `.with_ctes(ctes)` | WITH (Common Table Expressions) |
-| `.with_rls(&ctx)` | Inject RLS context, returns `QailBuildResult<Self>` |
+| `.with_rls(&ctx)` | Inject declared tenant/owner scope, returns `QailBuildResult<Self>`; requires an application-boundary isolation declaration |
 
 ### Materialized Views
 

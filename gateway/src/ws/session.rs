@@ -174,12 +174,21 @@ pub(super) async fn handle_socket(
                     send_token_expired(&tx).await;
                     break;
                 }
-                match tx.send(WsServerMessage::Notification {
-                    channel: notification.channel.clone(),
-                    payload: notification.payload,
-                }).await {
-                    Ok(()) => {}
-                    Err(_) => break,
+                // Forward the raw payload ONLY for channels this client
+                // explicitly subscribed to. Live-query channels are shared
+                // wake-ups whose payload (a trigger-authored row summary)
+                // must never reach a client — the client only ever sees the
+                // rows its own RLS-scoped re-fetch returns.
+                if conn_state.manual_subscriptions.contains(&notification.channel)
+                    && tx
+                        .send(WsServerMessage::Notification {
+                            channel: notification.channel.clone(),
+                            payload: notification.payload,
+                        })
+                        .await
+                        .is_err()
+                {
+                    break;
                 }
 
                 let mut stale_tables = Vec::new();

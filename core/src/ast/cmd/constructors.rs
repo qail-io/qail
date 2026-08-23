@@ -189,6 +189,29 @@ impl Qail {
         }
     }
 
+    /// Create a NOTIFY on the channel a gateway `subscribe(fragment)` under
+    /// `ctx` actually listens on.
+    ///
+    /// The gateway derives its real PostgreSQL channel from
+    /// `(scope, fragment)` via [`crate::rls::channel::scoped_channel_for`];
+    /// this is the producer-side half of that contract, so application code
+    /// never re-implements the naming convention.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ctx = RlsContext::tenant("acme");
+    /// let cmd = Qail::notify_scoped(&ctx, "chat_42", r#"{"id":7}"#)?;
+    /// // Generates: NOTIFY "t_4_acme_chat_42", '{"id":7}'
+    /// ```
+    pub fn notify_scoped(
+        ctx: &crate::rls::RlsContext,
+        fragment: &str,
+        payload: impl Into<String>,
+    ) -> Result<Self, String> {
+        let channel = crate::rls::channel::scoped_channel_for(ctx, fragment)?;
+        Ok(Self::notify(channel, payload))
+    }
+
     // PostgreSQL Procedural Commands
 
     /// Create a CALL command to invoke a stored procedure.

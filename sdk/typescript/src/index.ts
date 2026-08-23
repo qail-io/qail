@@ -281,7 +281,7 @@ export class QailClient {
                         ws?.close();
                         return;
                     }
-                    ws?.send(JSON.stringify({ action: 'listen', channel }));
+                    ws?.send(JSON.stringify({ type: 'subscribe', channel }));
                 };
 
                 ws.onmessage = (event) => {
@@ -309,7 +309,7 @@ export class QailClient {
                 alive = false;
                 if (ws && (ws.readyState === WS_CONNECTING || ws.readyState === WS_OPEN)) {
                     if (ws.readyState === WS_OPEN) {
-                        ws.send(JSON.stringify({ action: 'unlisten', channel }));
+                        ws.send(JSON.stringify({ type: 'unsubscribe', channel }));
                     }
                     ws.close();
                 }

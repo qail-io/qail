@@ -33,13 +33,18 @@ fn quote_guc_literal(value: &str) -> String {
 /// **Security**: GUC values are sanitized to prevent SQL injection via
 /// crafted JWT claims (e.g., `tenant_id: "'; DROP TABLE users; --"`).
 pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
+    // Every UUID-shaped GUC gets the nil UUID when absent — unconditionally.
+    // An empty string reaches policies as `''::uuid` and THROWS (PostgreSQL
+    // does not short-circuit OR), so a user-only context on a tenant-policy
+    // table, or a tenant context on an `agent_id = ...::uuid` policy, would
+    // fail every query instead of simply matching nothing.
     let nil_uuid = "00000000-0000-0000-0000-000000000000";
-    let t_id_raw = if ctx.is_global() && ctx.tenant_id.is_empty() {
+    let t_id_raw = if ctx.tenant_id.is_empty() {
         nil_uuid
     } else {
         &ctx.tenant_id
     };
-    let ag_id_raw = if ctx.is_global() && ctx.agent_id.is_empty() {
+    let ag_id_raw = if ctx.agent_id.is_empty() {
         nil_uuid
     } else {
         &ctx.agent_id
@@ -81,13 +86,18 @@ pub(crate) fn context_to_sql_with_timeouts(
     statement_timeout_ms: u32,
     lock_timeout_ms: u32,
 ) -> String {
+    // Every UUID-shaped GUC gets the nil UUID when absent — unconditionally.
+    // An empty string reaches policies as `''::uuid` and THROWS (PostgreSQL
+    // does not short-circuit OR), so a user-only context on a tenant-policy
+    // table, or a tenant context on an `agent_id = ...::uuid` policy, would
+    // fail every query instead of simply matching nothing.
     let nil_uuid = "00000000-0000-0000-0000-000000000000";
-    let t_id_raw = if ctx.is_global() && ctx.tenant_id.is_empty() {
+    let t_id_raw = if ctx.tenant_id.is_empty() {
         nil_uuid
     } else {
         &ctx.tenant_id
     };
-    let ag_id_raw = if ctx.is_global() && ctx.agent_id.is_empty() {
+    let ag_id_raw = if ctx.agent_id.is_empty() {
         nil_uuid
     } else {
         &ctx.agent_id
@@ -194,6 +204,34 @@ mod tests {
             ),
             "empty user_id emits nil UUID to avoid ::uuid cast failures"
         );
+    }
+
+    #[test]
+    fn test_context_to_sql_user_only_nils_tenant_and_agent() {
+        // A user-only context (consumer marketplace shape) must never reach a
+        // `tenant_id = current_setting(...)::uuid` policy as '' — that throws.
+        let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
+        let sql = context_to_sql(&ctx);
+        assert!(sql.contains(
+            "set_config('app.current_tenant_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
+        ));
+        assert!(sql.contains(
+            "set_config('app.current_agent_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
+        ));
+        assert!(
+            !sql.contains("$qail_guc$$qail_guc$"),
+            "no empty GUC literal may be emitted"
+        );
+    }
+
+    #[test]
+    fn test_context_to_sql_tenant_only_nils_agent() {
+        let ctx = RlsContext::tenant("abc-123");
+        let sql = context_to_sql_with_timeouts(&ctx, 1000, 0);
+        assert!(sql.contains(
+            "set_config('app.current_agent_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
+        ));
+        assert!(!sql.contains("$qail_guc$$qail_guc$"));
     }
 
     #[test]

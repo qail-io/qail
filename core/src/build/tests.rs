@@ -3082,6 +3082,7 @@ table users {
         related_tables: Vec::new(),
         is_cte_ref: false,
         has_rls: false,
+        rls_policy_delegated: false,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
     }];
@@ -3117,6 +3118,7 @@ table users {
         related_tables: Vec::new(),
         is_cte_ref: false,
         has_rls: false,
+        rls_policy_delegated: false,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
     }];
@@ -3472,6 +3474,7 @@ table users {
         related_tables: Vec::new(),
         is_cte_ref: false,
         has_rls: false,
+        rls_policy_delegated: false,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
     }];
@@ -3797,6 +3800,7 @@ fn test_sql_migration_ignores_non_ddl_alter_table_mentions() {
             policies: std::collections::HashMap::new(),
             foreign_keys: vec![],
             rls_enabled: false,
+            owner_column: None,
         },
     );
 
@@ -4430,4 +4434,206 @@ fn demo() {
         !source_uses_super_admin_without_allow(unrelated_call),
         "only SuperAdminToken::for_system_process(...) should set the file flag"
     );
+}
+
+fn rls_audit_usage(table: &str, has_rls: bool, delegated: bool) -> QailUsage {
+    QailUsage {
+        file: "test.rs".to_string(),
+        line: 1,
+        column: 1,
+        table: table.to_string(),
+        is_dynamic_table: false,
+        columns: vec!["id".to_string()],
+        action: "GET".to_string(),
+        related_tables: Vec::new(),
+        is_cte_ref: false,
+        has_rls,
+        rls_policy_delegated: delegated,
+        has_explicit_tenant_scope: false,
+        file_uses_super_admin: false,
+    }
+}
+
+#[test]
+fn rls_audit_flags_with_rls_that_scopes_nothing() {
+    // `rls` table with neither tenant_id nor owner= — with_rls() is a runtime
+    // no-op here, so a green build would be a false green.
+    let schema = Schema::parse("table listings rls {\n  id UUID\n  seller_id UUID\n}\n").unwrap();
+    let diagnostics =
+        validate_against_schema_diagnostics(&schema, &[rls_audit_usage("listings", true, false)]);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("scopes NOTHING")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn rls_audit_owner_declaration_satisfies_with_rls() {
+    let schema =
+        Schema::parse("table listings {\n  id UUID\n  seller_id UUID\n  owner seller_id\n}\n")
+            .unwrap();
+    assert!(
+        schema.is_rls_table("listings"),
+        "owner= must mark the table RLS"
+    );
+    let diagnostics =
+        validate_against_schema_diagnostics(&schema, &[rls_audit_usage("listings", true, false)]);
+    assert!(
+        !diagnostics.iter().any(|d| d.message.contains("RLS AUDIT")),
+        "{diagnostics:?}"
+    );
+    // ...and a bare query on it still warns.
+    let diagnostics =
+        validate_against_schema_diagnostics(&schema, &[rls_audit_usage("listings", false, false)]);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("has no .with_rls()")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn rls_audit_policy_delegation_is_exempt_from_scopes_nothing() {
+    let schema = Schema::parse("table listings rls {\n  id UUID\n  seller_id UUID\n}\n").unwrap();
+    let diagnostics =
+        validate_against_schema_diagnostics(&schema, &[rls_audit_usage("listings", true, true)]);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("scopes NOTHING")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn schema_owner_option_requires_declared_column() {
+    let err = Schema::parse("table listings {\n  id UUID\n  owner seller_id\n}\n")
+        .expect_err("owner column must exist");
+    assert!(err.contains("Owner column 'seller_id'"), "{err}");
+    let err =
+        Schema::parse("table listings {\n  id UUID\n  a UUID\n  b UUID\n  owner a\n  owner b\n}\n")
+            .expect_err("duplicate owner");
+    assert!(err.contains("Duplicate owner declaration"), "{err}");
+}
+
+#[test]
+fn rls_policy_delegation_recognised_in_chain_late_and_helper_forms() {
+    let content = r#"
+async fn execute_with_policy(cmd: Qail, conn: &mut qail_pg::PooledConnection, ctx: &RlsContext) {
+    let _ = conn.fetch_all_uncached(&cmd.with_rls_policy(ctx)).await;
+}
+
+async fn chain(conn: &mut qail_pg::PooledConnection, ctx: &RlsContext) {
+    let _ = conn.fetch_all_uncached(&Qail::get("harbors").with_rls_policy(ctx)).await;
+}
+
+async fn late(conn: &mut qail_pg::PooledConnection, ctx: &RlsContext) {
+    let cmd = Qail::get("harbors").columns(["id"]);
+    let _ = conn.fetch_all(&cmd.with_rls_policy(ctx)).await;
+}
+
+async fn helper(conn: &mut qail_pg::PooledConnection, ctx: &RlsContext) {
+    let cmd = Qail::get("harbors").columns(["id"]);
+    execute_with_policy(cmd, conn, ctx).await;
+}
+
+async fn plain(conn: &mut qail_pg::PooledConnection, ctx: &RlsContext) {
+    let _ = conn.fetch_all_uncached(&Qail::get("harbors").with_rls(ctx)).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    assert_eq!(usages.len(), 4, "{usages:#?}");
+    assert!(
+        usages[0].has_rls && usages[0].rls_policy_delegated,
+        "chain form"
+    );
+    assert!(
+        usages[1].has_rls && usages[1].rls_policy_delegated,
+        "late form"
+    );
+    assert!(
+        usages[2].has_rls && usages[2].rls_policy_delegated,
+        "helper form"
+    );
+    assert!(
+        usages[3].has_rls && !usages[3].rls_policy_delegated,
+        "plain with_rls is NOT delegation"
+    );
+
+    // And the validator honours all three: no "scopes NOTHING" for delegated forms.
+    let schema = Schema::parse("table harbors rls {\n  id UUID\n}\n").unwrap();
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    let nothing: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("scopes NOTHING"))
+        .collect();
+    assert_eq!(nothing.len(), 1, "{diagnostics:?}");
+    assert!(nothing[0].message.contains("Qail::get(\"harbors\")"));
+}
+
+#[test]
+fn migrate_parser_accepts_owner_attribute_and_rejects_header_options() {
+    use crate::migrate::parse_qail;
+    let schema = parse_qail(
+        "table listings {\n  id UUID primary_key\n  seller_id UUID\n  owner seller_id\n}\n",
+    )
+    .expect("owner attribute parses");
+    assert_eq!(
+        schema.tables["listings"].owner_column.as_deref(),
+        Some("seller_id")
+    );
+
+    let err = parse_qail("table listings owner=seller_id {\n  id UUID primary_key\n}\n")
+        .expect_err("header options must not be swallowed into the table name");
+    assert!(err.contains("Invalid table header"), "{err}");
+
+    let err = parse_qail("table listings {\n  id UUID primary_key\n  owner seller_id\n}\n")
+        .expect_err("owner must reference a declared column");
+    assert!(err.contains("Owner column 'seller_id'"), "{err}");
+}
+
+#[test]
+fn load_scope_registries_populates_both_registries_from_migrate_schema() {
+    use crate::migrate::parse_qail;
+    let schema = parse_qail(
+        "table _reg_t_orders {\n  id UUID primary_key\n  tenant_id UUID\n}\n\
+         table _reg_o_listings {\n  id UUID primary_key\n  seller_id UUID\n  owner seller_id\n}\n\
+         table _reg_both_notes {\n  id UUID primary_key\n  tenant_id UUID\n  user_id UUID\n  owner user_id\n}\n\
+         table _reg_none_ref {\n  id UUID primary_key\n}\n",
+    )
+    .unwrap();
+    let counts = crate::rls::init_scope_registries(&schema).expect("not sealed PolicyOnly");
+    assert_eq!(counts.tenant, 2);
+    assert_eq!(counts.owner, 2);
+    assert_eq!(
+        crate::rls::tenant::lookup_tenant_column("_reg_t_orders").as_deref(),
+        Some("tenant_id")
+    );
+    assert_eq!(
+        crate::rls::owner::lookup_owner_column("_reg_o_listings").as_deref(),
+        Some("seller_id")
+    );
+    assert_eq!(
+        crate::rls::owner::lookup_owner_column("_reg_both_notes").as_deref(),
+        Some("user_id")
+    );
+    assert!(crate::rls::tenant::lookup_tenant_column("_reg_none_ref").is_none());
+    assert!(crate::rls::owner::lookup_owner_column("_reg_none_ref").is_none());
+}
+
+#[test]
+fn build_schema_overlay_merge_carries_owner_column() {
+    let mut base = Schema::parse("table listings {\n  id UUID\n  seller_id UUID\n}\n").unwrap();
+    assert!(base.tables["listings"].owner_column.is_none());
+    let overlay = "table listings {\n  id UUID\n  seller_id UUID\n  owner seller_id\n}\n";
+    base.parse_qail_migration(overlay).expect("overlay merges");
+    assert_eq!(
+        base.tables["listings"].owner_column.as_deref(),
+        Some("seller_id")
+    );
+    assert!(base.tables["listings"].rls_enabled);
 }

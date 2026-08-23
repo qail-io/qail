@@ -168,7 +168,7 @@ public final class WebSocketSubscription: QailSubscription, @unchecked Sendable 
         lock.unlock()
 
         task.resume()
-        send(action: "listen", on: task)
+        send(type: "subscribe", on: task)
         startReceiving(task: task)
     }
 
@@ -188,13 +188,13 @@ public final class WebSocketSubscription: QailSubscription, @unchecked Sendable 
 
         guard let currentTask else { return }
         if currentTask.state == .running {
-            send(action: "unlisten", on: currentTask)
+            send(type: "unsubscribe", on: currentTask)
         }
         currentTask.cancel(with: .goingAway, reason: nil)
     }
 
-    private func send(action: String, on task: URLSessionWebSocketTask) {
-        let msgObj = ["action": action, "channel": channel]
+    private func send(type: String, on task: URLSessionWebSocketTask) {
+        let msgObj = ["type": type, "channel": channel]
         if let data = try? JSONSerialization.data(withJSONObject: msgObj),
            let msg = String(data: data, encoding: .utf8) {
             task.send(.string(msg)) { _ in }

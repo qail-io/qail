@@ -30,6 +30,11 @@ pub struct QailUsage {
     pub is_cte_ref: bool,
     /// Whether this query chain includes `.with_rls(` call
     pub has_rls: bool,
+    /// Whether the chain delegates isolation to DB policies via
+    /// `.with_rls_policy(`. Distinct from `has_rls`: delegation is an
+    /// explicit declaration that no AST predicate is expected, so the
+    /// "scopes nothing" audit must not fire on it.
+    pub rls_policy_delegated: bool,
     /// Whether this query chain has explicit tenant scope condition
     /// (e.g. `.eq("tenant_id", ...)` or `.is_null("tenant_id")`).
     pub has_explicit_tenant_scope: bool,
@@ -2338,6 +2343,25 @@ fn extract_receiver_ident_before_dot(source: &str, dot_idx: usize) -> Option<Str
 }
 
 fn collect_execution_site_rls_offsets(source: &str) -> HashMap<String, Vec<usize>> {
+    collect_execution_site_method_offsets(source, is_rls_method_name)
+}
+
+fn is_rls_method_name(name: &str) -> bool {
+    matches!(name, "with_rls" | "with_rls_policy" | "rls")
+}
+
+fn is_rls_policy_method_name(name: &str) -> bool {
+    name == "with_rls_policy"
+}
+
+/// Offsets of `<var>.<method>(` call sites, keyed by receiver variable, for
+/// every method `accept` recognises. Used for late-bound `.with_rls()` /
+/// `.with_rls_policy()` applied at the execution site rather than in the
+/// constructor chain.
+fn collect_execution_site_method_offsets(
+    source: &str,
+    accept: fn(&str) -> bool,
+) -> HashMap<String, Vec<usize>> {
     let bytes = source.as_bytes();
     let mut out: HashMap<String, Vec<usize>> = HashMap::new();
     let mut i = 0usize;
@@ -2365,7 +2389,7 @@ fn collect_execution_site_rls_offsets(source: &str) -> HashMap<String, Vec<usize
                 i += 1;
                 continue;
             };
-            if matches!(name, "with_rls" | "with_rls_policy" | "rls") {
+            if accept(name) {
                 cursor = skip_ws(bytes, cursor);
                 if bytes.get(cursor).copied() == Some(b'(')
                     && let Some(var) = extract_receiver_ident_before_dot(source, i)
@@ -2943,6 +2967,17 @@ fn collect_helper_rls_param_indices(
     source: &str,
     functions: &[LocalFunction],
 ) -> HashMap<String, HashSet<usize>> {
+    collect_helper_method_param_indices(source, functions, &["with_rls", "with_rls_policy", "rls"])
+}
+
+/// Parameter indices of local helper functions that apply one of `methods`
+/// to that parameter inside their body (e.g. `fn run(cmd: Qail, ctx: &Rls)
+/// { cmd.with_rls_policy(ctx) }` → `run` index 0).
+fn collect_helper_method_param_indices(
+    source: &str,
+    functions: &[LocalFunction],
+    methods: &[&str],
+) -> HashMap<String, HashSet<usize>> {
     let mut out = HashMap::new();
 
     for function in functions {
@@ -2951,9 +2986,9 @@ fn collect_helper_rls_param_indices(
             .unwrap_or_default();
         let mut indices = HashSet::new();
         for (idx, param) in function.params.iter().enumerate() {
-            if source_contains_ident_method_call(body, param, "with_rls")
-                || source_contains_ident_method_call(body, param, "with_rls_policy")
-                || source_contains_ident_method_call(body, param, "rls")
+            if methods
+                .iter()
+                .any(|method| source_contains_ident_method_call(body, param, method))
             {
                 indices.insert(idx);
             }
@@ -3066,12 +3101,16 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
         .filter_map(|chain| chain.bound_var.as_ref().map(|var| (var.as_str(), chain)))
         .collect::<Vec<_>>();
     let execution_site_rls = collect_execution_site_rls_offsets(content);
+    let execution_site_policy =
+        collect_execution_site_method_offsets(content, is_rls_policy_method_name);
     let local_functions = collect_local_functions(content);
     let literal_binding_index = collect_literal_binding_index(content, &local_functions);
     let cte_aliases =
         collect_cte_aliases(&chains, content, &local_functions, &literal_binding_index);
     let local_function_calls = collect_local_function_calls(content, &local_functions);
     let helper_rls_params = collect_helper_rls_param_indices(content, &local_functions);
+    let helper_policy_params =
+        collect_helper_method_param_indices(content, &local_functions, &["with_rls_policy"]);
     let mut function_name_counts = HashMap::new();
     for function in &local_functions {
         *function_name_counts
@@ -3101,12 +3140,9 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 .map(|other| other.start)
                 .unwrap_or(usize::MAX)
         });
-        let has_late_rls = chain.bound_var.as_ref().is_some_and(|var| {
-            execution_site_rls
-                .get(var)
-                .into_iter()
-                .flatten()
-                .any(|offset| {
+        let late_site_applies = |sites: &HashMap<String, Vec<usize>>| {
+            chain.bound_var.as_ref().is_some_and(|var| {
+                sites.get(var).into_iter().flatten().any(|offset| {
                     *offset >= chain.end
                         && *offset < next_same_var_start.unwrap_or(usize::MAX)
                         && match enclosing_function {
@@ -3116,7 +3152,9 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                             None => true,
                         }
                 })
-        });
+            })
+        };
+        let has_late_rls = late_site_applies(&execution_site_rls);
         let has_helper_param_rls = chain_has_helper_param_rls(
             chain,
             &local_function_calls,
@@ -3125,6 +3163,18 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
             next_same_var_start.unwrap_or(usize::MAX),
         );
         let has_rls = chain_has_rls(&chain.full_chain) || has_late_rls || has_helper_param_rls;
+        // Delegation evidence mirrors the three `has_rls` forms exactly, so a
+        // late `cmd.with_rls_policy(ctx)` or a helper that applies it is not
+        // misreported as "scopes NOTHING".
+        let rls_policy_delegated = chain_has_rls_policy_delegation(&chain.full_chain)
+            || late_site_applies(&execution_site_policy)
+            || chain_has_helper_param_rls(
+                chain,
+                &local_function_calls,
+                &helper_policy_params,
+                enclosing_function,
+                next_same_var_start.unwrap_or(usize::MAX),
+            );
         let literal_bindings =
             literal_bindings_for_offset(&literal_binding_index, chain.start, enclosing_function);
         let substitution_contexts = enclosing_function
@@ -3210,6 +3260,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                     related_tables: related_tables.clone(),
                     is_cte_ref,
                     has_rls,
+                    rls_policy_delegated,
                     has_explicit_tenant_scope,
                     file_uses_super_admin,
                 });
@@ -5062,6 +5113,12 @@ fn chain_has_rls(chain: &str) -> bool {
     scan_chain_method_calls(chain)
         .into_iter()
         .any(|call| matches!(call.name, "with_rls" | "with_rls_policy" | "rls"))
+}
+
+fn chain_has_rls_policy_delegation(chain: &str) -> bool {
+    scan_chain_method_calls(chain)
+        .into_iter()
+        .any(|call| call.name == "with_rls_policy")
 }
 
 fn chain_has_explicit_tenant_scope(

@@ -501,6 +501,7 @@ fn collect_rust_document_usages(
             related_tables: collect_usage_related_tables(&cmd),
             is_cte_ref: false,
             has_rls: rust_query_chain_has_rls(text, &query),
+            rls_policy_delegated: rust_query_chain_delegates_rls_policy(text, &query),
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
             file_uses_super_admin,
         };
@@ -590,6 +591,7 @@ fn collect_text_document_usages(
             related_tables: collect_usage_related_tables(&cmd),
             is_cte_ref: false,
             has_rls: false,
+            rls_policy_delegated: false,
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
             file_uses_super_admin,
         });
@@ -624,6 +626,7 @@ fn collect_text_document_usages(
             related_tables: collect_usage_related_tables(&cmd),
             is_cte_ref: false,
             has_rls: false,
+            rls_policy_delegated: false,
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
             file_uses_super_admin,
         });
@@ -811,6 +814,18 @@ fn rust_query_chain_has_rls(text: &str, query: &QueryCall) -> bool {
 
     rust_snippet_has_method_call(&snippet, ".with_rls")
         || rust_snippet_has_method_call(&snippet, ".rls")
+}
+
+fn rust_query_chain_delegates_rls_policy(text: &str, query: &QueryCall) -> bool {
+    let start = query.start_line.saturating_sub(1);
+    let end = query.end_line.saturating_sub(1);
+    let snippet = text
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| ((start..=end).contains(&idx)).then_some(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    rust_snippet_has_method_call(&snippet, ".with_rls_policy")
 }
 
 fn rust_snippet_has_method_call(snippet: &str, method: &str) -> bool {

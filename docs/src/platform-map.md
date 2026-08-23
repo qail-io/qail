@@ -24,6 +24,7 @@ business logic. This is the normal Rust driver mode:
 use qail_core::prelude::*;
 use qail_pg::PgDriver;
 
+qail_core::rls::init_scope_registries_from_tables(&[("orders", "tenant_id")], &[])?;
 let ctx = RlsContext::tenant(tenant_id).with_user(user_id);
 let cmd = Qail::get("orders")
     .columns(["id", "status", "total"])

@@ -21,9 +21,11 @@
 //! ```
 //! use qail_core::Qail;
 //! use qail_core::rls::RlsContext;
-//! use qail_core::rls::tenant::register_tenant_table;
 //!
-//! register_tenant_table("orders", "tenant_id");
+//! // Application boundary: register AND seal the process `Initialized`.
+//! // (`with_rls` refuses to run until the process declares its mode.)
+//! qail_core::rls::init_scope_registries_from_tables(&[("orders", "tenant_id")], &[])
+//!     .expect("scope registries seal");
 //!
 //! let ctx = RlsContext::tenant("550e8400-e29b-41d4-a716-446655440000");
 //! let query = Qail::get("orders").with_rls(&ctx).expect("rls should apply");
@@ -31,12 +33,37 @@
 //! ```
 
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, LogicalOp, MergeAction, MergeMatchKind, MergeSource,
-    Operator, Qail, Value,
+    Action, Cage, CageKind, Condition, ConflictAction, Expr, JoinKind, LogicalOp, MergeAction,
+    MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
 use crate::error::{QailBuildError, QailBuildResult};
 use crate::rls::RlsContext;
-use crate::rls::tenant::lookup_tenant_column;
+use crate::rls::owner::try_lookup_owner_column;
+use crate::rls::tenant::try_lookup_tenant_column;
+
+/// Registry lookups used by scoping. These are the ONLY lookup forms this
+/// module may use: a poisoned registry is `RlsRegistryUnavailable`, never
+/// `None` — `None` means "unregistered", which is the fail-open answer.
+fn tenant_column_for(table: &str) -> QailBuildResult<Option<String>> {
+    map_registry_lookup(table, try_lookup_tenant_column(table))
+}
+
+fn owner_column_for(table: &str) -> QailBuildResult<Option<String>> {
+    map_registry_lookup(table, try_lookup_owner_column(table))
+}
+
+/// `Err` from a registry becomes `RlsRegistryUnavailable`; `Ok(None)` stays
+/// "unregistered". Separated so the mapping itself is testable with a real
+/// `Err` without poisoning the process registries.
+fn map_registry_lookup(
+    table: &str,
+    lookup: Result<Option<String>, String>,
+) -> QailBuildResult<Option<String>> {
+    lookup.map_err(|reason| QailBuildError::RlsRegistryUnavailable {
+        table: table.to_string(),
+        reason,
+    })
+}
 
 fn normalize_ident(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -78,6 +105,34 @@ fn expr_named_eq(expr: &Expr, name: &str) -> bool {
 
 fn is_tenant_column_condition(cond: &Condition, tenant_col: &str) -> bool {
     expr_named_eq(&cond.left, tenant_col)
+}
+
+/// Split `qualifier.column` into normalized segments (quotes stripped,
+/// case-folded). `column` alone has one segment.
+fn column_ref_segments(raw: &str) -> Vec<String> {
+    raw.trim().split('.').map(normalize_ident).collect()
+}
+
+/// Whether two column references name the same column of the same relation.
+///
+/// A qualifier names a DIFFERENT relation only when it is one of the query's
+/// join qualifiers (`joined`); every other reference — unqualified, or
+/// qualified with the primary alias or a stray name — resolves to the
+/// primary relation. So `a.tenant_id` and `b.tenant_id` never match when
+/// `a`/`b` are joins, while a user-supplied `orders.tenant_id` spoof still
+/// gets replaced by the injected primary predicate.
+fn same_scoped_column(a: &str, b: &str, primary: &str, joined: &[String]) -> bool {
+    let primary = normalize_ident(primary);
+    let resolve = |raw: &str| -> Vec<String> {
+        let mut segs = column_ref_segments(raw);
+        match segs.len() {
+            1 => segs.insert(0, primary.clone()),
+            2 if !joined.contains(&segs[0]) => segs[0] = primary.clone(),
+            _ => {}
+        }
+        segs
+    };
+    resolve(a) == resolve(b)
 }
 
 fn condition_references_tenant_column(cond: &Condition, tenant_col: &str) -> bool {
@@ -236,17 +291,192 @@ impl Qail {
             return Ok(self);
         }
 
-        if !ctx.is_global() && !ctx.has_tenant() {
-            return Ok(self);
+        match crate::rls::scope_registry_state() {
+            crate::rls::ScopeRegistryState::Initialized => {}
+            // Declared: DB policies carry isolation, AST injects nothing.
+            crate::rls::ScopeRegistryState::PolicyOnly => return Ok(self),
+            // Undeclared: refusing beats the silent no-op this used to be.
+            crate::rls::ScopeRegistryState::Uninitialized => {
+                return Err(QailBuildError::RlsRegistryUninitialized {
+                    table: self.table.clone(),
+                });
+            }
         }
 
-        let scoped = self.scope_nested_rls(ctx)?;
+        let (base_table, _) = split_table_reference(&self.table);
+        let tenant_col = tenant_column_for(base_table)?;
+        let owner_col = owner_column_for(base_table)?;
 
-        let (tenant_table, _) = split_table_reference(&scoped.table);
-        let Some(tenant_col) = lookup_tenant_column(tenant_table) else {
-            return Ok(scoped);
+        // Fail closed: a registered table demands the scope it registered for.
+        // Returning the query untouched here would be the exact false-green
+        // the build audit exists to prevent — `.with_rls()` present, nothing
+        // injected.
+        Self::ensure_scope_present(
+            &self.table,
+            tenant_col.as_deref(),
+            owner_col.as_deref(),
+            ctx,
+        )?;
+
+        // Nested relations FIRST, unconditionally. An unregistered outer
+        // relation (a CTE alias, a wrapper view) can embed a registered
+        // table; deciding "nothing to do" before visiting it would let that
+        // inner table run unscoped.
+        let mut scoped = self.scope_nested_rls(ctx)?;
+        scoped = scoped.scope_joined_relations(ctx)?;
+
+        if let Some(tenant_col) = tenant_col {
+            scoped = scoped.scope_tenant_dimension(&tenant_col, ctx)?;
+            scoped = scoped.scope_conflict_update(&tenant_col, Self::tenant_scope_value(ctx))?;
+        }
+        if let Some(owner_col) = owner_col {
+            scoped = scoped.scope_owner_dimension(&owner_col, ctx)?;
+            scoped = scoped.scope_conflict_update(
+                &owner_col,
+                Some(Value::String(ctx.user_id().to_string())),
+            )?;
+        }
+        Ok(scoped)
+    }
+
+    fn ensure_scope_present(
+        table: &str,
+        tenant_col: Option<&str>,
+        owner_col: Option<&str>,
+        ctx: &RlsContext,
+    ) -> QailBuildResult<()> {
+        if let Some(col) = tenant_col
+            && !ctx.is_global()
+            && !ctx.has_tenant()
+        {
+            return Err(QailBuildError::RlsScopeMissing {
+                table: table.to_string(),
+                scope: "tenant",
+                column: col.to_string(),
+            });
+        }
+        if let Some(col) = owner_col
+            && !ctx.has_user()
+        {
+            return Err(QailBuildError::RlsScopeMissing {
+                table: table.to_string(),
+                scope: "user",
+                column: col.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// `Some(tenant)` for tenant contexts, `None` for global (rendered as
+    /// `IS NULL`).
+    fn tenant_scope_value(ctx: &RlsContext) -> Option<Value> {
+        if ctx.is_global() {
+            None
+        } else {
+            Some(Value::String(ctx.tenant_id.clone()))
+        }
+    }
+
+    fn scope_condition(col: &str, value: Option<Value>) -> Condition {
+        match value {
+            Some(value) => make_named_condition(col, value),
+            None => Condition {
+                left: Expr::Named(col.to_string()),
+                op: Operator::IsNull,
+                value: Value::Null,
+                is_array_unnest: false,
+            },
+        }
+    }
+
+    /// Scope every JOINed relation that is registered for tenant or owner
+    /// isolation. The predicate goes into the join's ON clause (INNER/LEFT/
+    /// LATERAL) or the WHERE cage (CROSS); RIGHT/FULL cannot isolate and are
+    /// refused. Fails closed like the primary relation.
+    fn scope_joined_relations(mut self, ctx: &RlsContext) -> QailBuildResult<Self> {
+        let mut extra_filters: Vec<Condition> = Vec::new();
+        for join in &mut self.joins {
+            let (base, alias) = split_table_reference(&join.table);
+            let tenant_col = tenant_column_for(base)?;
+            let owner_col = owner_column_for(base)?;
+            if tenant_col.is_none() && owner_col.is_none() {
+                continue;
+            }
+            Self::ensure_scope_present(
+                &join.table,
+                tenant_col.as_deref(),
+                owner_col.as_deref(),
+                ctx,
+            )?;
+            let qualifier = alias.unwrap_or(base);
+            let mut conditions = Vec::new();
+            if let Some(col) = tenant_col {
+                conditions.push(Self::scope_condition(
+                    &format!("{qualifier}.{col}"),
+                    Self::tenant_scope_value(ctx),
+                ));
+            }
+            if let Some(col) = owner_col {
+                conditions.push(Self::scope_condition(
+                    &format!("{qualifier}.{col}"),
+                    Some(Value::String(ctx.user_id().to_string())),
+                ));
+            }
+            match join.kind {
+                JoinKind::Inner | JoinKind::Left | JoinKind::Lateral => {
+                    join.on_true = false;
+                    join.on.get_or_insert_with(Vec::new).extend(conditions);
+                }
+                JoinKind::Cross => extra_filters.extend(conditions),
+                JoinKind::Right | JoinKind::Full => {
+                    return Err(QailBuildError::RlsJoinKindUnsupported {
+                        table: join.table.clone(),
+                        join_kind: format!("{:?}", join.kind),
+                    });
+                }
+            }
+        }
+        for condition in extra_filters {
+            self = self.scope_to_condition(condition);
+        }
+        Ok(self)
+    }
+
+    /// `ON CONFLICT DO UPDATE` is an UPDATE of an existing row: it must be
+    /// gated by the same scope as the insert payload, and must not be able
+    /// to move the row to another scope.
+    fn scope_conflict_update(mut self, col: &str, value: Option<Value>) -> QailBuildResult<Self> {
+        let condition_col = self.primary_tenant_condition_col(col);
+        let primary = self.primary_relation_qualifier();
+        let joined = self.join_qualifiers();
+        let table = self.table.clone();
+        let Some(on_conflict) = self.on_conflict.as_mut() else {
+            return Ok(self);
         };
+        let ConflictAction::DoUpdate { assignments } = &on_conflict.action else {
+            return Ok(self);
+        };
+        if assignments
+            .iter()
+            .any(|(assigned, _)| normalize_ident(assigned) == normalize_ident(col))
+        {
+            return Err(QailBuildError::RlsTenantColumnMutationDenied {
+                table,
+                tenant_column: col.to_string(),
+            });
+        }
+        on_conflict.where_conditions.retain(|c| {
+            !matches!(&c.left, Expr::Named(existing)
+                if same_scoped_column(existing, &condition_col, &primary, &joined))
+        });
+        on_conflict
+            .where_conditions
+            .push(Self::scope_condition(&condition_col, value));
+        Ok(self)
+    }
 
+    fn scope_tenant_dimension(self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
+        let scoped = self;
         if ctx.is_global() {
             return match scoped.action {
                 Action::Get
@@ -257,14 +487,14 @@ impl Qail {
                 | Action::Export
                 | Action::Search
                 | Action::Scroll => {
-                    let condition_col = scoped.primary_tenant_condition_col(&tenant_col);
+                    let condition_col = scoped.primary_tenant_condition_col(tenant_col);
                     Ok(scoped.scope_to_global(&condition_col))
                 }
-                Action::Set => scoped.scope_update_global(&tenant_col),
+                Action::Set => scoped.scope_update_global(tenant_col),
                 Action::Add | Action::Upsert | Action::Put => {
-                    scoped.scope_insert_global(&tenant_col)
+                    scoped.scope_insert_global(tenant_col)
                 }
-                Action::Merge => scoped.scope_merge_global(&tenant_col),
+                Action::Merge => scoped.scope_merge_global(tenant_col),
                 _ => Ok(scoped),
             };
         }
@@ -279,17 +509,52 @@ impl Qail {
             | Action::Export
             | Action::Search
             | Action::Scroll => {
-                let condition_col = scoped.primary_tenant_condition_col(&tenant_col);
+                let condition_col = scoped.primary_tenant_condition_col(tenant_col);
                 Ok(scoped.scope_to_tenant(&condition_col, ctx))
             }
-            Action::Set => scoped.scope_update_tenant(&tenant_col, ctx),
+            Action::Set => scoped.scope_update_tenant(tenant_col, ctx),
             // Insert / Upsert → auto-set tenant column in payload
             Action::Add | Action::Upsert | Action::Put => {
-                scoped.scope_insert_tenant(&tenant_col, ctx)
+                scoped.scope_insert_tenant(tenant_col, ctx)
             }
-            Action::Merge => scoped.scope_merge_tenant(&tenant_col, ctx),
+            Action::Merge => scoped.scope_merge_tenant(tenant_col, ctx),
             // DDL, transactions, etc. → no injection
             _ => Ok(scoped),
+        }
+    }
+
+    /// Owner-scope injection: `owner_col = ctx.user_id`.
+    ///
+    /// Orthogonal to tenant scoping — a table registered for both gets both
+    /// predicates ANDed. Global contexts carry no user, so they are rejected
+    /// earlier by the fail-closed check in [`Qail::with_rls`].
+    fn scope_owner_dimension(self, owner_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
+        let user_id = Value::String(ctx.user_id().to_string());
+        match self.action {
+            Action::Get
+            | Action::Cnt
+            | Action::Del
+            | Action::Over
+            | Action::Gen
+            | Action::Export
+            | Action::Search
+            | Action::Scroll => {
+                let condition_col = self.primary_tenant_condition_col(owner_col);
+                Ok(self.scope_to_value(&condition_col, user_id))
+            }
+            Action::Set => {
+                self.reject_tenant_payload_mutation(owner_col)?;
+                let condition_col = self.primary_tenant_condition_col(owner_col);
+                Ok(self.scope_to_value(&condition_col, user_id))
+            }
+            Action::Add | Action::Upsert | Action::Put => {
+                self.scope_insert_value(owner_col, user_id)
+            }
+            Action::Merge => Err(QailBuildError::RlsOwnerMergeUnsupported {
+                table: self.table.clone(),
+                owner_column: owner_col.to_string(),
+            }),
+            _ => Ok(self),
         }
     }
 
@@ -484,6 +749,11 @@ impl Qail {
                 }
             }
         }
+        if let Some(on_conflict) = &mut self.on_conflict {
+            for condition in &mut on_conflict.where_conditions {
+                Self::scope_condition_nested_rls(condition, ctx)?;
+            }
+        }
         if let Some(on_conflict) = &mut self.on_conflict
             && let crate::ast::ConflictAction::DoUpdate { assignments } = &mut on_conflict.action
         {
@@ -552,18 +822,36 @@ impl Qail {
     ///
     /// Adds the condition to the existing Filter cage (AND), or creates
     /// a new one. Uses the same pattern as `.filter()`.
-    fn scope_to_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> Self {
-        let condition = make_named_condition(tenant_col, Value::String(ctx.tenant_id.clone()));
+    fn scope_to_tenant(self, tenant_col: &str, ctx: &RlsContext) -> Self {
+        self.scope_to_value(tenant_col, Value::String(ctx.tenant_id.clone()))
+    }
 
-        // Try to append to existing filter cage
+    /// Inject a `WHERE col = value` filter, ANDed into the existing Filter cage.
+    fn scope_to_value(self, col: &str, value: Value) -> Self {
+        self.scope_to_condition(make_named_condition(col, value))
+    }
+
+    fn scope_to_condition(mut self, condition: Condition) -> Self {
+        let col = match &condition.left {
+            Expr::Named(name) => name.clone(),
+            _ => String::new(),
+        };
+        let primary = self.primary_relation_qualifier();
+        let joined = self.join_qualifiers();
+
+        // Try to append to existing filter cage. Replace only a predicate on
+        // the SAME relation's scope column — a `b.tenant_id` predicate from a
+        // CROSS-joined relation must survive an `a.tenant_id` injection.
         let existing = self
             .cages
             .iter_mut()
             .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And);
 
         if let Some(cage) = existing {
-            cage.conditions
-                .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
+            cage.conditions.retain(|cond| {
+                !matches!(&cond.left, Expr::Named(existing)
+                    if same_scoped_column(existing, &col, &primary, &joined))
+            });
             cage.conditions.push(condition);
         } else {
             self.cages.push(Cage {
@@ -574,6 +862,23 @@ impl Qail {
         }
 
         self
+    }
+
+    /// Alias if the primary relation has one, else its base name.
+    fn primary_relation_qualifier(&self) -> String {
+        let (base, alias) = split_table_reference(&self.table);
+        alias.unwrap_or(base).to_string()
+    }
+
+    /// Normalized qualifier (alias or base name) of every JOINed relation.
+    fn join_qualifiers(&self) -> Vec<String> {
+        self.joins
+            .iter()
+            .map(|join| {
+                let (base, alias) = split_table_reference(&join.table);
+                normalize_ident(alias.unwrap_or(base))
+            })
+            .collect()
     }
 
     fn primary_tenant_condition_col(&self, tenant_col: &str) -> String {
@@ -584,32 +889,9 @@ impl Qail {
     }
 
     /// Inject a `WHERE tenant_col IS NULL` filter for global/platform reads.
-    fn scope_to_global(mut self, tenant_col: &str) -> Self {
-        let condition = Condition {
-            left: Expr::Named(tenant_col.to_string()),
-            op: Operator::IsNull,
-            value: Value::Null,
-            is_array_unnest: false,
-        };
-
-        let existing = self
-            .cages
-            .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And);
-
-        if let Some(cage) = existing {
-            cage.conditions
-                .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
-            cage.conditions.push(condition);
-        } else {
-            self.cages.push(Cage {
-                kind: CageKind::Filter,
-                conditions: vec![condition],
-                logical_op: LogicalOp::And,
-            });
-        }
-
-        self
+    /// Same qualifier-aware de-duplication as the tenant path.
+    fn scope_to_global(self, tenant_col: &str) -> Self {
+        self.scope_to_condition(Self::scope_condition(tenant_col, None))
     }
 
     /// Auto-set tenant scope in INSERT/UPSERT payload.
@@ -697,7 +979,7 @@ impl Qail {
         self.scope_merge_query_source(ctx, tenant_col)?;
         self.reject_merge_tenant_update_mutation(tenant_col)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
-        let source_col = self.merge_source_tenant_col(tenant_col);
+        let source_col = self.merge_source_tenant_col(tenant_col)?;
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
 
         let condition = Condition {
@@ -724,7 +1006,7 @@ impl Qail {
         self.scope_merge_query_source(&RlsContext::global(), tenant_col)?;
         self.reject_merge_tenant_update_mutation(tenant_col)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
-        let source_col = self.merge_source_tenant_col(tenant_col);
+        let source_col = self.merge_source_tenant_col(tenant_col)?;
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
 
         let condition = Condition {
@@ -753,7 +1035,7 @@ impl Qail {
             self.merge.as_ref().map(|merge| &merge.source),
             Some(MergeSource::Query { .. })
         );
-        let Some(source_tenant_col) = self.merge_query_source_tenant_col(tenant_col) else {
+        let Some(source_tenant_col) = self.merge_query_source_tenant_col(tenant_col)? else {
             if has_query_source {
                 return Err(QailBuildError::RlsMergeSourceTenantProjectionRequired {
                     table: self.table.clone(),
@@ -793,63 +1075,78 @@ impl Qail {
         format!("{qualifier}.{tenant_col}")
     }
 
-    fn merge_source_tenant_col(&self, tenant_col: &str) -> Option<String> {
-        let merge = self.merge.as_ref()?;
+    fn merge_source_tenant_col(&self, tenant_col: &str) -> QailBuildResult<Option<String>> {
+        let Some(merge) = self.merge.as_ref() else {
+            return Ok(None);
+        };
         match &merge.source {
             MergeSource::Table { name, alias } => {
                 let (source_table, inline_alias) = split_table_reference(name);
-                let source_tenant_col = lookup_tenant_column(source_table)?;
+                let Some(source_tenant_col) = tenant_column_for(source_table)? else {
+                    return Ok(None);
+                };
                 let qualifier = alias.as_deref().or(inline_alias).unwrap_or(source_table);
-                Some(format!("{qualifier}.{source_tenant_col}"))
+                Ok(Some(format!("{qualifier}.{source_tenant_col}")))
             }
             MergeSource::Query { query, alias } => {
-                let source_tenant_col = self.merge_query_source_tenant_col(tenant_col)?;
-                let qualifier = alias.as_deref()?;
+                let Some(source_tenant_col) = self.merge_query_source_tenant_col(tenant_col)?
+                else {
+                    return Ok(None);
+                };
+                let Some(qualifier) = alias.as_deref() else {
+                    return Ok(None);
+                };
                 if query_projects_tenant_col(query, &source_tenant_col) {
-                    Some(format!("{qualifier}.{source_tenant_col}"))
+                    Ok(Some(format!("{qualifier}.{source_tenant_col}")))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
         }
     }
 
-    fn merge_query_source_tenant_col(&self, tenant_col: &str) -> Option<String> {
-        let merge = self.merge.as_ref()?;
+    fn merge_query_source_tenant_col(&self, tenant_col: &str) -> QailBuildResult<Option<String>> {
+        let Some(merge) = self.merge.as_ref() else {
+            return Ok(None);
+        };
         let MergeSource::Query { query, .. } = &merge.source else {
-            return None;
+            return Ok(None);
         };
 
         let (source_table, _) = split_table_reference(&query.table);
-        if let Some(source_tenant_col) = lookup_tenant_column(source_table) {
-            return Some(source_tenant_col);
+        if let Some(source_tenant_col) = tenant_column_for(source_table)? {
+            return Ok(Some(source_tenant_col));
         }
 
         if query_projects_tenant_col(query, tenant_col)
-            || self.cte_exposes_tenant_col(source_table, tenant_col)
+            || self.cte_exposes_tenant_col(source_table, tenant_col)?
         {
-            return Some(tenant_col.to_string());
+            return Ok(Some(tenant_col.to_string()));
         }
 
-        None
+        Ok(None)
     }
 
-    fn cte_exposes_tenant_col(&self, cte_name: &str, tenant_col: &str) -> bool {
-        self.ctes
+    fn cte_exposes_tenant_col(&self, cte_name: &str, tenant_col: &str) -> QailBuildResult<bool> {
+        let Some(cte) = self
+            .ctes
             .iter()
             .find(|cte| normalize_ident(&cte.name) == normalize_ident(cte_name))
-            .is_some_and(|cte| {
-                if !cte.columns.is_empty() {
-                    cte.columns
-                        .iter()
-                        .any(|col| normalize_ident(col) == normalize_ident(tenant_col))
-                } else {
-                    let (base_table, _) = split_table_reference(&cte.base_query.table);
-                    query_projects_tenant_col(&cte.base_query, tenant_col)
-                        || lookup_tenant_column(base_table)
-                            .is_some_and(|col| normalize_ident(&col) == normalize_ident(tenant_col))
-                }
-            })
+        else {
+            return Ok(false);
+        };
+        if !cte.columns.is_empty() {
+            return Ok(cte
+                .columns
+                .iter()
+                .any(|col| normalize_ident(col) == normalize_ident(tenant_col)));
+        }
+        let (base_table, _) = split_table_reference(&cte.base_query.table);
+        if query_projects_tenant_col(&cte.base_query, tenant_col) {
+            return Ok(true);
+        }
+        Ok(tenant_column_for(base_table)?
+            .is_some_and(|col| normalize_ident(&col) == normalize_ident(tenant_col)))
     }
 
     fn scope_merge_on_tenant_equality(
@@ -969,11 +1266,425 @@ impl Qail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rls::tenant::register_tenant_table;
+    use crate::ast::JoinKind;
     use crate::transpiler::ToSql;
 
     // Each test uses a UNIQUE table name to avoid parallel-test interference
-    // on the global TENANT_TABLES registry.
+    // on the global registries.
+    //
+    // Registration goes through the application-boundary API so the process
+    // is sealed `Initialized` the only way production can be: with at least
+    // one table registered. The low-level `register_*` helpers are
+    // mode-neutral and would leave `with_rls` at `RlsRegistryUninitialized`.
+
+    fn register_tenant_table(table: &str, column: &str) {
+        crate::rls::init_scope_registries_from_tables(&[(table, column)], &[])
+            .expect("boundary registration");
+    }
+
+    fn register_owner_table(table: &str, column: &str) {
+        crate::rls::init_scope_registries_from_tables(&[], &[(table, column)])
+            .expect("boundary registration");
+    }
+
+    /// `with_rls` on an unregistered table must be a no-op ONLY once the
+    /// process is sealed `Initialized` by a real registration.
+    fn ensure_initialized() {
+        register_tenant_table("_rls_tests_sentinel", "tenant_id");
+    }
+
+    // ── Owner scope + fail-closed ────────────────────────────────────
+
+    #[test]
+    fn owner_scope_injects_user_filter_on_get() {
+        register_owner_table("_rls_owner_listings", "seller_id");
+        let ctx = RlsContext::user("u-1");
+        let sql = Qail::get("_rls_owner_listings")
+            .with_rls(&ctx)
+            .expect("owner scope applies")
+            .to_sql();
+        assert!(sql.contains("seller_id = 'u-1'"), "{sql}");
+    }
+
+    #[test]
+    fn owner_scope_sets_payload_on_add_and_filters_set() {
+        register_owner_table("_rls_owner_posts", "author_id");
+        let ctx = RlsContext::user("u-9");
+        let add = Qail::add("_rls_owner_posts")
+            .set_value("title", "hi")
+            .with_rls(&ctx)
+            .expect("add scoped")
+            .to_sql();
+        assert!(add.contains("'u-9'"), "{add}");
+
+        let set = Qail::set("_rls_owner_posts")
+            .set_value("title", "edited")
+            .with_rls(&ctx)
+            .expect("set scoped")
+            .to_sql();
+        assert!(set.contains("author_id = 'u-9'"), "{set}");
+
+        let err = Qail::set("_rls_owner_posts")
+            .set_value("author_id", "someone-else")
+            .with_rls(&ctx)
+            .expect_err("owner column mutation must be refused");
+        assert!(matches!(
+            err,
+            QailBuildError::RlsTenantColumnMutationDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn tenant_and_owner_scopes_are_anded() {
+        register_tenant_table("_rls_both_notes", "tenant_id");
+        register_owner_table("_rls_both_notes", "user_id");
+        let ctx = RlsContext::tenant("t-1").with_user("u-1");
+        let sql = Qail::get("_rls_both_notes")
+            .with_rls(&ctx)
+            .expect("both scopes apply")
+            .to_sql();
+        assert!(sql.contains("tenant_id = 't-1'"), "{sql}");
+        assert!(sql.contains("user_id = 'u-1'"), "{sql}");
+        assert!(sql.contains(" AND "), "{sql}");
+    }
+
+    #[test]
+    fn registered_tenant_table_fails_closed_without_tenant() {
+        register_tenant_table("_rls_fc_orders", "tenant_id");
+        let err = Qail::get("_rls_fc_orders")
+            .with_rls(&RlsContext::user("u-1"))
+            .expect_err("user-only context on a tenant table must not silently run unscoped");
+        assert!(
+            matches!(
+                &err,
+                QailBuildError::RlsScopeMissing {
+                    scope: "tenant",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        let err = Qail::get("_rls_fc_orders")
+            .with_rls(&RlsContext::empty())
+            .expect_err("empty context must fail closed");
+        assert!(matches!(err, QailBuildError::RlsScopeMissing { .. }));
+    }
+
+    #[test]
+    fn registry_lookup_failure_maps_to_registry_unavailable_not_unscoped() {
+        // The process registries cannot be poisoned here without breaking
+        // sibling tests, so feed the mapping layer a real registry Err (the
+        // lock-level poison tests in rls::tests prove lookups produce one).
+        assert!(
+            matches!(super::tenant_column_for("_rls_probe_unreachable"), Ok(None)),
+            "healthy registry → unregistered"
+        );
+
+        let mapped =
+            super::map_registry_lookup("orders", Err("tenant registry lock poisoned".to_string()))
+                .expect_err("registry Err must never become Ok(None)");
+        match mapped {
+            QailBuildError::RlsRegistryUnavailable { table, reason } => {
+                assert_eq!(table, "orders");
+                assert!(reason.contains("poisoned"), "{reason}");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(
+            super::map_registry_lookup("orders", Ok(Some("tenant_id".into()))).unwrap(),
+            Some("tenant_id".to_string())
+        );
+    }
+
+    #[test]
+    fn registered_owner_table_fails_closed_without_user() {
+        register_owner_table("_rls_fc_listings", "seller_id");
+        let err = Qail::get("_rls_fc_listings")
+            .with_rls(&RlsContext::tenant("t-1"))
+            .expect_err("tenant-only context on an owner table must fail closed");
+        assert!(
+            matches!(&err, QailBuildError::RlsScopeMissing { scope: "user", .. }),
+            "{err:?}"
+        );
+        assert!(
+            Qail::get("_rls_fc_listings")
+                .with_rls(&RlsContext::global())
+                .is_err(),
+            "global context carries no user"
+        );
+    }
+
+    #[test]
+    fn owner_scope_rejects_merge_explicitly() {
+        register_owner_table("_rls_owner_merge", "owner_id");
+        let ctx = RlsContext::user("u-1");
+        let err = Qail::merge_into("_rls_owner_merge")
+            .with_rls(&ctx)
+            .expect_err("owner-scoped merge is unsupported, not silently unscoped");
+        assert!(matches!(
+            err,
+            QailBuildError::RlsOwnerMergeUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn unregistered_table_with_user_only_context_stays_no_op() {
+        ensure_initialized();
+        let ctx = RlsContext::user("u-1");
+        let sql = Qail::get("_rls_unregistered_reference")
+            .with_rls(&ctx)
+            .expect("no registry entry → untouched")
+            .to_sql();
+        assert!(!sql.contains("WHERE"), "{sql}");
+    }
+
+    #[test]
+    fn super_admin_bypasses_owner_scope() {
+        register_owner_table("_rls_owner_admin", "seller_id");
+        let token = crate::rls::SuperAdminToken::for_system_process("owner_test");
+        let sql = Qail::get("_rls_owner_admin")
+            .with_rls(&RlsContext::super_admin(token))
+            .expect("bypass")
+            .to_sql();
+        assert!(!sql.contains("seller_id"), "{sql}");
+    }
+
+    // ── Nested / joined / upsert coverage ───────────────────────────
+
+    #[test]
+    fn owner_table_inside_cte_is_scoped_even_when_outer_is_unregistered() {
+        register_owner_table("_rls_cte_inner_listings", "seller_id");
+        let ctx = RlsContext::user("u-1");
+        let inner = Qail::get("_rls_cte_inner_listings");
+        let sql = Qail::get("mine")
+            .with("mine", inner)
+            .with_rls(&ctx)
+            .expect("outer unregistered, inner owner table must still be scoped")
+            .to_sql();
+        assert!(sql.contains("seller_id = 'u-1'"), "{sql}");
+    }
+
+    #[test]
+    fn tenant_table_inside_cte_fails_closed_under_user_only_context() {
+        register_tenant_table("_rls_cte_inner_orders", "tenant_id");
+        let inner = Qail::get("_rls_cte_inner_orders");
+        let err = Qail::get("mine")
+            .with("mine", inner)
+            .with_rls(&RlsContext::user("u-1"))
+            .expect_err("inner tenant table must not run unscoped");
+        assert!(matches!(
+            err,
+            QailBuildError::RlsScopeMissing {
+                scope: "tenant",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn joined_owner_relation_gets_on_predicate() {
+        register_owner_table("_rls_join_threads", "owner_id");
+        let ctx = RlsContext::user("u-7");
+        let sql = Qail::get("_rls_join_msgs")
+            .join(
+                JoinKind::Inner,
+                "_rls_join_threads t",
+                "_rls_join_msgs.thread_id",
+                "t.id",
+            )
+            .with_rls(&ctx)
+            .expect("join scoped")
+            .to_sql();
+        assert!(sql.contains("t.owner_id = 'u-7'"), "{sql}");
+    }
+
+    #[test]
+    fn joined_tenant_relation_under_global_ctx_gets_is_null() {
+        register_tenant_table("_rls_join_refs", "tenant_id");
+        let sql = Qail::get("_rls_join_main")
+            .join(
+                JoinKind::Left,
+                "_rls_join_refs",
+                "_rls_join_main.ref_id",
+                "_rls_join_refs.id",
+            )
+            .with_rls(&RlsContext::global())
+            .expect("join scoped")
+            .to_sql();
+        assert!(sql.contains("_rls_join_refs.tenant_id IS NULL"), "{sql}");
+    }
+
+    #[test]
+    fn joined_registered_relation_via_full_join_is_refused() {
+        register_tenant_table("_rls_join_full", "tenant_id");
+        let err = Qail::get("_rls_join_main2")
+            .join(
+                JoinKind::Full,
+                "_rls_join_full",
+                "a.id",
+                "_rls_join_full.id",
+            )
+            .with_rls(&RlsContext::tenant("t-1"))
+            .expect_err("FULL join cannot isolate");
+        assert!(matches!(err, QailBuildError::RlsJoinKindUnsupported { .. }));
+    }
+
+    #[test]
+    fn joined_registered_relation_fails_closed_without_scope() {
+        register_owner_table("_rls_join_owned", "owner_id");
+        let err = Qail::get("_rls_join_main3")
+            .join(
+                JoinKind::Inner,
+                "_rls_join_owned",
+                "a.id",
+                "_rls_join_owned.id",
+            )
+            .with_rls(&RlsContext::tenant("t-1"))
+            .expect_err("joined owner table needs a user");
+        assert!(matches!(
+            err,
+            QailBuildError::RlsScopeMissing { scope: "user", .. }
+        ));
+    }
+
+    #[test]
+    fn multiple_cross_joined_registered_relations_keep_every_predicate() {
+        register_tenant_table("_rls_cross_a", "tenant_id");
+        register_tenant_table("_rls_cross_b", "tenant_id");
+        register_tenant_table("_rls_cross_main", "tenant_id");
+        let ctx = RlsContext::tenant("t1");
+        let mut q = Qail::get("_rls_cross_main");
+        for t in ["_rls_cross_a a", "_rls_cross_b b"] {
+            q.joins.push(crate::ast::Join {
+                table: t.to_string(),
+                kind: JoinKind::Cross,
+                on: None,
+                on_true: true,
+            });
+        }
+        let sql = q.with_rls(&ctx).expect("scoped").to_sql();
+        assert!(sql.contains("a.tenant_id = 't1'"), "{sql}");
+        assert!(sql.contains("b.tenant_id = 't1'"), "{sql}");
+        assert!(sql.contains("tenant_id = 't1'"), "{sql}");
+        assert_eq!(sql.matches("tenant_id = 't1'").count(), 3, "{sql}");
+    }
+
+    #[test]
+    fn multiple_cross_joined_registered_relations_keep_every_predicate_under_global() {
+        register_tenant_table("_rls_gcross_a", "tenant_id");
+        register_tenant_table("_rls_gcross_b", "tenant_id");
+        register_tenant_table("_rls_gcross_main", "tenant_id");
+        let mut q = Qail::get("_rls_gcross_main");
+        for t in ["_rls_gcross_a a", "_rls_gcross_b b"] {
+            q.joins.push(crate::ast::Join {
+                table: t.to_string(),
+                kind: JoinKind::Cross,
+                on: None,
+                on_true: true,
+            });
+        }
+        let sql = q.with_rls(&RlsContext::global()).expect("scoped").to_sql();
+        assert!(sql.contains("a.tenant_id IS NULL"), "{sql}");
+        assert!(sql.contains("b.tenant_id IS NULL"), "{sql}");
+        assert_eq!(sql.matches("tenant_id IS NULL").count(), 3, "{sql}");
+    }
+
+    #[test]
+    fn user_supplied_unqualified_scope_filter_is_replaced_not_duplicated() {
+        register_tenant_table("_rls_dedup_orders", "tenant_id");
+        let sql = Qail::get("_rls_dedup_orders")
+            .eq("tenant_id", "spoofed")
+            .with_rls(&RlsContext::tenant("t1"))
+            .expect("scoped")
+            .to_sql();
+        assert!(!sql.contains("spoofed"), "{sql}");
+        assert_eq!(sql.matches("tenant_id = 't1'").count(), 1, "{sql}");
+    }
+
+    #[test]
+    fn on_conflict_where_subquery_on_registered_table_is_scoped() {
+        register_tenant_table("_rls_ocw_target", "tenant_id");
+        register_tenant_table("_rls_ocw_inner", "tenant_id");
+        let ctx = RlsContext::tenant("t1");
+        let mut q = Qail::add("_rls_ocw_target")
+            .columns(["id"])
+            .values(vec![Value::String("x".into())])
+            .on_conflict_update(
+                &["id"],
+                &[("touched", Expr::Named("EXCLUDED.touched".into()))],
+            );
+        q.on_conflict
+            .as_mut()
+            .unwrap()
+            .where_conditions
+            .push(Condition {
+                left: Expr::Named("id".into()),
+                op: Operator::In,
+                value: Value::Subquery(Box::new(Qail::get("_rls_ocw_inner").columns(["id"]))),
+                is_array_unnest: false,
+            });
+        let sql = q.with_rls(&ctx).expect("scoped").to_sql();
+        assert!(
+            sql.contains("_rls_ocw_inner WHERE tenant_id = 't1'")
+                || sql.contains("_rls_ocw_inner\" WHERE tenant_id = 't1'"),
+            "nested relation inside ON CONFLICT WHERE must be scoped: {sql}"
+        );
+    }
+
+    #[test]
+    fn on_conflict_do_update_is_gated_by_owner_scope() {
+        register_owner_table("_rls_upsert_devices", "user_id");
+        let ctx = RlsContext::user("u-3");
+        let sql = Qail::add("_rls_upsert_devices")
+            .columns(["token", "platform"])
+            .values(vec![
+                Value::String("tok".into()),
+                Value::String("ios".into()),
+            ])
+            .on_conflict_update(
+                &["token"],
+                &[("platform", Expr::Named("EXCLUDED.platform".into()))],
+            )
+            .with_rls(&ctx)
+            .expect("upsert scoped")
+            .to_sql();
+        assert!(sql.contains("DO UPDATE SET"), "{sql}");
+        assert!(sql.contains("WHERE user_id = 'u-3'"), "{sql}");
+        assert!(sql.contains("'u-3'"), "{sql}");
+    }
+
+    #[test]
+    fn on_conflict_do_update_cannot_reassign_scope_column() {
+        register_tenant_table("_rls_upsert_tenanted", "tenant_id");
+        let ctx = RlsContext::tenant("t-1");
+        let err = Qail::add("_rls_upsert_tenanted")
+            .columns(["id"])
+            .values(vec![Value::String("x".into())])
+            .on_conflict_update(
+                &["id"],
+                &[("tenant_id", Expr::Named("EXCLUDED.tenant_id".into()))],
+            )
+            .with_rls(&ctx)
+            .expect_err("conflict update must not move the row to another tenant");
+        assert!(matches!(
+            err,
+            QailBuildError::RlsTenantColumnMutationDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn on_conflict_do_nothing_is_untouched() {
+        register_tenant_table("_rls_upsert_nothing", "tenant_id");
+        let sql = Qail::add("_rls_upsert_nothing")
+            .columns(["id"])
+            .values(vec![Value::String("x".into())])
+            .on_conflict_nothing(&["id"])
+            .with_rls(&RlsContext::tenant("t-1"))
+            .expect("ok")
+            .to_sql();
+        assert!(sql.contains("DO NOTHING"), "{sql}");
+        assert!(!sql.contains("DO NOTHING WHERE"), "{sql}");
+    }
 
     #[test]
     fn test_with_rls_injects_filter_on_get() {
@@ -1066,6 +1777,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_noop_for_unregistered_table() {
+        ensure_initialized();
         let ctx = RlsContext::tenant("t-789");
         let query = Qail::get("_rls_unreg_migrations")
             .with_rls(&ctx)
@@ -1270,22 +1982,24 @@ mod tests {
     }
 
     #[test]
-    fn test_with_rls_noop_no_tenant() {
+    fn test_with_rls_agent_only_fails_closed_on_tenant_table() {
         register_tenant_table("_rls_noops_orders", "tenant_id");
 
-        // Agent-only context without tenant_id
+        // Agent-only context without tenant_id: the table is registered for
+        // tenant scope, so running it unscoped would be the silent false-green.
         let ctx = RlsContext::agent("ag-only");
-        let query = Qail::get("_rls_noops_orders")
+        let err = Qail::get("_rls_noops_orders")
             .with_rls(&ctx)
-            .expect("missing tenant rls should no-op");
-
-        let filter = query
-            .cages
-            .iter()
-            .find(|c| matches!(c.kind, CageKind::Filter));
+            .expect_err("missing tenant on a registered table must fail closed");
         assert!(
-            filter.is_none(),
-            "Agent-only should not inject tenant filter"
+            matches!(
+                &err,
+                QailBuildError::RlsScopeMissing {
+                    scope: "tenant",
+                    ..
+                }
+            ),
+            "{err:?}"
         );
     }
 

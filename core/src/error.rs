@@ -140,6 +140,60 @@ pub enum QailBuildError {
         tenant_column: String,
     },
 
+    /// `with_rls` was called before the process declared its scope registries.
+    ///
+    /// Call `qail_core::rls::init_scope_registries(&schema)` (AST injection
+    /// from schema metadata) or `declare_policy_only_isolation(reason)` (DB
+    /// policies only) at application startup.
+    RlsRegistryUninitialized {
+        /// Table the query targeted.
+        table: String,
+    },
+
+    /// A scope registry could not be read (poisoned lock) while scoping.
+    ///
+    /// Fail-closed: "cannot read the registry" must never be interpreted as
+    /// "table is unregistered", or a late poison would disable every
+    /// tenant/owner predicate in the process at once.
+    RlsRegistryUnavailable {
+        /// Table whose registration was being looked up.
+        table: String,
+        /// Underlying registry error.
+        reason: String,
+    },
+
+    /// A registered RLS table was scoped with a context lacking the scope it requires.
+    ///
+    /// Fail-closed: a tenant-registered table needs a tenant (or global)
+    /// context; an owner-registered table needs an authenticated user.
+    RlsScopeMissing {
+        /// Target table being scoped.
+        table: String,
+        /// The scope that is required (`"tenant"` or `"user"`).
+        scope: &'static str,
+        /// The column the scope would have been injected on.
+        column: String,
+    },
+
+    /// A joined RLS relation cannot be scoped through this join kind.
+    ///
+    /// RIGHT/FULL joins reintroduce rows the ON predicate rejects, so a scope
+    /// predicate on the joined side does not isolate.
+    RlsJoinKindUnsupported {
+        /// Joined relation that required scoping.
+        table: String,
+        /// The join kind in use.
+        join_kind: String,
+    },
+
+    /// Owner-scoped MERGE is not supported by AST injection.
+    RlsOwnerMergeUnsupported {
+        /// Target table being scoped.
+        table: String,
+        /// Owner column registered for the table.
+        owner_column: String,
+    },
+
     /// Runtime relation registry lock failed.
     RelationRegistryLock(String),
 
@@ -178,6 +232,33 @@ impl std::fmt::Display for QailBuildError {
             } => write!(
                 f,
                 "with_rls rejects tenant column mutation on table '{table}' (tenant column '{tenant_column}')"
+            ),
+            Self::RlsRegistryUninitialized { table } => write!(
+                f,
+                "with_rls on table '{table}' before scope registries were declared — call qail_core::rls::init_scope_registries(&schema) or declare_policy_only_isolation(reason) at startup"
+            ),
+            Self::RlsRegistryUnavailable { table, reason } => write!(
+                f,
+                "with_rls on table '{table}' cannot read the scope registry ({reason}) — refusing to run unscoped"
+            ),
+            Self::RlsScopeMissing {
+                table,
+                scope,
+                column,
+            } => write!(
+                f,
+                "with_rls on table '{table}' requires a {scope} scope (column '{column}') but the context carries none — refusing to run unscoped"
+            ),
+            Self::RlsJoinKindUnsupported { table, join_kind } => write!(
+                f,
+                "with_rls cannot isolate RLS table '{table}' joined via {join_kind}; use INNER/LEFT/LATERAL or a CTE"
+            ),
+            Self::RlsOwnerMergeUnsupported {
+                table,
+                owner_column,
+            } => write!(
+                f,
+                "with_rls cannot owner-scope MERGE on table '{table}' (owner column '{owner_column}'); use with_rls_policy and a DB policy"
             ),
             Self::RlsMergeSourceTenantProjectionRequired {
                 table,

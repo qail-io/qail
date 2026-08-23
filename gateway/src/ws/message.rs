@@ -20,7 +20,7 @@ pub(super) async fn handle_client_message(
 ) {
     match msg {
         WsClientMessage::Subscribe { channel } => {
-            subscription::handle_subscribe(channel, tx, listener_tx, auth, conn_state).await;
+            subscription::handle_subscribe(channel, state, tx, listener_tx, auth, conn_state).await;
         }
         WsClientMessage::Unsubscribe { channel } => {
             subscription::handle_unsubscribe(channel, tx, listener_tx, auth, conn_state).await;

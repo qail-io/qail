@@ -25,7 +25,13 @@ impl PolicyEngine {
             .map_err(|e| GatewayError::Config(format!("Failed to parse policy file: {}", e)))?;
 
         self.policies = config.policies;
-        tracing::info!("Loaded {} policies from {}", self.policies.len(), path);
+        self.channel_policies = config.channel_policies;
+        tracing::info!(
+            "Loaded {} policies and {} channel policies from {}",
+            self.policies.len(),
+            self.channel_policies.len(),
+            path
+        );
 
         for policy in &self.policies {
             tracing::debug!(
@@ -43,6 +49,123 @@ impl PolicyEngine {
     /// Register an additional policy definition.
     pub fn add_policy(&mut self, policy: PolicyDef) {
         self.policies.push(policy);
+    }
+
+    /// Register an additional channel policy definition.
+    pub fn add_channel_policy(&mut self, policy: super::ChannelPolicyDef) {
+        self.channel_policies.push(policy);
+    }
+
+    /// Whether any channel policies are configured (i.e. subscribe is gated).
+    pub fn has_channel_policies(&self) -> bool {
+        !self.channel_policies.is_empty()
+    }
+
+    /// Authorize a manual `subscribe` fragment for `auth`.
+    ///
+    /// No channel policies configured → allowed (compatibility). Otherwise
+    /// the fragment must match at least one policy whose role requirement
+    /// `auth` satisfies; anything else is denied before LISTEN.
+    pub fn authorize_channel(
+        &self,
+        auth: &AuthContext,
+        fragment: &str,
+    ) -> Result<(), GatewayError> {
+        if self.channel_policies.is_empty() {
+            return Ok(());
+        }
+        let mut considered = Vec::new();
+        for policy in &self.channel_policies {
+            if let Some(ref required_role) = policy.role
+                && !auth.role.eq_ignore_ascii_case(required_role)
+            {
+                continue;
+            }
+            considered.push(policy.name.as_str());
+            let segments = Self::expand_channel_pattern(&policy.pattern, auth);
+            if channel_segments_match(&segments, fragment) {
+                return Ok(());
+            }
+        }
+        Err(GatewayError::AccessDenied(format!(
+            "Channel '{}' not allowed by channel policies {:?}",
+            fragment, considered
+        )))
+    }
+
+    /// Expand `$user_id` / `$tenant_id` / `$role` / claim placeholders in a
+    /// channel pattern into match segments.
+    ///
+    /// Only `*` written in the operator-authored pattern is a wildcard. A
+    /// substituted value is always a [`ChannelSegment::Literal`] — a claim of
+    /// `user_id = "*"` must match the fragment `chat_*_x`, never every chat.
+    fn expand_channel_pattern(pattern: &str, auth: &AuthContext) -> Vec<ChannelSegment> {
+        let mut replacements = vec![
+            ("$user_id".to_string(), auth.user_id.clone()),
+            ("$role".to_string(), auth.role.clone()),
+        ];
+        if let Some(ref tid) = auth.tenant_id {
+            replacements.push(("$tenant_id".to_string(), tid.clone()));
+        }
+        for (key, value) in &auth.claims {
+            if matches!(key.as_str(), "user_id" | "role" | "tenant_id") {
+                continue;
+            }
+            if let serde_json::Value::String(s) = value {
+                replacements.push((format!("${}", key), s.clone()));
+            }
+        }
+        Self::channel_pattern_segments(pattern, &replacements)
+    }
+
+    /// Tokenize a channel pattern: operator text becomes literal runs and
+    /// `*` wildcards; placeholders expand to literal runs by longest KNOWN key
+    /// (so `chat_$user_id_*` reads `$user_id` then a literal `_`; the SQL
+    /// filter tokenizer would treat `_` as part of the name). Unknown `$...`
+    /// runs stay literal and can never match a real id.
+    fn channel_pattern_segments(
+        pattern: &str,
+        replacements: &[(String, String)],
+    ) -> Vec<ChannelSegment> {
+        let mut segments: Vec<ChannelSegment> = Vec::new();
+        let mut literal = String::new();
+        let mut rest = pattern;
+        while !rest.is_empty() {
+            if let Some(tail) = rest.strip_prefix('*') {
+                if !literal.is_empty() {
+                    segments.push(ChannelSegment::Literal(std::mem::take(&mut literal)));
+                }
+                if !matches!(segments.last(), Some(ChannelSegment::Star)) {
+                    segments.push(ChannelSegment::Star);
+                }
+                rest = tail;
+                continue;
+            }
+            if rest.starts_with('$') {
+                let hit = replacements
+                    .iter()
+                    .filter(|(key, _)| rest.starts_with(key.as_str()))
+                    .max_by_key(|(key, _)| key.len());
+                match hit {
+                    Some((key, value)) => {
+                        literal.push_str(value);
+                        rest = &rest[key.len()..];
+                    }
+                    None => {
+                        literal.push('$');
+                        rest = &rest[1..];
+                    }
+                }
+                continue;
+            }
+            let ch = rest.chars().next().expect("non-empty");
+            literal.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+        if !literal.is_empty() {
+            segments.push(ChannelSegment::Literal(literal));
+        }
+        segments
     }
 
     /// Evaluate all matching policies for a given auth context and command,
@@ -2282,4 +2405,35 @@ fn command_reads_cte_alias(cmd: &Qail) -> bool {
         cmd.action,
         Action::Get | Action::Cnt | Action::Export | Action::With
     ) && cmd.ctes.iter().any(|cte| cte.name == cmd.table)
+}
+
+/// One piece of an expanded channel pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ChannelSegment {
+    /// Must match exactly — includes every substituted claim value.
+    Literal(String),
+    /// Operator-authored `*`: any (possibly empty) run of characters.
+    Star,
+}
+
+/// Match `fragment` against expanded segments. Literals are compared byte-for-
+/// byte, so a `*` that arrived through a claim value is just a character.
+pub(super) fn channel_segments_match(segments: &[ChannelSegment], fragment: &str) -> bool {
+    match segments.split_first() {
+        None => fragment.is_empty(),
+        Some((ChannelSegment::Literal(lit), rest)) => fragment
+            .strip_prefix(lit.as_str())
+            .is_some_and(|tail| channel_segments_match(rest, tail)),
+        Some((ChannelSegment::Star, rest)) => {
+            if rest.is_empty() {
+                return true;
+            }
+            // Try every split point; patterns are short and operator-authored.
+            fragment
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(fragment.len()))
+                .any(|i| channel_segments_match(rest, &fragment[i..]))
+        }
+    }
 }

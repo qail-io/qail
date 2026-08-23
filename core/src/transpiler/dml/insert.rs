@@ -118,6 +118,15 @@ fn build_on_conflict_postgres(on_conflict: &OnConflict, generator: &dyn SqlGener
                 })
                 .collect();
             sql.push_str(&sets.join(", "));
+            if !on_conflict.where_conditions.is_empty() {
+                let preds: Vec<String> = on_conflict
+                    .where_conditions
+                    .iter()
+                    .map(|c| c.to_sql(generator, None))
+                    .collect();
+                sql.push_str(" WHERE ");
+                sql.push_str(&preds.join(" AND "));
+            }
         }
     }
 

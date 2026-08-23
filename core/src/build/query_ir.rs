@@ -17,6 +17,7 @@ pub(crate) struct QueryIr {
     pub(crate) is_dynamic_table: bool,
     pub(crate) cmd: crate::ast::Qail,
     pub(crate) has_rls: bool,
+    pub(crate) rls_policy_delegated: bool,
     pub(crate) has_explicit_tenant_scope: bool,
     pub(crate) is_cte_ref: bool,
     pub(crate) file_uses_super_admin: bool,
@@ -46,6 +47,7 @@ pub(crate) fn build_query_ir(usages: &[QailUsage]) -> (Vec<QueryIr>, Vec<String>
             ..Default::default()
         };
         let has_rls = usage.has_rls;
+        let rls_policy_delegated = usage.rls_policy_delegated;
         append_scanned_columns(&mut cmd, &usage.columns);
 
         out.push(QueryIr {
@@ -57,6 +59,7 @@ pub(crate) fn build_query_ir(usages: &[QailUsage]) -> (Vec<QueryIr>, Vec<String>
             is_dynamic_table: usage.is_dynamic_table,
             cmd,
             has_rls,
+            rls_policy_delegated,
             has_explicit_tenant_scope: usage.has_explicit_tenant_scope,
             is_cte_ref: usage.is_cte_ref,
             file_uses_super_admin: usage.file_uses_super_admin,
@@ -81,6 +84,7 @@ mod tests {
             related_tables: Vec::new(),
             is_cte_ref: false,
             has_rls: false,
+            rls_policy_delegated: false,
             has_explicit_tenant_scope: false,
             file_uses_super_admin: false,
         }

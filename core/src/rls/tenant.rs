@@ -81,11 +81,19 @@ impl TenantRegistry {
     }
 }
 
-/// Global tenant registry, loaded at startup.
-pub static TENANT_TABLES: LazyLock<RwLock<TenantRegistry>> =
+/// Global tenant registry. Private: the only mutation paths are the
+/// registration helpers below, and none of them change the process
+/// isolation mode — only [`crate::rls::init_scope_registries`] /
+/// [`crate::rls::init_scope_registries_from_tables`] seal it, after
+/// verifying something was actually registered.
+static TENANT_TABLES: LazyLock<RwLock<TenantRegistry>> =
     LazyLock::new(|| RwLock::new(TenantRegistry::new()));
 
 /// Register a single table as tenant-scoped at runtime.
+///
+/// Mode-neutral: this adds metadata but does NOT publish `Initialized`.
+/// Use [`crate::rls::init_scope_registries_from_tables`] at the application
+/// boundary to register and seal in one fallible step.
 ///
 /// # Example
 /// ```
@@ -98,6 +106,40 @@ pub fn register_tenant_table(table: &str, column: &str) {
     }
 }
 
+/// Fallible bulk registration against an explicit lock. A poisoned lock is
+/// an error — the boundary must never seal over a registry it could not
+/// write. Parameterised on the lock so a test can poison a local one.
+pub(crate) fn register_into(
+    lock: &RwLock<TenantRegistry>,
+    tables: &[(&str, &str)],
+) -> Result<usize, String> {
+    let mut reg = lock
+        .write()
+        .map_err(|e| format!("tenant registry lock poisoned: {}", e))?;
+    for (table, column) in tables {
+        reg.register(*table, *column);
+    }
+    Ok(tables.len())
+}
+
+/// Fallible count against an explicit lock. Never reports a poisoned
+/// registry as empty.
+pub(crate) fn count_in(lock: &RwLock<TenantRegistry>) -> Result<usize, String> {
+    lock.read()
+        .map(|r| r.len())
+        .map_err(|e| format!("tenant registry lock poisoned: {}", e))
+}
+
+/// Bulk-register into the process registry, propagating a poisoned lock.
+pub(crate) fn try_register_tenant_tables(tables: &[(&str, &str)]) -> Result<usize, String> {
+    register_into(&TENANT_TABLES, tables)
+}
+
+/// Number of tenant-registered tables, or an error if the lock is poisoned.
+pub(crate) fn try_tenant_table_count() -> Result<usize, String> {
+    count_in(&TENANT_TABLES)
+}
+
 /// Lookup the tenant column for a table.
 /// Returns `None` if not a tenant-scoped table.
 ///
@@ -108,8 +150,26 @@ pub fn register_tenant_table(table: &str, column: &str) {
 /// assert_eq!(lookup_tenant_column("orders"), Some("tenant_id".to_string()));
 /// ```
 pub fn lookup_tenant_column(table: &str) -> Option<String> {
-    let registry = TENANT_TABLES.read().ok()?;
-    registry.get(table).map(|s| s.to_string())
+    try_lookup_tenant_column(table).ok().flatten()
+}
+
+/// Fallible lookup: distinguishes "not registered" (`Ok(None)`) from "the
+/// registry cannot be read" (`Err`). Security-sensitive traversal
+/// (`Qail::with_rls`) MUST use this form — collapsing a poisoned lock into
+/// `None` would read as "unregistered" and disable every tenant predicate
+/// at once.
+pub fn try_lookup_tenant_column(table: &str) -> Result<Option<String>, String> {
+    lookup_in(&TENANT_TABLES, table)
+}
+
+pub(crate) fn lookup_in(
+    lock: &RwLock<TenantRegistry>,
+    table: &str,
+) -> Result<Option<String>, String> {
+    let registry = lock
+        .read()
+        .map_err(|e| format!("tenant registry lock poisoned: {}", e))?;
+    Ok(registry.get(table).map(|s| s.to_string()))
 }
 
 /// Whether [`crate::ast::Qail::with_rls`] will actually scope a query on `relation`.
@@ -140,9 +200,10 @@ pub fn scoping_applies(relation: &str) -> bool {
     lookup_tenant_column(relation).is_some()
 }
 
-/// Load tenant tables from a schema.qail file.
+/// Load tenant tables from a schema.qail file (build-parser format).
 /// Auto-detects tables with `tenant_id` columns.
-/// Returns the number of tenant tables found.
+/// Returns the number of tenant tables found. Mode-neutral — see
+/// [`crate::rls::init_scope_registries`] for the sealing boundary.
 pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
     let mut registry = TENANT_TABLES
@@ -157,6 +218,26 @@ pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
         }
     }
 
+    Ok(count)
+}
+
+/// Register tenant tables from the canonical migrate-parser schema: every
+/// table with a `tenant_id` column. See [`crate::rls::init_scope_registries`].
+///
+/// Populates only — the boundary publishes the mode AFTER both registries
+/// are filled. A poisoned lock is an error, never a count of zero: the
+/// boundary must not seal `Initialized` over a registry it failed to fill.
+pub fn register_from_migrate_schema(schema: &crate::migrate::Schema) -> Result<usize, String> {
+    let mut reg = TENANT_TABLES
+        .write()
+        .map_err(|e| format!("tenant registry lock poisoned: {}", e))?;
+    let mut count = 0;
+    for (name, table) in &schema.tables {
+        if table.columns.iter().any(|c| c.name == "tenant_id") {
+            reg.register(name.as_str(), "tenant_id");
+            count += 1;
+        }
+    }
     Ok(count)
 }
 

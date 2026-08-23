@@ -223,6 +223,19 @@ where
     if name.is_empty() {
         return Err("Table name required".to_string());
     }
+    // The header is `table <name> {` and nothing else. Anything after the
+    // name would otherwise be swallowed INTO the name and reach DDL as
+    // `CREATE TABLE listings owner=seller_id (...)`. Table attributes
+    // (`enable_rls`, `force_rls`, `owner <col>`) live inside the block.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '"')
+    {
+        return Err(format!(
+            "Invalid table header '{}': attributes belong inside the block (e.g. `owner seller_id`)",
+            name
+        ));
+    }
 
     let mut table = Table::new(&name);
     let mut consumed = 0;
@@ -264,6 +277,20 @@ where
             table.force_rls = true;
             continue;
         }
+        if let Some(owner) = line.strip_prefix("owner ") {
+            let owner = owner.trim();
+            if owner.is_empty() || !owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(format!(
+                    "Invalid owner column '{}' for table '{}'",
+                    owner, name
+                ));
+            }
+            if table.owner_column.is_some() {
+                return Err(format!("Duplicate owner declaration for table '{}'", name));
+            }
+            table.owner_column = Some(owner.to_string());
+            continue;
+        }
 
         let col = parse_column(line, enum_types)?;
         if !seen_columns.insert(col.name.clone()) {
@@ -277,6 +304,14 @@ where
 
     if !found_closing_brace {
         return Err(format!("Unclosed table definition '{}'", name));
+    }
+    if let Some(owner) = table.owner_column.as_deref()
+        && !table.columns.iter().any(|c| c.name == owner)
+    {
+        return Err(format!(
+            "Owner column '{}' is not declared in table '{}'",
+            owner, name
+        ));
     }
 
     Ok((table, consumed))

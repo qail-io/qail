@@ -93,9 +93,8 @@ pub fn resolve_deltas_dir_from(start: &Path, create_if_missing: bool) -> anyhow:
             return Ok(path);
         }
         if create_if_missing {
-            std::fs::create_dir_all(&path).with_context(|| {
-                format!("Failed to create migrations_dir '{}'", path.display())
-            })?;
+            std::fs::create_dir_all(&path)
+                .with_context(|| format!("Failed to create migrations_dir '{}'", path.display()))?;
             return Ok(path);
         }
         // Declared but absent. Falling back to `deltas/` here would run a

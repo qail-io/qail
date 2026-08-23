@@ -26,6 +26,7 @@ use qail_core::prelude::*;
 use qail_pg::PgDriver;
 
 let mut driver = PgDriver::connect("localhost", 5432, "user", "mydb").await?;
+qail_core::rls::init_scope_registries_from_tables(&[("users", "tenant_id")], &[])?;
 let ctx = RlsContext::tenant(tenant_id);
 
 let query = Qail::get("users")
@@ -155,6 +156,10 @@ use qail_pg::PgDriver;
 let mut driver = PgDriver::connect("localhost", 5432, "user", "mydb").await?;
 
 // Multi-tenant: scope every query to this tenant
+qail_core::rls::init_scope_registries_from_tables(
+    &[("orders", "tenant_id"), ("users", "tenant_id")],
+    &[],
+)?;
 let ctx = RlsContext::tenant(tenant_id);
 
 // Build & execute
@@ -200,6 +205,8 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 
 ```rust
 // RLS: tenant-first constructors
+// Declare the complete registry once at application startup.
+qail_core::rls::init_scope_registries_from_tables(&[("bookings", "tenant_id")], &[])?;
 let ctx = RlsContext::tenant(tenant_id);            // Single tenant (preferred)
 let ctx = RlsContext::tenant_and_agent(tenant_id, agent_id); // Agent/reseller within tenant
 let ctx = RlsContext::global();                     // Shared data (tenant_id IS NULL)

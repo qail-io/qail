@@ -434,8 +434,9 @@ describe('QailClient', () => {
             expect(created!.url).toContain('/ws?access_token=ws-jwt');
 
             created!.open();
-            expect(created!.sent[0]).toBe(JSON.stringify({ action: 'listen', channel: 'orders' }));
+            expect(created!.sent[0]).toBe(JSON.stringify({ type: 'subscribe', channel: 'orders' }));
             sub.unsubscribe();
+            expect(created!.sent[1]).toBe(JSON.stringify({ type: 'unsubscribe', channel: 'orders' }));
         });
 
         it('unsubscribe() before open prevents listen and callbacks', async () => {

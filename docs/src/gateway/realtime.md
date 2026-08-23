@@ -12,7 +12,7 @@ Subscribe to table changes via WebSocket (backed by PostgreSQL `LISTEN/NOTIFY`):
 const ws = new WebSocket('ws://localhost:8080/ws');
 ws.send(JSON.stringify({
   type: 'subscribe',
-  channel: 'qail_table_orders'
+  channel: 'order_updates'
 }));
 
 ws.onmessage = (event) => {
@@ -22,7 +22,36 @@ ws.onmessage = (event) => {
 };
 ```
 
-Subscriptions are scoped by your RLS policies — each client only receives events for rows they are authorized to see.
+The client sends a channel *fragment*. The gateway derives the PostgreSQL
+channel from the authenticated tenant (`t_...`) or, for a tenant-less consumer
+account, the authenticated user (`u_...`). Clients must not send the reserved
+`qail_table_` or `qail_lq_` live-query namespaces.
+
+Producers must use the same derivation:
+
+```rust
+let ctx = RlsContext::tenant("acme");
+let notify = Qail::notify_scoped(&ctx, "order_updates", payload)?;
+driver.execute(&notify).await?;
+```
+
+Manual subscriptions are identity-scoped, not row-filtered. Restrict which
+fragments an identity may request with `channel_policies` in `policies.yaml`:
+
+```yaml
+policies: []
+channel_policies:
+  - name: own_chat
+    pattern: "chat_$user_id_*"
+  - name: seller_orders
+    pattern: "orders_$tenant_id_*"
+    role: seller
+```
+
+When `channel_policies` is absent or empty, current fragment behavior is
+preserved. Once any channel policy exists, unmatched fragments are denied
+before `LISTEN`. Claim substitutions are literal; a claim containing `*`
+cannot widen a pattern.
 
 ---
 
@@ -40,6 +69,9 @@ ws.send(JSON.stringify({
 ```
 
 The gateway re-executes the query at the specified interval and pushes updated results only when data has changed.
+
+Live-query NOTIFY payloads are never forwarded to the client. They are only
+wake-ups; the gateway re-fetches under the subscriber's authorization context.
 
 ---
 

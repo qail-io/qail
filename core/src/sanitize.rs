@@ -590,6 +590,10 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                 check_expr("on_conflict.assignment.expr", expr)?;
             }
         }
+        for cond in &oc.where_conditions {
+            check_expr("on_conflict.where.left", &cond.left)?;
+            check_value("on_conflict.where.value", &cond.value)?;
+        }
     }
 
     // ── MERGE ────────────────────────────────────────────────────────

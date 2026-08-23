@@ -639,6 +639,7 @@ mod tests {
             related_tables: Vec::new(),
             is_cte_ref: false,
             has_rls,
+            rls_policy_delegated: false,
             has_explicit_tenant_scope: false,
             file_uses_super_admin: false,
         }

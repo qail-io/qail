@@ -366,13 +366,168 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
         }
     };
 
+    let mut schema = schema;
+    let preserved = preserve_owner_declarations("schema.qail", &mut schema)?;
+
     // Always output .qail format now
     let qail = to_qail_string(&schema);
-    std::fs::write("schema.qail", &qail)?;
+    write_atomically("schema.qail", &qail)?;
     println!("{}", "✓ Schema synced to schema.qail".green().bold());
     println!("  Tables: {}", schema.tables.len());
+    if !preserved.kept.is_empty() {
+        println!(
+            "  Owner declarations preserved: {}",
+            preserved.kept.join(", ")
+        );
+    }
+    for (table, column) in &preserved.dropped {
+        println!(
+            "{} owner declaration '{}' on table '{}' dropped — the column no longer exists in the database",
+            "⚠".yellow(),
+            column,
+            table
+        );
+    }
 
     Ok(())
+}
+
+/// Write via a uniquely-created sibling temp file + rename so a crash or
+/// disk-full mid-write never leaves a truncated `schema.qail` behind, and two
+/// concurrent pulls never share a temp file (each `create_new`s its own; the
+/// last rename wins whole, never a blend). The existing file's permissions
+/// are carried over so replacement does not change its mode.
+fn write_atomically(path: &str, content: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let target = std::path::Path::new(path);
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("Invalid schema path: {}", path))?;
+    let existing_perms = std::fs::metadata(target).ok().map(|m| m.permissions());
+
+    let mut tmp = None;
+    let mut file = None;
+    for attempt in 0..64u32 {
+        let candidate = target.with_file_name(format!(
+            ".{}.{}.{}.tmp",
+            file_name,
+            std::process::id(),
+            attempt
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => {
+                tmp = Some(candidate);
+                file = Some(f);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(anyhow!(
+                    "Failed to create temp file {}: {}",
+                    candidate.display(),
+                    e
+                ));
+            }
+        }
+    }
+    let (tmp, mut file) = match (tmp, file) {
+        (Some(t), Some(f)) => (t, f),
+        _ => {
+            return Err(anyhow!(
+                "Could not create a unique temp file beside {}",
+                path
+            ));
+        }
+    };
+
+    let written = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+        .and_then(|_| match &existing_perms {
+            Some(perms) => std::fs::set_permissions(&tmp, perms.clone()),
+            None => Ok(()),
+        });
+    drop(file);
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow!("Failed to write {}: {}", tmp.display(), e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow!("Failed to replace {}: {}", path, e));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PreservedOwners {
+    /// `table.column` declarations carried forward.
+    pub(crate) kept: Vec<String>,
+    /// `(table, column)` declarations that could not be carried forward.
+    pub(crate) dropped: Vec<(String, String)>,
+}
+
+/// `owner <column>` is application metadata with no DDL footprint, so
+/// PostgreSQL introspection cannot recover it. A pull that overwrote
+/// `schema.qail` without this step would silently demote every owner-scoped
+/// table to an unscoped `.with_rls()` no-op. Carry the declarations forward
+/// from the existing file whenever the table and column still exist.
+pub(crate) fn preserve_owner_declarations(
+    existing_path: &str,
+    pulled: &mut Schema,
+) -> Result<PreservedOwners> {
+    // Only a genuinely absent file means "nothing to preserve". Any other
+    // failure (permissions, invalid UTF-8, I/O) means we cannot inspect what
+    // we are about to overwrite — refuse rather than silently drop metadata.
+    let existing = match std::fs::read_to_string(existing_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreservedOwners::default());
+        }
+        Err(e) => {
+            return Err(anyhow!(
+                "Refusing to overwrite {}: cannot read it ({}) so owner declarations cannot be preserved",
+                existing_path,
+                e
+            ));
+        }
+    };
+    let existing = match qail_core::migrate::parse_qail(&existing) {
+        Ok(schema) => schema,
+        Err(e) => {
+            return Err(anyhow!(
+                "Refusing to overwrite {}: it does not parse ({}) so owner declarations cannot be preserved",
+                existing_path,
+                e
+            ));
+        }
+    };
+    Ok(merge_owner_declarations(&existing, pulled))
+}
+
+pub(crate) fn merge_owner_declarations(existing: &Schema, pulled: &mut Schema) -> PreservedOwners {
+    let mut out = PreservedOwners::default();
+    let mut names: Vec<&String> = existing.tables.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(column) = existing.tables[name].owner_column.as_deref() else {
+            continue;
+        };
+        match pulled.tables.get_mut(name) {
+            Some(table) if table.columns.iter().any(|c| c.name == column) => {
+                table.owner_column = Some(column.to_string());
+                out.kept.push(format!("{name}.{column}"));
+            }
+            _ => out.dropped.push((name.clone(), column.to_string())),
+        }
+    }
+    out
 }
 
 async fn inspect_postgres(url: &str) -> Result<Schema> {
@@ -3321,5 +3476,187 @@ mod tests {
             rendered.contains("grant select on whatsapp_contacts_platform to app_user"),
             "grant missing from rendered schema: {rendered}"
         );
+    }
+}
+
+#[cfg(test)]
+mod owner_preservation_tests {
+    use super::*;
+    use qail_core::migrate::parse_qail;
+
+    #[test]
+    fn pull_carries_owner_forward_when_column_survives() {
+        let existing = parse_qail(
+            "table listings {\n  id UUID primary_key\n  seller_id UUID\n  owner seller_id\n}\n",
+        )
+        .unwrap();
+        // What introspection sees: same table, no owner (PostgreSQL can't know).
+        let mut pulled = parse_qail(
+            "table listings {\n  id UUID primary_key\n  seller_id UUID\n  title TEXT\n}\n",
+        )
+        .unwrap();
+        let out = merge_owner_declarations(&existing, &mut pulled);
+        assert_eq!(out.kept, vec!["listings.seller_id".to_string()]);
+        assert!(out.dropped.is_empty());
+        assert_eq!(
+            pulled.tables["listings"].owner_column.as_deref(),
+            Some("seller_id")
+        );
+        assert!(
+            to_qail_string(&pulled).contains("  owner seller_id\n"),
+            "round-trips into the rewritten file"
+        );
+    }
+
+    #[test]
+    fn pull_reports_owner_it_cannot_carry_forward() {
+        let existing = parse_qail(
+            "table listings {\n  id UUID primary_key\n  seller_id UUID\n  owner seller_id\n}\n\
+             table gone {\n  id UUID primary_key\n  user_id UUID\n  owner user_id\n}\n",
+        )
+        .unwrap();
+        let mut pulled = parse_qail("table listings {\n  id UUID primary_key\n}\n").unwrap();
+        let out = merge_owner_declarations(&existing, &mut pulled);
+        assert!(out.kept.is_empty());
+        assert_eq!(
+            out.dropped,
+            vec![
+                ("gone".to_string(), "user_id".to_string()),
+                ("listings".to_string(), "seller_id".to_string()),
+            ]
+        );
+        assert!(pulled.tables["listings"].owner_column.is_none());
+    }
+
+    #[test]
+    fn pull_distinguishes_absent_file_from_unreadable_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "qail_pull_preserve_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut pulled = parse_qail("table listings {\n  id UUID primary_key\n}\n").unwrap();
+
+        // Absent → nothing to preserve, proceed.
+        let absent = dir.join("schema.qail");
+        let out = preserve_owner_declarations(absent.to_str().unwrap(), &mut pulled).unwrap();
+        assert_eq!(out, PreservedOwners::default());
+
+        // Unreadable (a directory) → refuse; must not be treated as absent.
+        let unreadable = dir.join("schema_dir.qail");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        let err = preserve_owner_declarations(unreadable.to_str().unwrap(), &mut pulled)
+            .expect_err("a read failure other than NotFound must refuse the overwrite");
+        assert!(err.to_string().contains("cannot read it"), "{err}");
+
+        // Invalid UTF-8 → refuse as well.
+        let binary = dir.join("schema_bin.qail");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+        let err = preserve_owner_declarations(binary.to_str().unwrap(), &mut pulled)
+            .expect_err("invalid UTF-8 must refuse the overwrite");
+        assert!(err.to_string().contains("cannot read it"), "{err}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_atomically_replaces_file_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "qail_pull_atomic_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("schema.qail");
+        std::fs::write(&target, "old").unwrap();
+
+        write_atomically(target.to_str().unwrap(), "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomically_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "qail_pull_perms_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("schema.qail");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_atomically(target.to_str().unwrap(), "new").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "replacement must not change the file mode");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_atomically_concurrent_writers_never_blend() {
+        let dir = std::env::temp_dir().join(format!(
+            "qail_pull_concurrent_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("schema.qail");
+        let path = target.to_str().unwrap().to_string();
+
+        // Each writer's payload is self-identifying and large enough that a
+        // shared temp file would visibly interleave.
+        let payloads: Vec<String> = (0..8)
+            .map(|i| format!("writer-{i}\n").repeat(2000))
+            .collect();
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|p| {
+                let path = path.clone();
+                std::thread::spawn(move || write_atomically(&path, &p))
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+
+        let final_content = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            payloads.contains(&final_content),
+            "final file must be exactly one writer's payload, never a blend"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

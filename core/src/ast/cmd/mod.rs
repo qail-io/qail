@@ -121,6 +121,14 @@ pub struct OnConflict {
     pub columns: Vec<String>,
     /// What to do on conflict.
     pub action: ConflictAction,
+    /// `DO UPDATE ... WHERE <conditions>` — predicates over the EXISTING row.
+    ///
+    /// This is how RLS scoping reaches the update arm of an upsert: the
+    /// insert payload is stamped with the scope, and the conflicting row
+    /// must satisfy the same scope or the update is skipped. Ignored for
+    /// `DO NOTHING`.
+    #[serde(default)]
+    pub where_conditions: Vec<Condition>,
 }
 
 /// Action to take on an INSERT conflict.
@@ -215,6 +223,7 @@ impl Default for OnConflict {
         Self {
             columns: vec![],
             action: ConflictAction::DoNothing,
+            where_conditions: Vec::new(),
         }
     }
 }

@@ -577,6 +577,7 @@ impl Qail {
                     .map(|(col, expr)| (col.as_ref().to_string(), expr.clone()))
                     .collect(),
             },
+            where_conditions: Vec::new(),
         });
         self
     }
@@ -601,6 +602,7 @@ impl Qail {
                 .map(|c| c.as_ref().to_string())
                 .collect(),
             action: ConflictAction::DoNothing,
+            where_conditions: Vec::new(),
         });
         self
     }

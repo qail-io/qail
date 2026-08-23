@@ -236,7 +236,7 @@ Subscribe to table changes via WebSocket (PostgreSQL LISTEN/NOTIFY):
 const ws = new WebSocket('ws://localhost:8080/ws');
 ws.send(JSON.stringify({
   type: 'subscribe',
-  channel: 'qail_table_orders'
+  channel: 'order_updates'
 }));
 
 ws.onmessage = (event) => {
@@ -245,6 +245,13 @@ ws.onmessage = (event) => {
   console.log(msg);
 };
 ```
+
+`channel` is a client-visible fragment. The gateway derives a tenant-scoped
+(`t_...`) or user-scoped (`u_...`) PostgreSQL channel. Produce on the matching
+channel with `Qail::notify_scoped`, and use `channel_policies` in
+`policies.yaml` when fragments require authorization. The reserved
+`qail_table_` and `qail_lq_` namespaces are only for live-query wake-ups and
+cannot be manually subscribed.
 
 ### Live Queries
 

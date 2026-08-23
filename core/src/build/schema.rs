@@ -29,8 +29,15 @@ pub struct TableSchema {
     /// Foreign key relationships to other tables
     pub foreign_keys: Vec<ForeignKey>,
     /// Whether this table has Row-Level Security enabled
-    /// Auto-detected: table has `tenant_id` column or explicit `rls` keyword.
+    /// Auto-detected: table has `tenant_id` column, an `owner <column>`
+    /// attribute, or explicit `rls` keyword.
     pub rls_enabled: bool,
+    /// Owner column for user-scoped isolation (`owner <column>` table attribute).
+    ///
+    /// Explicit by design: a column named `seller_id` or `user_id` is never
+    /// inferred as an owner scope. Only this declaration makes
+    /// `with_rls` inject `<column> = app.current_user_id`.
+    pub owner_column: Option<String>,
 }
 
 /// Parsed schema from schema.qail file
@@ -248,6 +255,7 @@ impl Schema {
         let mut current_policies: HashMap<String, String> = HashMap::new();
         let mut current_fks: Vec<ForeignKey> = Vec::new();
         let mut current_rls_flag = false;
+        let mut current_owner_column: Option<String> = None;
         let mut enum_types: HashMap<String, Vec<String>> = HashMap::new();
 
         let mut lines = content.lines().peekable();
@@ -407,15 +415,19 @@ impl Schema {
                 }
                 let mut seen_rls_option = false;
                 for option in parts.iter().skip(1) {
-                    if *option != "rls" {
-                        return Err(format!("Unknown table option '{}' for '{}'", option, name));
+                    if *option == "rls" {
+                        if seen_rls_option {
+                            return Err(format!("Duplicate table option 'rls' for '{}'", name));
+                        }
+                        seen_rls_option = true;
+                        continue;
                     }
-                    if seen_rls_option {
-                        return Err(format!("Duplicate table option 'rls' for '{}'", name));
-                    }
-                    seen_rls_option = true;
+                    return Err(format!(
+                        "Unknown table option '{}' for '{}' (table attributes such as `owner <column>` go inside the block)",
+                        option, name
+                    ));
                 }
-                current_rls_flag = parts.contains(&"rls");
+                current_rls_flag = seen_rls_option;
                 current_table = Some((*name).to_string());
             }
             // End of table definition
@@ -432,7 +444,18 @@ impl Schema {
                 if schema.tables.contains_key(&table_name) {
                     return Err(format!("duplicate table declaration '{}'", table_name));
                 }
-                let has_rls = current_rls_flag || current_columns.contains_key("tenant_id");
+                let owner_column = current_owner_column.take();
+                if let Some(owner) = owner_column.as_deref()
+                    && !current_columns.contains_key(owner)
+                {
+                    return Err(format!(
+                        "Owner column '{}' is not declared in table '{}'",
+                        owner, table_name
+                    ));
+                }
+                let has_rls = current_rls_flag
+                    || current_columns.contains_key("tenant_id")
+                    || owner_column.is_some();
                 schema.tables.insert(
                     table_name.clone(),
                     TableSchema {
@@ -441,6 +464,7 @@ impl Schema {
                         policies: std::mem::take(&mut current_policies),
                         foreign_keys: std::mem::take(&mut current_fks),
                         rls_enabled: has_rls,
+                        owner_column,
                     },
                 );
                 current_rls_flag = false;
@@ -452,6 +476,24 @@ impl Schema {
             else if current_table.is_some() {
                 if matches!(line, "enable_rls" | "force_rls") {
                     current_rls_flag = true;
+                    continue;
+                }
+                if let Some(owner) = line.strip_prefix("owner ") {
+                    let owner = owner.trim();
+                    let table_name = current_table.as_deref().unwrap_or("<unknown>");
+                    if !is_build_identifier(owner) {
+                        return Err(format!(
+                            "Invalid owner column '{}' for table '{}'",
+                            owner, table_name
+                        ));
+                    }
+                    if current_owner_column.is_some() {
+                        return Err(format!(
+                            "Duplicate owner declaration for table '{}'",
+                            table_name
+                        ));
+                    }
+                    current_owner_column = Some(owner.to_string());
                     continue;
                 }
 
@@ -839,6 +881,13 @@ impl Schema {
                     existing.rls_enabled = true;
                     changes += 1;
                 }
+                if let Some(owner) = parsed_table.owner_column
+                    && existing.owner_column.as_deref() != Some(owner.as_str())
+                {
+                    existing.owner_column = Some(owner);
+                    existing.rls_enabled = true;
+                    changes += 1;
+                }
             } else {
                 changes += 1 + parsed_table.columns.len();
                 self.tables.insert(table_name, parsed_table);
@@ -917,6 +966,7 @@ impl Schema {
                         policies: HashMap::new(),
                         foreign_keys: vec![],
                         rls_enabled: false,
+                        owner_column: None,
                     },
                 );
                 changes += 2;
@@ -945,6 +995,7 @@ impl Schema {
                             policies: HashMap::new(),
                             foreign_keys: vec![],
                             rls_enabled: false,
+                            owner_column: None,
                         },
                     );
                     changes += 1;
@@ -990,6 +1041,7 @@ impl Schema {
                             policies: HashMap::new(),
                             foreign_keys: vec![],
                             rls_enabled: false,
+                            owner_column: None,
                         },
                     );
                     changes += 1;

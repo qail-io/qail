@@ -138,7 +138,6 @@ const WS_ERR_LIVE_QUERY_STOPPED_DB_UNAVAILABLE: &str = "Live query stopped: data
 const WS_ERR_LIVE_QUERY_UNSUB_FAILED: &str = "Live query unsubscribe failed";
 const WS_OUTBOX_CAPACITY: usize = 32;
 const WS_MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 50;
-const WS_PG_CHANNEL_MAX_BYTES: usize = 63;
 const WS_MIN_LIVE_QUERY_INTERVAL_MS: u64 = 1000;
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const WS_LISTENER_RETRY_MS: u64 = 500;
@@ -174,42 +173,6 @@ fn auth_headers_for_ws<'a>(
 const WS_LISTENER_CMD_TIMEOUT_MS: u64 = 3000;
 const WS_LISTENER_UNAVAILABLE_NOTICE_MS: u64 = 5000;
 const WS_NOTIFY_QUEUE_CAPACITY: usize = 256;
-
-fn tenant_scoped_channel(tenant_id: &str, suffix: &str) -> Result<String, String> {
-    if tenant_id.is_empty() {
-        return Err("Tenant identifier is required for scoped channel names".to_string());
-    }
-    if !tenant_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(
-            "Tenant identifier contains unsupported characters for channel scoping".to_string(),
-        );
-    }
-
-    // Include tenant length as an unambiguous delimiter component.
-    // Without this, tuples like ("acme", "eu_orders") and ("acme_eu", "orders")
-    // collide when flattened with underscores.
-    Ok(format!("{}_{}_{}", tenant_id.len(), tenant_id, suffix))
-}
-
-fn stable_channel_hash(input: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-fn compact_live_query_channel(tenant_id: &str, table: &str) -> String {
-    format!(
-        "qail_lq_{:016x}_{:016x}",
-        stable_channel_hash(tenant_id),
-        stable_channel_hash(table)
-    )
-}
 
 enum ListenControl {
     Listen {
@@ -268,58 +231,22 @@ fn decrement_channel_refcount(conn_state: &mut WsConnectionState, channel: &str)
     }
 }
 
-fn ensure_pg_channel_name_limit(channel: &str) -> Result<(), String> {
-    if channel.len() <= WS_PG_CHANNEL_MAX_BYTES {
-        return Ok(());
-    }
-
-    Err(format!(
-        "Channel name too long for PostgreSQL LISTEN/NOTIFY ({} bytes > {} bytes)",
-        channel.len(),
-        WS_PG_CHANNEL_MAX_BYTES
-    ))
-}
-
-fn validate_manual_channel_fragment(channel_fragment: &str) -> Result<(), String> {
-    if channel_fragment.is_empty() {
-        return Err("Channel name cannot be empty".to_string());
-    }
-    if !channel_fragment
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err("Invalid channel name — ASCII alphanumeric and underscores only".to_string());
-    }
-    Ok(())
-}
-
+/// Manual `subscribe` channel: derived in core so producers
+/// (`Qail::notify_scoped`) and this listener share one naming algorithm.
+/// Rejects the reserved `qail_table_`/`qail_lq_` live_query namespaces.
 pub(super) fn build_manual_notify_channel(
-    tenant_id: &str,
+    scope: qail_core::rls::channel::ChannelScope,
+    id: &str,
     channel_fragment: &str,
 ) -> Result<String, String> {
-    validate_manual_channel_fragment(channel_fragment)?;
-    let scoped = tenant_scoped_channel(tenant_id, channel_fragment)?;
-    ensure_pg_channel_name_limit(&scoped)?;
-    Ok(scoped)
+    qail_core::rls::channel::scoped_channel_in(scope, id, channel_fragment)
 }
 
 pub(super) fn build_live_query_notify_channel(
     tenant_id: Option<&str>,
     table: &str,
 ) -> Result<String, String> {
-    let channel = match tenant_id {
-        Some(tid) if !tid.is_empty() => {
-            let scoped = tenant_scoped_channel(tid, &format!("qail_table_{}", table))?;
-            if scoped.len() <= WS_PG_CHANNEL_MAX_BYTES {
-                scoped
-            } else {
-                compact_live_query_channel(tid, table)
-            }
-        }
-        _ => format!("qail_table_{}", table),
-    };
-    ensure_pg_channel_name_limit(&channel)?;
-    Ok(channel)
+    qail_core::rls::channel::live_query_channel(tenant_id, table)
 }
 
 async fn dispatch_live_query_update(

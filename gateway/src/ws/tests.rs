@@ -138,35 +138,83 @@ fn channel_refcount_tracks_unique_channels() {
 
 #[test]
 fn manual_notify_channel_rejects_over_pg_identifier_limit() {
-    let fragment = "a".repeat(WS_PG_CHANNEL_MAX_BYTES);
-    let err = build_manual_notify_channel("tenant", &fragment).expect_err("must reject overflow");
+    let fragment = "a".repeat(qail_core::rls::channel::PG_CHANNEL_MAX_BYTES);
+    let err = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "tenant",
+        &fragment,
+    )
+    .expect_err("must reject overflow");
     assert!(err.contains("63 bytes"));
 }
 
 #[test]
 fn manual_notify_channel_rejects_empty_fragment() {
-    let err = build_manual_notify_channel("tenant", "").expect_err("empty channel must reject");
+    let err =
+        build_manual_notify_channel(qail_core::rls::channel::ChannelScope::Tenant, "tenant", "")
+            .expect_err("empty channel must reject");
     assert!(err.contains("cannot be empty"));
 }
 
 #[test]
 fn manual_notify_channel_rejects_unicode_fragment() {
-    let err = build_manual_notify_channel("tenant", "café")
-        .expect_err("manual channel names must stay ASCII");
+    let err = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "tenant",
+        "café",
+    )
+    .expect_err("manual channel names must stay ASCII");
     assert!(err.contains("ASCII alphanumeric"));
+
+    let err = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "tenant",
+        "qail_table_orders",
+    )
+    .expect_err("live_query wake-up namespace is reserved");
+    assert!(err.contains("reserved"), "{err}");
+    let err = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "tenant",
+        "qail_lq_0000",
+    )
+    .expect_err("compact live_query namespace is reserved");
+    assert!(err.contains("reserved"), "{err}");
+
+    // Hyphens are admitted so `chat_<user-uuid>` patterns can exist.
+    build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "tenant",
+        "chat_11111111-aaaa-bbbb-cccc-222222222222",
+    )
+    .expect("hyphenated UUID fragment is valid");
 }
 
 #[test]
 fn manual_notify_channel_prevents_tenant_channel_collisions() {
-    let a = build_manual_notify_channel("acme", "eu_orders").expect("first channel");
-    let b = build_manual_notify_channel("acme_eu", "orders").expect("second channel");
+    let a = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "acme",
+        "eu_orders",
+    )
+    .expect("first channel");
+    let b = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "acme_eu",
+        "orders",
+    )
+    .expect("second channel");
     assert_ne!(a, b, "tenant/channel tuples must map to distinct channels");
 }
 
 #[test]
 fn manual_notify_channel_rejects_unsafe_tenant_identifier() {
-    let err = build_manual_notify_channel("tenant.with.dot", "orders")
-        .expect_err("unsafe tenant identifiers must be rejected");
+    let err = build_manual_notify_channel(
+        qail_core::rls::channel::ChannelScope::Tenant,
+        "tenant.with.dot",
+        "orders",
+    )
+    .expect_err("unsafe tenant identifiers must be rejected");
     assert!(err.contains("unsupported characters"));
 }
 
@@ -176,7 +224,7 @@ fn live_query_notify_channel_compacts_long_tenant_table_pairs() {
     let table = "orders_snapshot_partitioned_2026_region_alpha";
     let channel =
         build_live_query_notify_channel(Some(&tenant), table).expect("must compact overflow");
-    assert!(channel.len() <= WS_PG_CHANNEL_MAX_BYTES);
+    assert!(channel.len() <= qail_core::rls::channel::PG_CHANNEL_MAX_BYTES);
     assert!(channel.starts_with("qail_lq_"));
     assert_eq!(
         channel,
@@ -192,7 +240,7 @@ fn live_query_notify_channel_allows_uuid_tenant_common_table_name() {
     )
     .expect("uuid tenants with normal table names should subscribe");
 
-    assert!(channel.len() <= WS_PG_CHANNEL_MAX_BYTES);
+    assert!(channel.len() <= qail_core::rls::channel::PG_CHANNEL_MAX_BYTES);
 }
 
 #[test]
@@ -204,10 +252,10 @@ fn live_query_notify_channel_prevents_tenant_table_collisions() {
 
 #[test]
 fn live_query_notify_channel_allows_exact_pg_identifier_limit() {
-    let table = "a".repeat(WS_PG_CHANNEL_MAX_BYTES - "qail_table_".len());
+    let table = "a".repeat(qail_core::rls::channel::PG_CHANNEL_MAX_BYTES - "qail_table_".len());
     let channel =
         build_live_query_notify_channel(None, &table).expect("exact 63-byte channel should pass");
-    assert_eq!(channel.len(), WS_PG_CHANNEL_MAX_BYTES);
+    assert_eq!(channel.len(), qail_core::rls::channel::PG_CHANNEL_MAX_BYTES);
 }
 
 #[tokio::test]

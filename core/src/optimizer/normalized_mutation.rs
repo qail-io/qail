@@ -451,6 +451,7 @@ mod tests {
             on_conflict: Some(OnConflict {
                 columns: vec!["id".to_string()],
                 action: ConflictAction::DoNothing,
+                where_conditions: Vec::new(),
             }),
             returning: Some(vec![Expr::Star]),
             ..Default::default()

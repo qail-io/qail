@@ -247,12 +247,8 @@ fn report_policy_source(resolution: &PolicyResolution) {
 ///
 /// Returns `None` when the file parses but declares no policy table.
 fn parse_policy_file(path: &Path) -> Result<Option<MigrationPolicy>> {
-    let content = fs::read_to_string(path).with_context(|| {
-        format!(
-            "Failed to read {} for migration policy",
-            path.display()
-        )
-    })?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {} for migration policy", path.display()))?;
 
     let config: toml::Value = toml::from_str(&content)
         .map_err(|e| anyhow!("Failed to parse {}: {}", path.display(), e))?;
@@ -358,8 +354,8 @@ fn policy_values_differ(a: &MigrationPolicy, b: &MigrationPolicy) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnforcementMode, MigrationPolicy, ReceiptValidationMode, ensure_destructive_policy_declared,
-        resolve_migration_policy,
+        EnforcementMode, MigrationPolicy, ReceiptValidationMode,
+        ensure_destructive_policy_declared, resolve_migration_policy,
     };
     use crate::project::TempTree;
     use std::path::PathBuf;
@@ -419,7 +415,10 @@ mod tests {
     #[test]
     fn a_file_without_a_policy_table_is_not_a_declaration() {
         let tree = TempTree::new();
-        tree.write("qail.toml", "[project]\nname = \"t\"\nmode = \"postgres\"\n");
+        tree.write(
+            "qail.toml",
+            "[project]\nname = \"t\"\nmode = \"postgres\"\n",
+        );
         if !tree.ancestors_are_clean() {
             return; // a stray qail.toml above temp_dir would join the walk
         }
