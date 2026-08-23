@@ -158,7 +158,9 @@ impl PolicyEngine {
                 }
                 continue;
             }
-            let ch = rest.chars().next().expect("non-empty");
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
             literal.push(ch);
             rest = &rest[ch.len_utf8()..];
         }

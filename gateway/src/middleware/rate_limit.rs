@@ -54,6 +54,9 @@ impl RateLimiter {
     }
 
     /// Check if request is allowed (returns remaining tokens).
+    // Keep the established public Result shape; callers only distinguish
+    // allowed from rate-limited and there is no additional error state to carry.
+    #[allow(clippy::result_unit_err)]
     pub async fn check(&self, key: &str) -> Result<u32, ()> {
         let now = Instant::now();
         let mut buckets = self.buckets.write().await;

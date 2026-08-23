@@ -297,9 +297,7 @@ impl Qail {
             crate::rls::ScopeRegistryState::PolicyOnly => return Ok(self),
             // Undeclared: refusing beats the silent no-op this used to be.
             crate::rls::ScopeRegistryState::Uninitialized => {
-                return Err(QailBuildError::RlsRegistryUninitialized {
-                    table: self.table.clone(),
-                });
+                return Err(QailBuildError::RlsRegistryUninitialized { table: self.table });
             }
         }
 
@@ -551,7 +549,7 @@ impl Qail {
                 self.scope_insert_value(owner_col, user_id)
             }
             Action::Merge => Err(QailBuildError::RlsOwnerMergeUnsupported {
-                table: self.table.clone(),
+                table: self.table,
                 owner_column: owner_col.to_string(),
             }),
             _ => Ok(self),
