@@ -231,7 +231,7 @@ Supported parameters:
 | `sslrootcert` | file path | Custom CA bundle for server cert validation |
 | `sslcert` + `sslkey` | file paths | Enable mTLS client cert auth |
 | `channel_binding` | `disable`, `prefer`, `require` | SCRAM channel-binding policy |
-| `auth_mode` | `scram_only`, `gssapi_only`, `compat` | Auth policy preset |
+| `auth_mode` | `scram_only`, `gssapi_only`, `default` | Auth policy preset (the 1.x `compat` alias was removed in 2.0) |
 | `auth_scram` / `auth_md5` / `auth_cleartext` | boolean | Fine-grained mechanism toggles |
 | `auth_kerberos` / `auth_gssapi` / `auth_sspi` | boolean | Enterprise auth mechanism toggles |
 | `gss_provider` | `linux_krb5`, `callback`, `custom` | Selects built-in Linux krb5 provider vs external callback wiring |

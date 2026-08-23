@@ -136,33 +136,9 @@ ABI controller for enterprise auth. Use your OS ticket cache, keytab, sidecar,
 or enterprise identity stack to obtain credentials, then provide tokens through
 `ConnectOptions`.
 
-```rust
-use qail_pg::{
-    AuthSettings, ConnectOptions, EnterpriseAuthMechanism, PgDriver,
-};
-
-fn gss_provider(
-    mech: EnterpriseAuthMechanism,
-    challenge: Option<&[u8]>,
-) -> Result<Vec<u8>, String> {
-    // Plug your krb5/gssapi token generation here.
-    // Return initial token when challenge=None, then continue tokens per challenge.
-    let _ = (mech, challenge);
-    Err("not wired yet".to_string())
-}
-
-let options = ConnectOptions {
-    auth: AuthSettings::gssapi_only(),
-    gss_token_provider: Some(gss_provider),
-    ..Default::default()
-};
-
-let _driver = PgDriver::connect_with_options(
-    "db.internal", 5432, "app_user", "app_db", None, options
-).await?;
-```
-
-### Stateful GSS Provider (Per-Session Context)
+The provider is stateful (2.0 removed the 1.x function-pointer shape): an
+`Arc` closure receiving a `GssTokenRequest` with the mechanism, the server
+challenge, and a per-handshake `session_id`.
 
 ```rust
 use std::sync::Arc;
