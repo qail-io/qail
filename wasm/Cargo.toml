@@ -1,6 +1,6 @@
 [package]
 name = "qail-wasm"
-version = "2.0.0-rc.1"
+version = "2.0.0-rc.2"
 edition = "2024"
 description = "WebAssembly build of the QAIL MCP server for edge deployment"
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # needed. Everything above this layer is qail-mcp's own dispatch.
 [dependencies]
 wasm-bindgen = "0.2"
-qail-mcp = { path = "../mcp", version = "2.0.0-rc.1" }
+qail-mcp = { path = "../mcp", version = "2.0.0-rc.2" }
 
 [lints]
 workspace = true
