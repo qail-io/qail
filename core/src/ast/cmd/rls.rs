@@ -125,6 +125,16 @@ fn same_scoped_column(a: &str, b: &str, primary: &str, joined: &[String]) -> boo
     let primary = normalize_ident(primary);
     let resolve = |raw: &str| -> Vec<String> {
         let mut segs = column_ref_segments(raw);
+        // A schema-qualified reference (schema.relation.column) keys its
+        // relation by the relation segment alone — the schema prefix does
+        // not distinguish relations anywhere else in this resolver (both
+        // `primary` and `joined` are already last-segment normalized), so
+        // keeping it made `public.orders.tenant_id` unequal to the bare
+        // `tenant_id` it superseded and BOTH predicates survived de-dup
+        // (fails closed: silently zero rows).
+        if segs.len() > 2 {
+            segs = segs.split_off(segs.len() - 2);
+        }
         match segs.len() {
             1 => segs.insert(0, primary.clone()),
             2 if !joined.contains(&segs[0]) => segs[0] = primary.clone(),
@@ -2643,7 +2653,11 @@ mod tests {
         let ctx = RlsContext::tenant("t-1");
         let cmd = Qail::get("_rls_q_articles")
             .columns(["_rls_q_articles.id", "_rls_q_authors.name"])
-            .inner_join("_rls_q_authors", "_rls_q_articles.author_id", "_rls_q_authors.id")
+            .inner_join(
+                "_rls_q_authors",
+                "_rls_q_articles.author_id",
+                "_rls_q_authors.id",
+            )
             .with_rls(&ctx)
             .expect("with_rls");
         let sql = cmd.to_sql();
@@ -2698,5 +2712,33 @@ mod tests {
             sql.contains("_rls_q_globals.tenant_id"),
             "global IS NULL predicate must be table-qualified: {sql}"
         );
+    }
+
+    #[test]
+    fn schema_qualified_injection_dedups_bare_and_relation_qualified_predicates() {
+        // rc.2 P1: the injected `public.orders.tenant_id` must SUPERSEDE a
+        // caller-supplied bare `tenant_id` (and an `orders.tenant_id`) on the
+        // same relation — not coexist with it.
+        for existing in ["tenant_id", "_rls_sq_orders.tenant_id"] {
+            seal_tenant_table("public._rls_sq_orders", "tenant_id");
+            let ctx = RlsContext::tenant("t-1");
+            let cmd = Qail::get("public._rls_sq_orders")
+                .eq(existing, "t-1")
+                .with_rls(&ctx)
+                .expect("with_rls");
+            let scope_predicates = cmd
+                .cages
+                .iter()
+                .filter(|c| matches!(c.kind, CageKind::Filter))
+                .flat_map(|c| c.conditions.iter())
+                .filter(|cond| matches!(&cond.left, Expr::Named(n) if n.ends_with("tenant_id")))
+                .count();
+            assert_eq!(
+                scope_predicates,
+                1,
+                "exactly one scope predicate must remain for existing={existing}: {}",
+                cmd.to_sql()
+            );
+        }
     }
 }
