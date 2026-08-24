@@ -2750,10 +2750,10 @@ mod tests {
     }
 
     #[test]
-    fn set_value_after_injection_replaces_the_injected_tenant_entry() {
-        // with_rls FIRST (payload injection), explicit stamp AFTER — the
-        // production metering shape. Exactly one tenant_id payload entry
-        // must survive, carrying the explicitly stamped value.
+    fn identical_set_value_after_injection_collapses_to_one_entry() {
+        // with_rls FIRST (payload injection), identical explicit stamp AFTER
+        // — the production metering shape. The idempotent duplicate collapses
+        // to exactly one tenant_id payload entry.
         seal_tenant_table("_rls_sv_ledger", "tenant_id");
         let ctx = RlsContext::tenant("t-ctx");
         let cmd = Qail::add("_rls_sv_ledger")
@@ -2774,21 +2774,54 @@ mod tests {
 
     #[test]
     fn schema_qualified_cross_join_keeps_the_joined_scope_predicate() {
+        // A REAL cross join (JoinKind::Cross, on: None): its scope predicate
+        // lands in the filter cage where the primary injection de-dup runs —
+        // exactly the path that deleted it before the joined qualifiers were
+        // last-segment normalized. (An INNER join's predicate lives in ON
+        // and never exercises this path.)
         seal_tenant_table("public._rls_sqj_a", "tenant_id");
         seal_tenant_table("public._rls_sqj_b", "tenant_id");
         let ctx = RlsContext::tenant("t-1");
-        let cmd = Qail::get("public._rls_sqj_a")
-            .inner_join("public._rls_sqj_b", "_rls_sqj_a.b_id", "_rls_sqj_b.id")
-            .with_rls(&ctx)
-            .expect("with_rls");
-        let sql = cmd.to_sql();
+        let mut q = Qail::get("public._rls_sqj_a");
+        q.joins.push(crate::ast::Join {
+            table: "public._rls_sqj_b b".to_string(),
+            kind: JoinKind::Cross,
+            on: None,
+            on_true: true,
+        });
+        let sql = q.with_rls(&ctx).expect("with_rls").to_sql();
         assert!(
-            sql.contains("_rls_sqj_a.tenant_id"),
+            sql.contains("_rls_sqj_a.tenant_id = 't-1'"),
             "primary predicate must survive: {sql}"
         );
         assert!(
-            sql.contains("_rls_sqj_b.tenant_id"),
-            "JOINED predicate must survive primary injection de-dup: {sql}"
+            sql.contains("b.tenant_id = 't-1'"),
+            "cross-joined predicate must survive primary injection de-dup: {sql}"
+        );
+    }
+
+    #[test]
+    fn schema_qualified_cross_join_keeps_the_joined_scope_predicate_under_global() {
+        seal_tenant_table("public._rls_sqjg_a", "tenant_id");
+        seal_tenant_table("public._rls_sqjg_b", "tenant_id");
+        let mut q = Qail::get("public._rls_sqjg_a");
+        q.joins.push(crate::ast::Join {
+            table: "public._rls_sqjg_b b".to_string(),
+            kind: JoinKind::Cross,
+            on: None,
+            on_true: true,
+        });
+        let sql = q
+            .with_rls(&RlsContext::global())
+            .expect("with_rls")
+            .to_sql();
+        assert!(
+            sql.contains("_rls_sqjg_a.tenant_id IS NULL"),
+            "primary IS NULL predicate must survive: {sql}"
+        );
+        assert!(
+            sql.contains("b.tenant_id IS NULL"),
+            "cross-joined IS NULL predicate must survive: {sql}"
         );
     }
 
@@ -2866,7 +2899,10 @@ mod tests {
     }
 
     #[test]
-    fn set_coalesce_shares_the_idempotence_rules() {
+    fn conflicting_set_coalesce_after_injection_remains_fail_closed() {
+        // set_coalesce wraps the value (COALESCE expression), so against the
+        // injected plain tenant value it is a CONFLICTING duplicate — both
+        // entries must survive for the encoder error to fire.
         seal_tenant_table("_rls_dup_coalesce", "tenant_id");
         let ctx = RlsContext::tenant("t-c");
         let cmd = Qail::add("_rls_dup_coalesce")
@@ -2880,6 +2916,11 @@ mod tests {
             .flat_map(|c| c.conditions.iter())
             .filter(|cond| matches!(&cond.left, Expr::Named(n) if n == "tenant_id"))
             .count();
-        assert!(n <= 2, "{}", cmd.to_sql());
+        assert_eq!(
+            n,
+            2,
+            "conflicting set_coalesce must be preserved: {}",
+            cmd.to_sql()
+        );
     }
 }

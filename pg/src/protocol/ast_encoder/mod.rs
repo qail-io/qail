@@ -4219,4 +4219,30 @@ mod tests {
             "Normal GET should have FROM clause"
         );
     }
+    #[test]
+    fn conflicting_duplicate_payload_columns_fail_the_insert_encode() {
+        // rc.2 regression: the AST-level idempotent collapse preserves
+        // CONFLICTING duplicates on purpose — this encoder error is the
+        // fail-closed backstop that must fire for them.
+        let cmd = Qail::add("orders")
+            .set_value("tenant_id", "t-real")
+            .set_value("tenant_id", "t-spoof")
+            .set_value("total", 1);
+        let err = AstEncoder::encode_cmd_sql(&cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("assigns column more than once"),
+            "conflicting duplicate must fail encode: {msg}"
+        );
+        assert!(msg.contains("tenant_id"), "{msg}");
+
+        // The idempotent duplicate collapsed at the AST level, so the same
+        // INSERT with an identical repeated stamp encodes cleanly.
+        let ok = Qail::add("orders")
+            .set_value("tenant_id", "t-real")
+            .set_value("tenant_id", "t-real")
+            .set_value("total", 1);
+        let (sql, _) = AstEncoder::encode_cmd_sql(&ok).expect("idempotent stamp encodes");
+        assert!(sql.contains("tenant_id"), "{sql}");
+    }
 }
