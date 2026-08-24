@@ -880,10 +880,22 @@ impl Qail {
     }
 
     fn primary_tenant_condition_col(&self, tenant_col: &str) -> String {
-        let (_, alias) = split_table_reference(&self.table);
-        alias
-            .map(|alias| format!("{alias}.{tenant_col}"))
-            .unwrap_or_else(|| tenant_col.to_string())
+        // ALWAYS qualify with the alias (if any) or the base table name.
+        // A bare `tenant_col` is ambiguous the moment the query joins any
+        // other table that carries the same column — Postgres rejects the
+        // whole statement with 42702 ("column reference is ambiguous"),
+        // which took down every joined read/update under `with_rls` the
+        // first time the scope registries went live in production
+        // (articles, app_chat, admin order lists, 2026-08-24). Qualifying
+        // unconditionally is always-valid SQL, including UPDATE/DELETE
+        // WHERE clauses.
+        let (base, alias) = split_table_reference(&self.table);
+        let qualifier = alias.unwrap_or(base);
+        if qualifier.is_empty() {
+            tenant_col.to_string()
+        } else {
+            format!("{qualifier}.{tenant_col}")
+        }
     }
 
     /// Inject a `WHERE tenant_col IS NULL` filter for global/platform reads.
@@ -1623,8 +1635,7 @@ mod tests {
             });
         let sql = q.with_rls(&ctx).expect("scoped").to_sql();
         assert!(
-            sql.contains("_rls_ocw_inner WHERE tenant_id = 't1'")
-                || sql.contains("_rls_ocw_inner\" WHERE tenant_id = 't1'"),
+            sql.contains("WHERE _rls_ocw_inner.tenant_id = 't1'"),
             "nested relation inside ON CONFLICT WHERE must be scoped: {sql}"
         );
     }
@@ -1647,7 +1658,10 @@ mod tests {
             .expect("upsert scoped")
             .to_sql();
         assert!(sql.contains("DO UPDATE SET"), "{sql}");
-        assert!(sql.contains("WHERE user_id = 'u-3'"), "{sql}");
+        assert!(
+            sql.contains("WHERE _rls_upsert_devices.user_id = 'u-3'"),
+            "{sql}"
+        );
         assert!(sql.contains("'u-3'"), "{sql}");
     }
 
@@ -1702,7 +1716,7 @@ mod tests {
         let conditions = &filter.unwrap().conditions;
         assert!(
             conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id"))
                     && matches!(&c.value, Value::String(v) if v == "t-123")
             }),
             "Expected tenant_id = 't-123' condition"
@@ -1749,7 +1763,7 @@ mod tests {
         let conditions = &payload.unwrap().conditions;
         assert!(
             conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id"))
                     && matches!(&c.value, Value::String(v) if v == "t-456")
             }),
             "Expected tenant_id = 't-456' in payload"
@@ -1902,7 +1916,7 @@ mod tests {
         assert!(
             conditions
                 .iter()
-                .any(|c| { matches!(&c.left, Expr::Named(n) if n == "tenant_id") }),
+                .any(|c| { matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id")) }),
             "Expected tenant_id filter on SET"
         );
     }
@@ -1971,7 +1985,7 @@ mod tests {
 
             assert!(
                 filter.conditions.iter().any(|c| {
-                    matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                    matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id"))
                         && matches!(&c.value, Value::String(v) if v == "tenant-read-like")
                 }),
                 "Expected tenant filter on {action:?}"
@@ -2019,7 +2033,7 @@ mod tests {
         let conditions = &filter.expect("filter cage").conditions;
         assert!(
             conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id"))
                     && c.op == Operator::IsNull
                     && matches!(&c.value, Value::Null)
             }),
@@ -2046,7 +2060,7 @@ mod tests {
         let conditions = &payload.expect("payload cage").conditions;
         assert!(
             conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id"))
                     && matches!(&c.value, Value::Null)
             }),
             "Expected tenant_id = NULL in payload"
@@ -2080,7 +2094,7 @@ mod tests {
 
         assert!(subquery.cages.iter().any(|cage| {
             matches!(cage.kind, CageKind::Filter) && cage.conditions.iter().any(|condition| {
-                matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
                     && matches!(&condition.value, Value::String(value) if value == "tenant-expr")
             })
         }));
@@ -2119,7 +2133,7 @@ mod tests {
         assert!(subquery.cages.iter().any(|cage| {
             matches!(cage.kind, CageKind::Filter)
                 && cage.conditions.iter().any(|condition| {
-                    matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                    matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
                         && matches!(&condition.value, Value::String(value) if value == "tenant-condition")
                 })
         }));
@@ -2236,7 +2250,7 @@ mod tests {
             source_query.cages.iter().any(|cage| {
                 matches!(cage.kind, CageKind::Filter)
                     && cage.conditions.iter().any(|condition| {
-                        matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                        matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
                             && condition.op == Operator::Eq
                             && matches!(&condition.value, Value::String(value) if value == "tenant-query")
                     })
@@ -2247,7 +2261,7 @@ mod tests {
             source_query
                 .columns
                 .iter()
-                .any(|expr| matches!(expr, Expr::Named(name) if name == "tenant_id")),
+                .any(|expr| matches!(expr, Expr::Named(name) if name.ends_with("tenant_id"))),
             "MERGE query source must project tenant_id for ON classification"
         );
 
@@ -2326,7 +2340,7 @@ mod tests {
         assert!(
             cte.base_query.cages.iter().any(|cage| {
                 matches!(cage.kind, CageKind::Filter) && cage.conditions.iter().any(|condition| {
-                    matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                    matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
                         && condition.op == Operator::Eq
                         && matches!(&condition.value, Value::String(value) if value == "tenant-cte")
                 })
@@ -2363,7 +2377,7 @@ mod tests {
             cte.base_query.cages.iter().any(|cage| {
                 matches!(cage.kind, CageKind::Filter)
                     && cage.conditions.iter().any(|condition| {
-                        matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                        matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
                             && matches!(&condition.value, Value::String(value) if value == "tenant-alias")
                     })
             }),
@@ -2418,7 +2432,7 @@ mod tests {
             source_query.cages.iter().any(|cage| {
                 matches!(cage.kind, CageKind::Filter)
                     && cage.conditions.iter().any(|condition| {
-                        matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                        matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
                             && condition.op == Operator::IsNull
                             && matches!(condition.value, Value::Null)
                     })
@@ -2546,7 +2560,7 @@ mod tests {
         let tenant_matches = filter
             .conditions
             .iter()
-            .filter(|c| matches!(&c.left, Expr::Named(n) if n == "tenant_id"))
+            .filter(|c| matches!(&c.left, Expr::Named(n) if n.ends_with("tenant_id")))
             .count();
         assert_eq!(tenant_matches, 1, "tenant scope should not duplicate");
     }
@@ -2619,5 +2633,70 @@ mod tests {
         let sql = query.to_sql();
         assert!(sql.contains("'tenant-final'"));
         assert!(!sql.contains("'tenant-wrong'"));
+    }
+    // ── 42702 regression: injected predicates must be table-qualified ──
+
+    #[test]
+    fn tenant_injection_is_qualified_on_joined_get() {
+        seal_tenant_table("_rls_q_articles", "tenant_id");
+        seal_tenant_table("_rls_q_authors", "tenant_id");
+        let ctx = RlsContext::tenant("t-1");
+        let cmd = Qail::get("_rls_q_articles")
+            .columns(["_rls_q_articles.id", "_rls_q_authors.name"])
+            .inner_join("_rls_q_authors", "_rls_q_articles.author_id", "_rls_q_authors.id")
+            .with_rls(&ctx)
+            .expect("with_rls");
+        let sql = cmd.to_sql();
+        // A bare `tenant_id = $x` is ambiguous the moment another joined
+        // table carries the column — Postgres 42702. The primary predicate
+        // must name its relation.
+        assert!(
+            sql.contains("_rls_q_articles.tenant_id"),
+            "primary tenant predicate must be table-qualified: {sql}"
+        );
+    }
+
+    #[test]
+    fn tenant_injection_is_qualified_on_update_and_delete() {
+        seal_tenant_table("_rls_q_upd", "tenant_id");
+        let ctx = RlsContext::tenant("t-1");
+        let upd = Qail::set("_rls_q_upd")
+            .set_value("x", 1)
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .to_sql();
+        assert!(
+            upd.contains("_rls_q_upd.tenant_id"),
+            "UPDATE tenant predicate must be table-qualified: {upd}"
+        );
+        let del = Qail::del("_rls_q_upd")
+            .eq("id", "r-1")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .to_sql();
+        assert!(
+            del.contains("_rls_q_upd.tenant_id"),
+            "DELETE tenant predicate must be table-qualified: {del}"
+        );
+    }
+
+    #[test]
+    fn global_scope_injection_is_qualified_on_joined_get() {
+        seal_tenant_table("_rls_q_globals", "tenant_id");
+        seal_tenant_table("_rls_q_globals_kin", "tenant_id");
+        let ctx = RlsContext::global();
+        let sql = Qail::get("_rls_q_globals")
+            .inner_join(
+                "_rls_q_globals_kin",
+                "_rls_q_globals.kin_id",
+                "_rls_q_globals_kin.id",
+            )
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .to_sql();
+        assert!(
+            sql.contains("_rls_q_globals.tenant_id"),
+            "global IS NULL predicate must be table-qualified: {sql}"
+        );
     }
 }
