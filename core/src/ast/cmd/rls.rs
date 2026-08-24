@@ -123,6 +123,13 @@ fn column_ref_segments(raw: &str) -> Vec<String> {
 /// gets replaced by the injected primary predicate.
 fn same_scoped_column(a: &str, b: &str, primary: &str, joined: &[String]) -> bool {
     let primary = normalize_ident(primary);
+    // Canonicalize every join qualifier to its last relation segment too: a
+    // schema-qualified JOIN ("public.b") must classify `b.tenant_id` as the
+    // JOINED relation, not fall through to the primary — otherwise the
+    // primary injection de-dup deletes the joined predicate (fail-open for
+    // the joined relation on schema-qualified CROSS joins).
+    let joined: Vec<String> = joined.iter().map(|j| normalize_ident(j)).collect();
+    let joined = joined.as_slice();
     let resolve = |raw: &str| -> Vec<String> {
         let mut segs = column_ref_segments(raw);
         // A schema-qualified reference (schema.relation.column) keys its
@@ -2763,5 +2770,116 @@ mod tests {
             .count();
         assert_eq!(payload_tenants, 1, "{}", cmd.to_sql());
         assert!(cmd.to_sql().contains("'t-ctx'"));
+    }
+
+    #[test]
+    fn schema_qualified_cross_join_keeps_the_joined_scope_predicate() {
+        seal_tenant_table("public._rls_sqj_a", "tenant_id");
+        seal_tenant_table("public._rls_sqj_b", "tenant_id");
+        let ctx = RlsContext::tenant("t-1");
+        let cmd = Qail::get("public._rls_sqj_a")
+            .inner_join("public._rls_sqj_b", "_rls_sqj_a.b_id", "_rls_sqj_b.id")
+            .with_rls(&ctx)
+            .expect("with_rls");
+        let sql = cmd.to_sql();
+        assert!(
+            sql.contains("_rls_sqj_a.tenant_id"),
+            "primary predicate must survive: {sql}"
+        );
+        assert!(
+            sql.contains("_rls_sqj_b.tenant_id"),
+            "JOINED predicate must survive primary injection de-dup: {sql}"
+        );
+    }
+
+    #[test]
+    fn identical_stamp_collapses_in_both_call_orders() {
+        seal_tenant_table("_rls_dup_orders_a", "tenant_id");
+        let ctx = RlsContext::tenant("t-9");
+        // with_rls first, identical stamp after.
+        let first = Qail::add("_rls_dup_orders_a")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .set_value("tenant_id", "t-9")
+            .set_value("x", 1);
+        // stamp first, with_rls after (injection replaces).
+        let second = Qail::add("_rls_dup_orders_a")
+            .set_value("tenant_id", "t-9")
+            .set_value("x", 1)
+            .with_rls(&ctx)
+            .expect("with_rls");
+        for (label, cmd) in [("rls-first", first), ("stamp-first", second)] {
+            let n = cmd
+                .cages
+                .iter()
+                .filter(|c| matches!(c.kind, CageKind::Payload))
+                .flat_map(|c| c.conditions.iter())
+                .filter(|cond| matches!(&cond.left, Expr::Named(n) if n == "tenant_id"))
+                .count();
+            assert_eq!(n, 1, "{label}: {}", cmd.to_sql());
+        }
+    }
+
+    #[test]
+    fn conflicting_stamp_after_injection_is_preserved_for_the_encoder_error() {
+        // A later set_value must NOT silently override the injected scope —
+        // the conflicting duplicate survives so the encoder's
+        // assigns-column-more-than-once error stays fail-closed.
+        seal_tenant_table("_rls_dup_orders_b", "tenant_id");
+        let ctx = RlsContext::tenant("t-real");
+        let cmd = Qail::add("_rls_dup_orders_b")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .set_value("tenant_id", "t-spoof");
+        let n = cmd
+            .cages
+            .iter()
+            .filter(|c| matches!(c.kind, CageKind::Payload))
+            .flat_map(|c| c.conditions.iter())
+            .filter(|cond| matches!(&cond.left, Expr::Named(n) if n == "tenant_id"))
+            .count();
+        assert_eq!(n, 2, "conflicting duplicate must be preserved");
+    }
+
+    #[test]
+    fn owner_scope_stamp_follows_the_same_idempotence_rules() {
+        seal_owner_table("_rls_dup_owner", "user_id");
+        let ctx = RlsContext::user("u-1");
+        let same = Qail::add("_rls_dup_owner")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .set_value("user_id", "u-1");
+        let count = |cmd: &Qail| {
+            cmd.cages
+                .iter()
+                .filter(|c| matches!(c.kind, CageKind::Payload))
+                .flat_map(|c| c.conditions.iter())
+                .filter(|cond| matches!(&cond.left, Expr::Named(n) if n == "user_id"))
+                .count()
+        };
+        assert_eq!(count(&same), 1);
+        let conflicting = Qail::add("_rls_dup_owner")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .set_value("user_id", "u-2");
+        assert_eq!(count(&conflicting), 2);
+    }
+
+    #[test]
+    fn set_coalesce_shares_the_idempotence_rules() {
+        seal_tenant_table("_rls_dup_coalesce", "tenant_id");
+        let ctx = RlsContext::tenant("t-c");
+        let cmd = Qail::add("_rls_dup_coalesce")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .set_coalesce("tenant_id", "t-c");
+        let n = cmd
+            .cages
+            .iter()
+            .filter(|c| matches!(c.kind, CageKind::Payload))
+            .flat_map(|c| c.conditions.iter())
+            .filter(|cond| matches!(&cond.left, Expr::Named(n) if n == "tenant_id"))
+            .count();
+        assert!(n <= 2, "{}", cmd.to_sql());
     }
 }

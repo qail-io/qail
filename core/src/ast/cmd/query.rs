@@ -472,22 +472,23 @@ impl Qail {
         };
 
         if let Some(cage) = payload_cage {
-            // Later set_value on the same column REPLACES the earlier entry.
-            // Without this, `.with_rls(ctx)` called before the payload is
-            // built (its ADD path auto-sets the tenant column) plus an
-            // explicit `.set_value("tenant_id", …)` afterwards left TWO
-            // payload entries and every such INSERT failed at encode with
-            // "INSERT assigns column more than once" (production usage
-            // metering, 2026-08-24). Last write wins — the same contract
-            // as calling set_value twice in a row.
-            if let Some(existing) = cage.conditions.iter_mut().find(|cond| {
+            // Collapse only IDEMPOTENT duplicates: the exact same column,
+            // operator, value, and array flag. `.with_rls(ctx)` called
+            // before the payload is built auto-sets the tenant column; an
+            // explicit `.set_value("tenant_id", <same ctx tenant>)` after
+            // it must not fail the INSERT with "assigns column more than
+            // once" (production usage metering, 2026-08-24). A CONFLICTING
+            // duplicate is preserved on purpose so the existing encoder
+            // error still fires — a later set_value must never be able to
+            // silently override an injected RLS scope value.
+            let idempotent = cage.conditions.iter().any(|cond| {
                 matches!((&cond.left, &condition.left),
                     (Expr::Named(a), Expr::Named(b)) if a == b)
-            }) {
-                existing.op = condition.op;
-                existing.value = condition.value;
-                existing.is_array_unnest = condition.is_array_unnest;
-            } else {
+                    && cond.op == condition.op
+                    && cond.value == condition.value
+                    && cond.is_array_unnest == condition.is_array_unnest
+            });
+            if !idempotent {
                 cage.conditions.push(condition);
             }
         } else {
@@ -543,22 +544,23 @@ impl Qail {
         };
 
         if let Some(cage) = payload_cage {
-            // Later set_value on the same column REPLACES the earlier entry.
-            // Without this, `.with_rls(ctx)` called before the payload is
-            // built (its ADD path auto-sets the tenant column) plus an
-            // explicit `.set_value("tenant_id", …)` afterwards left TWO
-            // payload entries and every such INSERT failed at encode with
-            // "INSERT assigns column more than once" (production usage
-            // metering, 2026-08-24). Last write wins — the same contract
-            // as calling set_value twice in a row.
-            if let Some(existing) = cage.conditions.iter_mut().find(|cond| {
+            // Collapse only IDEMPOTENT duplicates: the exact same column,
+            // operator, value, and array flag. `.with_rls(ctx)` called
+            // before the payload is built auto-sets the tenant column; an
+            // explicit `.set_value("tenant_id", <same ctx tenant>)` after
+            // it must not fail the INSERT with "assigns column more than
+            // once" (production usage metering, 2026-08-24). A CONFLICTING
+            // duplicate is preserved on purpose so the existing encoder
+            // error still fires — a later set_value must never be able to
+            // silently override an injected RLS scope value.
+            let idempotent = cage.conditions.iter().any(|cond| {
                 matches!((&cond.left, &condition.left),
                     (Expr::Named(a), Expr::Named(b)) if a == b)
-            }) {
-                existing.op = condition.op;
-                existing.value = condition.value;
-                existing.is_array_unnest = condition.is_array_unnest;
-            } else {
+                    && cond.op == condition.op
+                    && cond.value == condition.value
+                    && cond.is_array_unnest == condition.is_array_unnest
+            });
+            if !idempotent {
                 cage.conditions.push(condition);
             }
         } else {
