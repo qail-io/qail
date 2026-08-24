@@ -2773,7 +2773,7 @@ mod tests {
             .set_value("id", 7)
             .set_value("vector", Value::Vector(vec![0.1, 0.2]));
         let point = extract_upsert_point(&duplicate_id).expect("deduped id");
-        assert_eq!(point.id, PointIdSpec::Num(7));
+        assert_eq!(point.id, qail_qdrant::PointId::Num(7));
 
         let duplicate_vector = Qail::upsert("embeddings")
             .vector(vec![0.1, 0.2])
@@ -3128,7 +3128,7 @@ mod tests {
             .set_value("vector", Value::Vector(vec![0.1, 0.2]));
 
         let point = extract_upsert_point(&cmd).expect("last id wins");
-        assert_eq!(point.id, PointIdSpec::Num(8));
+        assert_eq!(point.id, qail_qdrant::PointId::Num(8));
     }
 
     #[test]
