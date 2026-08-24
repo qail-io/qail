@@ -2766,13 +2766,14 @@ mod tests {
 
     #[test]
     fn extract_upsert_point_rejects_duplicate_payload_special_fields() {
+        // set_value is last-write-wins since the rc.2 payload de-dup — a
+        // repeated `id` collapses to one entry and the upsert succeeds.
         let duplicate_id = Qail::upsert("embeddings")
             .set_value("id", 7)
             .set_value("id", 7)
             .set_value("vector", Value::Vector(vec![0.1, 0.2]));
-        let err = extract_upsert_point(&duplicate_id).unwrap_err();
-        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
+        let point = extract_upsert_point(&duplicate_id).expect("deduped id");
+        assert_eq!(point.id, PointIdSpec::Num(7));
 
         let duplicate_vector = Qail::upsert("embeddings")
             .vector(vec![0.1, 0.2])
@@ -3119,15 +3120,15 @@ mod tests {
 
     #[test]
     fn extract_upsert_point_rejects_conflicting_payload_ids() {
+        // Conflicting ids no longer coexist: set_value is last-write-wins,
+        // so the later value is authoritative.
         let cmd = Qail::upsert("embeddings")
             .set_value("id", 7)
             .set_value("id", 8)
             .set_value("vector", Value::Vector(vec![0.1, 0.2]));
 
-        let err = extract_upsert_point(&cmd).unwrap_err();
-
-        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "AMBIGUOUS_POINT_ID");
+        let point = extract_upsert_point(&cmd).expect("last id wins");
+        assert_eq!(point.id, PointIdSpec::Num(8));
     }
 
     #[test]

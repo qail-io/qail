@@ -2741,4 +2741,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn set_value_after_injection_replaces_the_injected_tenant_entry() {
+        // with_rls FIRST (payload injection), explicit stamp AFTER — the
+        // production metering shape. Exactly one tenant_id payload entry
+        // must survive, carrying the explicitly stamped value.
+        seal_tenant_table("_rls_sv_ledger", "tenant_id");
+        let ctx = RlsContext::tenant("t-ctx");
+        let cmd = Qail::add("_rls_sv_ledger")
+            .with_rls(&ctx)
+            .expect("with_rls")
+            .set_value("tenant_id", "t-ctx")
+            .set_value("metric", "core_transactions");
+        let payload_tenants = cmd
+            .cages
+            .iter()
+            .filter(|c| matches!(c.kind, CageKind::Payload))
+            .flat_map(|c| c.conditions.iter())
+            .filter(|cond| matches!(&cond.left, Expr::Named(n) if n == "tenant_id"))
+            .count();
+        assert_eq!(payload_tenants, 1, "{}", cmd.to_sql());
+        assert!(cmd.to_sql().contains("'t-ctx'"));
+    }
 }

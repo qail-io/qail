@@ -472,7 +472,24 @@ impl Qail {
         };
 
         if let Some(cage) = payload_cage {
-            cage.conditions.push(condition);
+            // Later set_value on the same column REPLACES the earlier entry.
+            // Without this, `.with_rls(ctx)` called before the payload is
+            // built (its ADD path auto-sets the tenant column) plus an
+            // explicit `.set_value("tenant_id", …)` afterwards left TWO
+            // payload entries and every such INSERT failed at encode with
+            // "INSERT assigns column more than once" (production usage
+            // metering, 2026-08-24). Last write wins — the same contract
+            // as calling set_value twice in a row.
+            if let Some(existing) = cage.conditions.iter_mut().find(|cond| {
+                matches!((&cond.left, &condition.left),
+                    (Expr::Named(a), Expr::Named(b)) if a == b)
+            }) {
+                existing.op = condition.op;
+                existing.value = condition.value;
+                existing.is_array_unnest = condition.is_array_unnest;
+            } else {
+                cage.conditions.push(condition);
+            }
         } else {
             self.cages.push(Cage {
                 kind: CageKind::Payload,
@@ -526,7 +543,24 @@ impl Qail {
         };
 
         if let Some(cage) = payload_cage {
-            cage.conditions.push(condition);
+            // Later set_value on the same column REPLACES the earlier entry.
+            // Without this, `.with_rls(ctx)` called before the payload is
+            // built (its ADD path auto-sets the tenant column) plus an
+            // explicit `.set_value("tenant_id", …)` afterwards left TWO
+            // payload entries and every such INSERT failed at encode with
+            // "INSERT assigns column more than once" (production usage
+            // metering, 2026-08-24). Last write wins — the same contract
+            // as calling set_value twice in a row.
+            if let Some(existing) = cage.conditions.iter_mut().find(|cond| {
+                matches!((&cond.left, &condition.left),
+                    (Expr::Named(a), Expr::Named(b)) if a == b)
+            }) {
+                existing.op = condition.op;
+                existing.value = condition.value;
+                existing.is_array_unnest = condition.is_array_unnest;
+            } else {
+                cage.conditions.push(condition);
+            }
         } else {
             self.cages.push(Cage {
                 kind: CageKind::Payload,
