@@ -349,11 +349,11 @@ jobs:
           }
 
           # Trusted publishing is configured for the established release-line
-          # crates only. First/manual releases are uploaded by an owner from
-          # this exact tag after their same-version dependencies become visible;
-          # the job waits for them below before declaring the release complete.
+          # crates. First/manual workflow crate releases are uploaded by an owner
+          # from this exact tag after their same-version dependencies become
+          # visible; the job waits for them below before declaring completion.
           # Abort before publishing anything if an established crate vanished.
-          for crate in qail-core qail-pg qail-qdrant qail; do
+          for crate in qail-core qail-pg qail-qdrant qail-gateway qail; do
             if ! crate_exists_on_registry "$crate"; then
               echo "::error::$crate has never been published to crates.io, and trusted publishing cannot create a crate. Bootstrap manually as an owner with a user token (cargo login): from a clean checkout of this tag, publish IN DEPENDENCY ORDER (core -> pg -> qdrant -> workflow -> workflow-postgres -> gateway -> qail), waiting for each crate to become visible before the next, until $crate's first release exists — its same-version internal dependencies must be on the registry before 'cargo publish -p $crate' can succeed. Then configure trusted publishing for it and re-run this workflow (already-published versions are skipped). Aborting before any crate is published."
               exit 1
@@ -411,9 +411,10 @@ jobs:
 
           # Complete dependency graph. Every crate waits for registry
           # visibility before anything downstream consumes it. qail-workflow,
-          # qail-workflow-postgres and qail-gateway are published manually from
-          # this exact tag because their crates.io trusted-publisher bootstrap
-          # is not available to this job. qail-lsp, qail-mcp and qail-wasm are
+          # qail-workflow and qail-workflow-postgres are published manually from
+          # this exact tag because their crates.io trusted-publisher bootstrap is
+          # not available to this job. qail-gateway is an established,
+          # trusted-publishing-only crate. qail-lsp, qail-mcp and qail-wasm are
           # deliberately NOT published.
           publish_crate qail-core
           wait_for_crate qail-core
@@ -430,7 +431,7 @@ jobs:
           echo "Waiting for manual qail-workflow-postgres@$version publication"
           wait_for_crate qail-workflow-postgres
 
-          echo "Waiting for manual qail-gateway@$version publication"
+          publish_crate qail-gateway
           wait_for_crate qail-gateway
 
           publish_crate qail
