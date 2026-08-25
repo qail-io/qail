@@ -4796,3 +4796,58 @@ fn demo() {
         usages[0].scope_errors
     );
 }
+
+#[test]
+fn relation_alias_hides_the_original_table_name() {
+    let source = r#"
+fn demo() {
+    let _q = Qail::get("odysseys")
+        .table_alias("o")
+        .left_join_as("vessels", "v", "o.id", "v.id")
+        .group_by(["o.id", "v.id", "odysseys.id", "vessels.id"]);
+}
+"#;
+    let usages = scope_check_scan(source, "alias_hides_target");
+    assert_eq!(usages.len(), 1, "expected one scanned usage");
+    let errors = &usages[0].scope_errors;
+    assert!(
+        !errors
+            .iter()
+            .any(|e| e.contains("\"o.id\"") || e.contains("\"v.id\"")),
+        "declared aliases must stay valid: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("\"odysseys.id\"")),
+        "FROM alias must hide the original table name: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("\"vessels.id\"")),
+        "JOIN alias must hide the original table name: {errors:?}"
+    );
+}
+
+#[test]
+fn visible_but_unjoined_cte_is_not_in_relation_scope() {
+    let source = r#"
+fn demo() {
+    let cte = Qail::get("odysseys").column("id").to_cte("candidate");
+    let _q = Qail::get("odyssey_pricing_tiers")
+        .with_cte(cte)
+        .column("id")
+        .group_by(["candidate.id"]);
+}
+"#;
+    let usages = scope_check_scan(source, "unjoined_cte");
+    let usage = usages
+        .iter()
+        .find(|usage| usage.table == "odyssey_pricing_tiers")
+        .expect("outer query usage");
+    assert!(
+        usage
+            .scope_errors
+            .iter()
+            .any(|e| e.contains("\"candidate.id\"")),
+        "a merely visible CTE is not a FROM/JOIN relation: {:?}",
+        usage.scope_errors
+    );
+}

@@ -3229,14 +3229,16 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 substitutions,
                 &literal_bindings,
             );
-            let related_tables = extract_related_tables_with_bindings(
+            let scope_related_tables = extract_related_tables_with_bindings(
                 &chain.full_chain,
                 substitutions,
                 &literal_bindings,
-            )
-            .into_iter()
-            .filter(|table| !visible_cte_names.contains(table))
-            .collect::<Vec<_>>();
+            );
+            let related_tables = scope_related_tables
+                .iter()
+                .filter(|table| !visible_cte_names.contains(*table))
+                .cloned()
+                .collect::<Vec<_>>();
             let related_tables_key = related_tables.join("\x1d");
 
             for table in resolved_tables {
@@ -3252,21 +3254,25 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                         local_functions: &local_functions,
                     },
                 );
+                let scope_qualifiers = extract_relation_scope_qualifiers_with_bindings(
+                    &chain.full_chain,
+                    &table,
+                    substitutions,
+                    &literal_bindings,
+                );
                 let columns = normalize_columns_with_aliases(&raw_columns, &alias_map);
                 let columns_key = columns.join("\x1f");
-                let variant_key = format!("{table}\x1e{columns_key}\x1e{related_tables_key}");
+                let is_cte_ref = visible_cte_names.contains(&table)
+                    && !chain_defines_cte_alias(chain, &table, substitutions, &literal_bindings);
+                let scope_errors =
+                    qualifier_scope_errors(&scope_checked_entries, &table, &scope_qualifiers);
+                let scope_errors_key = scope_errors.join("\x1c");
+                let variant_key = format!(
+                    "{table}\x1e{columns_key}\x1e{related_tables_key}\x1e{scope_errors_key}"
+                );
                 if !seen_variants.insert(variant_key) {
                     continue;
                 }
-                let is_cte_ref = visible_cte_names.contains(&table)
-                    && !chain_defines_cte_alias(chain, &table, substitutions, &literal_bindings);
-                let scope_errors = qualifier_scope_errors(
-                    &scope_checked_entries,
-                    &table,
-                    &related_tables,
-                    &alias_map,
-                    &visible_cte_names,
-                );
                 usages.push(QailUsage {
                     file: file.to_string(),
                     line: chain.line,
@@ -5132,6 +5138,101 @@ fn extract_scope_checked_entries_with_bindings(
     entries
 }
 
+/// Relation qualifiers that are actually addressable in the generated SQL.
+/// PostgreSQL aliases hide the original relation name completely, so this is
+/// intentionally derived from the builder calls rather than from the broader
+/// schema-validation table/alias map. Likewise, a CTE name is valid only when
+/// it is the FROM relation or is explicitly joined by this query; mere lexical
+/// visibility does not put it in SQL relation scope.
+fn extract_relation_scope_qualifiers_with_bindings(
+    line: &str,
+    primary_table: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> HashSet<String> {
+    let calls = scan_chain_method_calls(line);
+    let mut qualifiers = HashSet::new();
+    let mut primary_aliases = Vec::new();
+
+    for call in &calls {
+        if matches!(call.name, "table_alias" | "target_alias") {
+            primary_aliases.extend(resolve_string_arg(call.args, 0, substitutions, bindings));
+        }
+    }
+    if primary_aliases.is_empty() {
+        insert_relation_scope_qualifier(&mut qualifiers, primary_table);
+    } else {
+        for alias in primary_aliases {
+            insert_scope_alias(&mut qualifiers, &alias);
+        }
+    }
+
+    for call in calls {
+        match call.name {
+            "using_table" | "left_join" | "inner_join" | "left_join_conds" | "inner_join_conds"
+            | "join_on" | "join_on_optional" => {
+                for table in resolve_string_arg(call.args, 0, substitutions, bindings) {
+                    insert_relation_scope_qualifier(&mut qualifiers, &table);
+                }
+            }
+            "left_join_as" | "inner_join_as" | "using_table_as" => {
+                for alias in resolve_string_arg(call.args, 1, substitutions, bindings) {
+                    insert_scope_alias(&mut qualifiers, &alias);
+                }
+            }
+            "using_query_as" => {
+                for alias in resolve_string_arg(call.args, 1, substitutions, bindings) {
+                    insert_scope_alias(&mut qualifiers, &alias);
+                }
+            }
+            "join" | "join_conds" => {
+                for table in resolve_string_arg(call.args, 1, substitutions, bindings) {
+                    insert_relation_scope_qualifier(&mut qualifiers, &table);
+                }
+            }
+            "update_from" | "delete_using" => {
+                for table in resolve_array_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
+                    insert_relation_scope_qualifier(&mut qualifiers, &table);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    qualifiers
+}
+
+fn insert_scope_alias(qualifiers: &mut HashSet<String>, alias: &str) {
+    let alias = alias.trim();
+    if !alias.is_empty()
+        && alias
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        qualifiers.insert(alias.to_string());
+    }
+}
+
+fn insert_relation_scope_qualifier(qualifiers: &mut HashSet<String>, table_ref: &str) {
+    if let Some((_table, alias)) = split_table_alias(table_ref) {
+        insert_scope_alias(qualifiers, &alias);
+        return;
+    }
+    let Some(table) = normalize_related_table_name(table_ref) else {
+        return;
+    };
+    qualifiers.insert(table.clone());
+    if let Some(base) = table.rsplit('.').next()
+        && base != table
+    {
+        qualifiers.insert(base.to_string());
+    }
+}
+
 /// Scope-check qualified GROUP BY / DISTINCT ON entries against the tables
 /// actually present in the query. A qualifier that resolves to a real schema
 /// table still fails here when that table is not joined — exactly the shape
@@ -5141,38 +5242,11 @@ fn extract_scope_checked_entries_with_bindings(
 fn qualifier_scope_errors(
     entries: &[(&'static str, String)],
     table: &str,
-    related_tables: &[String],
-    aliases: &HashMap<String, String>,
-    visible_cte_names: &HashSet<String>,
+    valid_qualifiers: &HashSet<String>,
 ) -> Vec<String> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let mut valid: HashSet<String> = HashSet::new();
-    let add = |valid: &mut HashSet<String>, name: &str| {
-        let base = name.split_whitespace().next().unwrap_or(name).trim();
-        if base.is_empty() {
-            return;
-        }
-        valid.insert(base.to_string());
-        if let Some(stripped) = base.strip_prefix("public.") {
-            valid.insert(stripped.to_string());
-        }
-    };
-    add(&mut valid, table);
-    for related in related_tables {
-        add(&mut valid, related);
-    }
-    for (alias, target) in aliases {
-        add(&mut valid, alias);
-        add(&mut valid, target);
-    }
-    for cte in visible_cte_names {
-        add(&mut valid, cte);
-    }
-    // ON CONFLICT / MERGE pseudo-relation.
-    valid.insert("excluded".to_string());
-    valid.insert("EXCLUDED".to_string());
 
     let mut errors = Vec::new();
     for (clause, entry) in entries {
@@ -5185,15 +5259,15 @@ fn qualifier_scope_errors(
         {
             continue;
         }
-        let parts: Vec<&str> = entry.split('.').collect();
-        let prefix = match parts.as_slice() {
-            [prefix, _column] => *prefix,
-            ["public", prefix, _column] => *prefix,
-            _ => continue,
+        let Some((qualifier, _column)) = entry.rsplit_once('.') else {
+            continue;
         };
-        if !valid.contains(prefix) {
+        if qualifier.is_empty() || qualifier.contains('"') {
+            continue;
+        }
+        if !valid_qualifiers.contains(qualifier) && !matches!(qualifier, "excluded" | "EXCLUDED") {
             errors.push(format!(
-                "{clause} references \"{entry}\" but \"{prefix}\" is not the FROM table, a joined table, or a declared alias in this query (FROM {table})"
+                "{clause} references \"{entry}\" but \"{qualifier}\" is not the FROM table, a joined table, or a declared alias in this query (FROM {table})"
             ));
         }
     }
