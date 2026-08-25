@@ -2865,6 +2865,33 @@ fn test_custom_join_multiple_conditions() {
 }
 
 #[test]
+fn test_join_on_array_unnest_expands_to_exists() {
+    // Array-membership join condition: must expand to EXISTS/unnest exactly
+    // like WHERE conditions do — `uuid[] = uuid` verbatim is invalid SQL that
+    // only fails at runtime (the wire encoder had this gap; keep both paths
+    // covered).
+    let cmd = Qail::get("odyssey_connections")
+        .columns(["odyssey_connections.id", "ol.id"])
+        .inner_join_conds(
+            "odyssey_legs ol",
+            vec![Condition {
+                left: Expr::Named("odyssey_connections.leg_ids".to_string()),
+                op: Operator::Eq,
+                value: Value::Column("ol.id".to_string()),
+                is_array_unnest: true,
+            }],
+        );
+    let sql = cmd.to_sql();
+    assert!(
+        sql.contains(
+            "INNER JOIN odyssey_legs ol ON EXISTS (SELECT 1 FROM unnest(odyssey_connections.leg_ids) _el WHERE _el = ol.id)"
+        ),
+        "SQL was: {}",
+        sql
+    );
+}
+
+#[test]
 fn test_distinct_on() {
     // Manual construction for DISTINCT ON
     let mut cmd = Qail::get("employees");

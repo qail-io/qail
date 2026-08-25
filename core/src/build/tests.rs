@@ -3085,6 +3085,7 @@ table users {
         rls_policy_delegated: false,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
+        scope_errors: Vec::new(),
     }];
 
     let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
@@ -3121,6 +3122,7 @@ table users {
         rls_policy_delegated: false,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
+        scope_errors: Vec::new(),
     }];
 
     let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
@@ -3477,6 +3479,7 @@ table users {
         rls_policy_delegated: false,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
+        scope_errors: Vec::new(),
     }];
 
     let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
@@ -4451,6 +4454,7 @@ fn rls_audit_usage(table: &str, has_rls: bool, delegated: bool) -> QailUsage {
         rls_policy_delegated: delegated,
         has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
+        scope_errors: Vec::new(),
     }
 }
 
@@ -4642,4 +4646,153 @@ fn build_schema_overlay_merge_carries_owner_column() {
         Some("seller_id")
     );
     assert!(base.tables["listings"].rls_enabled);
+}
+
+// ── GROUP BY / DISTINCT ON qualifier-scope validation ────────────────────
+// Regression for the 2026-08-25 rotation Deploy-A incident: a query grouping
+// by "conn.id" (and by a real table never joined in that query) compiled,
+// passed schema validation, and failed only at runtime.
+
+fn scope_check_scan(source: &str, tag: &str) -> Vec<QailUsage> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qail_build_scope_{}_{}_{}",
+        tag,
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&root).expect("create temp root");
+    let file = root.join("scope_case.rs");
+    std::fs::write(&file, source).expect("write source");
+    let usages = scan_source_files(root.to_str().expect("utf8 temp path"));
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&root);
+    usages
+}
+
+fn scope_check_schema() -> Schema {
+    Schema::parse(
+        r#"
+table odyssey_pricing_tiers {
+  id UUID
+  base_amount NUMERIC
+  plan_id UUID
+}
+table odysseys {
+  id UUID
+  tenant_id UUID
+}
+table vessels {
+  id UUID
+  tenant_id UUID
+}
+table odyssey_legs {
+  id UUID
+  odyssey_id UUID
+}
+"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn group_by_unjoined_alias_is_a_schema_error() {
+    // The incident shape: "conn" is not joined anywhere in this query, and
+    // "odyssey_legs" is a REAL schema table that is also not joined — both
+    // must fail, including the one that exists in the schema.
+    let source = r#"
+fn demo() {
+    let _q = Qail::get("odyssey_pricing_tiers")
+        .column("v.tenant_id")
+        .inner_join("odysseys", "odyssey_pricing_tiers.plan_id", "odysseys.id")
+        .left_join_as("vessels", "v", "odysseys.id", "v.id")
+        .group_by(["v.tenant_id", "conn.id", "odyssey_legs.id"]);
+}
+"#;
+    let usages = scope_check_scan(source, "unjoined");
+    assert_eq!(usages.len(), 1, "expected one scanned usage");
+    let errors = &usages[0].scope_errors;
+    assert!(
+        errors.iter().any(|e| e.contains("\"conn.id\"")),
+        "unknown alias must fail: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("\"odyssey_legs.id\"")),
+        "real-but-unjoined table must fail: {errors:?}"
+    );
+    assert!(
+        !errors.iter().any(|e| e.contains("v.tenant_id")),
+        "joined alias must pass: {errors:?}"
+    );
+
+    let diagnostics = validate_against_schema_diagnostics(&scope_check_schema(), &usages);
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::SchemaError) && d.message.contains("conn.id")
+        }),
+        "scope errors must surface as schema errors: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn group_by_in_scope_qualifiers_pass() {
+    // FROM table, inline join alias, left_join_as alias, plain joined table,
+    // unqualified columns, and expression-ish entries must all stay clean.
+    let source = r#"
+fn demo() {
+    let _q = Qail::get("odyssey_pricing_tiers")
+        .column("id")
+        .inner_join("odysseys", "odyssey_pricing_tiers.plan_id", "odysseys.id")
+        .inner_join_conds(
+            "odyssey_legs ol",
+            vec![Condition {
+                left: col("ol.odyssey_id"),
+                op: Operator::Eq,
+                value: Value::Column("odysseys.id".to_string()),
+                is_array_unnest: false,
+            }],
+        )
+        .left_join_as("vessels", "v", "odysseys.id", "v.id")
+        .group_by([
+            "odyssey_pricing_tiers.id",
+            "odysseys.tenant_id",
+            "ol.id",
+            "v.tenant_id",
+            "base_amount",
+            "metadata->>'kind'",
+            "amount::text",
+        ]);
+}
+"#;
+    let usages = scope_check_scan(source, "inscope");
+    assert_eq!(usages.len(), 1, "expected one scanned usage");
+    assert!(
+        usages[0].scope_errors.is_empty(),
+        "in-scope qualifiers must not error: {:?}",
+        usages[0].scope_errors
+    );
+}
+
+#[test]
+fn distinct_on_gets_the_same_scope_check() {
+    let source = r#"
+fn demo() {
+    let _q = Qail::get("odysseys")
+        .column("id")
+        .distinct_on(["ghost.id"]);
+}
+"#;
+    let usages = scope_check_scan(source, "distinct");
+    assert_eq!(usages.len(), 1, "expected one scanned usage");
+    assert!(
+        usages[0]
+            .scope_errors
+            .iter()
+            .any(|e| e.contains("distinct_on") && e.contains("\"ghost.id\"")),
+        "distinct_on must be scope-checked: {:?}",
+        usages[0].scope_errors
+    );
 }

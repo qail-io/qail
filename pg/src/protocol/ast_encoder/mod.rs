@@ -443,6 +443,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn join_on_array_unnest_expands_to_exists() {
+        use qail_core::ast::{Condition, Operator, Value, builders::col};
+
+        // Membership join: legs whose id appears in the connection's uuid[]
+        // column. Rendering `left = value` verbatim here produced
+        // `uuid[] = uuid` (42883 at runtime) — the join ON must expand to
+        // the same EXISTS/unnest form WHERE conditions get.
+        let cmd = Qail::get("odyssey_connections")
+            .columns(["odyssey_connections.id", "ol.id"])
+            .inner_join_conds(
+                "odyssey_legs ol",
+                vec![Condition {
+                    left: col("odyssey_connections.leg_ids"),
+                    op: Operator::Eq,
+                    value: Value::Column("ol.id".to_string()),
+                    is_array_unnest: true,
+                }],
+            );
+
+        let mut sql_buf = BytesMut::new();
+        let mut params = Vec::new();
+        assert!(AstEncoder::encode_cacheable_cmd_sql_to(&cmd, &mut sql_buf, &mut params).unwrap());
+        let sql = String::from_utf8_lossy(&sql_buf);
+        assert!(
+            sql.contains(
+                "INNER JOIN odyssey_legs ol ON EXISTS (SELECT 1 FROM unnest(odyssey_connections.leg_ids) _el WHERE _el = ol.id)"
+            ),
+            "{sql}"
+        );
+
+        // Pattern operators carry wrapping semantics the join form does not
+        // implement — they must be rejected, never silently mis-rendered.
+        let bad = Qail::get("odyssey_connections")
+            .columns(["odyssey_connections.id"])
+            .inner_join_conds(
+                "odyssey_legs ol",
+                vec![Condition {
+                    left: col("odyssey_connections.leg_ids"),
+                    op: Operator::Fuzzy,
+                    value: Value::Column("ol.id".to_string()),
+                    is_array_unnest: true,
+                }],
+            );
+        let mut bad_buf = BytesMut::new();
+        let mut bad_params = Vec::new();
+        assert!(
+            AstEncoder::encode_cacheable_cmd_sql_to(&bad, &mut bad_buf, &mut bad_params).is_err()
+        );
+    }
+
+    #[test]
     fn test_encode_cacheable_cmd_sql_to_supports_count_and_merge() {
         use qail_core::ast::{Expr, Operator};
 

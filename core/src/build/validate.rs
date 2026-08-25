@@ -136,6 +136,18 @@ pub fn validate_against_schema_diagnostics(
         push_unique(ValidationDiagnostic::schema_error(err));
     }
 
+    // Qualifier-scope violations found at scan time (GROUP BY / DISTINCT ON
+    // entries referencing relations the query never joins). These pass
+    // schema-existence checks but fail at runtime, so they are hard errors.
+    for usage in usages {
+        for err in &usage.scope_errors {
+            push_unique(ValidationDiagnostic::schema_error(format!(
+                "{}:{}: {}",
+                usage.file, usage.line, err
+            )));
+        }
+    }
+
     for query in query_ir {
         // Skip CTE alias refs — but only if the name doesn't also exist as a
         // real schema table. If there's a collision (CTE alias == real table name),

@@ -42,6 +42,12 @@ pub struct QailUsage {
     /// When true AND the queried table is tenant-scoped, the build emits a
     /// warning: the query may bypass tenant isolation.
     pub file_uses_super_admin: bool,
+    /// Qualifier-scope violations found at scan time: GROUP BY / DISTINCT ON
+    /// entries whose `table.` qualifier is neither the FROM table, a joined
+    /// table, a declared alias, nor a visible CTE. These compile and pass
+    /// schema-existence validation but fail at runtime (42P01-class), so the
+    /// build must fail instead.
+    pub scope_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3218,6 +3224,11 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
 
             let raw_columns =
                 extract_columns_with_bindings(&chain.full_chain, substitutions, &literal_bindings);
+            let scope_checked_entries = extract_scope_checked_entries_with_bindings(
+                &chain.full_chain,
+                substitutions,
+                &literal_bindings,
+            );
             let related_tables = extract_related_tables_with_bindings(
                 &chain.full_chain,
                 substitutions,
@@ -3249,6 +3260,13 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                 }
                 let is_cte_ref = visible_cte_names.contains(&table)
                     && !chain_defines_cte_alias(chain, &table, substitutions, &literal_bindings);
+                let scope_errors = qualifier_scope_errors(
+                    &scope_checked_entries,
+                    &table,
+                    &related_tables,
+                    &alias_map,
+                    &visible_cte_names,
+                );
                 usages.push(QailUsage {
                     file: file.to_string(),
                     line: chain.line,
@@ -3263,6 +3281,7 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
                     rls_policy_delegated,
                     has_explicit_tenant_scope,
                     file_uses_super_admin,
+                    scope_errors,
                 });
                 pushed = true;
             }
@@ -5086,6 +5105,99 @@ fn split_table_alias(table_ref: &str) -> Option<(String, String)> {
         }
         _ => None,
     }
+}
+
+/// GROUP BY / DISTINCT ON entries from a chain, tagged with the clause name
+/// they came from. Only these two clauses are scope-checked: their qualifiers
+/// must reference a relation the query actually joins, and unlike SELECT
+/// columns they carry no alias/JSON ambiguity worth being lenient about.
+fn extract_scope_checked_entries_with_bindings(
+    line: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<(&'static str, String)> {
+    let mut entries = Vec::new();
+    for call in scan_chain_method_calls(line) {
+        let clause = match call.name {
+            "group_by" => "group_by",
+            "distinct_on" => "distinct_on",
+            _ => continue,
+        };
+        for entry in
+            resolve_array_string_values(extract_first_argument(call.args), substitutions, bindings)
+        {
+            entries.push((clause, entry));
+        }
+    }
+    entries
+}
+
+/// Scope-check qualified GROUP BY / DISTINCT ON entries against the tables
+/// actually present in the query. A qualifier that resolves to a real schema
+/// table still fails here when that table is not joined — exactly the shape
+/// that passes schema-existence validation and dies at runtime (42P01-class).
+/// Expression-ish entries (casts, functions, JSON paths, subscripts, aliases)
+/// are skipped, mirroring the column validator's leniency.
+fn qualifier_scope_errors(
+    entries: &[(&'static str, String)],
+    table: &str,
+    related_tables: &[String],
+    aliases: &HashMap<String, String>,
+    visible_cte_names: &HashSet<String>,
+) -> Vec<String> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let mut valid: HashSet<String> = HashSet::new();
+    let add = |valid: &mut HashSet<String>, name: &str| {
+        let base = name.split_whitespace().next().unwrap_or(name).trim();
+        if base.is_empty() {
+            return;
+        }
+        valid.insert(base.to_string());
+        if let Some(stripped) = base.strip_prefix("public.") {
+            valid.insert(stripped.to_string());
+        }
+    };
+    add(&mut valid, table);
+    for related in related_tables {
+        add(&mut valid, related);
+    }
+    for (alias, target) in aliases {
+        add(&mut valid, alias);
+        add(&mut valid, target);
+    }
+    for cte in visible_cte_names {
+        add(&mut valid, cte);
+    }
+    // ON CONFLICT / MERGE pseudo-relation.
+    valid.insert("excluded".to_string());
+    valid.insert("EXCLUDED".to_string());
+
+    let mut errors = Vec::new();
+    for (clause, entry) in entries {
+        let entry = entry.trim();
+        if entry.contains('(')
+            || entry.contains('[')
+            || entry.contains("::")
+            || entry.contains("->")
+            || entry.contains(' ')
+        {
+            continue;
+        }
+        let parts: Vec<&str> = entry.split('.').collect();
+        let prefix = match parts.as_slice() {
+            [prefix, _column] => *prefix,
+            ["public", prefix, _column] => *prefix,
+            _ => continue,
+        };
+        if !valid.contains(prefix) {
+            errors.push(format!(
+                "{clause} references \"{entry}\" but \"{prefix}\" is not the FROM table, a joined table, or a declared alias in this query (FROM {table})"
+            ));
+        }
+    }
+    errors
 }
 
 fn normalize_columns_with_aliases(

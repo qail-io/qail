@@ -1086,6 +1086,36 @@ fn encode_select_with_columns(
                 if i > 0 {
                     buf.extend_from_slice(b" AND ");
                 }
+                if cond.is_array_unnest {
+                    // Array membership expands to EXISTS/unnest exactly as in
+                    // WHERE (encode_conditions): rendering `left op value`
+                    // verbatim would emit e.g. `uuid[] = uuid` — invalid SQL
+                    // that only fails at runtime (42883). Join ON supports the
+                    // plain comparators; pattern operators (Fuzzy, …) carry
+                    // wrapping semantics that belong in WHERE.
+                    if !matches!(
+                        cond.op,
+                        Operator::Eq
+                            | Operator::Ne
+                            | Operator::Gt
+                            | Operator::Gte
+                            | Operator::Lt
+                            | Operator::Lte
+                    ) {
+                        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                            "join.on: is_array_unnest supports only comparison operators, got {:?}",
+                            cond.op
+                        )));
+                    }
+                    buf.extend_from_slice(b"EXISTS (SELECT 1 FROM unnest(");
+                    encode_expr(&cond.left, buf)?;
+                    buf.extend_from_slice(b") _el WHERE _el ");
+                    encode_operator(&cond.op, buf);
+                    buf.extend_from_slice(b" ");
+                    encode_join_value(&cond.value, buf, params)?;
+                    buf.extend_from_slice(b")");
+                    continue;
+                }
                 encode_expr(&cond.left, buf)?;
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
