@@ -504,6 +504,7 @@ fn collect_rust_document_usages(
             rls_policy_delegated: rust_query_chain_delegates_rls_policy(text, &query),
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
             file_uses_super_admin,
+            scope_errors: Vec::new(),
         };
 
         let key = usage_dedupe_key(&usage);
@@ -594,6 +595,7 @@ fn collect_text_document_usages(
             rls_policy_delegated: false,
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
             file_uses_super_admin,
+            scope_errors: Vec::new(),
         });
         ranges.push((start_line, range));
     }
@@ -629,6 +631,7 @@ fn collect_text_document_usages(
             rls_policy_delegated: false,
             has_explicit_tenant_scope: cmd_has_explicit_tenant_scope(&cmd),
             file_uses_super_admin,
+            scope_errors: Vec::new(),
         });
         ranges.push((start_line, range));
     }

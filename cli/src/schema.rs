@@ -642,6 +642,7 @@ mod tests {
             rls_policy_delegated: false,
             has_explicit_tenant_scope: false,
             file_uses_super_admin: false,
+            scope_errors: Vec::new(),
         }
     }
 
