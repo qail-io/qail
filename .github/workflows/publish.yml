@@ -264,12 +264,12 @@ jobs:
             cargo info --registry crates-io "$crate" >/dev/null 2>&1
           }
 
-          # Trusted publishing (crates-io-auth-action) can only publish NEW
-          # VERSIONS of existing crates — a crate's FIRST release must be
-          # published manually by an owner before trusted publishing can be
-          # configured for it. Abort before publishing ANYTHING so a missing
-          # bootstrap never leaves a partial release on the registry.
-          for crate in qail-core qail-pg qail-qdrant qail-workflow qail-workflow-postgres qail-gateway qail; do
+          # Trusted publishing is configured for the established release-line
+          # crates only. First/manual releases are uploaded by an owner from
+          # this exact tag after their same-version dependencies become visible;
+          # the job waits for them below before declaring the release complete.
+          # Abort before publishing anything if an established crate vanished.
+          for crate in qail-core qail-pg qail-qdrant qail; do
             if ! crate_exists_on_registry "$crate"; then
               echo "::error::$crate has never been published to crates.io, and trusted publishing cannot create a crate. Bootstrap manually as an owner with a user token (cargo login): from a clean checkout of this tag, publish IN DEPENDENCY ORDER (core -> pg -> qdrant -> workflow -> workflow-postgres -> gateway -> qail), waiting for each crate to become visible before the next, until $crate's first release exists — its same-version internal dependencies must be on the registry before 'cargo publish -p $crate' can succeed. Then configure trusted publishing for it and re-run this workflow (already-published versions are skipped). Aborting before any crate is published."
               exit 1
@@ -326,8 +326,11 @@ jobs:
           }
 
           # Complete dependency graph. Every crate waits for registry
-          # visibility before anything downstream consumes it. qail-lsp,
-          # qail-mcp and qail-wasm are deliberately NOT published.
+          # visibility before anything downstream consumes it. qail-workflow,
+          # qail-workflow-postgres and qail-gateway are published manually from
+          # this exact tag because their crates.io trusted-publisher bootstrap
+          # is not available to this job. qail-lsp, qail-mcp and qail-wasm are
+          # deliberately NOT published.
           publish_crate qail-core
           wait_for_crate qail-core
 
@@ -337,13 +340,13 @@ jobs:
           publish_crate qail-qdrant
           wait_for_crate qail-qdrant
 
-          publish_crate qail-workflow
+          echo "Waiting for manual qail-workflow@$version publication"
           wait_for_crate qail-workflow
 
-          publish_crate qail-workflow-postgres
+          echo "Waiting for manual qail-workflow-postgres@$version publication"
           wait_for_crate qail-workflow-postgres
 
-          publish_crate qail-gateway
+          echo "Waiting for manual qail-gateway@$version publication"
           wait_for_crate qail-gateway
 
           publish_crate qail

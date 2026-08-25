@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.0-rc.2] - 2026-08-24
+## [2.0.0] - 2026-08-25
 
 ### Fixed
 
 - **RLS predicates are always relation-qualified.** `with_rls()` now emits the primary tenant/owner predicate with the relation alias, or the base table name when no alias exists. Joined queries whose primary and joined relations both carry `tenant_id`/owner columns no longer fail at runtime with PostgreSQL `42702` (`column reference is ambiguous`). Qualification also applies to UPDATE/DELETE filters, global `IS NULL` scoping, and `ON CONFLICT DO UPDATE … WHERE`.
 - **Schema-qualified scope de-duplication preserves CROSS-join isolation.** `public.orders.tenant_id`, `orders.tenant_id`, and bare `tenant_id` resolve to the same primary scope column, while a schema-qualified joined relation remains distinct. Injecting the primary predicate therefore replaces stale caller scope without deleting the predicate of a registered CROSS-joined relation.
 - **Idempotent payload stamps collapse without permitting scope override.** Repeating the exact same `set_value`/`set_coalesce` payload assignment produces one entry, fixing INSERTs built as `.with_rls(ctx)?.set_value("tenant_id", ctx.tenant_id())`. A conflicting duplicate remains in the AST so the PostgreSQL encoder fails closed with `assigns column more than once`; a later builder call cannot silently replace the tenant/owner value injected by `with_rls()`. Qdrant upserts likewise accept an identical repeated point id but continue to reject conflicting ids as `AMBIGUOUS_POINT_ID`.
+- **Array-membership JOIN conditions encode correctly on the PostgreSQL wire path.** A JOIN `Condition` with `is_array_unnest` now emits `EXISTS (SELECT 1 FROM unnest(...))`, matching the core transpiler and preventing the invalid `uuid[] = uuid` form that PostgreSQL rejects with `42883`. Unsupported pattern operators fail during encoding instead of degrading into malformed SQL.
+- **Build validation rejects out-of-scope aggregate qualifiers.** Qualified `GROUP BY` and `DISTINCT ON` entries must name the active FROM relation, a joined relation, or its declared alias. Unknown aliases, real-but-unjoined tables, alias-hidden relation names, and visible-but-unjoined CTEs are hard schema errors with source locations instead of `42P01` failures at runtime.
 
 ## [2.0.0-rc.1] - 2026-08-24
 

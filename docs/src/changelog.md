@@ -4,13 +4,15 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.0-rc.2)
+## Current Highlights (v2.0.0)
 
+- **JOIN array membership parity**: `is_array_unnest` expands to the same `EXISTS/unnest` SQL in the PostgreSQL wire encoder and the core transpiler; unsupported JOIN pattern operators fail closed.
+- **Aggregate qualifier validation**: `GROUP BY` and `DISTINCT ON` qualifiers are checked against the active relation scope, including alias hiding and CTE visibility rules, before application code can ship invalid SQL.
 - **Qualified RLS injection**: tenant/owner predicates name their primary relation, avoiding PostgreSQL `42702` ambiguity on joined queries; schema-qualified CROSS joins retain every registered relation's predicate.
 - **Fail-closed payload de-duplication**: identical repeated assignments collapse, while conflicting tenant/owner stamps remain an encoder error instead of overriding the value injected by `with_rls()`.
 - **RLS scope hardening**: `with_rls()` fails closed on registered tables, scope registries are declared once at the application boundary (`init_scope_registries` / `declare_policy_only_isolation`), owner (`owner <column>`) scoping joins tenant scoping, and `ON CONFLICT DO UPDATE` carries the scope predicate via `OnConflict.where_conditions`.
 - **1.x compatibility surfaces removed**: the `qail-encoder` C ABI, SQLite/DynamoDB/MongoDB transpilers, the agent identity plane (`app.current_agent_id`), the function-pointer GSS callback, the JWT `user_id` alias, `auth_mode=compat`, deprecated SDK aliases, and the `io_uring` feature alias. See the repository CHANGELOG `[2.0.0-rc.1]` section for per-item migration notes.
-- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.0-rc.2`; `qail-workflow`, `qail-workflow-postgres` and `qail-gateway` are in the crates.io publish set.
+- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.0`; `qail-workflow`, `qail-workflow-postgres` and `qail-gateway` are in the crates.io publish set.
 
 ## v1.4.0 Highlights
 
