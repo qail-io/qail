@@ -11,6 +11,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_gateway_tag:
+        description: 'Recovery: publish qail-gateway from this exact release tag using trusted publishing'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ env:
 jobs:
   preflight:
     name: Release Preflight
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_gateway_tag == ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -121,6 +127,66 @@ jobs:
             cargo package -p "$crate" --list > "target/package-$crate.files"
             test -s "target/package-$crate.files"
           done
+
+  publish-gateway-recovery:
+    name: Publish Gateway From Tag
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_gateway_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Validate release tag input
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.publish_gateway_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag: $RELEASE_TAG"
+            exit 1
+          fi
+
+      - name: Checkout exact release tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ inputs.publish_gateway_tag }}
+
+      - name: Verify tag and gateway version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.publish_gateway_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          version="$(awk -F '"' '/^version =/ {print $2; exit}' gateway/Cargo.toml)"
+          test "$version" = "${RELEASE_TAG#v}"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Authenticate with Crates.io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+        id: auth
+
+      - name: Publish qail-gateway
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          RELEASE_TAG: ${{ inputs.publish_gateway_tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          if cargo info --registry crates-io "qail-gateway@$version" >/dev/null 2>&1; then
+            echo "qail-gateway@$version already exists in crates.io; skipping"
+            exit 0
+          fi
+          cargo publish -p qail-gateway --dry-run
+          cargo publish -p qail-gateway
 
   build-lsp-binaries:
     name: LSP Binary (${{ matrix.target }})
