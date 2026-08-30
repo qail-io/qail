@@ -322,9 +322,10 @@ impl PgConnection {
                 .await
                 {
                     Ok(conn) => Ok(conn),
-                    Err(PgError::Connection(msg))
-                        if msg.contains("Server does not support TLS") =>
-                    {
+                    // Exact-sentinel match: only the SSLRequest-rejected case
+                    // may fall back to plaintext. Handshake and certificate
+                    // failures propagate and fail closed.
+                    Err(e) if e.is_tls_unsupported_by_server() => {
                         Self::connect_with_password_and_auth_and_gss(ConnectParams {
                             host,
                             port,
@@ -769,9 +770,7 @@ impl PgConnection {
         tcp_stream.read_exact(&mut response).await?;
 
         if response[0] != b'S' {
-            return Err(PgError::Connection(
-                "Server does not support TLS".to_string(),
-            ));
+            return Err(PgError::tls_unsupported_by_server());
         }
 
         let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
@@ -985,9 +984,7 @@ impl PgConnection {
         tcp_stream.read_exact(&mut response).await?;
 
         if response[0] != b'S' {
-            return Err(PgError::Connection(
-                "Server does not support TLS".to_string(),
-            ));
+            return Err(PgError::tls_unsupported_by_server());
         }
 
         let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();

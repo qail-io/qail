@@ -78,8 +78,14 @@ fn evict_failed_hot_preprepare_entries(
 }
 
 impl PgPoolInner {
-    pub(super) async fn return_connection(&self, conn: PgConnection, created_at: Instant) {
+    pub(super) async fn return_connection(&self, mut conn: PgConnection, created_at: Instant) {
         decrement_active_count_saturating(&self.active_count);
+
+        // The scrub's UNLISTEN * clears only server-side listens. Notifications
+        // already buffered client-side — including ones the server flushes
+        // during the release round trip itself — must not be readable by the
+        // next checkout.
+        conn.notifications.clear();
 
         if conn.is_io_desynced() {
             tracing::warn!(

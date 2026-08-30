@@ -388,3 +388,49 @@ async fn copy_export_rejects_truncated_final_text_row() {
 
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn copy_export_rejects_newline_free_row_exceeding_cap() {
+    let (listener, port) = mock_listener().await;
+
+    // Three 9 MB newline-free CopyData frames: each passes the per-frame cap,
+    // but the cross-frame row accumulator must fail closed past 16 MB instead
+    // of buffering the stream without bound.
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, _payload) = read_frontend_frame(&mut sock).await;
+        assert_eq!(msg_type, b'Q');
+
+        sock.write_all(&copy_out_response_text_zero_cols())
+            .await
+            .unwrap();
+        let chunk = vec![b'x'; 9 * 1024 * 1024];
+        for _ in 0..3 {
+            sock.write_all(&copy_data(&chunk)).await.unwrap();
+        }
+        sock.write_all(&copy_done()).await.unwrap();
+        sock.write_all(&command_complete("COPY 1")).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut conn =
+        PgConnection::connect_with_password("127.0.0.1", port, "test_user", "test_db", None)
+            .await
+            .unwrap();
+
+    let cmd = Qail::export("users").columns(["id"]);
+    let err = conn.copy_export(&cmd).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exceeds") && msg.contains("without a newline"),
+        "unexpected error message: {msg}"
+    );
+
+    server.await.unwrap();
+}

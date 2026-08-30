@@ -208,8 +208,8 @@ async fn test_rls_across_multiple_tables() {
 
 // ══════════════════════════════════════════════════════════════════
 // P3: Pool-level connection recycling isolation
-// Proves that DISCARD ALL + RLS reset prevents cross-tenant leakage
-// when connections are recycled through the pool.
+// Proves that the RLS reset prevents cross-tenant leakage when
+// connections are recycled through the pool.
 // ══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -231,7 +231,8 @@ async fn test_pool_connection_recycling_isolation() {
     assert!(a_count > 0, "Tenant A should see vessels");
 
     // ── Step 2: Clear context (simulates connection recycling) ──
-    // This triggers RLS reset + DISCARD ALL internally
+    // Ends the RLS transaction; transaction-local set_config values
+    // auto-reset. Pool release additionally runs the session scrub.
     driver.clear_rls_context().await.unwrap();
 
     // Verify isolation: without context, zero rows

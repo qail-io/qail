@@ -218,6 +218,12 @@ fn encode_copy_export_sql(cmd: &Qail) -> PgResult<String> {
     Ok(sql)
 }
 
+/// Maximum bytes a single COPY text row may accumulate across CopyData
+/// frames before a newline. `MAX_MESSAGE_SIZE` caps one frame; this caps the
+/// cross-frame accumulator so a newline-free stream cannot grow memory
+/// without bound.
+const MAX_COPY_TEXT_ROW_BYTES: usize = 16 * 1024 * 1024;
+
 fn drain_copy_text_rows<F>(pending: &mut Vec<u8>, chunk: &[u8], on_row: &mut F) -> PgResult<()>
 where
     F: FnMut(Vec<String>) -> PgResult<()>,
@@ -228,6 +234,17 @@ where
         pending.drain(..=pos);
         let row = parse_copy_text_row(&line)?;
         on_row(row)?;
+    }
+    // Cap only the residual partial row: CopyData boundaries are arbitrary,
+    // so a large frame full of complete newline-terminated rows is legal —
+    // only a single row growing across frames without a newline is not.
+    if pending.len() > MAX_COPY_TEXT_ROW_BYTES {
+        let buffered = pending.len();
+        pending.clear();
+        return Err(PgError::Protocol(format!(
+            "COPY text row exceeds {} bytes without a newline ({} buffered)",
+            MAX_COPY_TEXT_ROW_BYTES, buffered
+        )));
     }
     Ok(())
 }
@@ -661,6 +678,12 @@ impl PgConnection {
 
     /// Export data using COPY TO STDOUT (AST-native).
     /// Takes a `Qail::Export` and returns rows as `Vec<Vec<String>>`.
+    ///
+    /// A single text row is capped at [`MAX_COPY_TEXT_ROW_BYTES`]; exports
+    /// with wider rows (e.g. large `bytea` columns) should stream raw bytes
+    /// via [`Self::copy_export_stream_raw`] instead. The returned `Vec`
+    /// buffers the whole result — use the `_stream` variants for large
+    /// exports.
     /// # Example
     /// ```ignore
     /// let cmd = Qail::export("users")
@@ -923,5 +946,57 @@ mod tests {
 
         let err = drain_copy_text_rows(&mut pending, b"a\tb\n", &mut on_row).unwrap_err();
         assert!(matches!(err, PgError::Query(msg) if msg == "fail"));
+    }
+
+    #[test]
+    fn drain_copy_text_rows_rejects_newline_free_row_over_cap() {
+        let mut pending = Vec::new();
+        let mut on_row = |_row: Vec<String>| -> PgResult<()> {
+            panic!("no row should complete without a newline")
+        };
+        let chunk = vec![b'x'; super::MAX_COPY_TEXT_ROW_BYTES + 1];
+
+        let err = drain_copy_text_rows(&mut pending, &chunk, &mut on_row).unwrap_err();
+
+        assert!(matches!(err, PgError::Protocol(msg) if msg.contains("exceeds")));
+        assert!(
+            pending.is_empty(),
+            "overflowed accumulator must be released"
+        );
+    }
+
+    #[test]
+    fn drain_copy_text_rows_caps_accumulation_across_chunks() {
+        let mut pending = Vec::new();
+        let mut on_row = |_row: Vec<String>| -> PgResult<()> {
+            panic!("no row should complete without a newline")
+        };
+        let chunk = vec![b'x'; super::MAX_COPY_TEXT_ROW_BYTES / 2 + 1];
+
+        drain_copy_text_rows(&mut pending, &chunk, &mut on_row).unwrap();
+        let err = drain_copy_text_rows(&mut pending, &chunk, &mut on_row).unwrap_err();
+
+        assert!(matches!(err, PgError::Protocol(msg) if msg.contains("exceeds")));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn drain_copy_text_rows_accepts_large_frame_of_complete_rows() {
+        let mut pending = Vec::new();
+        let mut rows = 0usize;
+        let mut on_row = |_row: Vec<String>| -> PgResult<()> {
+            rows += 1;
+            Ok(())
+        };
+        // One frame larger than the row cap, made entirely of small
+        // newline-terminated rows: legal per COPY frame-boundary rules.
+        let row_count = super::MAX_COPY_TEXT_ROW_BYTES / 4 + 1;
+        let chunk = b"a\tb\n".repeat(row_count);
+        assert!(chunk.len() > super::MAX_COPY_TEXT_ROW_BYTES);
+
+        drain_copy_text_rows(&mut pending, &chunk, &mut on_row).unwrap();
+
+        assert_eq!(rows, row_count);
+        assert!(pending.is_empty());
     }
 }

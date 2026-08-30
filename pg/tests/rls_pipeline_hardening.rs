@@ -11,6 +11,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
 
+/// Session-state scrub appended to every pool release. Pinned here so any
+/// change to the release contract shows up in this suite.
+const RELEASE_SCRUB_SQL: &str = "CLOSE ALL; \
+     SET SESSION AUTHORIZATION DEFAULT; \
+     RESET ALL; \
+     UNLISTEN *; \
+     SELECT pg_advisory_unlock_all(); \
+     DISCARD TEMP; \
+     DISCARD SEQUENCES";
+
+fn release_commit_sql() -> String {
+    format!("COMMIT; {RELEASE_SCRUB_SQL}")
+}
+
+fn release_rollback_sql() -> String {
+    format!("ROLLBACK; {RELEASE_SCRUB_SQL}")
+}
+
 async fn mock_listener() -> (TcpListener, u16) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -150,7 +168,7 @@ async fn dropped_pooled_connection_rolls_back_instead_of_commit() {
         assert_eq!(msg_type, b'Q');
         assert_eq!(
             payload_cstr(&payload),
-            "ROLLBACK",
+            release_rollback_sql(),
             "implicit Drop cleanup must fail closed and never COMMIT"
         );
 
@@ -182,7 +200,7 @@ async fn rollback_and_release_sends_rollback() {
             .await
             .expect("timed out waiting for explicit rollback release");
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        assert_eq!(payload_cstr(&payload), release_rollback_sql());
 
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
@@ -226,7 +244,7 @@ async fn rls_bound_connection_rejects_outer_transaction_control() {
         assert_eq!(msg_type, b'Q');
         assert_eq!(
             payload_cstr(&payload),
-            "COMMIT",
+            release_commit_sql(),
             "BEGIN/COMMIT/ROLLBACK guards must fail before writing to the socket"
         );
 
@@ -316,7 +334,7 @@ async fn fetch_all_with_rls_drains_extended_responses_after_setup_error() {
             .await
             .expect("timed out waiting for release COMMIT");
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
+        assert_eq!(payload_cstr(&payload), release_commit_sql());
 
         sock.write_all(&command_complete("COMMIT")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
@@ -406,7 +424,7 @@ async fn fetch_all_with_rls_retry_already_exists_rolls_back_before_retry() {
             .await
             .expect("timed out waiting for release COMMIT");
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "COMMIT");
+        assert_eq!(payload_cstr(&payload), release_commit_sql());
 
         sock.write_all(&command_complete("COMMIT")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();

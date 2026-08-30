@@ -142,7 +142,7 @@ impl PgConnection {
                             if got_ready {
                                 return Ok(notification);
                             }
-                            self.notifications.push_back(notification);
+                            self.buffer_notification(notification)?;
                             continue;
                         }
                         BackendMessage::EmptyQueryResponse => continue,
@@ -338,6 +338,29 @@ mod tests {
             .expect_err("server error must fail");
 
         assert!(matches!(err, PgError::QueryServer(_)));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_notification_desyncs_on_notification_flood() {
+        use crate::driver::io::MAX_BUFFERED_NOTIFICATIONS;
+
+        let (mut conn, _peer) = test_conn_with_peer();
+        // process_id + channel "c" + empty payload, no ReadyForQuery ever.
+        let mut body = Vec::new();
+        body.extend_from_slice(&7i32.to_be_bytes());
+        body.extend_from_slice(b"c\0\0");
+        for _ in 0..=MAX_BUFFERED_NOTIFICATIONS {
+            push_backend_frame(&mut conn, b'A', &body);
+        }
+
+        let err = conn
+            .recv_notification()
+            .await
+            .expect_err("pre-ready notification flood must fail closed");
+
+        assert!(err.to_string().contains("notification buffer overflow"));
         assert!(conn.is_io_desynced());
     }
 }

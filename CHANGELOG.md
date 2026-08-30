@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Pool releases scrub session state before reuse.** Returning a connection to the pool previously ran only `COMMIT` (RLS checkouts) or `ROLLBACK` (raw checkouts), so session-scoped state — `SET`/`SET ROLE`, `LISTEN` registrations, session advisory locks, holdable cursors, temp tables, sequence state — survived into the next caller's checkout and could cross tenant boundaries. Every release path (checked release, rollback-and-release, leaked-connection cleanup) now appends `CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; SELECT pg_advisory_unlock_all(); DISCARD TEMP; DISCARD SEQUENCES` to the same simple-query round trip, and the client-side notification queue — including `NOTIFY` frames the server flushes during the release response itself — is cleared before the connection re-enters the pool. `DEALLOCATE ALL` and `DISCARD PLANS` are deliberately omitted so prepared-statement caches survive. The scrub applies to pool releases only; `PgDriver::clear_rls_context` on a standalone connection still runs a plain `COMMIT` and leaves caller-owned session state (advisory locks, listens, temp tables) untouched.
+- **The undrained notification queue is bounded.** A server streaming unsolicited `NotificationResponse` frames while the client was blocked in a receive loop could grow the per-connection notification buffer without limit; the 64 MB per-frame cap never bounded the aggregate. Every receive path that buffers notifications — including the dedicated `recv_notification` drain — now fails closed at 8192 undrained notifications, and any single notification over 16 KB (double what a real PostgreSQL server can produce) is rejected outright, bounding worst-case buffered memory. On overflow the connection reports a protocol error, is marked desynced, and is destroyed instead of returning to the pool.
+- **COPY text export bounds the cross-frame row accumulator.** `copy_export` and the row-streaming variants accumulated bytes until a newline arrived, so a stream of newline-free `CopyData` frames grew memory without bound. A single text row is now capped at 16 MB, matching the replication `XLogData` cap; oversized rows fail closed with a protocol error.
+- **The `sslmode=prefer` plaintext fallback matches an exact sentinel.** The decision to retry in plaintext after a rejected SSLRequest was gated on a substring match against a human-readable message, which a future wording change could have widened until TLS handshake or certificate failures fell back silently. The fallback now requires full-string equality with the one sentinel emitted when the server answers the SSLRequest with a non-`'S'` byte; handshake and certificate failures keep failing closed, and a mock-server suite pins all four negotiation outcomes.
+
+### Removed
+
+- **Unused `postgres-protocol` dependency dropped from `qail-pg`.** The wire codec is fully hand-implemented; the crate was declared but never referenced.
+
 ## [2.0.1] - 2026-08-31
 
 ### Fixed

@@ -2197,7 +2197,6 @@ dependencies = [
  "md-5 0.10.6",
  "metrics",
  "pbkdf2",
- "postgres-protocol",
  "proptest",
  "qail-core",
  "rand 0.10.1",

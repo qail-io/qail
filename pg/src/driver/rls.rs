@@ -138,8 +138,46 @@ pub fn sanitize_guc_value(val: &str) -> String {
 /// so no explicit reset is needed — just end the transaction.
 /// `SET LOCAL statement_timeout` is also transaction-scoped and
 /// auto-resets on COMMIT — no separate RESET needed.
+///
+/// Deliberately NOT the pool-release scrub: on a driver-owned standalone
+/// connection the caller keeps its session state (advisory locks, listens,
+/// temp tables, session GUCs) across an RLS context switch.
 pub(crate) fn reset_sql() -> &'static str {
     "COMMIT"
+}
+
+/// Session-state scrub appended to every pool release reset.
+///
+/// Mirrors the documented `DISCARD ALL` equivalent minus `DEALLOCATE ALL`
+/// and `DISCARD PLANS`, so prepared-statement caches survive while
+/// session-scoped state (`SET`/`SET ROLE`, listens, session advisory locks,
+/// held cursors, temp tables, sequence state) cannot leak into the next
+/// caller's checkout. Transaction-local `SET LOCAL`/`set_config(..., true)`
+/// values already auto-reset when the transaction ends; this closes the
+/// session-level vectors the transaction end does not touch.
+macro_rules! session_scrub_sql {
+    () => {
+        "CLOSE ALL; \
+         SET SESSION AUTHORIZATION DEFAULT; \
+         RESET ALL; \
+         UNLISTEN *; \
+         SELECT pg_advisory_unlock_all(); \
+         DISCARD TEMP; \
+         DISCARD SEQUENCES"
+    };
+}
+
+/// SQL to commit the pool-managed RLS transaction and scrub session state
+/// before the connection is reused by another caller. Pool release paths
+/// only — see [`reset_sql`] for the standalone-driver reset.
+pub(crate) fn pool_release_commit_sql() -> &'static str {
+    concat!("COMMIT; ", session_scrub_sql!())
+}
+
+/// SQL to roll back any open transaction and scrub session state before the
+/// connection is reused by another caller. Pool release paths only.
+pub(crate) fn pool_release_rollback_sql() -> &'static str {
+    concat!("ROLLBACK; ", session_scrub_sql!())
 }
 
 #[cfg(test)]
@@ -254,7 +292,45 @@ mod tests {
     #[test]
     fn test_reset_sql() {
         let sql = reset_sql();
-        assert_eq!(sql, "COMMIT", "Should just COMMIT (SET LOCAL auto-resets)");
+        assert_eq!(
+            sql, "COMMIT",
+            "standalone-driver reset must not scrub caller-owned session state"
+        );
+    }
+
+    #[test]
+    fn test_pool_release_commit_sql() {
+        let sql = pool_release_commit_sql();
+        assert!(
+            sql.starts_with("COMMIT; "),
+            "must end the RLS transaction first (SET LOCAL auto-resets)"
+        );
+        for scrub in [
+            "CLOSE ALL",
+            "SET SESSION AUTHORIZATION DEFAULT",
+            "RESET ALL",
+            "UNLISTEN *",
+            "pg_advisory_unlock_all()",
+            "DISCARD TEMP",
+            "DISCARD SEQUENCES",
+        ] {
+            assert!(sql.contains(scrub), "release must scrub session state: {scrub}");
+        }
+        assert!(
+            !sql.contains("DEALLOCATE") && !sql.contains("DISCARD ALL") && !sql.contains("PLANS"),
+            "scrub must preserve prepared statements and plans"
+        );
+    }
+
+    #[test]
+    fn test_pool_release_rollback_sql() {
+        let sql = pool_release_rollback_sql();
+        assert!(sql.starts_with("ROLLBACK; "));
+        assert_eq!(
+            sql.split_once("; ").map(|(_, scrub)| scrub),
+            pool_release_commit_sql().split_once("; ").map(|(_, scrub)| scrub),
+            "both release paths must run the identical session scrub"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════

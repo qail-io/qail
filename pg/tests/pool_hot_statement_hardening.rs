@@ -110,6 +110,17 @@ fn error_response(code: &str, message: &str) -> Vec<u8> {
     backend_frame(b'E', &payload)
 }
 
+/// Exact simple-query SQL a raw pool release must send: ROLLBACK plus the
+/// session-state scrub that prevents cross-checkout leakage. Pinned here so
+/// any change to the release contract shows up in this suite.
+const RELEASE_ROLLBACK_SQL: &str = "ROLLBACK; CLOSE ALL; \
+     SET SESSION AUTHORIZATION DEFAULT; \
+     RESET ALL; \
+     UNLISTEN *; \
+     SELECT pg_advisory_unlock_all(); \
+     DISCARD TEMP; \
+     DISCARD SEQUENCES";
+
 fn pool_config(port: u16) -> PoolConfig {
     pool_config_with_max(port, 1)
 }
@@ -145,7 +156,7 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
         sock.flush().await.unwrap();
@@ -164,7 +175,7 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
         sock.flush().await.unwrap();
@@ -250,7 +261,7 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut replacement_sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         replacement_sock
             .write_all(&command_complete("ROLLBACK"))
             .await
@@ -279,7 +290,7 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut replacement_sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         replacement_sock
             .write_all(&command_complete("ROLLBACK"))
             .await
@@ -289,7 +300,7 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
 
         let (msg_type, payload) = read_frontend_frame(&mut first_sock).await;
         assert_eq!(msg_type, b'Q');
-        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+        assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         first_sock
             .write_all(&command_complete("ROLLBACK"))
             .await

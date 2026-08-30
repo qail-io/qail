@@ -448,7 +448,14 @@ async fn test_release_raw_rolls_back_before_returning_connection() {
         let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
         let mut payload = vec![0u8; len - 4];
         peer.read_exact(&mut payload).await.unwrap();
-        assert_eq!(payload, b"ROLLBACK\0");
+        let mut expected = crate::driver::rls::pool_release_rollback_sql()
+            .as_bytes()
+            .to_vec();
+        expected.push(0);
+        assert_eq!(
+            payload, expected,
+            "raw release must roll back AND scrub session state"
+        );
 
         peer.write_all(&command_complete("ROLLBACK")).await.unwrap();
         peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
@@ -459,6 +466,230 @@ async fn test_release_raw_rolls_back_before_returning_connection() {
         conn: Some(conn),
         pool: std::sync::Arc::clone(&pool.inner),
         rls_dirty: false,
+        created_at: Instant::now(),
+    };
+    pooled
+        .release_checked()
+        .await
+        .expect("release should succeed");
+    peer_task.await.unwrap();
+
+    assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
+    assert_eq!(pool.inner.semaphore.available_permits(), 1);
+    assert_eq!(pool.inner.connections.lock().await.len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_release_clears_buffered_notifications_before_pool_return() {
+    use crate::driver::Notification;
+    use crate::driver::connection::StatementCache;
+    use crate::driver::stream::PgStream;
+    use bytes::BytesMut;
+    use std::collections::{HashMap, VecDeque};
+    use std::num::NonZeroUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    fn backend_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(msg_type);
+        out.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn command_complete(tag: &str) -> Vec<u8> {
+        let mut payload = Vec::from(tag.as_bytes());
+        payload.push(0);
+        backend_frame(b'C', &payload)
+    }
+
+    fn notification_frame(channel: &str, payload_text: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&7i32.to_be_bytes());
+        payload.extend_from_slice(channel.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(payload_text.as_bytes());
+        payload.push(0);
+        backend_frame(b'A', &payload)
+    }
+
+    let (unix_stream, mut peer) = UnixStream::pair().expect("unix stream pair");
+    // One notification already buffered from the previous caller's work.
+    let mut buffered = VecDeque::new();
+    buffered.push_back(Notification {
+        process_id: 7,
+        channel: "tenant_a_chan".to_string(),
+        payload: "tenant-a-secret".to_string(),
+    });
+    let conn = PgConnection {
+        stream: PgStream::Unix(unix_stream),
+        buffer: BytesMut::with_capacity(1024),
+        write_buf: BytesMut::with_capacity(1024),
+        sql_buf: BytesMut::with_capacity(256),
+        params_buf: Vec::new(),
+        prepared_statements: HashMap::new(),
+        stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+        column_info_cache: HashMap::new(),
+        process_id: 0,
+        cancel_key_bytes: Vec::new(),
+        requested_protocol_minor: PgConnection::default_protocol_minor(),
+        negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+        notifications: buffered,
+        replication_stream_active: false,
+        replication_mode_enabled: false,
+        last_replication_wal_end: None,
+        io_desynced: false,
+        pending_statement_closes: Vec::new(),
+        draining_statement_closes: false,
+    };
+
+    let pool = PgPool::connect(
+        PoolConfig::new_dev("localhost", 5432, "user", "db")
+            .min_connections(0)
+            .max_connections(1),
+    )
+    .await
+    .expect("pool init");
+
+    let permit = pool
+        .inner
+        .semaphore
+        .acquire()
+        .await
+        .expect("semaphore permit");
+    permit.forget();
+    pool.inner.active_count.store(1, Ordering::Relaxed);
+
+    let peer_task = tokio::spawn(async move {
+        let mut head = [0u8; 5];
+        peer.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], b'Q');
+        let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+        let mut payload = vec![0u8; len - 4];
+        peer.read_exact(&mut payload).await.unwrap();
+
+        // The server flushes a pending NOTIFY inside the release response
+        // itself, before the CommandComplete — the classic leak window.
+        peer.write_all(&notification_frame("tenant_a_chan", "late-flush"))
+            .await
+            .unwrap();
+        peer.write_all(&command_complete("ROLLBACK")).await.unwrap();
+        peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        peer.flush().await.unwrap();
+    });
+
+    let pooled = PooledConnection {
+        conn: Some(conn),
+        pool: std::sync::Arc::clone(&pool.inner),
+        rls_dirty: false,
+        created_at: Instant::now(),
+    };
+    pooled
+        .release_checked()
+        .await
+        .expect("release should succeed");
+    peer_task.await.unwrap();
+
+    let connections = pool.inner.connections.lock().await;
+    assert_eq!(connections.len(), 1);
+    assert!(
+        connections[0].conn.notifications.is_empty(),
+        "no notification from a previous checkout may survive into the pool"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_release_rls_commits_and_scrubs_session_state() {
+    use crate::driver::connection::StatementCache;
+    use crate::driver::stream::PgStream;
+    use bytes::BytesMut;
+    use std::collections::{HashMap, VecDeque};
+    use std::num::NonZeroUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    fn backend_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(msg_type);
+        out.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn command_complete(tag: &str) -> Vec<u8> {
+        let mut payload = Vec::from(tag.as_bytes());
+        payload.push(0);
+        backend_frame(b'C', &payload)
+    }
+
+    let (unix_stream, mut peer) = UnixStream::pair().expect("unix stream pair");
+    let conn = PgConnection {
+        stream: PgStream::Unix(unix_stream),
+        buffer: BytesMut::with_capacity(1024),
+        write_buf: BytesMut::with_capacity(1024),
+        sql_buf: BytesMut::with_capacity(256),
+        params_buf: Vec::new(),
+        prepared_statements: HashMap::new(),
+        stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+        column_info_cache: HashMap::new(),
+        process_id: 0,
+        cancel_key_bytes: Vec::new(),
+        requested_protocol_minor: PgConnection::default_protocol_minor(),
+        negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+        notifications: VecDeque::new(),
+        replication_stream_active: false,
+        replication_mode_enabled: false,
+        last_replication_wal_end: None,
+        io_desynced: false,
+        pending_statement_closes: Vec::new(),
+        draining_statement_closes: false,
+    };
+
+    let pool = PgPool::connect(
+        PoolConfig::new_dev("localhost", 5432, "user", "db")
+            .min_connections(0)
+            .max_connections(1),
+    )
+    .await
+    .expect("pool init");
+
+    let permit = pool
+        .inner
+        .semaphore
+        .acquire()
+        .await
+        .expect("semaphore permit");
+    permit.forget();
+    pool.inner.active_count.store(1, Ordering::Relaxed);
+
+    let peer_task = tokio::spawn(async move {
+        let mut head = [0u8; 5];
+        peer.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], b'Q');
+        let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+        let mut payload = vec![0u8; len - 4];
+        peer.read_exact(&mut payload).await.unwrap();
+        let mut expected = crate::driver::rls::pool_release_commit_sql()
+            .as_bytes()
+            .to_vec();
+        expected.push(0);
+        assert_eq!(
+            payload, expected,
+            "RLS release must COMMIT AND scrub session state"
+        );
+
+        peer.write_all(&command_complete("COMMIT")).await.unwrap();
+        peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        peer.flush().await.unwrap();
+    });
+
+    let pooled = PooledConnection {
+        conn: Some(conn),
+        pool: std::sync::Arc::clone(&pool.inner),
+        rls_dirty: true,
         created_at: Instant::now(),
     };
     pooled

@@ -157,11 +157,18 @@ impl PooledConnection {
     pub async fn release_checked(self) -> PgResult<()> {
         let (sql, context) = if self.rls_dirty {
             // COMMIT the transaction opened by acquire_with_rls.
-            // Transaction-local set_config values auto-reset on COMMIT,
-            // so no explicit RLS cleanup is needed.
-            (crate::driver::rls::reset_sql(), "pool release reset/COMMIT")
+            // Transaction-local set_config values auto-reset on COMMIT;
+            // the appended scrub clears session-scoped state (SET/SET ROLE,
+            // listens, advisory locks, temp tables) that COMMIT leaves behind.
+            (
+                crate::driver::rls::pool_release_commit_sql(),
+                "pool release reset/COMMIT",
+            )
         } else {
-            ("ROLLBACK", "pool release reset/ROLLBACK")
+            (
+                crate::driver::rls::pool_release_rollback_sql(),
+                "pool release reset/ROLLBACK",
+            )
         };
         self.finish_with_reset(sql, context, "release_reset_failed")
             .await
@@ -173,7 +180,7 @@ impl PooledConnection {
     /// request-level savepoint failures that must fail closed.
     pub async fn rollback_and_release(self) -> PgResult<()> {
         self.finish_with_reset(
-            "ROLLBACK",
+            crate::driver::rls::pool_release_rollback_sql(),
             "pool release rollback/ROLLBACK",
             "release_rollback_failed",
         )
@@ -384,7 +391,7 @@ impl Drop for PooledConnection {
                     handle.spawn(async move {
                         let cleanup_ok = execute_simple_with_timeout(
                             &mut conn,
-                            "ROLLBACK",
+                            crate::driver::rls::pool_release_rollback_sql(),
                             reset_timeout,
                             "pool leaked cleanup ROLLBACK",
                         )

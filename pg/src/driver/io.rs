@@ -9,6 +9,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(crate) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64 MB — prevents OOM from malicious server messages
 
+/// Maximum undrained LISTEN/NOTIFY notifications buffered per connection.
+/// `MAX_MESSAGE_SIZE` caps a single frame; this caps the aggregate queue so a
+/// server streaming unsolicited NotificationResponse frames while the client
+/// is blocked in a receive loop cannot grow memory without bound.
+pub(crate) const MAX_BUFFERED_NOTIFICATIONS: usize = 8192;
+
+/// Maximum channel + payload bytes for a single buffered notification.
+/// A real PostgreSQL server caps NOTIFY payloads at ~8000 bytes and channel
+/// names at 63; a larger frame is a hostile peer inflating the queue, so the
+/// aggregate buffered memory stays bounded by
+/// `MAX_BUFFERED_NOTIFICATIONS * MAX_NOTIFICATION_BYTES`.
+pub(crate) const MAX_NOTIFICATION_BYTES: usize = 16 * 1024;
+
 /// Default read timeout for individual socket reads.
 /// Prevents Slowloris DoS where a server sends partial data then goes silent.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -765,6 +778,36 @@ impl PgConnection {
         Ok(())
     }
 
+    /// Buffer an async notification, failing closed once the undrained queue
+    /// reaches [`MAX_BUFFERED_NOTIFICATIONS`] or a single notification
+    /// exceeds [`MAX_NOTIFICATION_BYTES`].
+    pub(crate) fn buffer_notification(
+        &mut self,
+        notification: super::notification::Notification,
+    ) -> PgResult<()> {
+        let size = notification.channel.len() + notification.payload.len();
+        if size > MAX_NOTIFICATION_BYTES {
+            return self.protocol_desync(format!(
+                "notification exceeds {} bytes ({} received)",
+                MAX_NOTIFICATION_BYTES, size
+            ));
+        }
+        if self.notifications.len() >= MAX_BUFFERED_NOTIFICATIONS {
+            tracing::warn!(
+                channel = %notification.channel,
+                buffered = self.notifications.len(),
+                "notification_buffer_overflow: undrained queue at cap, desyncing connection"
+            );
+            return self.protocol_desync(format!(
+                "notification buffer overflow: {} undrained notifications (max {})",
+                self.notifications.len(),
+                MAX_BUFFERED_NOTIFICATIONS
+            ));
+        }
+        self.notifications.push_back(notification);
+        Ok(())
+    }
+
     /// Loops until a complete message is available.
     /// Automatically buffers NotificationResponse messages for LISTEN/NOTIFY.
     pub async fn recv(&mut self) -> PgResult<BackendMessage> {
@@ -807,12 +850,11 @@ impl PgConnection {
                         payload,
                     } = msg
                     {
-                        self.notifications
-                            .push_back(super::notification::Notification {
-                                process_id,
-                                channel,
-                                payload,
-                            });
+                        self.buffer_notification(super::notification::Notification {
+                            process_id,
+                            channel,
+                            payload,
+                        })?;
                         continue; // Keep reading for the actual response
                     }
 
@@ -870,12 +912,11 @@ impl PgConnection {
                         payload,
                     } = msg
                     {
-                        self.notifications
-                            .push_back(super::notification::Notification {
-                                process_id,
-                                channel,
-                                payload,
-                            });
+                        self.buffer_notification(super::notification::Notification {
+                            process_id,
+                            channel,
+                            payload,
+                        })?;
                         continue;
                     }
 
@@ -1050,12 +1091,11 @@ impl PgConnection {
                 channel,
                 payload,
             } => {
-                self.notifications
-                    .push_back(super::notification::Notification {
-                        process_id,
-                        channel,
-                        payload,
-                    });
+                self.buffer_notification(super::notification::Notification {
+                    process_id,
+                    channel,
+                    payload,
+                })?;
                 Ok(None)
             }
             _ => Ok(Some(msg_type)),
@@ -1910,5 +1950,94 @@ mod tests {
                 .contains("CommandComplete missing null terminator")
         );
         assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    fn push_notification_frame(conn: &mut PgConnection, channel: &str, payload: &str) {
+        let mut body = Vec::new();
+        body.extend_from_slice(&7i32.to_be_bytes());
+        body.extend_from_slice(channel.as_bytes());
+        body.push(0);
+        body.extend_from_slice(payload.as_bytes());
+        body.push(0);
+        conn.buffer.extend_from_slice(b"A");
+        conn.buffer
+            .extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        conn.buffer.extend_from_slice(&body);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_buffers_notifications_below_cap() {
+        let mut conn = test_conn();
+        for _ in 0..3 {
+            push_notification_frame(&mut conn, "jobs", "42");
+        }
+        conn.buffer.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+
+        let msg = conn.recv().await.unwrap();
+
+        assert!(matches!(msg, BackendMessage::ReadyForQuery(_)));
+        assert_eq!(conn.notifications.len(), 3);
+        assert!(!conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_desyncs_on_notification_flood() {
+        let mut conn = test_conn();
+        for _ in 0..=MAX_BUFFERED_NOTIFICATIONS {
+            push_notification_frame(&mut conn, "c", "");
+        }
+
+        let err = conn.recv().await.unwrap_err();
+
+        assert!(err.to_string().contains("notification buffer overflow"));
+        assert!(conn.is_io_desynced());
+        assert_eq!(conn.notifications.len(), MAX_BUFFERED_NOTIFICATIONS);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_msg_type_fast_desyncs_on_notification_flood() {
+        let mut conn = test_conn();
+        for _ in 0..=MAX_BUFFERED_NOTIFICATIONS {
+            push_notification_frame(&mut conn, "c", "");
+        }
+
+        let err = conn.recv_msg_type_fast().await.unwrap_err();
+
+        assert!(err.to_string().contains("notification buffer overflow"));
+        assert!(conn.is_io_desynced());
+        assert_eq!(conn.notifications.len(), MAX_BUFFERED_NOTIFICATIONS);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_without_timeout_desyncs_on_notification_flood() {
+        let mut conn = test_conn();
+        for _ in 0..=MAX_BUFFERED_NOTIFICATIONS {
+            push_notification_frame(&mut conn, "c", "");
+        }
+
+        let err = conn.recv_without_timeout().await.unwrap_err();
+
+        assert!(err.to_string().contains("notification buffer overflow"));
+        assert!(conn.is_io_desynced());
+        assert_eq!(conn.notifications.len(), MAX_BUFFERED_NOTIFICATIONS);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_desyncs_on_oversized_notification() {
+        let mut conn = test_conn();
+        let payload = "x".repeat(MAX_NOTIFICATION_BYTES + 1);
+        push_notification_frame(&mut conn, "c", &payload);
+
+        let err = conn.recv().await.unwrap_err();
+
+        assert!(err.to_string().contains("notification exceeds"));
+        assert!(conn.is_io_desynced());
+        assert!(conn.notifications.is_empty());
     }
 }

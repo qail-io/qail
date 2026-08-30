@@ -91,6 +91,29 @@ pub enum PgError {
     PoolClosed,
 }
 
+/// Exact message emitted when the server answers the SSLRequest preface
+/// with anything other than `'S'`.
+///
+/// The `TlsMode::Prefer` fallback matches this message by full equality to
+/// decide a plaintext retry. TLS handshake and certificate-validation
+/// failures use different messages and must keep failing closed — never
+/// widen this to a substring match.
+pub(crate) const TLS_UNSUPPORTED_BY_SERVER: &str = "Server does not support TLS";
+
+impl PgError {
+    /// The SSLRequest preface was answered with a non-`'S'` byte: the server
+    /// does not offer TLS on this endpoint.
+    pub(crate) fn tls_unsupported_by_server() -> Self {
+        PgError::Connection(TLS_UNSUPPORTED_BY_SERVER.to_string())
+    }
+
+    /// True only for the exact [`Self::tls_unsupported_by_server`] sentinel.
+    /// A failed TLS handshake or certificate validation never matches.
+    pub(crate) fn is_tls_unsupported_by_server(&self) -> bool {
+        matches!(self, PgError::Connection(msg) if msg == TLS_UNSUPPORTED_BY_SERVER)
+    }
+}
+
 /// Structured PostgreSQL server error fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgServerError {
@@ -263,8 +286,23 @@ impl PgError {
 
 #[cfg(test)]
 mod tests {
-    use super::ColumnInfo;
+    use super::{ColumnInfo, PgError, TLS_UNSUPPORTED_BY_SERVER};
     use crate::protocol::FieldDescription;
+
+    #[test]
+    fn tls_sentinel_matches_only_the_exact_message() {
+        assert!(PgError::tls_unsupported_by_server().is_tls_unsupported_by_server());
+        // Substring-containing messages must NOT match — a widening back to
+        // .contains() would silently downgrade cert failures to plaintext.
+        let prefixed = PgError::Connection(format!("connect failed: {TLS_UNSUPPORTED_BY_SERVER}"));
+        let suffixed = PgError::Connection(format!("{TLS_UNSUPPORTED_BY_SERVER}: retrying"));
+        let handshake = PgError::Connection("TLS handshake failed: bad cert".to_string());
+        assert!(!prefixed.is_tls_unsupported_by_server());
+        assert!(!suffixed.is_tls_unsupported_by_server());
+        assert!(!handshake.is_tls_unsupported_by_server());
+        assert!(!PgError::Protocol(TLS_UNSUPPORTED_BY_SERVER.to_string())
+            .is_tls_unsupported_by_server());
+    }
 
     fn field(name: &str, type_oid: u32) -> FieldDescription {
         FieldDescription {
