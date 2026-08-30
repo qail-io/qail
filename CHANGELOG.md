@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-31
+
+### Fixed
+
+- **Build-time migration merge tolerates type restatements.** An applied migration is re-parsed over the pulled schema on every build, and its spelling is often less specific than what the database reports back: bare `VARCHAR` is applied as `VARCHAR(255)` and pulled back with the length, bare `DECIMAL` comes back with a precision, and an enum declared before later `ADD VALUE`s keeps its original value list forever. Each of those raised `conflicting column type`, which aborted the whole merge — `validate()` then ran against a partially merged schema, silently dropping every remaining migration from build-time query validation. Same-family Varchar/Decimal precision restatements and same-name enums whose value sets are supersets/subsets of each other now merge, keeping the pulled type as ground truth; genuinely different types remain a hard error.
+- **Migration merge order is deterministic.** `merge_migrations` sorts migration paths before merging instead of relying on filesystem `read_dir` order, so merge results — and, when a file fails to parse, the set of migrations that made it into the schema — no longer vary by platform.
+
 ## [2.0.0] - 2026-08-25
 
 ### Fixed

@@ -4,7 +4,12 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.0)
+## Current Highlights (v2.0.1)
+
+- **Migration merge restatement tolerance**: build-time validation no longer aborts the schema merge when an applied migration restates a column less specifically than the pulled schema reports it (bare `VARCHAR` vs `VARCHAR(n)`, bare `DECIMAL` vs a precision, an enum declared before later values were added). The pulled type stays ground truth; genuinely different types remain a hard error.
+- **Deterministic migration merge order**: migration paths are sorted before merging, so the build-time schema no longer depends on filesystem `read_dir` order.
+
+## v2.0.0 Highlights
 
 - **JOIN array membership parity**: `is_array_unnest` expands to the same `EXISTS/unnest` SQL in the PostgreSQL wire encoder and the core transpiler; unsupported JOIN pattern operators fail closed.
 - **Aggregate qualifier validation**: `GROUP BY` and `DISTINCT ON` qualifiers are checked against the active relation scope, including alias hiding and CTE visibility rules, before application code can ship invalid SQL.
