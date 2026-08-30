@@ -779,12 +779,15 @@ impl Schema {
         let mut merged_count = 0;
 
         // Walk migration directories (format: migrations/YYYYMMDD_name/up.sql)
+        // in version order. `read_dir` order is filesystem-dependent; sorting
+        // makes the merge deterministic — and, when a file fails to parse,
+        // makes WHICH migrations made it into the schema deterministic too.
         let entries =
             fs::read_dir(dir).map_err(|e| format!("Failed to read migrations dir: {}", e))?;
+        let mut paths: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-
+        for path in paths {
             // Collect the migration file(s) to merge for this entry. A subdirectory
             // is either the legacy single-file form (`up.qail` / `up.sql`) or the
             // phased form the migrator applies (`expand.qail` → `backfill.qail` →
@@ -841,6 +844,47 @@ impl Schema {
         Ok(merged_count)
     }
 
+    /// Whether a migration-declared column type is an acceptable restatement
+    /// of the type already in the schema.
+    ///
+    /// Applied deltas are re-parsed over the pulled schema on every build, and
+    /// a delta's spelling is often less specific than what the database
+    /// reports back: bare `VARCHAR` is applied as `VARCHAR(255)` and pulled
+    /// back as `Varchar(Some(255))`, bare `DECIMAL` comes back with a
+    /// precision. Those are the same column, not a conflict — and erroring on
+    /// them aborts the whole merge, silently dropping every later migration
+    /// from the schema the query validator sees. The existing (pulled) type
+    /// stays; the hard error is reserved for genuinely different types.
+    pub(crate) fn column_type_is_restatement(
+        existing: &ColumnType,
+        migration: &ColumnType,
+    ) -> bool {
+        match (existing, migration) {
+            (ColumnType::Varchar(_), ColumnType::Varchar(_)) => true,
+            (ColumnType::Decimal(_), ColumnType::Decimal(_)) => true,
+            // The same named enum whose value set grew over time: an applied
+            // migration keeps its original (smaller) list forever, while the
+            // pulled schema reports every value added since — and a pending
+            // widening delta is the same picture mirrored. Divergent value
+            // sets (neither contains the other) stay a hard conflict.
+            (
+                ColumnType::Enum {
+                    name: existing_name,
+                    values: existing_values,
+                },
+                ColumnType::Enum {
+                    name: migration_name,
+                    values: migration_values,
+                },
+            ) => {
+                existing_name == migration_name
+                    && (migration_values.iter().all(|v| existing_values.contains(v))
+                        || existing_values.iter().all(|v| migration_values.contains(v)))
+            }
+            _ => existing == migration,
+        }
+    }
+
     /// Parse native QAIL migration content and merge tables/columns into build schema.
     pub(crate) fn parse_qail_migration(&mut self, qail: &str) -> Result<usize, String> {
         let parsed = Schema::parse(qail)?;
@@ -850,7 +894,7 @@ impl Schema {
             if let Some(existing) = self.tables.get_mut(&table_name) {
                 for (col_name, col_type) in parsed_table.columns {
                     if let Some(existing_type) = existing.columns.get(&col_name) {
-                        if existing_type != &col_type {
+                        if !Self::column_type_is_restatement(existing_type, &col_type) {
                             return Err(format!(
                                 "conflicting column type for '{}.{}': existing {:?}, migration {:?}",
                                 table_name, col_name, existing_type, col_type
@@ -945,7 +989,7 @@ impl Schema {
 
             if let Some(existing) = self.tables.get_mut(&table) {
                 if let Some(existing_type) = existing.columns.get(&column_name) {
-                    if existing_type != &column_type {
+                    if !Self::column_type_is_restatement(existing_type, &column_type) {
                         return Err(format!(
                             "conflicting column type for '{}.{}': existing {:?}, migration {:?}",
                             table, column_name, existing_type, column_type

@@ -749,6 +749,95 @@ table users {
     );
 }
 
+/// The production shape behind the fix: an APPLIED delta declaring bare
+/// `VARCHAR` is re-parsed over the pulled schema, where the same column came
+/// back as `VARCHAR(255)`. That is a restatement, not a conflict — erroring
+/// here aborted the whole merge and silently dropped every later migration
+/// from the validator's schema.
+#[test]
+fn test_parse_qail_migration_accepts_varchar_length_restatement() {
+    let mut schema = Schema::parse(
+        r#"
+table promotions {
+  id UUID
+  discount_basis VARCHAR(255)
+}
+"#,
+    )
+    .unwrap();
+
+    schema
+        .parse_qail_migration("alter promotions add discount_basis:VARCHAR:default='order'")
+        .expect("bare VARCHAR over pulled VARCHAR(255) is a restatement, not a conflict");
+    // The pulled type is ground truth and must survive the merge untouched.
+    assert_eq!(
+        schema
+            .table("promotions")
+            .unwrap()
+            .columns
+            .get("discount_basis"),
+        Some(&ColumnType::Varchar(Some(255))),
+    );
+
+    // Same tolerance through the table-block path, and for DECIMAL precision.
+    schema
+        .parse_qail_migration(
+            r#"
+table promotions {
+  discount_basis VARCHAR
+  amount DECIMAL(10, 2)
+}
+"#,
+        )
+        .expect("table-block restatement must merge");
+    schema
+        .parse_qail_migration("alter promotions add amount:DECIMAL")
+        .expect("bare DECIMAL over DECIMAL(10,2) is a restatement");
+
+    // Genuinely different types still fail loudly.
+    let err = schema
+        .parse_qail_migration("alter promotions add discount_basis:text")
+        .expect_err("VARCHAR vs TEXT stays a conflict");
+    assert!(
+        err.contains("conflicting column type for 'promotions.discount_basis'"),
+        "{err}"
+    );
+}
+
+/// An enum that gained values after a migration was applied: the migration's
+/// original (smaller) value list is a restatement of the pulled enum, not a
+/// conflict. Divergent value sets stay one.
+#[test]
+fn test_parse_qail_migration_accepts_grown_enum_restatement() {
+    let grown = ColumnType::Enum {
+        name: "vessel_class".to_string(),
+        values: ["LUXURY", "EXECUTIVE", "BUSINESS", "ECONOMY", "PREMIUM"]
+            .map(String::from)
+            .to_vec(),
+    };
+    let original = ColumnType::Enum {
+        name: "vessel_class".to_string(),
+        values: ["LUXURY", "EXECUTIVE", "BUSINESS", "ECONOMY"]
+            .map(String::from)
+            .to_vec(),
+    };
+    let divergent = ColumnType::Enum {
+        name: "vessel_class".to_string(),
+        values: ["LUXURY", "STANDARD"].map(String::from).to_vec(),
+    };
+    let other_name = ColumnType::Enum {
+        name: "cabin_class".to_string(),
+        values: ["LUXURY"].map(String::from).to_vec(),
+    };
+
+    // Both directions: applied migration older than the pulled schema, and a
+    // pending widening delta newer than it.
+    assert!(Schema::column_type_is_restatement(&grown, &original));
+    assert!(Schema::column_type_is_restatement(&original, &grown));
+    assert!(!Schema::column_type_is_restatement(&grown, &divergent));
+    assert!(!Schema::column_type_is_restatement(&grown, &other_name));
+}
+
 #[test]
 fn test_extract_string_arg() {
     assert_eq!(extract_string_arg(r#""users")"#), Some("users".to_string()));
