@@ -314,7 +314,10 @@ mod tests {
             "DISCARD TEMP",
             "DISCARD SEQUENCES",
         ] {
-            assert!(sql.contains(scrub), "release must scrub session state: {scrub}");
+            assert!(
+                sql.contains(scrub),
+                "release must scrub session state: {scrub}"
+            );
         }
         assert!(
             !sql.contains("DEALLOCATE") && !sql.contains("DISCARD ALL") && !sql.contains("PLANS"),
@@ -328,7 +331,9 @@ mod tests {
         assert!(sql.starts_with("ROLLBACK; "));
         assert_eq!(
             sql.split_once("; ").map(|(_, scrub)| scrub),
-            pool_release_commit_sql().split_once("; ").map(|(_, scrub)| scrub),
+            pool_release_commit_sql()
+                .split_once("; ")
+                .map(|(_, scrub)| scrub),
             "both release paths must run the identical session scrub"
         );
     }

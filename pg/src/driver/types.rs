@@ -300,8 +300,10 @@ mod tests {
         assert!(!prefixed.is_tls_unsupported_by_server());
         assert!(!suffixed.is_tls_unsupported_by_server());
         assert!(!handshake.is_tls_unsupported_by_server());
-        assert!(!PgError::Protocol(TLS_UNSUPPORTED_BY_SERVER.to_string())
-            .is_tls_unsupported_by_server());
+        assert!(
+            !PgError::Protocol(TLS_UNSUPPORTED_BY_SERVER.to_string())
+                .is_tls_unsupported_by_server()
+        );
     }
 
     fn field(name: &str, type_oid: u32) -> FieldDescription {

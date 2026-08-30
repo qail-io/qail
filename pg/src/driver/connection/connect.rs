@@ -28,6 +28,19 @@ fn protocol_version_from_minor(minor: u16) -> i32 {
     ((3i32) << 16) | i32::from(minor)
 }
 
+/// Pin the process-level rustls CryptoProvider before any `ClientConfig`
+/// is built. When feature unification enables both `ring` and `aws-lc-rs`
+/// in the same binary, rustls cannot auto-select a provider and panics on
+/// first use; installing aws-lc-rs explicitly keeps TLS connects
+/// deterministic in every feature combination. A concurrent install by
+/// another thread is fine — first writer wins, the rest are no-ops.
+fn ensure_crypto_provider() {
+    use tokio_rustls::rustls::crypto::{CryptoProvider, aws_lc_rs};
+    if CryptoProvider::get_default().is_none() {
+        let _ = aws_lc_rs::default_provider().install_default();
+    }
+}
+
 fn socket_addr(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{}]:{}", host, port)
@@ -794,6 +807,7 @@ impl PgConnection {
             }
         }
 
+        ensure_crypto_provider();
         let config = ClientConfig::builder()
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
@@ -1022,6 +1036,7 @@ impl PgConnection {
         let client_key = PrivateKeyDer::from_pem_slice(&config.client_key_pem)
             .map_err(|e| PgError::Connection(format!("Invalid client key PEM: {}", e)))?;
 
+        ensure_crypto_provider();
         let tls_config = ClientConfig::builder()
             .with_root_certificates(root_cert_store)
             .with_client_auth_cert(client_certs, client_key)

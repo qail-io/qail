@@ -58,8 +58,7 @@ async fn tls_require_fails_closed_on_server_n() {
         // The client must not answer 'N' with a plaintext StartupMessage
         // on this socket either.
         let mut trailing = [0u8; 1];
-        let read =
-            tokio::time::timeout(Duration::from_millis(300), sock.read(&mut trailing)).await;
+        let read = tokio::time::timeout(Duration::from_millis(300), sock.read(&mut trailing)).await;
         match read {
             // Clean close (FIN), reset (client dropped the socket), or
             // silence — all mean no plaintext retry on this socket.
@@ -80,7 +79,10 @@ async fn tls_require_fails_closed_on_server_n() {
     )
     .await;
 
-    assert!(result.is_err(), "Require must fail when the server rejects TLS");
+    assert!(
+        result.is_err(),
+        "Require must fail when the server rejects TLS"
+    );
     let err = result.err().unwrap();
     assert!(
         err.to_string().contains("Server does not support TLS"),
