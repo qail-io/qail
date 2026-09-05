@@ -433,6 +433,59 @@ fn run_sql_policy_checks(scan_roots: &[String]) {
     }
 }
 
+/// The migrations directory the build merges into the pulled schema.
+///
+/// Mirrors the CLI's rule so a crate's build and its `qail migrate` runs read
+/// ONE set of files: walking up from the crate root, the nearest `qail.toml`
+/// that declares `[project].migrations_dir` wins, resolved against that file's
+/// directory; a nearer file that declares nothing does not mask an ancestor
+/// that does. Without any declaration the `migrations/` directory beside
+/// `schema.qail` is used, as before this rule existed.
+pub fn resolve_migrations_dir() -> String {
+    let start = std::env::var("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    resolve_migrations_dir_from(&start)
+}
+
+/// [`resolve_migrations_dir`], starting the walk at `start`.
+pub fn resolve_migrations_dir_from(start: &Path) -> String {
+    for dir in start.ancestors() {
+        let config = dir.join("qail.toml");
+        if !config.is_file() {
+            continue;
+        }
+        match declared_migrations_dir(&config) {
+            Ok(Some(declared)) => return dir.join(declared).to_string_lossy().into_owned(),
+            Ok(None) => continue,
+            Err(e) => {
+                println!("cargo:warning=QAIL: {}: {}", config.display(), e);
+                continue;
+            }
+        }
+    }
+    "migrations".to_string()
+}
+
+/// `[project].migrations_dir` from one `qail.toml`, read without expanding
+/// `${VAR}` references: a build script has no DATABASE_URL to expand, and the
+/// key it needs never carries one.
+fn declared_migrations_dir(config: &Path) -> Result<Option<String>, String> {
+    let raw = std::fs::read_to_string(config).map_err(|e| e.to_string())?;
+    let value: toml::Value = toml::from_str(&raw).map_err(|e| e.to_string())?;
+    match value
+        .get("project")
+        .and_then(|project| project.get("migrations_dir"))
+    {
+        None => Ok(None),
+        Some(declared) => declared
+            .as_str()
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| "project.migrations_dir must be a string".to_string()),
+    }
+}
+
 /// Build validation entrypoint for build.rs.
 /// Failures are reported via `cargo:warning` and process exit code 1.
 pub fn validate() {
@@ -443,6 +496,7 @@ pub fn validate() {
             "false".to_string()
         }
     });
+    let migrations_dir = resolve_migrations_dir();
 
     match mode.as_str() {
         "schema" => {
@@ -457,14 +511,15 @@ pub fn validate() {
                 println!("cargo:rerun-if-changed=schema.qail");
                 println!("cargo:rerun-if-changed=schema");
             }
-            println!("cargo:rerun-if-changed=migrations");
+            println!("cargo:rerun-if-changed={}", migrations_dir);
+            println!("cargo:rerun-if-changed=qail.toml");
             println!("cargo:rerun-if-env-changed=QAIL");
             emit_scan_watchers(&scan_roots);
 
             match Schema::parse_file("schema.qail") {
                 Ok(mut schema) => {
                     // Merge pending migrations with pulled schema
-                    let merged = match schema.merge_migrations("migrations") {
+                    let merged = match schema.merge_migrations(&migrations_dir) {
                         Ok(n) => n,
                         Err(e) => {
                             println!("cargo:warning=QAIL: Migration merge failed: {}", e);
@@ -549,7 +604,7 @@ pub fn validate() {
             match Schema::parse_file("schema.qail") {
                 Ok(mut schema) => {
                     // Merge pending migrations (in case live DB doesn't have them yet)
-                    let merged = match schema.merge_migrations("migrations") {
+                    let merged = match schema.merge_migrations(&migrations_dir) {
                         Ok(n) => n,
                         Err(e) => {
                             println!("cargo:warning=QAIL: Migration merge failed: {}", e);

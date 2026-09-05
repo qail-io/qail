@@ -4940,3 +4940,63 @@ fn demo() {
         usage.scope_errors
     );
 }
+
+fn migrations_dir_scratch(label: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = std::env::temp_dir().join(format!(
+        "qail-migrations-dir-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("scratch dir");
+    root
+}
+
+#[test]
+fn migrations_dir_stays_migrations_without_a_declaring_config() {
+    let root = migrations_dir_scratch("none");
+    let krate = root.join("crate");
+    std::fs::create_dir_all(&krate).expect("crate dir");
+    // A config that declares nothing is not a declaration.
+    std::fs::write(krate.join("qail.toml"), "[project]\nname = \"x\"\n").expect("write config");
+
+    assert_eq!(resolve_migrations_dir_from(&krate), "migrations");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn migrations_dir_follows_the_nearest_declaring_config() {
+    let root = migrations_dir_scratch("declared");
+    let krate = root.join("workspace").join("crate");
+    std::fs::create_dir_all(&krate).expect("crate dir");
+    // The ancestor declares; the crate's own config does not, and must not mask it.
+    std::fs::write(
+        root.join("workspace").join("qail.toml"),
+        "[project]\nname = \"x\"\nmigrations_dir = \"db/deltas\"\n\n[postgres]\nurl = \"${DATABASE_URL}\"\n",
+    )
+    .expect("write workspace config");
+    std::fs::write(krate.join("qail.toml"), "[project]\nname = \"x\"\n")
+        .expect("write crate config");
+
+    let resolved = resolve_migrations_dir_from(&krate);
+    assert_eq!(
+        std::path::Path::new(&resolved),
+        root.join("workspace").join("db").join("deltas"),
+        "resolved against the declaring file's directory: {resolved}"
+    );
+
+    // A malformed value is reported, not silently treated as a declaration.
+    std::fs::write(krate.join("qail.toml"), "[project]\nmigrations_dir = 7\n")
+        .expect("write bad config");
+    let resolved = resolve_migrations_dir_from(&krate);
+    assert_eq!(
+        std::path::Path::new(&resolved),
+        root.join("workspace").join("db").join("deltas"),
+        "a bad nearer value falls through to the ancestor: {resolved}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
