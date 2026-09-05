@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.2] - 2026-09-05
+
+### Added
+
+- **Build-time validation reads `[project].migrations_dir`.** `qail_core::build::validate()` merged a literal `migrations/` directory beside `schema.qail`, while `qail migrate` resolved `migrations_dir` from the nearest `qail.toml`, so a crate that keeps its migrations anywhere else needed a symlink for the build and the CLI to read the same files. The validator now walks up from `CARGO_MANIFEST_DIR` and uses the nearest `qail.toml` that declares `[project].migrations_dir`, resolved against that file's directory; a nearer file that declares nothing does not mask an ancestor that does, and with no declaration `migrations/` is used as before. The key is read without `${VAR}` expansion, so a build script without `DATABASE_URL` still resolves it, and both the resolved directory and `qail.toml` are `rerun-if-changed` triggers.
+
+### Fixed
+
+- **rustls crypto provider is installed before any `ClientConfig` is built.** When feature unification enabled both `ring` and `aws-lc-rs` in one binary, rustls could not auto-select a provider and panicked on the first TLS use; `qail-pg` now installs the `aws-lc-rs` provider explicitly, pinned by the TLS negotiation suite in the workspace build.
 
 ### Security
 

@@ -3,7 +3,7 @@
  * Protocol + rate-limit conformance suite for the QAIL MCP Worker.
  *
  *   node scripts/conformance.mjs [--url https://dev.qail.io/mcp] [--skip-ratelimit]
- *                                [--ratelimit-probe] [--fresh] [--expect-version 2.0.1]
+ *                                [--ratelimit-probe] [--fresh] [--expect-version 2.0.2]
  *
  * Node builtins only (global `fetch`, `Promise.all`). No dependencies.
  *

@@ -4,7 +4,16 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.1)
+## Current Highlights (v2.0.2)
+
+- **Pool releases scrub session state**: every return path appends `CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; pg_advisory_unlock_all(); DISCARD TEMP; DISCARD SEQUENCES` to the release round trip and clears the client-side notification queue, so session state can no longer cross into the next checkout. Prepared statements survive.
+- **Bounded buffering**: the undrained `LISTEN`/`NOTIFY` queue fails closed at 8192 entries and 16 KB per notification; COPY text export caps a cross-frame row at 16 MB. Overflow desyncs and destroys the connection instead of growing memory.
+- **Exact `sslmode=prefer` fallback**: plaintext retry requires the one sentinel a server emits when it declines the SSLRequest; handshake and certificate failures keep failing closed.
+- **rustls provider pinned**: `qail-pg` installs the `aws-lc-rs` crypto provider before building any `ClientConfig`, so feature unification with `ring` no longer panics on first TLS use.
+- **Build validation follows `migrations_dir`**: `qail_core::build::validate()` resolves `[project].migrations_dir` from the nearest `qail.toml` the way `qail migrate` does, so a crate keeping its migrations outside `migrations/` needs no symlink.
+- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.2`.
+
+## v2.0.1 Highlights
 
 - **Migration merge restatement tolerance**: build-time validation no longer aborts the schema merge when an applied migration restates a column less specifically than the pulled schema reports it (bare `VARCHAR` vs `VARCHAR(n)`, bare `DECIMAL` vs a precision, an enum declared before later values were added). The pulled type stays ground truth; genuinely different types remain a hard error.
 - **Deterministic migration merge order**: migration paths are sorted before merging, so the build-time schema no longer depends on filesystem `read_dir` order.
