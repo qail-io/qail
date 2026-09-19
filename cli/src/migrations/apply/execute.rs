@@ -1232,7 +1232,10 @@ async fn verify_created_table_shape(
         if !column_type_matches(data_type, &live) {
             failures.push(format!(
                 "expected column '{}.{}' type '{}' but found '{}'",
-                cmd.table, name, data_type, live.data_type
+                cmd.table,
+                name,
+                data_type,
+                live_type_label(&live)
             ));
         }
 
@@ -1333,6 +1336,28 @@ async fn verify_table_constraints(
 }
 
 fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
+    let expected_element = array_element_type(expected);
+    let live_is_array = live.data_type.eq_ignore_ascii_case("ARRAY");
+    if expected_element.is_some() != live_is_array {
+        return false;
+    }
+    if let Some(expected_element) = expected_element {
+        // information_schema reports an array as data_type 'ARRAY'; the element
+        // type is udt_name with a leading underscore ('_uuid', '_int4').
+        let Some(live_element) = live
+            .udt_name
+            .as_deref()
+            .and_then(|udt| udt.strip_prefix('_'))
+            .filter(|element| !element.is_empty())
+        else {
+            return false;
+        };
+        // Length/precision columns are NULL for array columns, so element
+        // modifiers (varchar(20)[]) are checked for syntax only.
+        return parse_type_modifiers(expected_element).is_some()
+            && normalize_column_type(expected_element) == normalize_column_type(live_element);
+    }
+
     let live_type = if live.data_type.eq_ignore_ascii_case("USER-DEFINED") {
         live.udt_name.as_deref().unwrap_or(live.data_type.as_str())
     } else {
@@ -1344,6 +1369,27 @@ fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
     }
 
     type_modifiers_match(&expected_type, expected, live)
+}
+
+/// Element type of an expected `T[]` (any number of dimensions; Postgres stores
+/// `T[][]` as the same array type), or `None` when `raw` is not an array type.
+fn array_element_type(raw: &str) -> Option<&str> {
+    let mut element = raw.trim().strip_suffix("[]")?.trim_end();
+    while let Some(inner) = element.strip_suffix("[]") {
+        element = inner.trim_end();
+    }
+    Some(element)
+}
+
+fn live_type_label(live: &LiveColumnDefinition) -> String {
+    match live.udt_name.as_deref() {
+        Some(udt) if live.data_type.eq_ignore_ascii_case("ARRAY") => match udt.strip_prefix('_') {
+            Some(element) if !element.is_empty() => format!("{}[]", element),
+            _ => live.data_type.clone(),
+        },
+        Some(udt) if live.data_type.eq_ignore_ascii_case("USER-DEFINED") => udt.to_string(),
+        _ => live.data_type.clone(),
+    }
 }
 
 fn type_modifiers_match(
@@ -2276,7 +2322,7 @@ mod tests {
         collect_policy_final_expectations, column_type_matches, constraint_columns_match,
         deferrable_matches, enforce_apply_destructive_policy,
         enforce_apply_down_destructive_policy, ensure_applied_checksum_matches,
-        ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches,
+        ensure_up_down_pairing, fk_rule_matches, foreign_key_constraint_matches, live_type_label,
         normalize_column_type, parse_qail_to_commands_strict, parse_rename_expr,
         resolve_apply_shadow_receipt_policy, should_adopt_existing_error,
         should_run_apply_lock_risk_preflight, split_schema_ident, strip_optional_if_exists_prefix,
@@ -2485,6 +2531,100 @@ mod tests {
         let timestamp_default =
             live_column("timestamp without time zone", None, None, None, Some(6));
         assert!(column_type_matches("timestamp", &timestamp_default));
+    }
+
+    fn live_array_column(udt_name: Option<&str>) -> LiveColumnDefinition {
+        LiveColumnDefinition {
+            udt_name: udt_name.map(str::to_string),
+            ..live_column("ARRAY", None, None, None, None)
+        }
+    }
+
+    #[test]
+    fn column_type_matching_reads_array_element_from_udt_name() {
+        assert!(column_type_matches(
+            "UUID[]",
+            &live_array_column(Some("_uuid"))
+        ));
+        assert!(column_type_matches(
+            "TEXT[]",
+            &live_array_column(Some("_text"))
+        ));
+        assert!(column_type_matches(
+            "INT[]",
+            &live_array_column(Some("_int4"))
+        ));
+        assert!(column_type_matches(
+            "BIGINT[]",
+            &live_array_column(Some("_int8"))
+        ));
+        assert!(column_type_matches(
+            "BOOLEAN[]",
+            &live_array_column(Some("_bool"))
+        ));
+        assert!(column_type_matches(
+            "TIMESTAMPTZ[]",
+            &live_array_column(Some("_timestamptz"))
+        ));
+        assert!(column_type_matches(
+            "DOUBLE PRECISION[]",
+            &live_array_column(Some("_float8"))
+        ));
+        assert!(column_type_matches(
+            "VARCHAR(20)[]",
+            &live_array_column(Some("_varchar"))
+        ));
+        assert!(column_type_matches(
+            "uuid[][]",
+            &live_array_column(Some("_uuid"))
+        ));
+    }
+
+    #[test]
+    fn column_type_matching_rejects_array_mismatches() {
+        // Expected array, live scalar.
+        let live_uuid = live_column("uuid", None, None, None, None);
+        assert!(!column_type_matches("UUID[]", &live_uuid));
+        // Expected scalar, live array.
+        assert!(!column_type_matches(
+            "UUID",
+            &live_array_column(Some("_uuid"))
+        ));
+        // Element type differs.
+        assert!(!column_type_matches(
+            "UUID[]",
+            &live_array_column(Some("_text"))
+        ));
+        assert!(!column_type_matches(
+            "INT[]",
+            &live_array_column(Some("_int8"))
+        ));
+        // A live ARRAY without a usable udt_name never matches.
+        assert!(!column_type_matches("UUID[]", &live_array_column(None)));
+        assert!(!column_type_matches(
+            "UUID[]",
+            &live_array_column(Some("uuid"))
+        ));
+        assert!(!column_type_matches("[]", &live_array_column(Some("_"))));
+        assert!(!column_type_matches(
+            "NUMERIC(10,nope)[]",
+            &live_array_column(Some("_numeric"))
+        ));
+    }
+
+    #[test]
+    fn live_type_label_names_array_and_user_defined_types() {
+        assert_eq!(live_type_label(&live_array_column(Some("_uuid"))), "uuid[]");
+        assert_eq!(live_type_label(&live_array_column(None)), "ARRAY");
+        let user_defined = LiveColumnDefinition {
+            udt_name: Some("order_status".to_string()),
+            ..live_column("USER-DEFINED", None, None, None, None)
+        };
+        assert_eq!(live_type_label(&user_defined), "order_status");
+        assert_eq!(
+            live_type_label(&live_column("uuid", None, None, None, None)),
+            "uuid"
+        );
     }
 
     #[test]
@@ -3175,6 +3315,110 @@ mod tests {
             !version_exists(&mut pg, migration_name.as_str()).await,
             "failed type-modifier adoption must not write a migration receipt"
         );
+
+        let _ = pg
+            .execute(&Qail {
+                action: Action::Drop,
+                table,
+                ..Default::default()
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn apply_verifies_array_columns_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping array column verification DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let table = format!("apply_array_type_{}", suffix);
+        let migration_name = format!("apply_array_type_{}.up.qail", suffix);
+        let make_cmd = |tags_type: &str| Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "involved_tenant_ids".to_string(),
+                    data_type: "UUID[]".to_string(),
+                    constraints: vec![Constraint::Default("'{}'::uuid[]".to_string())],
+                },
+                Expr::Def {
+                    name: "tags".to_string(),
+                    data_type: tags_type.to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "counts".to_string(),
+                    data_type: "INT[]".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+            ],
+            ..Default::default()
+        };
+        let context = |name: &'static str| (name, crate::time::md5_hex(name));
+
+        let (sql, checksum) = context("-- apply array type");
+        apply_commands_and_record_receipt_atomic(
+            &mut pg,
+            &[make_cmd("TEXT[]")],
+            false,
+            ApplyReceiptContext {
+                migration_name: &migration_name,
+                started_ms: crate::migrations::now_epoch_ms(),
+                executed_sql_for_receipt: sql.to_string(),
+                checksum,
+                risk_summary: "source=apply.array_type.test".to_string(),
+                affected_rows_est: None,
+                failpoint_override: None,
+            },
+        )
+        .await
+        .expect("array columns must pass post-apply verification");
+        assert!(version_exists(&mut pg, migration_name.as_str()).await);
+
+        let drifted_name = format!("apply_array_type_drift_{}.up.qail", suffix);
+        let (sql, checksum) = context("-- adopt array type drift");
+        let err = apply_commands_and_record_receipt_atomic(
+            &mut pg,
+            &[make_cmd("UUID[]")],
+            true,
+            ApplyReceiptContext {
+                migration_name: &drifted_name,
+                started_ms: crate::migrations::now_epoch_ms(),
+                executed_sql_for_receipt: sql.to_string(),
+                checksum,
+                risk_summary: "source=apply.array_type.test".to_string(),
+                affected_rows_est: None,
+                failpoint_override: None,
+            },
+        )
+        .await
+        .expect_err("a text[] column must not be adopted as UUID[]");
+        assert!(
+            err.to_string().contains("tags")
+                && err.to_string().contains("UUID[]")
+                && err.to_string().contains("text[]"),
+            "unexpected array drift error: {err}"
+        );
+        assert!(!version_exists(&mut pg, drifted_name.as_str()).await);
 
         let _ = pg
             .execute(&Qail {
