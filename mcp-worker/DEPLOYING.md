@@ -188,5 +188,5 @@ tests** for `src/ratelimit.ts`; the strict split is verified only by running thi
 manually. Back-to-back runs need ~60 s between them, which the script handles by default.
 
 Pointing `--url` at a bare host root always resolves to that host's real `/mcp` endpoint. To
-mutation-test the suite, give a base with a non-empty path (`https://dev.qail.io/docs`) or a
+mutation-test the suite, give a base with a non-empty path (`https://qail.rs/docs`) or a
 different host — the resolved endpoint is echoed before the first check.

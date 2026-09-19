@@ -5,7 +5,7 @@ edition = "2024"
 description = "WebAssembly build of the QAIL MCP server for edge deployment"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
-homepage = "https://dev.qail.io"
+homepage = "https://qail.rs"
 publish = false
 
 [lib]

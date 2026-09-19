@@ -54,7 +54,7 @@ struct WarningJson {
     references: Vec<CodeRefJson>,
 }
 
-/// Analyze migration impact. See [full docs](https://dev.qail.io/docs/features/analyzer.html).
+/// Analyze migration impact. See [full docs](https://qail.rs/docs/features/analyzer).
 pub fn migrate_analyze(
     schema_diff_path: &str,
     codebase_path: &str,

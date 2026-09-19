@@ -47,7 +47,7 @@ For the full project changelog, see the repository file:
 
 ## v1.3.0 Highlights
 
-- Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://dev.qail.io/blog/qail-rs-v1-3-0-deep-audit-hardening)
+- Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://qail.rs/blog/qail-rs-v1-3-0-deep-audit-hardening)
 - **Native vertical access policy**: `qail_core::access` adds deny-by-default table policies, role/scope requirements, operation permissions, and read/write/returning column rules before AST execution.
 - **Gateway policy integration**: `[access]` in `qail.toml` loads TOML/JSON policies so gateway REST, QAIL text/binary/batch, transaction, RPC, nested, expanded, and live-query paths can enforce vertical table and column boundaries alongside PostgreSQL RLS.
 - **PostgreSQL statement cache safety**: hot prepared statements are promoted, evicted, reparsed, and retained only in states that match the real backend statement lifecycle.

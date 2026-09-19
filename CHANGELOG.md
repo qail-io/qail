@@ -194,7 +194,7 @@ Every item below is a public surface that 1.x retained for compatibility and 2.0
 
 ## [1.3.0] - 2026-06-04
 
-Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://dev.qail.io/blog/qail-rs-v1-3-0-deep-audit-hardening)
+Detailed changelog: [QAIL.rs v1.3.0: Native Vertical Policy and the Audit Pass Behind It](https://qail.rs/blog/qail-rs-v1-3-0-deep-audit-hardening)
 
 ### Added
 - **Native vertical access policies:** Added `qail_core::access` as a first-class policy layer for operation and column access before an AST reaches PostgreSQL. `AccessPolicy`/`AccessContext` support deny-by-default table policies, role and scope requirements, per-operation allow/deny rules, read/write/returning `ColumnRule`s, wildcard table fallback, super-admin bypass via `SuperAdminToken`, and TOML/JSON policy loading.
