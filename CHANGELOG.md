@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-09-23
+
+### Fixed
+
+- **The build-time N+1 analyzer reads past lifetimes, loop labels and wrapped calls.** Its lexer took every `'` for a char literal running to the next apostrophe, so a lifetime or label (`DayScope<'_>`, `'outer:`) blanked the code after it up to an apostrophe in a later comment: the queries in between were never checked, and a pure builder could take its caller's body and read as query-executing. A quote now opens a literal only as `'x'` or an escape. An exec call whose argument list wraps onto the next line (`conn.fetch_all(` then the arguments) was invisible, so helpers written that way never counted as query-executing; the arguments are now read across lines before batching and loop dependence are judged.
+- **Iterator loops no longer depend on formatting.** A `.map`, `.filter_map` or `.flat_map` on a chain begun by `.iter()`, `.iter_mut()` or `.into_iter()`, with no terminal (`.collect()`, `.next()`, `.find(..)`) since, is a loop across lines and adaptors, and a one-line closure body (`join_all(ids.iter().map(|id| load(conn, *id)))`) is a loop scope bounded by its call, so an id list built inline for one batched query stays clean. A closure-free `.map(fn)` no longer arms a phantom loop that adopted the next unrelated `{`, a later function's signature included.
+- **The paced-loop exemption requires waiting on the loop's own path.** A bare `loop` counts as paced only with a directly awaited `.tick()` or `sleep(..)`, or a `select!` whose arms are all `_` with one timer, on the loop body's top level. A sleep in a branch (`None => sleep(..).await`), a `select!` arm that binds data, or a `.tick(` beside an unrelated `.await` no longer exempts every query in the loop. Builds that run the check report more real N+1 sites; across 30 source trees the only diagnostics that disappear are proven false positives.
+- **`qail migrate apply` verifies array columns by element type.** `information_schema` reports an array column as `data_type = 'ARRAY'` with the element type in `udt_name` (`_uuid`, `_int4`), so post-apply verification compared an expected `UUID[]` against `ARRAY` and failed the apply. Array columns now match on element type (any number of dimensions); scalar-vs-array and element mismatches still fail, and the drift error names an array as `text[]`.
+- **`qail init` links the configuration docs.** The generated config header pointed at `/docs/config`, a 404; it now links `/docs/features/configuration`.
+
+### Security
+
+- **rustls 0.23.45 for RUSTSEC-2026-0285 (GHSA-2mjx-qc3c-rqvc).** rustls before 0.23.45 accepted TLS 1.3 handshake messages sent at the wrong encryption level. The workspace lockfile resolves rustls 0.23.45 with aws-lc-rs 1.18.1 and rustls-webpki 0.103.15, and replaces the yanked chacha20 0.10.0 with 0.10.2. A plain `cargo update -p rustls` stops at 0.23.43; downstream lockfiles need `cargo update -p rustls --precise 0.23.45`.
+
+### Changed
+
+- **Crate homepages, the README and the docs header point at qail.rs.** `dev.qail.io` redirects there; the MCP endpoint stays `https://dev.qail.io/mcp`.
+
 ## [2.0.2] - 2026-09-05
 
 ### Added

@@ -4,7 +4,15 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.2)
+## Current Highlights (v2.0.3)
+
+- **N+1 analyzer precision**: lifetimes and loop labels no longer blank the code after them; exec calls with wrapped arguments, rustfmt-split iterator chains and one-line iterator closures are analyzed; a closure-free `.map(fn)` no longer opens a phantom loop.
+- **Paced loops wait on their own path**: only a directly awaited `.tick()`/`sleep(..)` or a `select!` whose arms are all `_` with one timer, at the loop body's top level, exempts a bare `loop`; a backoff-branch sleep or a data-driven `select!` arm no longer does.
+- **Array columns in `qail migrate apply`**: post-apply verification matches arrays on element type instead of the `ARRAY` data type.
+- **rustls 0.23.45**: the workspace lockfile resolves the fix for RUSTSEC-2026-0285.
+- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.3`.
+
+## v2.0.2 Highlights
 
 - **Pool releases scrub session state**: every return path appends `CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; pg_advisory_unlock_all(); DISCARD TEMP; DISCARD SEQUENCES` to the release round trip and clears the client-side notification queue, so session state can no longer cross into the next checkout. Prepared statements survive.
 - **Bounded buffering**: the undrained `LISTEN`/`NOTIFY` queue fails closed at 8192 entries and 16 KB per notification; COPY text export caps a cross-frame row at 16 MB. Overflow desyncs and destroys the connection instead of growing memory.
