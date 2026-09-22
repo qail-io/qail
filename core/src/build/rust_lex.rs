@@ -53,21 +53,39 @@ pub(super) fn consume_rust_literal(bytes: &[u8], start: usize) -> Option<usize> 
     }
 
     if bytes.get(start).copied() == Some(b'\'') {
-        let mut i = start + 1;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
+        return consume_char_literal(bytes, start);
+    }
+
+    None
+}
+
+/// A `'` opens a char literal only as `'x'` (one UTF-8 char) or an escape
+/// (`'\n'`, `'\''`, `'\u{1F600}'`). Anything else is a lifetime or a loop label
+/// (`'a`, `'_`, `'static`, `'outer:`), which is code: read as a literal, it
+/// blanked every line up to the next apostrophe, one inside a later comment
+/// included, and the analyzers never saw the queries in between.
+fn consume_char_literal(bytes: &[u8], start: usize) -> Option<usize> {
+    let body = start + 1;
+    let first = *bytes.get(body)?;
+    if first == b'\\' {
+        // `'\u{10FFFF}'` is the longest escape: its closing quote sits ten
+        // bytes past the backslash.
+        let mut i = body + 2;
+        while i < bytes.len() && i <= body + 10 {
             if bytes[i] == b'\'' {
                 return Some(i + 1);
             }
             i += 1;
         }
-        return Some(bytes.len());
+        return None;
     }
-
-    None
+    let width = match first {
+        0xF0..=0xFF => 4,
+        0xE0..=0xEF => 3,
+        0xC0..=0xDF => 2,
+        _ => 1,
+    };
+    (bytes.get(body + width).copied() == Some(b'\'')).then_some(body + width + 1)
 }
 
 pub(super) fn mask_non_code(source: &str) -> String {
@@ -179,5 +197,34 @@ let ok = 1;
         assert!(!masked.contains("query_as!"));
         assert!(!masked.contains("Qail::raw_sql"));
         assert!(masked.contains("let ok = 1;"));
+    }
+
+    #[test]
+    fn lifetimes_and_labels_do_not_mask_following_code() {
+        let src = r#"
+fn day<'a>(scope: DayScope<'_>, name: &'a str) -> Qail {
+    'outer: loop {
+        conn.fetch_all(&cmd);
+        break 'outer;
+    }
+}
+// the caller's own orders
+let visible = 1;
+"#;
+        let masked = mask_non_code(src);
+        assert!(masked.contains("conn.fetch_all(&cmd);"), "{masked}");
+        assert!(masked.contains("'outer: loop {"), "{masked}");
+        assert!(masked.contains("let visible = 1;"), "{masked}");
+        assert!(!masked.contains("caller"), "{masked}");
+    }
+
+    #[test]
+    fn char_literals_stay_masked() {
+        let src = r#"let a = 'x'; let b = '\''; let c = '"'; let d = 'é'; let e = b'q'; let f = '\u{1F600}'; let tail = 1;"#;
+        let masked = mask_non_code(src);
+        for literal in ["'x'", r"'\''", "'\"'", "'é'", "'q'", r"'\u{1F600}'"] {
+            assert!(!masked.contains(literal), "{literal} visible in {masked}");
+        }
+        assert!(masked.contains("let tail = 1;"), "{masked}");
     }
 }

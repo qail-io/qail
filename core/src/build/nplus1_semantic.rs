@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::rust_lex::{
@@ -104,9 +104,39 @@ impl LoopFrame {
     }
 }
 
+/// A loop scope inside one line: an iterator closure with an expression body,
+/// between its parameters and the end of its call.
+#[derive(Debug)]
+struct InlineLoop {
+    /// Byte just past the closure's closing `|`.
+    start: usize,
+    /// Byte of the call's closing `)`, or the end of the line.
+    end: usize,
+    vars: HashSet<String>,
+}
+
+impl InlineLoop {
+    fn contains(&self, pos: usize) -> bool {
+        pos >= self.start && pos < self.end
+    }
+}
+
+/// A closure written as an argument.
+struct ClosureArg<'a> {
+    params: &'a str,
+    /// Byte just past the closing `|`.
+    body_start: usize,
+    /// The body is a block (`|id| {`, `|id| -> T {`).
+    block: bool,
+}
+
 #[derive(Debug)]
 struct PendingLoop {
     vars: HashSet<String>,
+    /// Set when an expression-bodied iterator closure is waiting for a block
+    /// on a later line: the brace depth of the block it sits in. The wait
+    /// ends with its statement or that block, never at an unrelated `{`.
+    closure_scope: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +224,50 @@ const ITER_LOOP_PATTERNS: [&str; 4] = [
 
 const ITER_MAP_LOOP_PATTERNS: [&str; 3] = [".iter().map(", ".iter_mut().map(", ".into_iter().map("];
 
+/// Methods that start an iterator chain.
+const ITER_SOURCES: [&str; 3] = ["iter", "iter_mut", "into_iter"];
+
+/// Chain adaptors whose closure runs once per item.
+const ITER_MAP_ADAPTORS: [&str; 3] = ["map", "filter_map", "flat_map"];
+
+/// Methods whose result is no longer an iterator: a `.map(` after one maps an
+/// `Option`, a collection or a value, not the items.
+const ITER_TERMINALS: [&str; 33] = [
+    "all",
+    "any",
+    "collect",
+    "collect_vec",
+    "count",
+    "find",
+    "find_map",
+    "fold",
+    "for_each",
+    "is_empty",
+    "join",
+    "last",
+    "len",
+    "max",
+    "max_by",
+    "max_by_key",
+    "min",
+    "min_by",
+    "min_by_key",
+    "next",
+    "next_back",
+    "nth",
+    "nth_back",
+    "partition",
+    "peek",
+    "position",
+    "product",
+    "reduce",
+    "rposition",
+    "sum",
+    "try_fold",
+    "try_for_each",
+    "unzip",
+];
+
 /// Detect semantic N+1 patterns in a single Rust source file.
 #[cfg(any(test, feature = "analyzer"))]
 pub(crate) fn detect_n_plus_one_in_file(file: &str, source: &str) -> Vec<NPlusOneDiagnostic> {
@@ -225,13 +299,19 @@ fn detect_n_plus_one_in_source_with_index(
 
     let mut loop_stack: Vec<LoopFrame> = Vec::new();
     let mut pending_loop: Option<PendingLoop> = None;
-    let mut pending_iterator_loop = false;
+    // An iterator loop call whose closure is on a later line: the brace depth
+    // of the block the call sits in.
+    let mut pending_iterator_scope: Option<i32> = None;
+    // Per brace depth: the expression open there is an iterator chain.
+    let mut iter_chains: BTreeMap<i32, bool> = BTreeMap::new();
     let mut brace_depth: i32 = 0;
 
-    for (idx, raw_line) in lines.iter().enumerate() {
+    for idx in 0..lines.len() {
         let code_line = code_lines.get(idx).copied().unwrap_or_default();
         let line_no = idx + 1;
         let trimmed = code_line.trim();
+        let chain_opens = scan_iterator_chains(code_line, brace_depth, &mut iter_chains);
+        let mut inline_loops: Vec<InlineLoop> = Vec::new();
 
         if let Some(pending) = pending_loop.take() {
             if code_line.contains('{') {
@@ -240,16 +320,19 @@ fn detect_n_plus_one_in_source_with_index(
                 let mut frame = LoopFrame::new(brace_depth, pending.vars);
                 frame.has_scheduler_pacing = has_scheduler_pacing;
                 loop_stack.push(frame);
+            } else if pending.closure_scope.is_some() && line_ends_statement(code_line) {
+                // The expression closure's statement ended with no block: there
+                // is no loop body left to find.
             } else {
                 pending_loop = Some(pending);
             }
         }
 
-        if pending_iterator_loop {
+        if pending_iterator_scope.is_some() {
             if let Some(params) = extract_closure_params(trimmed) {
                 let mut vars = HashSet::new();
                 collect_closure_param_idents(params, &mut vars);
-                pending_iterator_loop = false;
+                pending_iterator_scope = None;
                 if code_line.contains('{') {
                     let has_scheduler_pacing =
                         loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
@@ -257,10 +340,19 @@ fn detect_n_plus_one_in_source_with_index(
                     frame.has_scheduler_pacing = has_scheduler_pacing;
                     loop_stack.push(frame);
                 } else {
-                    pending_loop = Some(PendingLoop { vars });
+                    // The expression body on this line runs per item.
+                    inline_loops.extend(leading_inline_loop(code_line));
+                    if !line_ends_statement(code_line) {
+                        // Still open: a block on a later line of the same
+                        // statement is the loop body.
+                        pending_loop = Some(PendingLoop {
+                            vars,
+                            closure_scope: Some(brace_depth),
+                        });
+                    }
                 }
             } else if trimmed.contains(';') {
-                pending_iterator_loop = false;
+                pending_iterator_scope = None;
             }
         }
 
@@ -274,29 +366,62 @@ fn detect_n_plus_one_in_source_with_index(
                 frame.has_scheduler_pacing = has_scheduler_pacing;
                 loop_stack.push(frame);
             } else if is_inline_iterator_closure {
-                // Expression-only iterator closures do not create a block scope.
-                // Keeping them pending makes the next unrelated `{ ... }` look
-                // like the closure body and causes false N+1 diagnostics.
+                // No block scope: a pending frame would adopt the next
+                // unrelated `{`. The closure body is a loop scope bounded by
+                // its call on this line instead.
+                inline_loops =
+                    inline_loops_for(code_line, &iterator_call_opens(code_line, &chain_opens));
             } else {
                 pending_loop = Some(PendingLoop {
                     vars: work_loop_vars,
+                    closure_scope: None,
                 });
+            }
+        } else if !chain_opens.is_empty() {
+            // A map on an iterator chain the fixed patterns cannot see: split
+            // over lines, or past other adaptors.
+            let mut block_vars: Option<HashSet<String>> = None;
+            for &open in &chain_opens {
+                let unclosed = find_matching_paren_at(code_line, open).is_none();
+                match closure_at(code_line, open + 1) {
+                    Some(closure) if closure.block => {
+                        block_vars.get_or_insert_with(|| {
+                            let mut vars = HashSet::new();
+                            collect_closure_param_idents(closure.params, &mut vars);
+                            vars
+                        });
+                    }
+                    Some(closure) => {
+                        if unclosed {
+                            let mut vars = HashSet::new();
+                            collect_closure_param_idents(closure.params, &mut vars);
+                            pending_loop = Some(PendingLoop {
+                                vars,
+                                closure_scope: Some(brace_depth),
+                            });
+                        }
+                        inline_loops.extend(inline_loops_for(code_line, &[open]));
+                    }
+                    None if unclosed => pending_iterator_scope = Some(brace_depth),
+                    None => {}
+                }
+            }
+            if let Some(vars) = block_vars {
+                let has_scheduler_pacing =
+                    loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
+                let mut frame = LoopFrame::new(brace_depth, vars);
+                frame.has_scheduler_pacing = has_scheduler_pacing;
+                loop_stack.push(frame);
             }
         } else if starts_iterator_loop(trimmed)
             && extract_closure_params(trimmed).is_none()
             && !trimmed.contains(';')
         {
-            pending_iterator_loop = true;
+            pending_iterator_scope = Some(brace_depth);
         }
 
         let work_depth = loop_stack.len();
         if work_depth > 0 {
-            if line_has_scheduler_pacing(trimmed)
-                && let Some(frame) = loop_stack.last_mut()
-            {
-                frame.has_scheduler_pacing = true;
-            }
-
             let loop_vars = active_loop_vars(&loop_stack);
             let scheduler_loop_context = work_depth == 1
                 && loop_stack
@@ -365,49 +490,31 @@ fn detect_n_plus_one_in_source_with_index(
                 frame.query_bindings.insert(var_name, binding);
             }
 
-            if let Some(exec) = find_exec_call(raw_line) {
-                let arg_shape = parse_qail_chain_shape(&exec.first_arg, &loop_vars);
-                let matched_binding =
-                    find_binding_for_arg(&loop_stack, &exec.first_arg).filter(|binding| {
-                        arg_shape
-                            .as_ref()
-                            .is_none_or(|shape| binding_matches_arg_shape(binding, shape))
-                    });
-
-                let batched = matched_binding
-                    .as_ref()
-                    .map(|b| b.batched)
-                    .or_else(|| arg_shape.as_ref().map(|s| s.batched))
-                    .unwrap_or_else(|| is_batched_expr(&exec.first_arg));
-                let prebuilt_command = matched_binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.prebuilt_command)
-                    || is_loop_command_replay_arg(&loop_vars, &exec.first_arg);
-
-                if !batched && !prebuilt_command {
-                    let uses_loop_var = matched_binding
-                        .as_ref()
-                        .map(|b| b.uses_loop_var)
-                        .or_else(|| arg_shape.as_ref().map(|s| s.uses_loop_var))
-                        .unwrap_or_else(|| any_loop_var_in_text(&loop_vars, &exec.first_arg));
-                    if !scheduler_loop_context || uses_loop_var {
-                        emit_query_loop_diag(
-                            &mut out,
-                            &mut seen,
-                            file,
-                            line_no,
-                            exec.column,
-                            work_depth,
-                            uses_loop_var,
-                        );
-                    }
-                }
+            // A call inside a one-line iterator closure is judged below, one
+            // loop deeper.
+            if let Some(exec) = find_exec_call_spanning(&lines, idx)
+                && !inline_loops.iter().any(|l| l.contains(exec.column - 1))
+                && let Some(uses_loop_var) = unbatched_exec(&exec, &loop_stack, &loop_vars)
+                && (!scheduler_loop_context || uses_loop_var)
+            {
+                emit_query_loop_diag(
+                    &mut out,
+                    &mut seen,
+                    file,
+                    line_no,
+                    exec.column,
+                    work_depth,
+                    uses_loop_var,
+                );
             }
 
             if let Some(caller_idx) = line_to_fn.get(idx).and_then(|v| *v)
                 && let Some(caller) = index.functions.get(caller_idx)
             {
                 for call in collect_function_calls(code_line) {
+                    if inline_loops.iter().any(|l| l.contains(call.column - 1)) {
+                        continue;
+                    }
                     let resolved = resolve_function_call_targets(caller, &call, index);
                     if !scheduler_loop_context
                         && resolved
@@ -426,6 +533,56 @@ fn detect_n_plus_one_in_source_with_index(
             }
         }
 
+        // One-line iterator closures: a loop one deeper than the frames
+        // around them, never paced.
+        if !inline_loops.is_empty() {
+            let depth = work_depth + 1;
+            let raw = lines[idx];
+            let calls = collect_function_calls(code_line);
+            let caller = line_to_fn
+                .get(idx)
+                .and_then(|v| *v)
+                .and_then(|caller_idx| index.functions.get(caller_idx));
+            for inline in &inline_loops {
+                let mut vars = active_loop_vars(&loop_stack);
+                vars.extend(inline.vars.iter().cloned());
+
+                let mut from = inline.start;
+                while let Some(exec) = raw.get(from..inline.end).and_then(find_exec_call) {
+                    let column = from + exec.column;
+                    if let Some(uses_loop_var) = unbatched_exec(&exec, &loop_stack, &vars) {
+                        emit_query_loop_diag(
+                            &mut out,
+                            &mut seen,
+                            file,
+                            line_no,
+                            column,
+                            depth,
+                            uses_loop_var,
+                        );
+                    }
+                    from = column;
+                }
+
+                if let Some(caller) = caller {
+                    for call in calls.iter().filter(|c| inline.contains(c.column - 1)) {
+                        if resolve_function_call_targets(caller, call, index)
+                            .iter()
+                            .any(|&target_idx| index.query_executing_functions[target_idx])
+                        {
+                            emit_indirect_query_loop_diag(
+                                &mut out,
+                                &mut seen,
+                                file,
+                                line_no,
+                                call.column,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         brace_depth += brace_delta(code_line);
         while let Some(frame) = loop_stack.last() {
             if brace_depth <= frame.exit_depth {
@@ -434,9 +591,92 @@ fn detect_n_plus_one_in_source_with_index(
                 break;
             }
         }
+        iter_chains.retain(|&depth, _| depth <= brace_depth);
+
+        // A pending iterator call or expression closure cannot outlive its
+        // statement. When the block it sits in closes, the wait carries on
+        // only if the next line continues the method chain (`}).map(|k| {`
+        // split over lines); otherwise the next `{` — a later fn, even —
+        // belongs to other code.
+        if pending_iterator_scope.is_some_and(|scope| brace_depth < scope) {
+            pending_iterator_scope =
+                next_code_line_continues_chain(&code_lines, idx).then_some(brace_depth);
+        }
+        if let Some(pending) = pending_loop.as_mut()
+            && pending
+                .closure_scope
+                .is_some_and(|scope| brace_depth < scope)
+        {
+            if next_code_line_continues_chain(&code_lines, idx) {
+                pending.closure_scope = Some(brace_depth);
+            } else {
+                pending_loop = None;
+            }
+        }
     }
 
     out
+}
+
+/// An exec call in a loop is an N+1 unless its command is batched or a
+/// prebuilt command replayed: `None` then, else whether it depends on a loop
+/// variable.
+fn unbatched_exec(
+    exec: &ExecCall,
+    loop_stack: &[LoopFrame],
+    loop_vars: &HashSet<String>,
+) -> Option<bool> {
+    let arg_shape = parse_qail_chain_shape(&exec.first_arg, loop_vars);
+    let matched_binding = find_binding_for_arg(loop_stack, &exec.first_arg).filter(|binding| {
+        arg_shape
+            .as_ref()
+            .is_none_or(|shape| binding_matches_arg_shape(binding, shape))
+    });
+
+    let batched = matched_binding
+        .as_ref()
+        .map(|b| b.batched)
+        .or_else(|| arg_shape.as_ref().map(|s| s.batched))
+        .unwrap_or_else(|| is_batched_expr(&exec.first_arg));
+    let prebuilt_command = matched_binding
+        .as_ref()
+        .is_some_and(|binding| binding.prebuilt_command)
+        || is_loop_command_replay_arg(loop_vars, &exec.first_arg);
+    if batched || prebuilt_command {
+        return None;
+    }
+
+    Some(
+        matched_binding
+            .as_ref()
+            .map(|b| b.uses_loop_var)
+            .or_else(|| arg_shape.as_ref().map(|s| s.uses_loop_var))
+            .unwrap_or_else(|| any_loop_var_in_text(loop_vars, &exec.first_arg)),
+    )
+}
+
+/// The next code line after `idx` continues a method chain (`.map(`).
+fn next_code_line_continues_chain(code_lines: &[&str], idx: usize) -> bool {
+    code_lines
+        .iter()
+        .skip(idx + 1)
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with('.') && !line.starts_with(".."))
+}
+
+/// The line ends a statement: a `;` outside every bracket the line opens.
+fn line_ends_statement(code_line: &str) -> bool {
+    let mut depth = 0i32;
+    for ch in code_line.chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ';' if depth <= 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn binding_matches_arg_shape(binding: &QueryBinding, arg_shape: &QueryShape) -> bool {
@@ -1123,29 +1363,38 @@ fn parse_work_loop_vars(trimmed_line: &str) -> Option<HashSet<String>> {
         .or_else(|| parse_iterator_loop_vars(trimmed_line))
 }
 
-fn line_has_scheduler_pacing(trimmed_line: &str) -> bool {
-    let line = trimmed_line.trim();
-    if line.is_empty() {
-        return false;
+/// Byte positions of timer calls the line awaits directly: `.tick().await`,
+/// `sleep(..).await`, `sleep_until(..).await`. An `.await` elsewhere on the
+/// line (a handler in a one-line `select!`) is not the timer's.
+fn awaited_timer_positions(line: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for name in [".tick(", "sleep(", "sleep_until("] {
+        for (pos, found) in line.match_indices(name) {
+            let joined_to_ident = !name.starts_with('.')
+                && line[..pos].chars().next_back().is_some_and(is_ident_char);
+            if joined_to_ident {
+                continue;
+            }
+            let open = pos + found.len() - 1;
+            if find_matching_paren_at(line, open)
+                .is_some_and(|close| line[close + 1..].trim_start().starts_with(".await"))
+            {
+                out.push(pos);
+            }
+        }
     }
-
-    let has_tick_await =
-        line.contains(".tick().await") || (line.contains(".tick(") && line.contains(".await"));
-    let has_sleep_await = (line.contains("tokio::time::sleep(")
-        || line.contains("tokio::time::sleep_until(")
-        || line.starts_with("sleep(")
-        || line.contains(" sleep("))
-        && line.contains(".await");
-
-    has_tick_await || has_sleep_await
+    out
 }
 
+/// Only a wait on the loop's own path paces it: on a line at the loop body's
+/// top level, outside any block the line opens. A sleep in an `if`, a `match`
+/// arm or an `else` runs on some iterations, and the rest run back to back.
 fn loop_block_has_scheduler_pacing(code_lines: &[&str], start_idx: usize, exit_depth: i32) -> bool {
+    let body_depth = exit_depth + 1;
     let mut depth = exit_depth;
 
     for (idx, raw) in code_lines.iter().enumerate().skip(start_idx) {
-        let line = raw.trim();
-        if idx > start_idx && line_has_scheduler_pacing(line) {
+        if idx > start_idx && depth == body_depth && waits_on_loop_path(code_lines, idx) {
             return true;
         }
 
@@ -1156,6 +1405,177 @@ fn loop_block_has_scheduler_pacing(code_lines: &[&str], start_idx: usize, exit_d
     }
 
     false
+}
+
+/// Line `idx` waits on a timer outside every block it opens: a directly
+/// awaited timer call, or a `select!` that is a pure wait.
+fn waits_on_loop_path(code_lines: &[&str], idx: usize) -> bool {
+    let line = code_lines[idx];
+    let unconditional = |pos: usize| brace_delta(&line[..pos]) == 0;
+    awaited_timer_positions(line).into_iter().any(unconditional)
+        || line
+            .find("select!")
+            .is_some_and(|pos| unconditional(pos) && select_at_line_paces(code_lines, idx))
+}
+
+/// Lines read past a `select!` looking for the end of its block.
+const MAX_SELECT_LINES: usize = 200;
+
+/// A `select!` opening on line `idx` paces its loop the way `sleep(..).await`
+/// does only when it is a pure wait: every arm's pattern is `_` and one arm
+/// awaits a timer. An arm that binds what its future yields (`Some(msg) =
+/// rx.recv()`) feeds data into the loop, so the block paces nothing — and
+/// neither does a block this cannot read arm by arm.
+fn select_at_line_paces(code_lines: &[&str], idx: usize) -> bool {
+    let Some(first) = code_lines.get(idx) else {
+        return false;
+    };
+    let Some(pos) = first.find("select!") else {
+        return false;
+    };
+    let mut text = first[pos + "select!".len()..].to_string();
+    for line in code_lines.iter().skip(idx + 1).take(MAX_SELECT_LINES) {
+        text.push('\n');
+        text.push_str(line);
+    }
+    let rest = text.trim_start();
+    if !rest.starts_with('{') {
+        return false;
+    }
+    let mut depth = 0i32;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return select_block_paces(&rest[1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn select_block_paces(body: &str) -> bool {
+    let mut has_timer = false;
+    for arm in split_select_arms(body) {
+        let arm = arm.trim();
+        if arm.is_empty() || arm == "biased" {
+            continue;
+        }
+        let Some(arrow) = find_top_level_arrow(arm) else {
+            return false;
+        };
+        let head = arm[..arrow].trim();
+        if head == "else" {
+            continue;
+        }
+        let Some(eq) = find_top_level_assign(head) else {
+            return false;
+        };
+        if head[..eq].trim() != "_" {
+            return false;
+        }
+        has_timer |= line_has_timer_future(&head[eq + 1..]);
+    }
+    has_timer
+}
+
+/// The arms of a `select!` body: split at top-level `,` and `;` (`biased;`),
+/// and after a handler block, but not at the `, if` of an arm's guard.
+fn split_select_arms(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut arms = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut seen_arrow = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 && seen_arrow {
+                    arms.push(&body[start..=i]);
+                    start = i + 1;
+                    seen_arrow = false;
+                }
+            }
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => {
+                seen_arrow = true;
+                i += 1;
+            }
+            b',' | b';' if depth == 0 => {
+                let guard_follows = bytes[i] == b','
+                    && body[i + 1..]
+                        .trim_start()
+                        .strip_prefix("if")
+                        .is_some_and(|after| {
+                            after.starts_with(|c: char| c.is_whitespace() || c == '(')
+                        });
+                if !guard_follows {
+                    arms.push(&body[start..i]);
+                    start = i + 1;
+                    seen_arrow = false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    arms.push(&body[start..]);
+    arms
+}
+
+fn find_top_level_arrow(arm: &str) -> Option<usize> {
+    let bytes = arm.as_bytes();
+    let mut depth = 0i32;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `=` between an arm's pattern and its future: top level, and not part
+/// of `==`, `!=`, `<=`, `>=`, `=>` or a compound assignment.
+fn find_top_level_assign(head: &str) -> Option<usize> {
+    let bytes = head.as_bytes();
+    let mut depth = 0i32;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'=' if depth == 0 => {
+                let prev = i.checked_sub(1).map(|p| bytes[p]);
+                let next = bytes.get(i + 1).copied();
+                let joined_before = prev.is_some_and(|p| b"=!<>+-*/%&|^".contains(&p));
+                let joined_after = matches!(next, Some(b'=') | Some(b'>'));
+                if !joined_before && !joined_after {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A timer future as a `select!` arm names it: `interval.tick()`,
+/// `tokio::time::sleep(..)`, `sleep_until(..)`.
+fn line_has_timer_future(line: &str) -> bool {
+    line.contains(".tick()")
+        || line.contains("tokio::time::sleep(")
+        || line.contains("sleep_until(")
+        || line.trim_start().starts_with("sleep(")
+        || line.contains(" sleep(")
 }
 
 fn parse_for_loop_vars(trimmed_line: &str) -> Option<HashSet<String>> {
@@ -1215,6 +1635,218 @@ fn starts_iterator_loop(trimmed_line: &str) -> bool {
 fn contains_iterator_loop_pattern(line: &str) -> bool {
     ITER_LOOP_PATTERNS.iter().any(|pat| line.contains(pat))
         || ITER_MAP_LOOP_PATTERNS.iter().any(|pat| line.contains(pat))
+}
+
+/// One line's pass over method chains. `chains` holds, per brace depth,
+/// whether the expression open at that depth is an iterator chain: a source
+/// (`.iter()`, `.iter_mut()`, `.into_iter()`) was called and no terminal
+/// since. It carries over lines, so a chain rustfmt splits (`ids` / `.iter()`
+/// / `.map(|id| {`) or runs through other adaptors (`.filter(..)`) is still
+/// one chain. Returns the byte of the `(` of each map-like call (`.map(`,
+/// `.filter_map(`, `.flat_map(`) made on an iterator chain.
+fn scan_iterator_chains(
+    code_line: &str,
+    start_depth: i32,
+    chains: &mut BTreeMap<i32, bool>,
+) -> Vec<usize> {
+    let trimmed = code_line.trim_start();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if !trimmed.starts_with(['.', ')', ']', '}']) {
+        // Not a continuation: a new expression starts at this depth.
+        chains.insert(start_depth, false);
+    }
+
+    let bytes = code_line.as_bytes();
+    let mut depth = start_depth;
+    // The chain state of each `(`/`[` opened on this line; outside them the
+    // brace depth's entry holds it.
+    let mut groups: Vec<bool> = Vec::new();
+    let mut opens = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                depth += 1;
+                chains.insert(depth, false);
+            }
+            b'}' => {
+                chains.remove(&depth);
+                depth -= 1;
+            }
+            b'(' | b'[' => groups.push(false),
+            b')' | b']' => {
+                groups.pop();
+            }
+            b';' | b',' => set_chain_state(&mut groups, chains, depth, false),
+            b'=' => {
+                let prev = i.checked_sub(1).map(|p| bytes[p]);
+                let next = bytes.get(i + 1).copied();
+                let comparison = next == Some(b'=') || prev.is_some_and(|p| b"=!<>".contains(&p));
+                if !comparison {
+                    // An assignment or a match arm: a new expression starts.
+                    set_chain_state(&mut groups, chains, depth, false);
+                }
+            }
+            b'.' => {
+                if let Some((name, open)) = method_call_at(code_line, i) {
+                    let active = groups
+                        .last()
+                        .copied()
+                        .unwrap_or_else(|| chains.get(&depth).copied().unwrap_or(false));
+                    if ITER_SOURCES.contains(&name.as_str()) {
+                        set_chain_state(&mut groups, chains, depth, true);
+                    } else if ITER_TERMINALS.contains(&name.as_str()) {
+                        set_chain_state(&mut groups, chains, depth, false);
+                    } else if active && ITER_MAP_ADAPTORS.contains(&name.as_str()) {
+                        opens.push(open);
+                    }
+                    i = open;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    opens
+}
+
+fn set_chain_state(
+    groups: &mut [bool],
+    chains: &mut BTreeMap<i32, bool>,
+    depth: i32,
+    iterator: bool,
+) {
+    match groups.last_mut() {
+        Some(state) => *state = iterator,
+        None => {
+            chains.insert(depth, iterator);
+        }
+    }
+}
+
+/// The method called at the `.` at byte `dot` (`.name(` or `.name::<T>(`),
+/// with the byte of its `(`. A field access, `.await` or a range is not one.
+fn method_call_at(line: &str, dot: usize) -> Option<(String, usize)> {
+    let bytes = line.as_bytes();
+    if bytes.get(dot + 1) == Some(&b'.') || (dot > 0 && bytes[dot - 1] == b'.') {
+        return None;
+    }
+    let start = skip_ws_at(line, dot + 1);
+    let first = *bytes.get(start)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let name = parse_ident_at(line, start)?;
+    let mut cursor = skip_optional_turbofish(line, start + name.len());
+    cursor = skip_ws_at(line, cursor);
+    (bytes.get(cursor) == Some(&b'(')).then_some((name, cursor))
+}
+
+/// The closure written as the argument starting at byte `arg_start`, if the
+/// argument is one (`|id| ..`, `move |id| ..`, `async move |id| ..`).
+fn closure_at(line: &str, arg_start: usize) -> Option<ClosureArg<'_>> {
+    let mut cursor = skip_ws_at(line, arg_start);
+    for keyword in ["async ", "move "] {
+        if line
+            .get(cursor..)
+            .is_some_and(|rest| rest.starts_with(keyword))
+        {
+            cursor = skip_ws_at(line, cursor + keyword.len());
+        }
+    }
+    if line.as_bytes().get(cursor) != Some(&b'|') {
+        return None;
+    }
+    let params_start = cursor + 1;
+    let close_bar = params_start + line.get(params_start..)?.find('|')?;
+    let body_start = close_bar + 1;
+    let body = line.get(body_start..)?.trim_start();
+    Some(ClosureArg {
+        params: &line[params_start..close_bar],
+        body_start,
+        block: body.starts_with('{') || body.starts_with("->"),
+    })
+}
+
+/// The `(` of every iterator loop call on the line: the fixed patterns
+/// (`.for_each(`, `.iter().map(`, …) and the map-like calls the chain pass
+/// found.
+fn iterator_call_opens(code_line: &str, chain_opens: &[usize]) -> Vec<usize> {
+    let mut opens: Vec<usize> = ITER_LOOP_PATTERNS
+        .iter()
+        .chain(ITER_MAP_LOOP_PATTERNS.iter())
+        .flat_map(|pat| {
+            code_line
+                .match_indices(pat)
+                .map(|(pos, found)| pos + found.len() - 1)
+        })
+        .chain(chain_opens.iter().copied())
+        .collect();
+    opens.sort_unstable();
+    opens.dedup();
+    opens
+}
+
+/// The iterator closures on the line with an expression body: each is a loop
+/// scope from its parameters to the end of its call — to the end of the line
+/// when the call closes on a later one.
+fn inline_loops_for(code_line: &str, opens: &[usize]) -> Vec<InlineLoop> {
+    opens
+        .iter()
+        .filter_map(|&open| {
+            let closure = closure_at(code_line, open + 1)?;
+            if closure.block {
+                return None;
+            }
+            let mut vars = HashSet::new();
+            collect_closure_param_idents(closure.params, &mut vars);
+            Some(InlineLoop {
+                start: closure.body_start,
+                end: find_matching_paren_at(code_line, open).unwrap_or(code_line.len()),
+                vars,
+            })
+        })
+        .collect()
+}
+
+/// The expression-bodied closure a line starts with, as a loop scope up to
+/// where its argument ends on the line (a `,` or the call's `)`).
+fn leading_inline_loop(code_line: &str) -> Option<InlineLoop> {
+    let first = code_line.len() - code_line.trim_start().len();
+    let closure = closure_at(code_line, first)?;
+    if closure.block {
+        return None;
+    }
+    let mut vars = HashSet::new();
+    collect_closure_param_idents(closure.params, &mut vars);
+    let bytes = code_line.as_bytes();
+    let mut depth = 0i32;
+    let mut end = code_line.len();
+    for (i, &b) in bytes.iter().enumerate().skip(closure.body_start) {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    Some(InlineLoop {
+        start: closure.body_start,
+        end,
+        vars,
+    })
 }
 
 fn strip_loop_label(trimmed_line: &str) -> &str {
@@ -2065,6 +2697,34 @@ struct ExecCall {
     column: usize,
     column_offset: usize,
     first_arg: String,
+    /// The argument list closes in the scanned text. When the call wraps its
+    /// arguments onto later lines, `first_arg` holds only what the text has.
+    args_closed: bool,
+}
+
+/// Lines read past a wrapped exec call looking for its closing paren.
+const MAX_WRAPPED_ARG_LINES: usize = 40;
+
+/// `find_exec_call` on line `idx`, reading a wrapped argument list
+/// (`conn.fetch_all(\n    &cmd,\n)`) across the lines after it, so the
+/// first argument's shape — batched, loop-dependent — is judged whole.
+fn find_exec_call_spanning(lines: &[&str], idx: usize) -> Option<ExecCall> {
+    let line = lines.get(idx)?;
+    let call = find_exec_call(line)?;
+    if call.args_closed {
+        return Some(call);
+    }
+    let mut text = (*line).to_string();
+    for next in lines.iter().skip(idx + 1).take(MAX_WRAPPED_ARG_LINES) {
+        text.push('\n');
+        text.push_str(next);
+        if let Some(whole) = find_exec_call(&text)
+            && whole.args_closed
+        {
+            return Some(whole);
+        }
+    }
+    Some(call)
 }
 
 fn find_exec_call(line: &str) -> Option<ExecCall> {
@@ -2119,8 +2779,12 @@ fn find_exec_call(line: &str) -> Option<ExecCall> {
             continue;
         }
 
-        let close = find_matching_paren_at(line, cursor)?;
-        let args = line.get(cursor + 1..close).unwrap_or_default();
+        // An argument list that wraps onto the next line is still a call:
+        // giving up here left every rustfmt-wrapped `fetch_all(` unseen.
+        let (args, args_closed) = match find_matching_paren_at(line, cursor) {
+            Some(close) => (line.get(cursor + 1..close).unwrap_or_default(), true),
+            None => (line.get(cursor + 1..).unwrap_or_default(), false),
+        };
         let first_arg = split_top_level(args, ',')
             .first()
             .copied()
@@ -2132,6 +2796,7 @@ fn find_exec_call(line: &str) -> Option<ExecCall> {
             column: i + 1,
             column_offset: i + 1,
             first_arg,
+            args_closed,
         });
     }
 
@@ -3153,5 +3818,612 @@ async fn apply_commands(conn: &Conn, versions: Vec<String>) {
             diags.iter().any(|d| d.code == NPlusOneCode::N1002),
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn lifetime_in_signature_does_not_hide_later_query_loop() {
+        let source = r#"
+fn day_query(scope: DayScope<'_>, key: &str) -> Qail {
+    Qail::get("orders").eq("key", key)
+}
+
+// The caller's orders: its own, plus the admitted ones.
+async fn read_day(conn: &Conn, ids: Vec<String>, scope: DayScope<'_>) {
+    for id in ids {
+        let cmd = Qail::get("orders").eq("id", id.as_str());
+        let _ = conn.fetch_all(&cmd).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn pure_builder_with_lifetime_is_not_query_executing() {
+        let source = r#"
+fn day_query(scope: DayScope<'_>, key: &str) -> Qail {
+    Qail::get("orders").eq("key", key)
+}
+
+// The caller's orders.
+async fn read_day(conn: &Conn, ids: Vec<String>, scope: DayScope<'_>) {
+    // caller's own rows first
+    let mut rows = Vec::new();
+    for key in ["travel_date", "return_travel_date"] {
+        let cmd = day_query(scope, key).in_vals("id", ids.clone());
+        rows.extend(conn.fetch_all(&cmd).await);
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            !diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn closure_free_iter_map_tail_does_not_open_a_loop() {
+        let source = r#"
+async fn operated(conn: &Conn) -> Result<Vec<Row>, String> {
+    let rows = conn.fetch_all(&Qail::get("routes")).await?;
+    Ok(rows.iter().map(route_row).collect())
+}
+
+struct Topology {
+    routes: Vec<Row>,
+}
+
+impl Topology {
+    fn operator_of(&self, id: &str) -> Option<&str> {
+        self.routes.iter().find(|r| r.id == id).map(|r| r.tenant.as_str())
+    }
+}
+
+async fn read_topology(conn: &Conn) {
+    let _ = operated(conn).await;
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn closure_free_iter_map_argument_does_not_open_a_loop() {
+        let source = r#"
+async fn lock_rows(conn: &Conn, ids: Vec<String>) -> Result<usize, String> {
+    let cmd = Qail::get("inventory")
+        .in_vals("segment_id", ids.iter().map(String::as_str))
+        .for_update()
+        .map_err(|e| format!("lock build: {e}"))?;
+    let rows = conn.fetch_all(&cmd).await.map_err(|e| format!("lock: {e}"))?;
+    Ok(rows.len())
+}
+
+async fn active_orders(conn: &Conn, odyssey_id: &str) -> Result<Vec<Row>, String> {
+    let cmd = Qail::get("connections").eq("odyssey_id", odyssey_id);
+    let rows = conn
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| format!("connections: {e}"))?;
+    Ok(rows)
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn multiline_expression_closure_does_not_capture_a_later_block() {
+        let source = r#"
+async fn load(conn: &Conn) {
+    let _ = conn.fetch_all(&Qail::get("users")).await;
+}
+
+async fn demo(conn: &Conn, ids: Vec<String>, compact: bool) {
+    let names: Vec<String> = ids.iter().map(
+        |id| id.to_uppercase()
+    ).collect();
+    if compact {
+        load(conn).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn ignores_query_calls_in_select_tick_paced_loop() {
+        let source = r#"
+async fn dispatch_tick(conn: &Conn) {
+    let _ = conn.fetch_all(&Qail::get("outbox")).await;
+}
+
+async fn worker(conn: &Conn, wake: &Notify) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        let from_timer = tokio::select! {
+            _ = interval.tick() => true,
+            _ = wake.notified() => false,
+        };
+        dispatch_tick(conn).await;
+        if from_timer {
+            dispatch_tick(conn).await;
+        }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn ignores_query_calls_in_select_sleep_paced_loop() {
+        let source = r#"
+async fn sweep(conn: &Conn) {
+    let _ = conn.fetch_all(&Qail::get("holds")).await;
+}
+
+async fn worker(conn: &Conn, stop: &Notify) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = stop.notified() => return,
+        }
+        sweep(conn).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn select_loop_without_timer_arm_still_flags() {
+        let source = r#"
+async fn save(conn: &Conn) {
+    let _ = conn.fetch_all(&Qail::get("events")).await;
+}
+
+async fn consume(conn: &Conn, rx: &mut Receiver<Event>, stop: &Notify) {
+    loop {
+        tokio::select! {
+            _ = rx.recv() => {}
+            _ = stop.notified() => return,
+        }
+        save(conn).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn select_loop_with_data_arm_and_timer_still_flags() {
+        let source = r#"
+async fn handle(conn: &Conn, msg: Msg) {
+    let _ = conn.fetch_all(&Qail::get("events").eq("id", msg.id)).await;
+}
+
+async fn consume(conn: &Conn, rx: &mut Receiver<Msg>) {
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            Some(msg) = rx.recv() => {
+                handle(conn, msg).await;
+            }
+            _ = heartbeat.tick() => {}
+        }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn biased_select_with_guarded_timer_arm_paces_the_loop() {
+        let source = r#"
+async fn sweep(conn: &Conn) {
+    let _ = conn.fetch_all(&Qail::get("holds")).await;
+}
+
+async fn worker(conn: &Conn, shutdown: &Notify, ready: bool) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => return,
+            _ = interval.tick(), if ready => {}
+        }
+        sweep(conn).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn closure_chained_after_function_map_still_flags() {
+        let source = r#"
+async fn demo(conn: &Conn, ids: Vec<i64>) {
+    let rows = ids.iter().map(to_key)
+        .map(|key| {
+            conn.fetch_all(&Qail::get("t").eq("k", key))
+        })
+        .collect::<Vec<_>>();
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn closure_chained_after_a_closed_block_still_flags() {
+        let source = r#"
+async fn demo(conn: &Conn, data: Vec<Group>) {
+    let rows = data.iter().map(|d| {
+        d.items.iter().map(to_key)
+    })
+    .map(|k| {
+        conn.fetch_all(&Qail::get("t").eq("k", k))
+    })
+    .collect::<Vec<_>>();
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn closure_block_on_the_line_after_its_params_still_flags() {
+        let source = r#"
+fn demo(conn: &Conn, ids: Vec<i64>) {
+    ids.iter().for_each(
+        |id|
+        {
+            let cmd = Qail::get("users").eq("id", *id);
+            let _ = conn.fetch_all(&cmd);
+        }
+    );
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn expression_closure_opening_a_block_later_still_flags() {
+        let source = r#"
+fn demo(conn: &Conn, ids: Vec<i64>) {
+    ids.iter().for_each(
+        |id| lookup(*id)
+            .map(|row| {
+                let cmd = Qail::del("t").eq("id", row);
+                let _ = conn.fetch_all(&cmd);
+            })
+    );
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1001),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn rustfmt_split_iterator_chain_is_a_loop() {
+        let source = r#"
+async fn demo(conn: &Conn, ids: Vec<i64>) {
+    let rows = ids
+        .iter()
+        .map(|id| {
+            conn.fetch_one(&Qail::get("t").eq("id", *id))
+        })
+        .collect::<Vec<_>>();
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn iterator_chain_through_other_adaptors_is_a_loop() {
+        let source = r#"
+async fn demo(conn: &Conn, orders: Vec<Order>) {
+    let rows = orders
+        .iter()
+        .filter(|o| o.is_paid())
+        .map(|order| {
+            conn.fetch_one(&Qail::get("t").eq("id", order.id))
+        })
+        .collect::<Vec<_>>();
+    let more = orders.iter().filter(|o| o.is_paid()).map(|order| {
+        conn.fetch_one(&Qail::get("t").eq("id", order.id))
+    });
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        let lines: Vec<usize> = diags
+            .iter()
+            .filter(|d| d.code == NPlusOneCode::N1002)
+            .map(|d| d.line)
+            .collect();
+        assert_eq!(lines, vec![7, 11], "{diags:?}");
+    }
+
+    #[test]
+    fn option_map_after_an_iterator_terminal_is_not_a_loop() {
+        let source = r#"
+async fn demo(conn: &Conn, ids: Vec<i64>, rows: Vec<Row>) {
+    let first = ids
+        .iter()
+        .find(|id| **id > 0)
+        .map(|id| {
+            conn.fetch_one(&Qail::get("t").eq("id", *id))
+        });
+    let next = ids.iter().next().map(|id| {
+        conn.fetch_one(&Qail::get("t").eq("id", *id))
+    });
+    let top = rows.first().map(|row| {
+        conn.fetch_one(&Qail::get("t").eq("id", row.id))
+    });
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn inline_iterator_closure_calling_a_query_helper_flags() {
+        let source = r#"
+async fn load(conn: &Conn, id: i64) -> Row {
+    conn.fetch_one(&Qail::get("t").eq("id", id)).await
+}
+
+async fn demo(conn: &Conn, ids: Vec<i64>) {
+    let rows = join_all(ids.iter().map(|id| load(conn, *id))).await;
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn inline_iterator_closure_executing_a_query_flags() {
+        let source = r#"
+async fn demo(conn: &Conn, ids: Vec<i64>) {
+    let rows = join_all(ids.iter().map(|id| conn.fetch_one(&Qail::get("t").eq("id", *id)))).await;
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn inline_closure_building_ids_for_one_batched_query_is_clean() {
+        let source = r#"
+async fn load_users(conn: &Conn, ids: &[String]) -> Vec<Row> {
+    conn.fetch_all(&Qail::get("users").in_vals("id", ids)).await
+}
+
+async fn demo(conn: &Conn, rows: Vec<Row>) {
+    let users = load_users(conn, &rows.iter().map(|r| r.text(0)).collect::<Vec<_>>()).await;
+    let direct = conn.fetch_all(&Qail::get("users").in_vals("id", rows.iter().map(|r| r.text(0)).collect::<Vec<_>>())).await;
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn sleep_in_a_backoff_branch_does_not_pace_the_loop() {
+        let source = r#"
+async fn handle(conn: &Conn, m: Msg) {
+    let _ = conn.fetch_all(&Qail::get("t").eq("id", m.id)).await;
+}
+
+async fn consume(conn: &Conn, rx: &mut Receiver<Msg>) {
+    loop {
+        match rx.recv().await {
+            Some(m) => handle(conn, m).await,
+            None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+        }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn sleep_inside_an_if_on_one_line_does_not_pace_the_loop() {
+        let source = r#"
+async fn drain(conn: &Conn) -> usize {
+    conn.fetch_all(&Qail::get("jobs")).await.len()
+}
+
+async fn worker(conn: &Conn) {
+    loop {
+        let n = drain(conn).await;
+        if n == 0 { tokio::time::sleep(std::time::Duration::from_secs(5)).await; }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn sleep_after_each_claimed_job_paces_the_loop() {
+        let source = r#"
+async fn claim_next_job(conn: &Conn) -> Option<Job> {
+    let rows = conn.fetch_all(&Qail::get("jobs").limit(1)).await;
+    rows.first().map(to_job)
+}
+
+async fn process_job(conn: &Conn, job: Job) {
+    let _ = conn.fetch_all(&Qail::set("jobs").eq("id", job.id)).await;
+}
+
+async fn drain_due_jobs(conn: &Conn) {
+    loop {
+        let job = match claim_next_job(conn).await {
+            Some(job) => job,
+            None => break,
+        };
+        process_job(conn, job).await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn one_line_select_with_a_data_arm_is_not_paced_by_its_tick() {
+        let source = r#"
+async fn handle(conn: &Conn, m: Msg) {
+    let _ = conn.fetch_all(&Qail::get("t").eq("id", m.id)).await;
+}
+
+async fn worker(conn: &Conn, rx: &mut Receiver<Msg>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        tokio::select! { Some(m) = rx.recv() => handle(conn, m).await, _ = interval.tick() => {} }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn detects_helper_whose_exec_call_wraps_its_arguments() {
+        let source = r#"
+async fn claim(conn: &Conn, lane: i64) {
+    let _ = conn
+        .fetch_all(
+            &Qail::get("lanes")
+                .eq("id", lane)
+                .for_update_skip_locked(),
+        )
+        .await;
+}
+
+async fn run(conn: &Conn, lanes: Vec<i64>) {
+    for lane in lanes {
+        claim(conn, lane).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn detects_loop_dependent_exec_call_with_wrapped_arguments() {
+        let source = r#"
+async fn demo(conn: &Conn, ids: Vec<i64>) {
+    for id in ids {
+        let _ = conn.fetch_all(
+            &Qail::get("users").eq("id", id),
+        ).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_batched_exec_call_with_wrapped_arguments() {
+        let source = r#"
+async fn demo(conn: &Conn, groups: Vec<Vec<i64>>) {
+    for chunk in groups {
+        let _ = conn.fetch_all(
+            // one batch per group
+            &Qail::get("users").in_vals("id", chunk),
+        ).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(diags.is_empty(), "{diags:?}");
     }
 }
