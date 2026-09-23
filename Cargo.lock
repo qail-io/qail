@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "chrono",
  "nom",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "qail-gateway"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2167,7 +2167,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "qail-core",
  "serde",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "qail-mcp"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "qail-core",
  "serde_json",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "base64",
  "bytes",
@@ -2213,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "qail-qdrant"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "qail-mcp",
  "wasm-bindgen",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "qail-workflow"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "qail-workflow-postgres"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "async-trait",
  "chrono",

@@ -4,7 +4,12 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.3)
+## Current Highlights (v2.0.4)
+
+- **Linear COPY text export**: `copy_export` and the row-streaming variants parse a frame's rows in place and shift the consumed bytes out once, so a `CopyData` frame of many small rows costs linear time instead of minutes.
+- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.4`.
+
+## v2.0.3 Highlights
 
 - **N+1 analyzer precision**: lifetimes and loop labels no longer blank the code after them; exec calls with wrapped arguments, rustfmt-split iterator chains and one-line iterator closures are analyzed; a closure-free `.map(fn)` no longer opens a phantom loop.
 - **Paced loops wait on their own path**: only a directly awaited `.tick()`/`sleep(..)` or a `select!` whose arms are all `_` with one timer, at the loop body's top level, exempts a bare `loop`; a backoff-branch sleep or a data-driven `select!` arm no longer does.

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] - 2026-09-23
+
+### Fixed
+
+- **COPY text export drains a frame's rows in one pass.** `copy_export` and the row-streaming variants drained their pending buffer after every row, so each row moved everything still buffered: a `CopyData` frame holding many complete rows cost O(bytes × rows), and a 16 MiB frame of short rows took minutes. Rows are now parsed in place and the consumed prefix is shifted out once. A failing row still leaves the rows after it buffered, and only the unterminated tail can exceed the 16 MiB row cap.
+
 ## [2.0.3] - 2026-09-23
 
 ### Fixed
