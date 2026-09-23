@@ -229,12 +229,23 @@ where
     F: FnMut(Vec<String>) -> PgResult<()>,
 {
     pending.extend_from_slice(chunk);
-    while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-        let line = pending[..pos].to_vec();
-        pending.drain(..=pos);
-        let row = parse_copy_text_row(&line)?;
-        on_row(row)?;
-    }
+    // Rows are read in place from a moving offset and the consumed prefix is
+    // shifted out once. Draining after every row moved the whole remaining
+    // buffer each time: quadratic in a frame of many small rows.
+    let mut consumed = 0usize;
+    let result = loop {
+        let Some(len) = pending[consumed..].iter().position(|&b| b == b'\n') else {
+            break Ok(());
+        };
+        let row = parse_copy_text_row(&pending[consumed..consumed + len]);
+        consumed += len + 1;
+        if let Err(e) = row.and_then(&mut *on_row) {
+            break Err(e);
+        }
+    };
+    // A failed row is consumed with the rows before it; the rest stay pending.
+    pending.drain(..consumed);
+    result?;
     // Cap only the residual partial row: CopyData boundaries are arbitrary,
     // so a large frame full of complete newline-terminated rows is legal —
     // only a single row growing across frames without a newline is not.
@@ -946,6 +957,29 @@ mod tests {
 
         let err = drain_copy_text_rows(&mut pending, b"a\tb\n", &mut on_row).unwrap_err();
         assert!(matches!(err, PgError::Query(msg) if msg == "fail"));
+    }
+
+    #[test]
+    fn row_error_consumes_that_row_and_keeps_the_rest_pending() {
+        let mut pending = Vec::new();
+        let mut seen = 0usize;
+        let mut on_row = |_row: Vec<String>| -> PgResult<()> {
+            seen += 1;
+            if seen == 2 {
+                return Err(PgError::Query("second".to_string()));
+            }
+            Ok(())
+        };
+        let err =
+            drain_copy_text_rows(&mut pending, b"a\tb\nc\td\ne\tf\ng", &mut on_row).unwrap_err();
+        assert!(matches!(err, PgError::Query(msg) if msg == "second"));
+        assert_eq!(pending, b"e\tf\ng");
+
+        let mut pending = Vec::new();
+        let mut on_row = |_row: Vec<String>| -> PgResult<()> { Ok(()) };
+        drain_copy_text_rows(&mut pending, b"a\tb\n\\x\nc\td", &mut on_row)
+            .expect_err("an invalid escape must fail the row");
+        assert_eq!(pending, b"c\td");
     }
 
     #[test]
