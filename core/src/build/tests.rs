@@ -1785,6 +1785,33 @@ fn test_extract_columns_condition_builder_surface_methods() {
 }
 
 #[test]
+fn test_projection_aliases_are_valid_only_in_order_by() {
+    let query = r#"Qail::get("orders")
+        .column("tenant_id")
+        .column_expr(count().alias("total_orders"))
+        .column_expr(sum("total_fare").alias("revenue"))
+        .group_by(["tenant_id"])
+        .order_by("total_orders", SortOrder::Desc)
+        .order_desc("revenue")"#;
+    let columns = extract_columns(query);
+    assert!(columns.contains(&"tenant_id".to_string()), "{columns:?}");
+    assert!(columns.contains(&"total_fare".to_string()), "{columns:?}");
+    assert!(!columns.contains(&"total_orders".to_string()), "{columns:?}");
+    assert!(!columns.contains(&"revenue".to_string()), "{columns:?}");
+
+    let with_filter = format!("{query}.eq(\"total_orders\", 3)");
+    assert!(extract_columns(&with_filter).contains(&"total_orders".to_string()));
+
+    let bad_source = r#"Qail::get("orders")
+        .column_expr(sum("revenue").alias("revenue"))
+        .order_asc("revenue")"#;
+    assert!(extract_columns(bad_source).contains(&"revenue".to_string()));
+
+    let bad_order = format!("{query}.order_desc(\"typo\")");
+    assert!(extract_columns(&bad_order).contains(&"typo".to_string()));
+}
+
+#[test]
 fn test_extract_columns_expression_projection_surface_methods() {
     let line = r#"Qail::get("orders")
         .column_expr(col("status").with_alias("order_status"))

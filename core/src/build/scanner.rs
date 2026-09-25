@@ -3264,8 +3264,20 @@ fn extract_columns_with_bindings(
     let calls = scan_chain_method_calls(line);
     let mut columns = Vec::new();
     let mut aliases = HashSet::new();
+    let mut projection_aliases = HashSet::new();
 
     for call in &calls {
+        if matches!(call.name, "column_expr" | "select_expr") {
+            for projection in scan_chain_method_calls(call.args) {
+                if matches!(projection.name, "alias" | "with_alias") {
+                    projection_aliases.extend(resolve_string_values(
+                        extract_first_argument(projection.args),
+                        substitutions,
+                        bindings,
+                    ));
+                }
+            }
+        }
         if call.name == "alias" {
             for name in
                 resolve_string_values(extract_first_argument(call.args), substitutions, bindings)
@@ -3304,9 +3316,6 @@ fn extract_columns_with_bindings(
             | "like"
             | "ilike"
             | "where_eq"
-            | "order_by"
-            | "order_desc"
-            | "order_asc"
             | "in_vals"
             | "is_null"
             | "is_not_null"
@@ -3317,6 +3326,19 @@ fn extract_columns_with_bindings(
                     bindings,
                 ) {
                     columns.push(col);
+                }
+            }
+            "order_by" | "order_desc" | "order_asc" => {
+                // PostgreSQL permits projection aliases in ORDER BY, but
+                // not in WHERE or inside the projection's own expression.
+                for col in resolve_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
+                    if !projection_aliases.contains(&col) {
+                        columns.push(col);
+                    }
                 }
             }
             "typed_column" | "typed_eq" | "typed_ne" | "typed_gt" | "typed_lt" | "typed_gte"
