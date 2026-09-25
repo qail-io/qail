@@ -4451,6 +4451,117 @@ fn demo() {
 }
 
 #[test]
+fn test_scan_file_sees_queries_after_lifetimes_and_labels() {
+    // A `'` opens a char literal only as `'x'` or an escape. Read as one, a
+    // lifetime or loop label hid everything up to the next apostrophe, or to
+    // the end of the file, and the queries in between were never scanned.
+    let cases = [
+        (
+            "anonymous lifetime, no later apostrophe",
+            r#"
+fn load(conn: &mut PgConnection<'_>) {
+    let _q = Qail::get("users").column("id");
+}
+"#,
+        ),
+        (
+            "'static, next apostrophe in a later comment",
+            r#"
+fn table() -> &'static str {
+    "users"
+}
+
+fn load() {
+    let _q = Qail::get("users").column("id");
+}
+
+// the caller's own rows
+"#,
+        ),
+        (
+            "loop label",
+            r#"
+fn drain(ids: &[i64]) {
+    'outer: for id in ids {
+        let _q = Qail::get("users").column("id").eq("id", id);
+        break 'outer;
+    }
+}
+"#,
+        ),
+        (
+            "char literal holding a double quote",
+            r#"
+fn quote() -> char {
+    '"'
+}
+
+fn load() {
+    let _q = Qail::get("users").column("id");
+}
+"#,
+        ),
+    ];
+
+    let missed = cases
+        .iter()
+        .filter(|(_, content)| {
+            let mut usages = Vec::new();
+            scan_file("test.rs", content, &mut usages);
+            !(usages.len() == 1 && usages[0].table == "users")
+        })
+        .map(|(case, _)| *case)
+        .collect::<Vec<_>>();
+    assert!(missed.is_empty(), "query not scanned: {missed:?}");
+}
+
+#[test]
+fn test_source_audits_reach_query_after_lifetime() {
+    let schema = Schema::parse(
+        r#"
+table users rls {
+  id UUID primary_key
+  tenant_id UUID
+  email TEXT
+}
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+fn load(conn: &mut PgConnection<'_>) {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("users").column("emial");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::SchemaError)
+                && d.message.contains("Column 'emial' not found")
+        }),
+        "column typo after a lifetime must fail validation: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::RlsWarning)
+                && d.message.contains("has no .with_rls()")
+        }),
+        "unscoped query after a lifetime must get the RLS audit: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.iter().any(|d| {
+            matches!(d.kind, ValidationDiagnosticKind::RlsWarning)
+                && d.message.contains("SuperAdminToken::for_system_process()")
+        }),
+        "SuperAdmin call after a lifetime must get the SuperAdmin audit: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn test_extract_columns_ignores_method_markers_inside_string_literals() {
     let line = r#"Qail::get("orders")
         .column("id")

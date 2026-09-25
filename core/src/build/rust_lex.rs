@@ -133,7 +133,7 @@ pub(super) fn mask_non_code(source: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| source.to_string())
 }
 
-fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> {
+pub(super) fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> {
     if bytes.get(idx).copied() == Some(b'r') {
         let mut j = idx + 1;
         while bytes.get(j).copied() == Some(b'#') {
@@ -160,7 +160,7 @@ fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> 
     None
 }
 
-fn find_raw_string_end(bytes: &[u8], mut idx: usize, hashes: usize) -> Option<usize> {
+pub(super) fn find_raw_string_end(bytes: &[u8], mut idx: usize, hashes: usize) -> Option<usize> {
     while idx < bytes.len() {
         if bytes[idx] == b'"' {
             let mut ok = true;

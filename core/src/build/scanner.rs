@@ -4,6 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use super::rust_lex::{
+    consume_block_comment, consume_rust_literal, find_raw_string_end, raw_string_prefix,
+    starts_with_bytes,
+};
+
 /// Extracted QAIL usage from source code
 #[derive(Debug)]
 pub struct QailUsage {
@@ -1389,12 +1394,6 @@ fn offset_to_line_col(line_starts: &[usize], offset: usize) -> (usize, usize) {
     (line_idx + 1, offset.saturating_sub(line_start))
 }
 
-fn starts_with_bytes(haystack: &[u8], idx: usize, needle: &[u8]) -> bool {
-    haystack
-        .get(idx..idx.saturating_add(needle.len()))
-        .is_some_and(|s| s == needle)
-}
-
 fn skip_ws(bytes: &[u8], mut idx: usize) -> usize {
     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
         idx += 1;
@@ -1417,113 +1416,6 @@ fn parse_ident_at_bytes(text: &str, start: usize) -> Option<(&str, usize)> {
     } else {
         Some((text.get(start..end)?, end))
     }
-}
-
-fn consume_block_comment(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 2;
-    let mut depth = 1usize;
-    while i < bytes.len() && depth > 0 {
-        if starts_with_bytes(bytes, i, b"/*") {
-            depth += 1;
-            i += 2;
-        } else if starts_with_bytes(bytes, i, b"*/") {
-            depth = depth.saturating_sub(1);
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    i
-}
-
-fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> {
-    if bytes.get(idx).copied() == Some(b'r') {
-        let mut j = idx + 1;
-        while bytes.get(j).copied() == Some(b'#') {
-            j += 1;
-        }
-        if bytes.get(j).copied() == Some(b'"') {
-            let hashes = j - (idx + 1);
-            return Some((idx, j + 1, hashes));
-        }
-        return None;
-    }
-
-    if bytes.get(idx).copied() == Some(b'b') && bytes.get(idx + 1).copied() == Some(b'r') {
-        let mut j = idx + 2;
-        while bytes.get(j).copied() == Some(b'#') {
-            j += 1;
-        }
-        if bytes.get(j).copied() == Some(b'"') {
-            let hashes = j - (idx + 2);
-            return Some((idx, j + 1, hashes));
-        }
-    }
-
-    None
-}
-
-fn find_raw_string_end(bytes: &[u8], mut idx: usize, hashes: usize) -> Option<usize> {
-    while idx < bytes.len() {
-        if bytes[idx] == b'"' {
-            let mut ok = true;
-            for off in 0..hashes {
-                if bytes.get(idx + 1 + off).copied() != Some(b'#') {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                return Some(idx);
-            }
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn consume_rust_literal(bytes: &[u8], start: usize) -> Option<usize> {
-    if let Some((_, content_start, hashes)) = raw_string_prefix(bytes, start) {
-        let end_quote = find_raw_string_end(bytes, content_start, hashes)?;
-        return Some(end_quote + 1 + hashes);
-    }
-
-    if bytes.get(start).copied() == Some(b'"') || starts_with_bytes(bytes, start, b"b\"") {
-        let quote_offset = if bytes.get(start).copied() == Some(b'"') {
-            start
-        } else {
-            start + 1
-        };
-        let mut i = quote_offset + 1;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if bytes[i] == b'"' {
-                return Some(i + 1);
-            }
-            i += 1;
-        }
-        return Some(bytes.len());
-    }
-
-    if bytes.get(start).copied() == Some(b'\'') {
-        let mut i = start + 1;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if bytes[i] == b'\'' {
-                return Some(i + 1);
-            }
-            i += 1;
-        }
-        return Some(bytes.len());
-    }
-
-    None
 }
 
 fn find_matching_delim(source: &str, open_idx: usize, open: u8, close: u8) -> Option<usize> {
