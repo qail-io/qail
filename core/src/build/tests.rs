@@ -1796,7 +1796,10 @@ fn test_projection_aliases_are_valid_only_in_order_by() {
     let columns = extract_columns(query);
     assert!(columns.contains(&"tenant_id".to_string()), "{columns:?}");
     assert!(columns.contains(&"total_fare".to_string()), "{columns:?}");
-    assert!(!columns.contains(&"total_orders".to_string()), "{columns:?}");
+    assert!(
+        !columns.contains(&"total_orders".to_string()),
+        "{columns:?}"
+    );
     assert!(!columns.contains(&"revenue".to_string()), "{columns:?}");
 
     let with_filter = format!("{query}.eq(\"total_orders\", 3)");
