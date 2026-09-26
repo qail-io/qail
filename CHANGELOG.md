@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.5] - 2026-09-26
+
+### Fixed
+
+- **Build validation accepts composite foreign keys.** `qail pull` writes a composite foreign key as a table-level `foreign_key (a, b) references t(x, y)` line, which `qail migrate` reads. The build-time parser behind `qail_core::build::validate()` read the line as a column and failed with `Unknown column type '(a,' for column 'foreign_key'`, so a pulled schema with a composite FK broke every downstream build. The line is now parsed with the migrate grammar; malformed lines, column-count mismatches, unknown options and undeclared local columns fail with the table name. The build schema does not record composite keys: `TableSchema::foreign_keys` holds single-column relations only.
+- **The build scanner reads past lifetimes and loop labels.** The scanner behind build-time schema validation, the RLS and SuperAdmin audits and the LSP's schema diagnostics kept its own lexer copy that read every `'` as a char literal running to the next one, so the queries after a lifetime or label (`'_`, `'static`, `'outer:`) were never scanned: a column typo passed validation and an unscoped query on an RLS table got no audit warning. It now uses the fixed `rust_lex` helpers. Builds that run validation check more queries and may report errors and audit warnings that were hidden before.
+- **ORDER BY may name a projection alias.** `.order_by("total")` after `.column_expr(count().alias("total"))` is valid PostgreSQL; validation no longer reports the alias as a missing column.
+
 ## [2.0.4] - 2026-09-23
 
 ### Fixed

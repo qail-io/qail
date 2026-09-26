@@ -10,8 +10,8 @@ systems.
 
 ```toml
 [dependencies]
-qail-workflow = "2.0.4"
-qail-core = "2.0.4"
+qail-workflow = "2.0.5"
+qail-core = "2.0.5"
 ```
 
 ## Features

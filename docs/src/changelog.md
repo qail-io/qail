@@ -4,7 +4,14 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.4)
+## Current Highlights (v2.0.5)
+
+- **Composite foreign keys in build validation**: `qail_core::build::validate()` accepts the table-level `foreign_key (a, b) references t(x, y)` lines `qail pull` writes; a pulled schema with a composite FK no longer fails every downstream build.
+- **Build scanner reads past lifetimes and loop labels**: schema validation and the RLS/SuperAdmin audits no longer skip the queries after `'_`, `'static` or `'outer:`.
+- **ORDER BY on a projection alias**: `.order_by("total")` after `.column_expr(count().alias("total"))` validates instead of reading the alias as a missing column.
+- **Release line**: Rust workspace crates and install snippets are bumped to `2.0.5`.
+
+## v2.0.4 Highlights
 
 - **Linear COPY text export**: `copy_export` and the row-streaming variants parse a frame's rows in place and shift the consumed bytes out once, so a `CopyData` frame of many small rows costs linear time instead of minutes.
 - **Release line**: Rust workspace crates and install snippets are bumped to `2.0.4`.
