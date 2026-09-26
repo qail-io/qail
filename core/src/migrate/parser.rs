@@ -1336,7 +1336,7 @@ fn parse_enum_value(raw: &str) -> Result<String, String> {
 
 /// Parse a table-level multi-column foreign key.
 /// Syntax: `foreign_key (a, b) references other_table(x, y)`
-fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
+pub(crate) fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
     let rest = line.strip_prefix("foreign_key").unwrap_or(line).trim();
 
     // Extract local columns from (...)

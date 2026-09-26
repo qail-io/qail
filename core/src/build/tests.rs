@@ -4751,6 +4751,72 @@ fn schema_owner_option_requires_declared_column() {
 }
 
 #[test]
+fn schema_accepts_composite_foreign_key_from_pull_output() {
+    let source = r#"
+table invoices {
+  id uuid primary_key
+  book_tenant_id uuid not_null
+  operator_tenant_id uuid not_null
+}
+
+table components {
+  id uuid primary_key
+  invoice_id uuid not_null references invoices(id)
+  book_tenant_id uuid not_null
+  operator_tenant_id uuid not_null
+  foreign_key (invoice_id, book_tenant_id, operator_tenant_id) references invoices(id, book_tenant_id, operator_tenant_id) name components_owner_fk on_delete cascade deferrable
+}
+"#;
+    // Round-trip through the serializer `qail pull` uses, not a hand-written copy.
+    let migrate_schema = crate::migrate::parse_qail(source).expect("migrate parser");
+    let pulled = crate::migrate::to_qail_string(&migrate_schema);
+    assert!(pulled.contains("  foreign_key ("), "{pulled}");
+
+    let schema = Schema::parse(&pulled).expect("build parser accepts pull output");
+    let components = schema.table("components").expect("components table");
+    assert_eq!(components.columns.len(), 4);
+    assert_eq!(components.foreign_keys.len(), 1);
+    assert_eq!(components.foreign_keys[0].column, "invoice_id");
+}
+
+#[test]
+fn schema_composite_foreign_key_may_precede_its_columns() {
+    Schema::parse(
+        "table child {\n  foreign_key (a, b) references parent(a, b)\n  a UUID\n  b UUID\n}\n",
+    )
+    .expect("columns declared after the foreign_key line");
+}
+
+#[test]
+fn schema_composite_foreign_key_fails_closed() {
+    let err = Schema::parse(
+        "table child {\n  a UUID\n  foreign_key (a, missing) references parent(a, b)\n}\n",
+    )
+    .expect_err("undeclared local column");
+    assert!(
+        err.contains("foreign_key column 'missing' is not declared in table 'child'"),
+        "{err}"
+    );
+
+    let err = Schema::parse(
+        "table child {\n  a UUID\n  b UUID\n  foreign_key (a, b) references parent(a)\n}\n",
+    )
+    .expect_err("column count mismatch");
+    assert!(err.contains("column counts must match"), "{err}");
+    assert!(err.contains("in table 'child'"), "{err}");
+
+    let err = Schema::parse("table child {\n  a UUID\n  foreign_key (a) parent(a)\n}\n")
+        .expect_err("missing references keyword");
+    assert!(err.contains("missing 'references'"), "{err}");
+
+    let err = Schema::parse(
+        "table child {\n  a UUID\n  foreign_key (a) references parent(a) on_delete explode\n}\n",
+    )
+    .expect_err("unknown trailing option");
+    assert!(err.contains("in table 'child'"), "{err}");
+}
+
+#[test]
 fn rls_policy_delegation_recognised_in_chain_late_and_helper_forms() {
     let content = r#"
 async fn execute_with_policy(cmd: Qail, conn: &mut qail_pg::PooledConnection, ctx: &RlsContext) {

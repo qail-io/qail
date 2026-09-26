@@ -256,6 +256,9 @@ impl Schema {
         let mut current_fks: Vec<ForeignKey> = Vec::new();
         let mut current_rls_flag = false;
         let mut current_owner_column: Option<String> = None;
+        // Local columns of table-level `foreign_key (...)` lines; checked at the
+        // closing brace so the line may precede its columns.
+        let mut current_composite_fk_columns: Vec<String> = Vec::new();
         let mut enum_types: HashMap<String, Vec<String>> = HashMap::new();
 
         let mut lines = content.lines().peekable();
@@ -453,6 +456,14 @@ impl Schema {
                         owner, table_name
                     ));
                 }
+                for column in current_composite_fk_columns.drain(..) {
+                    if !current_columns.contains_key(&column) {
+                        return Err(format!(
+                            "foreign_key column '{}' is not declared in table '{}'",
+                            column, table_name
+                        ));
+                    }
+                }
                 let has_rls = current_rls_flag
                     || current_columns.contains_key("tenant_id")
                     || owner_column.is_some();
@@ -494,6 +505,18 @@ impl Schema {
                         ));
                     }
                     current_owner_column = Some(owner.to_string());
+                    continue;
+                }
+                // Table-level composite FK written by `qail pull`. Validated but not
+                // stored: `foreign_keys` models single-column joins only.
+                if line == "foreign_key"
+                    || line.starts_with("foreign_key ")
+                    || line.starts_with("foreign_key(")
+                {
+                    let table_name = current_table.as_deref().unwrap_or("<unknown>");
+                    let fk = crate::migrate::parser::parse_multi_column_fk(line)
+                        .map_err(|e| format!("{} in table '{}'", e, table_name))?;
+                    current_composite_fk_columns.extend(fk.columns);
                     continue;
                 }
 
