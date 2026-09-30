@@ -155,6 +155,11 @@ impl PgDriver {
     ///
     /// After clearing, all RLS-protected queries will return zero rows
     /// (empty tenant scope matches nothing).
+    ///
+    /// Clearing COMMITs the context's transaction. When the server answers
+    /// that COMMIT with `ROLLBACK` (a statement under the context had
+    /// failed), the context is still cleared and the lost writes are
+    /// returned as an error.
     pub async fn clear_rls_context(&mut self) -> PgResult<()> {
         let sql = rls::reset_sql();
         if sql.as_bytes().contains(&0) {
@@ -162,9 +167,9 @@ impl PgDriver {
                 "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
             ));
         }
-        self.connection.execute_simple(sql).await?;
+        let tags = self.connection.execute_simple_tags(sql).await?;
         self.rls_context = None;
-        Ok(())
+        super::transaction::commit_outcome(&tags, "clear_rls_context COMMIT")
     }
 
     /// Get the current RLS context, if any.

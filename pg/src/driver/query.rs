@@ -878,11 +878,22 @@ impl PgConnection {
 
     /// Execute a simple SQL statement (no parameters).
     pub async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
+        self.execute_simple_tags(sql).await.map(|_| ())
+    }
+
+    /// Execute simple SQL (no parameters) and return each statement's
+    /// CommandComplete tag, in order.
+    ///
+    /// For some statements the tag is the only report of how they ended:
+    /// COMMIT on a failed transaction completes with the tag `ROLLBACK` and
+    /// no ErrorResponse.
+    pub(crate) async fn execute_simple_tags(&mut self, sql: &str) -> PgResult<Vec<String>> {
         let bytes = PgEncoder::try_encode_query_string(sql)?;
         self.send_bytes(&bytes).await?;
 
         let mut error: Option<PgError> = None;
         let mut flow = SimpleFlowTracker::new();
+        let mut tags = Vec::new();
 
         loop {
             let msg = self.recv().await?;
@@ -900,8 +911,9 @@ impl PgConnection {
                         return return_with_desync(self, err);
                     }
                 }
-                BackendMessage::CommandComplete(_) => {
+                BackendMessage::CommandComplete(tag) => {
                     flow.on_command_complete();
+                    tags.push(tag);
                 }
                 BackendMessage::EmptyQueryResponse => {
                     if let Err(err) = flow.on_empty_query_response("simple-query execute") {
@@ -917,7 +929,7 @@ impl PgConnection {
                     {
                         return return_with_desync(self, err);
                     }
-                    return Ok(());
+                    return Ok(tags);
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {

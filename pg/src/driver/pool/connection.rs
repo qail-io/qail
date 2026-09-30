@@ -81,14 +81,17 @@ impl PooledConnection {
         Ok(())
     }
 
+    /// Run the reset and return the connection to the pool. `Some(tags)`:
+    /// the reset's CommandComplete tags; `None`: the connection was already
+    /// gone and nothing ran.
     async fn finish_with_reset(
         mut self,
         reset_sql: &'static str,
         operation: &'static str,
         failure_reason: &'static str,
-    ) -> PgResult<()> {
+    ) -> PgResult<Option<Vec<String>>> {
         let Some(mut conn) = self.conn.take() else {
-            return Ok(());
+            return Ok(None);
         };
 
         if conn.is_io_desynced() {
@@ -108,26 +111,29 @@ impl PooledConnection {
         }
 
         let reset_timeout = self.pool.config.connect_timeout;
-        if let Err(e) =
-            execute_simple_with_timeout(&mut conn, reset_sql, reset_timeout, operation).await
+        let tags = match execute_simple_with_timeout(&mut conn, reset_sql, reset_timeout, operation)
+            .await
         {
-            tracing::error!(
-                host = %self.pool.config.host,
-                port = self.pool.config.port,
-                user = %self.pool.config.user,
-                db = %self.pool.config.database,
-                timeout_ms = reset_timeout.as_millis() as u64,
-                error = %e,
-                "pool_release_failed: reset failed; dropping connection to prevent state leak"
-            );
-            decrement_active_count_saturating(&self.pool.active_count);
-            self.pool.semaphore.add_permits(1);
-            pool_churn_record_destroy(&self.pool.config, failure_reason);
-            return Err(e);
-        }
+            Ok(tags) => tags,
+            Err(e) => {
+                tracing::error!(
+                    host = %self.pool.config.host,
+                    port = self.pool.config.port,
+                    user = %self.pool.config.user,
+                    db = %self.pool.config.database,
+                    timeout_ms = reset_timeout.as_millis() as u64,
+                    error = %e,
+                    "pool_release_failed: reset failed; dropping connection to prevent state leak"
+                );
+                decrement_active_count_saturating(&self.pool.active_count);
+                self.pool.semaphore.add_permits(1);
+                pool_churn_record_destroy(&self.pool.config, failure_reason);
+                return Err(e);
+            }
+        };
 
         self.pool.return_connection(conn, self.created_at).await;
-        Ok(())
+        Ok(Some(tags))
     }
 
     /// Deterministic connection cleanup and pool return.
@@ -154,24 +160,37 @@ impl PooledConnection {
     ///
     /// This is the checked form of [`Self::release`]. It is useful for callers
     /// that need to report reset failures rather than only logging them.
+    ///
+    /// On an RLS-bound connection it also errors when the server answers the
+    /// COMMIT with `ROLLBACK`: a statement in the transaction had failed, so
+    /// none of its writes were kept. The reset still ran whole, so the
+    /// connection goes back to the pool.
     pub async fn release_checked(self) -> PgResult<()> {
-        let (sql, context) = if self.rls_dirty {
-            // COMMIT the transaction opened by acquire_with_rls.
-            // Transaction-local set_config values auto-reset on COMMIT;
-            // the appended scrub clears session-scoped state (SET/SET ROLE,
-            // listens, advisory locks, temp tables) that COMMIT leaves behind.
-            (
+        if !self.rls_dirty {
+            return self
+                .finish_with_reset(
+                    crate::driver::rls::pool_release_rollback_sql(),
+                    "pool release reset/ROLLBACK",
+                    "release_reset_failed",
+                )
+                .await
+                .map(|_| ());
+        }
+        // COMMIT the transaction opened by acquire_with_rls.
+        // Transaction-local set_config values auto-reset on COMMIT;
+        // the appended scrub clears session-scoped state (SET/SET ROLE,
+        // listens, advisory locks, temp tables) that COMMIT leaves behind.
+        let tags = self
+            .finish_with_reset(
                 crate::driver::rls::pool_release_commit_sql(),
                 "pool release reset/COMMIT",
+                "release_reset_failed",
             )
-        } else {
-            (
-                crate::driver::rls::pool_release_rollback_sql(),
-                "pool release reset/ROLLBACK",
-            )
-        };
-        self.finish_with_reset(sql, context, "release_reset_failed")
-            .await
+            .await?;
+        match tags {
+            Some(tags) => crate::driver::transaction::commit_outcome(&tags, "pool release COMMIT"),
+            None => Ok(()),
+        }
     }
 
     /// Roll back the pool-managed transaction and return the connection to the pool.
@@ -185,6 +204,7 @@ impl PooledConnection {
             "release_rollback_failed",
         )
         .await
+        .map(|_| ())
     }
 
     // ==================== TRANSACTION CONTROL ====================

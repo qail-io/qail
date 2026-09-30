@@ -16,6 +16,26 @@ fn quote_savepoint_name(name: &str) -> PgResult<String> {
     Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
 
+/// How the server ended a transaction on COMMIT, read from the
+/// CommandComplete tags of the SQL that began with the COMMIT.
+///
+/// PostgreSQL answers COMMIT on a failed transaction with the tag `ROLLBACK`
+/// and no ErrorResponse: the statement succeeds and every write the
+/// transaction made is gone. Any first tag but `COMMIT` is that loss.
+pub(crate) fn commit_outcome(tags: &[String], operation: &str) -> PgResult<()> {
+    match tags.first().map(String::as_str) {
+        Some("COMMIT") => Ok(()),
+        Some(tag) => Err(PgError::Query(format!(
+            "{operation}: the server answered COMMIT with {tag}; \
+             the transaction had failed and none of its writes were kept"
+        ))),
+        None => Err(PgError::Query(format!(
+            "{operation}: the server answered COMMIT without a command tag; \
+             whether the transaction's writes were kept is unknown"
+        ))),
+    }
+}
+
 impl PgConnection {
     /// Begin a new transaction.
     /// After calling this, all queries run within the transaction
@@ -26,8 +46,13 @@ impl PgConnection {
 
     /// Commit the current transaction.
     /// Makes all changes since `begin_transaction()` permanent.
+    ///
+    /// Errors when the server answers the COMMIT with `ROLLBACK`: a
+    /// statement in the transaction had failed, so none of its changes were
+    /// kept. The transaction is over either way.
     pub async fn commit(&mut self) -> PgResult<()> {
-        self.execute_simple("COMMIT").await
+        let tags = self.execute_simple_tags("COMMIT").await?;
+        commit_outcome(&tags, "COMMIT")
     }
 
     /// Rollback the current transaction.
@@ -67,7 +92,34 @@ impl PgConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_savepoint_name;
+    use super::{commit_outcome, quote_savepoint_name};
+
+    fn tags(tags: &[&str]) -> Vec<String> {
+        tags.iter().map(|tag| tag.to_string()).collect()
+    }
+
+    #[test]
+    fn commit_outcome_keeps_a_commit_tag() {
+        assert!(commit_outcome(&tags(&["COMMIT"]), "COMMIT").is_ok());
+        assert!(commit_outcome(&tags(&["COMMIT", "CLOSE CURSOR ALL", "SET"]), "COMMIT").is_ok());
+    }
+
+    #[test]
+    fn commit_outcome_reports_a_commit_answered_rollback() {
+        let err = commit_outcome(
+            &tags(&["ROLLBACK", "CLOSE CURSOR ALL"]),
+            "pool release COMMIT",
+        )
+        .expect_err("a rolled-back COMMIT is an error");
+        let text = err.to_string();
+        assert!(text.contains("pool release COMMIT"), "{text}");
+        assert!(text.contains("ROLLBACK"), "{text}");
+    }
+
+    #[test]
+    fn commit_outcome_reports_a_commit_without_a_tag() {
+        assert!(commit_outcome(&[], "COMMIT").is_err());
+    }
 
     #[test]
     fn quote_savepoint_name_escapes_quotes() {

@@ -1137,13 +1137,15 @@ pub(super) fn validate_pool_config(config: &PoolConfig) -> PgResult<()> {
     Ok(())
 }
 
+/// Run simple SQL under `timeout`; returns each statement's CommandComplete
+/// tag, in order.
 pub(super) async fn execute_simple_with_timeout(
     conn: &mut PgConnection,
     sql: &str,
     timeout: Duration,
     operation: &str,
-) -> PgResult<()> {
-    match tokio::time::timeout(timeout, conn.execute_simple(sql)).await {
+) -> PgResult<Vec<String>> {
+    match tokio::time::timeout(timeout, conn.execute_simple_tags(sql)).await {
         Ok(result) => result,
         Err(_) => {
             conn.mark_io_desynced();
