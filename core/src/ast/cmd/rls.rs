@@ -237,6 +237,9 @@ fn expr_projects_tenant_col(expr: &Expr, tenant_col: &str) -> bool {
         | Expr::Subscript {
             alias: Some(alias), ..
         }
+        | Expr::ArraySlice {
+            alias: Some(alias), ..
+        }
         | Expr::Collate {
             alias: Some(alias), ..
         }
@@ -968,6 +971,14 @@ impl Qail {
             Expr::Subscript { expr, index, .. } => {
                 Self::scope_expr_nested_rls(expr, ctx)?;
                 Self::scope_expr_nested_rls(index, ctx)?;
+            }
+            Expr::ArraySlice {
+                expr, lower, upper, ..
+            } => {
+                Self::scope_expr_nested_rls(expr, ctx)?;
+                for bound in [lower, upper].into_iter().flatten() {
+                    Self::scope_expr_nested_rls(bound, ctx)?;
+                }
             }
             Expr::FieldAccess { expr, .. } => Self::scope_expr_nested_rls(expr, ctx)?,
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {

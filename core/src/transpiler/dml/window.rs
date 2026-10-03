@@ -3,7 +3,7 @@
 use super::select::aggregate_filter_sql;
 use crate::ast::*;
 use crate::transpiler::SqlGenerator;
-use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::conditions::{ConditionToSql, slice_bounds_sql, subscript_sql};
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::render_table_reference;
 
@@ -89,21 +89,9 @@ pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
 
                 if let Some(fr) = frame {
                     over_clause.push(' ');
-                    match fr {
-                        WindowFrame::Rows { start, end } => {
-                            over_clause.push_str(&format!(
-                                "ROWS BETWEEN {} AND {}",
-                                bound_to_sql(start),
-                                bound_to_sql(end)
-                            ));
-                        }
-                        WindowFrame::Range { start, end } => {
-                            over_clause.push_str(&format!(
-                                "RANGE BETWEEN {} AND {}",
-                                bound_to_sql(start),
-                                bound_to_sql(end)
-                            ));
-                        }
+                    match fr.to_sql() {
+                        Ok(frame_sql) => over_clause.push_str(&frame_sql),
+                        Err(reason) => return format!("/* ERROR: {reason} */"),
                     }
                 }
 
@@ -155,16 +143,6 @@ pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     sql
-}
-
-fn bound_to_sql(bound: &FrameBound) -> String {
-    match bound {
-        FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
-        FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
-        FrameBound::CurrentRow => "CURRENT ROW".to_string(),
-        FrameBound::Preceding(n) => format!("{} PRECEDING", n),
-        FrameBound::Following(n) => format!("{} FOLLOWING", n),
-    }
 }
 
 fn render_window_expr(expr: &Expr, generator: &dyn SqlGenerator, cmd: &Qail) -> String {
@@ -267,10 +245,19 @@ fn render_window_expr(expr: &Expr, generator: &dyn SqlGenerator, cmd: &Qail) -> 
                 .join(", ");
             format!("ROW({elements})")
         }
-        Expr::Subscript { expr, index, .. } => format!(
-            "{}[{}]",
+        Expr::Subscript { expr, index, .. } => subscript_sql(
+            expr,
             render_window_expr(expr, generator, cmd),
-            render_window_expr(index, generator, cmd)
+            &render_window_expr(index, generator, cmd),
+        ),
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => subscript_sql(
+            expr,
+            render_window_expr(expr, generator, cmd),
+            &slice_bounds_sql(lower, upper, |bound| {
+                render_window_expr(bound, generator, cmd)
+            }),
         ),
         _ => "/* ERROR: Invalid window expression */".to_string(),
     }

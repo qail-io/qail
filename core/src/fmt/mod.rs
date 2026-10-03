@@ -1,5 +1,5 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, FrameBound, Join, LogicalOp, MergeAction,
+    Action, Cage, CageKind, Condition, Expr, FrameBound, Join, LockMode, LogicalOp, MergeAction,
     MergeMatchKind, MergeSource, Operator, Qail, SortOrder, Value, WindowFrame,
 };
 use std::fmt::{Result, Write};
@@ -48,6 +48,11 @@ impl Formatter {
 
     fn visit_cmd(&mut self, cmd: &Qail) -> Result {
         for cte in &cmd.ctes {
+            // The `with name = ...` text form has no slot for these; failing
+            // beats a text wire payload that silently drops them.
+            if cte.materialization.is_some() || cte.search.is_some() || cte.cycle.is_some() {
+                return Err(std::fmt::Error);
+            }
             write!(self.buffer, "with {} = ", cte.name)?;
             self.indent_level += 1;
             writeln!(self.buffer)?;
@@ -191,8 +196,37 @@ impl Formatter {
             }
         }
 
+        self.format_lock_clause(cmd)?;
+
         // self.indent_level -= 1; // Removed matching decrement
         Ok(())
+    }
+
+    /// `for update [of a, b] [nowait | skip locked]`, read back by the parser.
+    fn format_lock_clause(&mut self, cmd: &Qail) -> Result {
+        let Some(mode) = cmd.lock_mode else {
+            return Ok(());
+        };
+        self.indent()?;
+        write!(
+            self.buffer,
+            "{}",
+            match mode {
+                LockMode::Update => "for update",
+                LockMode::NoKeyUpdate => "for no key update",
+                LockMode::Share => "for share",
+                LockMode::KeyShare => "for key share",
+            }
+        )?;
+        if !cmd.lock_of.is_empty() {
+            write!(self.buffer, " of {}", cmd.lock_of.join(", "))?;
+        }
+        if cmd.lock_nowait {
+            write!(self.buffer, " nowait")?;
+        } else if cmd.skip_locked {
+            write!(self.buffer, " skip locked")?;
+        }
+        writeln!(self.buffer)
     }
 
     fn format_merge(&mut self, cmd: &Qail) -> Result {
@@ -239,6 +273,17 @@ impl Formatter {
             }
             write!(self.buffer, " then ")?;
             self.format_merge_action(&clause.action)?;
+        }
+        if let Some(returning) = &cmd.returning
+            && !returning.is_empty()
+        {
+            write!(self.buffer, " returning ")?;
+            for (i, expr) in returning.iter().enumerate() {
+                if i > 0 {
+                    write!(self.buffer, ", ")?;
+                }
+                self.format_column(expr)?;
+            }
         }
         writeln!(self.buffer)?;
         Ok(())
@@ -358,14 +403,28 @@ impl Formatter {
                     over_parts.push(format!("order by {}", items.join(", ")));
                 }
                 if let Some(frame) = frame {
-                    let (unit, start, end) = match frame {
-                        WindowFrame::Rows { start, end } => ("rows", start, end),
-                        WindowFrame::Range { start, end } => ("range", start, end),
+                    let (unit, start, end, exclude) = match frame {
+                        WindowFrame::Rows {
+                            start,
+                            end,
+                            exclude,
+                        } => ("rows", start, end, exclude),
+                        WindowFrame::Range {
+                            start,
+                            end,
+                            exclude,
+                        } => ("range", start, end, exclude),
+                        WindowFrame::Groups {
+                            start,
+                            end,
+                            exclude,
+                        } => ("groups", start, end, exclude),
                     };
                     over_parts.push(format!(
-                        "{unit} between {} and {}",
+                        "{unit} between {} and {}{}",
                         frame_bound_text(start),
-                        frame_bound_text(end)
+                        frame_bound_text(end),
+                        frame_exclusion_text(exclude)
                     ));
                 }
                 write!(self.buffer, " over ({}) as {}", over_parts.join(" "), name)?;
@@ -377,7 +436,9 @@ impl Formatter {
             } => {
                 write!(self.buffer, "case")?;
                 for (cond, val) in when_clauses {
-                    write!(self.buffer, " when {} then {}", cond.left, val)?;
+                    write!(self.buffer, " when ")?;
+                    self.format_conditions(std::slice::from_ref(cond), LogicalOp::And)?;
+                    write!(self.buffer, " then {}", val)?;
                 }
                 if let Some(e) = else_value {
                     write!(self.buffer, " else {}", e)?;
@@ -483,9 +544,29 @@ impl Formatter {
                 }
             }
             Expr::Subscript { expr, index, alias } => {
-                self.format_column(expr)?;
+                self.format_subscript_base(expr)?;
                 write!(self.buffer, "[")?;
                 self.format_column(index)?;
+                write!(self.buffer, "]")?;
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
+            }
+            Expr::ArraySlice {
+                expr,
+                lower,
+                upper,
+                alias,
+            } => {
+                self.format_subscript_base(expr)?;
+                write!(self.buffer, "[")?;
+                if let Some(lower) = lower {
+                    self.format_column(lower)?;
+                }
+                write!(self.buffer, ":")?;
+                if let Some(upper) = upper {
+                    self.format_column(upper)?;
+                }
                 write!(self.buffer, "]")?;
                 if let Some(a) = alias {
                     write!(self.buffer, " as {}", a)?;
@@ -535,6 +616,16 @@ impl Formatter {
             }
         }
         Ok(())
+    }
+
+    fn format_subscript_base(&mut self, expr: &Expr) -> Result {
+        if expr.needs_parens_for_subscript() {
+            write!(self.buffer, "(")?;
+            self.format_column(expr)?;
+            write!(self.buffer, ")")
+        } else {
+            self.format_column(expr)
+        }
     }
 
     fn format_join(&mut self, join: &Join) -> Result {
@@ -716,5 +807,38 @@ fn frame_bound_text(bound: &FrameBound) -> String {
         FrameBound::CurrentRow => "current row".to_string(),
         FrameBound::Following(n) => format!("{n} following"),
         FrameBound::UnboundedFollowing => "unbounded following".to_string(),
+        // The frame grammar reads only the interval shorthand (`7d preceding`),
+        // not `interval '7 days'`.
+        FrameBound::IntervalPreceding { amount, unit } => {
+            format!("{amount}{} preceding", interval_shorthand_unit(unit))
+        }
+        FrameBound::IntervalFollowing { amount, unit } => {
+            format!("{amount}{} following", interval_shorthand_unit(unit))
+        }
+    }
+}
+
+/// Unit suffix of the DSL interval shorthand (`24h`, `6mo`).
+fn interval_shorthand_unit(unit: &crate::ast::values::IntervalUnit) -> &'static str {
+    use crate::ast::values::IntervalUnit;
+    match unit {
+        IntervalUnit::Second => "s",
+        IntervalUnit::Minute => "m",
+        IntervalUnit::Hour => "h",
+        IntervalUnit::Day => "d",
+        IntervalUnit::Week => "w",
+        IntervalUnit::Month => "mo",
+        IntervalUnit::Year => "y",
+    }
+}
+
+/// Frame exclusion in DSL spelling; the default `no others` is omitted.
+fn frame_exclusion_text(exclude: &crate::ast::FrameExclusion) -> &'static str {
+    use crate::ast::FrameExclusion;
+    match exclude {
+        FrameExclusion::NoOthers => "",
+        FrameExclusion::CurrentRow => " exclude current row",
+        FrameExclusion::Group => " exclude group",
+        FrameExclusion::Ties => " exclude ties",
     }
 }

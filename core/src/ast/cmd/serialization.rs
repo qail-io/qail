@@ -34,6 +34,11 @@ struct Fields {
     using_tables: Vec<String>,
     lock_mode: Option<LockMode>,
     skip_locked: bool,
+    // Absent in payloads written before NOWAIT / OF locks existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    lock_nowait: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lock_of: Vec<String>,
     fetch: Option<(u64, bool)>,
     default_values: bool,
     overriding: Option<OverridingKind>,

@@ -2,7 +2,8 @@
 
 use crate::ast::*;
 use crate::transpiler::conditions::{
-    ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax,
+    ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax, slice_bounds_sql,
+    subscript_sql,
 };
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::{
@@ -290,7 +291,8 @@ fn build_select_inner(
                     | Expr::SpecialFunction { alias, .. }
                     | Expr::ArrayConstructor { alias, .. }
                     | Expr::RowConstructor { alias, .. }
-                    | Expr::Subscript { alias, .. } => append_alias(
+                    | Expr::Subscript { alias, .. }
+                    | Expr::ArraySlice { alias, .. } => append_alias(
                         render_expr_for_orderby(c, generator.as_ref(), cmd),
                         alias,
                         generator.as_ref(),
@@ -398,21 +400,9 @@ fn build_select_inner(
 
                         if let Some(fr) = frame {
                             over_clause.push(' ');
-                            match fr {
-                                WindowFrame::Rows { start, end } => {
-                                    over_clause.push_str(&format!(
-                                        "ROWS BETWEEN {} AND {}",
-                                        bound_to_sql(start),
-                                        bound_to_sql(end)
-                                    ));
-                                }
-                                WindowFrame::Range { start, end } => {
-                                    over_clause.push_str(&format!(
-                                        "RANGE BETWEEN {} AND {}",
-                                        bound_to_sql(start),
-                                        bound_to_sql(end)
-                                    ));
-                                }
+                            match fr.to_sql() {
+                                Ok(frame_sql) => over_clause.push_str(&frame_sql),
+                                Err(reason) => return format!("/* ERROR: {reason} */"),
                             }
                         }
 
@@ -629,32 +619,59 @@ fn build_select_inner(
 
     // SET OPERATIONS (UNION, INTERSECT, EXCEPT)
     for (set_op, other_cmd) in &cmd.set_ops {
-        let op_str = match set_op {
-            SetOp::Union => "UNION",
-            SetOp::UnionAll => "UNION ALL",
-            SetOp::Intersect => "INTERSECT",
-            SetOp::Except => "EXCEPT",
-        };
         sql.push_str(&format!(
             " {} {}",
-            op_str,
+            set_op.sql_keyword(),
             build_set_operand(other_cmd, dialect)
         ));
     }
 
     // FOR UPDATE/SHARE (row locking)
-    if let Some(lock) = &cmd.lock_mode {
-        match lock {
-            LockMode::Update => sql.push_str(" FOR UPDATE"),
-            LockMode::NoKeyUpdate => sql.push_str(" FOR NO KEY UPDATE"),
-            LockMode::Share => sql.push_str(" FOR SHARE"),
-            LockMode::KeyShare => sql.push_str(" FOR KEY SHARE"),
-        }
-        if cmd.skip_locked {
-            sql.push_str(" SKIP LOCKED");
-        }
-    }
+    sql.push_str(&lock_clause_sql(cmd, generator.as_ref()));
 
+    sql
+}
+
+fn lock_clause_sql(cmd: &Qail, generator: &dyn SqlGenerator) -> String {
+    let Some(lock) = &cmd.lock_mode else {
+        return if cmd.skip_locked || cmd.lock_nowait || !cmd.lock_of.is_empty() {
+            " /* ERROR: NOWAIT, SKIP LOCKED and OF require a row lock mode */".to_string()
+        } else {
+            String::new()
+        };
+    };
+    if cmd.skip_locked && cmd.lock_nowait {
+        return " /* ERROR: NOWAIT and SKIP LOCKED are mutually exclusive */".to_string();
+    }
+    let mut sql = match lock {
+        LockMode::Update => " FOR UPDATE",
+        LockMode::NoKeyUpdate => " FOR NO KEY UPDATE",
+        LockMode::Share => " FOR SHARE",
+        LockMode::KeyShare => " FOR KEY SHARE",
+    }
+    .to_string();
+    if !cmd.lock_of.is_empty() {
+        // PostgreSQL rejects qualified names here; OF takes FROM names or aliases.
+        if cmd
+            .lock_of
+            .iter()
+            .any(|name| name.is_empty() || name.contains('.') || name.contains('\0'))
+        {
+            return " /* ERROR: Invalid row lock OF name */".to_string();
+        }
+        let names: Vec<String> = cmd
+            .lock_of
+            .iter()
+            .map(|name| generator.quote_identifier(name))
+            .collect();
+        sql.push_str(" OF ");
+        sql.push_str(&names.join(", "));
+    }
+    if cmd.lock_nowait {
+        sql.push_str(" NOWAIT");
+    } else if cmd.skip_locked {
+        sql.push_str(" SKIP LOCKED");
+    }
     sql
 }
 
@@ -889,10 +906,19 @@ fn render_expr_for_orderby(
                 .join(", ");
             format!("ROW({elements})")
         }
-        Expr::Subscript { expr, index, .. } => format!(
-            "{}[{}]",
+        Expr::Subscript { expr, index, .. } => subscript_sql(
+            expr,
             render_expr_for_orderby(expr, generator, cmd),
-            render_expr_for_orderby(index, generator, cmd)
+            &render_expr_for_orderby(index, generator, cmd),
+        ),
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => subscript_sql(
+            expr,
+            render_expr_for_orderby(expr, generator, cmd),
+            &slice_bounds_sql(lower, upper, |bound| {
+                render_expr_for_orderby(bound, generator, cmd)
+            }),
         ),
         Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
         Expr::Exists { query, negated, .. } => {
@@ -1086,16 +1112,5 @@ pub(super) fn aggregate_filter_sql(
             format!(" FILTER (WHERE {})", filter_parts.join(" AND "))
         }
         _ => String::new(),
-    }
-}
-
-/// Convert FrameBound to SQL string for window functions
-fn bound_to_sql(bound: &FrameBound) -> String {
-    match bound {
-        FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
-        FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
-        FrameBound::CurrentRow => "CURRENT ROW".to_string(),
-        FrameBound::Preceding(n) => format!("{} PRECEDING", n),
-        FrameBound::Following(n) => format!("{} FOLLOWING", n),
     }
 }

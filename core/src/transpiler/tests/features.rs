@@ -2822,6 +2822,9 @@ fn test_recursive_cte() {
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: Some("employees".to_string()),
+        materialization: None,
+        search: None,
+        cycle: None,
     }];
     cmd.action = Action::With;
 
@@ -2855,6 +2858,9 @@ fn test_postgres_recursive_cte_parenthesizes_set_op_base_term() {
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: None,
+        materialization: None,
+        search: None,
+        cycle: None,
     }];
 
     use crate::transpiler::dml::cte::build_cte;
@@ -2892,6 +2898,9 @@ fn test_postgres_recursive_cte_parenthesizes_set_op_recursive_term() {
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: None,
+        materialization: None,
+        search: None,
+        cycle: None,
     }];
 
     use crate::transpiler::dml::cte::build_cte;
@@ -2919,6 +2928,9 @@ fn test_postgres_recursive_cte_parenthesizes_limited_base_term() {
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: None,
+        materialization: None,
+        search: None,
+        cycle: None,
     }];
 
     use crate::transpiler::dml::cte::build_cte;

@@ -326,6 +326,9 @@ fn test_v2_aggregate_modifiers_round_trip_through_display() {
         "get orders fields sum(amount) filter (where active = true) over ()",
         "get orders fields sum(amount) filter (where active = true) over (partition by region order by created_at desc rows between unbounded preceding and current row) as running",
         "get orders fields sum(amount) filter (where status = 'paid' and deleted_at is null) over (order by id range between 2 preceding and 1 following) as paid",
+        "get orders fields sum(amount) over (order by id groups between 1 preceding and current row exclude ties) as grouped",
+        "get orders fields avg(amount) over (order by created_at range between 7d preceding and current row exclude current row) as weekly",
+        "get orders fields sum(amount) filter (where active = true) over (order by created_at range between 6mo preceding and 1y following exclude group) as spread",
         "get orders fields count(distinct status) filter (where region = 'bali') as n",
         "get orders fields count(*) filter (where amount >= 10 and deleted_at is not null) as n",
     ] {

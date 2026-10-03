@@ -320,6 +320,14 @@ fn collect_expr_subquery_references(
             collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
             collect_expr_subquery_references(path, line, index, cte_aliases, refs);
         }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_expr_subquery_references(path, line, bound, cte_aliases, refs);
+            }
+        }
         Expr::FunctionCall { args, .. } | Expr::ArrayConstructor { elements: args, .. } => {
             for arg in args {
                 collect_expr_subquery_references(path, line, arg, cte_aliases, refs);
@@ -569,6 +577,14 @@ fn collect_expr_columns(
         Expr::Subscript { expr, index, .. } => {
             collect_expr_columns(expr, scope, cols, seen);
             collect_expr_columns(index, scope, cols, seen);
+        }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            collect_expr_columns(expr, scope, cols, seen);
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_expr_columns(bound, scope, cols, seen);
+            }
         }
         Expr::FunctionCall { args, .. } | Expr::ArrayConstructor { elements: args, .. } => {
             collect_exprs_columns(args, scope, cols, seen);
@@ -945,6 +961,9 @@ mod tests {
                 }),
                 recursive_query: None,
                 source_table: None,
+                materialization: None,
+                search: None,
+                cycle: None,
             }],
             ..Default::default()
         };
@@ -981,6 +1000,9 @@ mod tests {
                     ..Default::default()
                 })),
                 source_table: None,
+                materialization: None,
+                search: None,
+                cycle: None,
             }],
             ..Default::default()
         };

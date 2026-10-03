@@ -769,6 +769,14 @@ fn collect_columns_from_expr(expr: &Expr, push: &mut dyn FnMut(&str)) {
             collect_columns_from_expr(expr, push);
             collect_columns_from_expr(index, push);
         }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            collect_columns_from_expr(expr, push);
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_columns_from_expr(bound, push);
+            }
+        }
         Expr::Collate { expr, .. } => collect_columns_from_expr(expr, push),
         _ => {}
     }

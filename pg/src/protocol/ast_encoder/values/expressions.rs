@@ -4,8 +4,8 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    CageKind, Condition, Constraint, Expr, FrameBound, JsonPathSegment, ModKind, Operator,
-    SortOrder, Value, WindowFrame,
+    CageKind, Condition, Constraint, Expr, JsonPathSegment, ModKind, Operator, SortOrder, Value,
+    WindowFrame,
 };
 use qail_core::transpiler::escape_identifier;
 
@@ -135,6 +135,7 @@ fn encode_projection_expr(
         | Expr::ArrayConstructor { alias, .. }
         | Expr::RowConstructor { alias, .. }
         | Expr::Subscript { alias, .. }
+        | Expr::ArraySlice { alias, .. }
         | Expr::Collate { alias, .. }
         | Expr::FieldAccess { alias, .. }
         | Expr::Subquery { alias, .. }
@@ -369,7 +370,7 @@ fn encode_column_expr_inner(
             // FRAME clause (ROWS/RANGE BETWEEN ... AND ...)
             if let Some(f) = frame {
                 buf.extend_from_slice(b" ");
-                encode_window_frame(f, buf);
+                encode_window_frame(f, buf)?;
             }
             buf.extend_from_slice(b")");
         }
@@ -394,9 +395,23 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b")");
         }
         Expr::Subscript { expr, index, .. } => {
-            encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
+            encode_subscript_base(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"[");
             encode_column_expr_inner(index, buf, params.as_deref_mut())?;
+            buf.extend_from_slice(b"]");
+        }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            encode_subscript_base(expr, buf, params.as_deref_mut())?;
+            buf.extend_from_slice(b"[");
+            if let Some(lower) = lower {
+                encode_column_expr_inner(lower, buf, params.as_deref_mut())?;
+            }
+            buf.extend_from_slice(b":");
+            if let Some(upper) = upper {
+                encode_column_expr_inner(upper, buf, params.as_deref_mut())?;
+            }
             buf.extend_from_slice(b"]");
         }
         Expr::Collate {
@@ -501,6 +516,23 @@ fn encode_column_expr_inner(
                 encode_column_expr_inner(col, buf, params)?;
             }
         },
+    }
+    Ok(())
+}
+
+/// Base of `[...]`, parenthesized when PostgreSQL cannot subscript it directly.
+fn encode_subscript_base(
+    expr: &Expr,
+    buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let wrap = expr.needs_parens_for_subscript();
+    if wrap {
+        buf.extend_from_slice(b"(");
+    }
+    encode_column_expr_inner(expr, buf, params)?;
+    if wrap {
+        buf.extend_from_slice(b")");
     }
     Ok(())
 }
@@ -1157,39 +1189,16 @@ fn write_quoted_array_element(
     Ok(())
 }
 
-/// Encode window frame (ROWS/RANGE BETWEEN ... AND ...)
-fn encode_window_frame(frame: &WindowFrame, buf: &mut BytesMut) {
-    match frame {
-        WindowFrame::Rows { start, end } => {
-            buf.extend_from_slice(b"ROWS BETWEEN ");
-            encode_frame_bound(start, buf);
-            buf.extend_from_slice(b" AND ");
-            encode_frame_bound(end, buf);
-        }
-        WindowFrame::Range { start, end } => {
-            buf.extend_from_slice(b"RANGE BETWEEN ");
-            encode_frame_bound(start, buf);
-            buf.extend_from_slice(b" AND ");
-            encode_frame_bound(end, buf);
-        }
-    }
-}
-
-/// Encode a single frame bound
-fn encode_frame_bound(bound: &FrameBound, buf: &mut BytesMut) {
-    match bound {
-        FrameBound::UnboundedPreceding => buf.extend_from_slice(b"UNBOUNDED PRECEDING"),
-        FrameBound::Preceding(n) => {
-            buf.extend_from_slice(n.to_string().as_bytes());
-            buf.extend_from_slice(b" PRECEDING");
-        }
-        FrameBound::CurrentRow => buf.extend_from_slice(b"CURRENT ROW"),
-        FrameBound::Following(n) => {
-            buf.extend_from_slice(n.to_string().as_bytes());
-            buf.extend_from_slice(b" FOLLOWING");
-        }
-        FrameBound::UnboundedFollowing => buf.extend_from_slice(b"UNBOUNDED FOLLOWING"),
-    }
+/// Encode window frame (`ROWS|RANGE|GROUPS BETWEEN ... AND ... [EXCLUDE ...]`).
+fn encode_window_frame(
+    frame: &WindowFrame,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    let sql = frame
+        .to_sql()
+        .map_err(|reason| crate::protocol::EncodeError::InvalidAst(reason.to_string()))?;
+    buf.extend_from_slice(sql.as_bytes());
+    Ok(())
 }
 
 #[cfg(test)]

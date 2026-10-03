@@ -844,6 +844,9 @@ mod tests {
             base_query: Box::new(base),
             recursive_query: Some(Box::new(recursive)),
             source_table: None,
+            materialization: None,
+            search: None,
+            cycle: None,
         }];
 
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
@@ -873,6 +876,9 @@ mod tests {
             base_query: Box::new(base),
             recursive_query: Some(Box::new(recursive)),
             source_table: None,
+            materialization: None,
+            search: None,
+            cycle: None,
         }];
 
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();

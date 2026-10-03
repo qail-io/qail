@@ -20,13 +20,14 @@ pub mod write_payload;
 pub use self::cages::{Cage, CageKind};
 pub use self::cmd::Qail;
 pub use self::cmd::{
-    CTEDef, ConflictAction, GroupByClause, Merge, MergeAction, MergeClause, MergeMatchKind,
-    MergeSource, OnConflict,
+    CTEDef, ConflictAction, CteCycle, CteMaterialization, CteSearch, CteSearchOrder, GroupByClause,
+    Merge, MergeAction, MergeClause, MergeMatchKind, MergeSource, OnConflict,
 };
 pub use self::conditions::Condition;
 pub use self::expr::{
-    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FunctionDef, IndexDef,
-    JsonPathSegment, TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
+    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FrameExclusion, FunctionDef,
+    IndexDef, JsonPathSegment, TableConstraint, TriggerDef, TriggerEvent, TriggerTiming,
+    WindowFrame,
 };
 pub use self::joins::Join;
 pub use self::operators::{

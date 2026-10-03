@@ -62,79 +62,22 @@ pub fn parse_column_list(input: &str) -> IResult<&str, Vec<Expr>> {
     }
 }
 
-/// Parse a single column with optional alias: name as display_name
+/// Parse a single column with optional alias: name as display_name.
+/// A leading `not` negates the whole column expression.
 pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
+    let (input, negated) = opt((tag_no_case("not"), multispace1)).parse(input)?;
     let (input, mut expr) = parse_expression(input)?;
+    if negated.is_some() {
+        expr = super::expressions::negate(expr);
+    }
     let (input, _) = multispace0(input)?;
 
+    let alias_start = input;
     let (input, alias) =
         opt(preceded((tag_no_case("as"), multispace1), parse_identifier)).parse(input)?;
 
     if let Some(a) = alias {
-        // Wrap whatever expr we found in Aliased?
-        // Wait, Expr::Aliased has { name: String, alias: String }.
-        // This suggests only named columns can be aliased?
-        // AST needs update if we want aliased complex expressions.
-        // Actually Expr definition:
-        // Aliased { name: String, alias: String }
-        // Case { ..., alias: Option<String> }
-        // JsonAccess { ..., alias: Option<String> }
-        // FunctionCall { ..., alias: Option<String> }
-
-        // We should move Alias into global Expr wrapper or update Expr structure.
-        // For now, let's map what we can.
-        expr = match expr {
-            Expr::Named(n) => Expr::Aliased {
-                name: n,
-                alias: a.to_string(),
-            },
-            Expr::FunctionCall { name, args, .. } => Expr::FunctionCall {
-                name,
-                args,
-                alias: Some(a.to_string()),
-            },
-            Expr::JsonAccess {
-                column,
-                path_segments,
-                ..
-            } => Expr::JsonAccess {
-                column,
-                path_segments,
-                alias: Some(a.to_string()),
-            },
-            Expr::Case {
-                when_clauses,
-                else_value,
-                ..
-            } => Expr::Case {
-                when_clauses,
-                else_value,
-                alias: Some(a.to_string()),
-            },
-            Expr::Aggregate {
-                col,
-                func,
-                distinct,
-                filter,
-                ..
-            } => Expr::Aggregate {
-                col,
-                func,
-                distinct,
-                filter,
-                alias: Some(a.to_string()),
-            },
-            Expr::Cast {
-                expr: inner,
-                target_type,
-                ..
-            } => Expr::Cast {
-                expr: inner,
-                target_type,
-                alias: Some(a.to_string()),
-            },
-            _ => expr,
-        };
+        expr = super::expressions::alias_or_fail(alias_start, expr, a)?;
     }
 
     Ok((input, expr))
@@ -411,6 +354,76 @@ pub fn parse_offset_clause(input: &str) -> IResult<&str, Cage> {
             kind: CageKind::Offset(n),
             conditions: vec![],
             logical_op: LogicalOp::And,
+        },
+    ))
+}
+
+/// Parsed `FOR <strength> [OF ...] [NOWAIT | SKIP LOCKED]` row-lock clause.
+#[derive(Debug, Default)]
+pub struct LockClause {
+    /// Lock strength; `None` when no clause was written.
+    pub mode: Option<LockMode>,
+    /// `OF` names.
+    pub of: Vec<String>,
+    /// `NOWAIT`.
+    pub nowait: bool,
+    /// `SKIP LOCKED`.
+    pub skip_locked: bool,
+}
+
+/// Parse: for update | for no key update | for share | for key share
+/// [of name, ...] [nowait | skip locked]
+pub fn parse_lock_clause(input: &str) -> IResult<&str, LockClause> {
+    let (input, _) = tag_no_case("for").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, mode) = alt((
+        value(
+            LockMode::NoKeyUpdate,
+            (
+                tag_no_case("no"),
+                multispace1,
+                tag_no_case("key"),
+                multispace1,
+                tag_no_case("update"),
+            ),
+        ),
+        value(
+            LockMode::KeyShare,
+            (tag_no_case("key"), multispace1, tag_no_case("share")),
+        ),
+        value(LockMode::Update, tag_no_case("update")),
+        value(LockMode::Share, tag_no_case("share")),
+    ))
+    .parse(input)?;
+
+    let (input, of) = opt(preceded(
+        (multispace1, tag_no_case("of"), multispace1),
+        separated_list1(
+            (multispace0, char(','), multispace0),
+            map(super::base::parse_bare_identifier, str::to_string),
+        ),
+    ))
+    .parse(input)?;
+
+    let (input, wait) = opt(preceded(
+        multispace1,
+        alt((
+            value(false, tag_no_case("nowait")),
+            value(
+                true,
+                (tag_no_case("skip"), multispace1, tag_no_case("locked")),
+            ),
+        )),
+    ))
+    .parse(input)?;
+
+    Ok((
+        input,
+        LockClause {
+            mode: Some(mode),
+            of: of.unwrap_or_default(),
+            nowait: wait == Some(false),
+            skip_locked: wait == Some(true),
         },
     ))
 }

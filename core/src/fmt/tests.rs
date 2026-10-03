@@ -152,6 +152,9 @@ fn test_fmt_cte() {
         base_query: Box::new(Qail::get("table")),
         recursive_query: None,
         source_table: None,
+        materialization: None,
+        search: None,
+        cycle: None,
     });
 
     let formatter = Formatter::new();

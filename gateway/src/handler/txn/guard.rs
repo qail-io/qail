@@ -88,6 +88,14 @@ fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
             reject_expr_subqueries(expr)?;
             reject_expr_subqueries(index)?;
         }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            reject_expr_subqueries(expr)?;
+            for bound in [lower, upper].into_iter().flatten() {
+                reject_expr_subqueries(bound)?;
+            }
+        }
         Expr::FieldAccess { expr, .. } => reject_expr_subqueries(expr)?,
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             reject_ddl_in_transaction(query)?;

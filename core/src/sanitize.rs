@@ -421,6 +421,24 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             Ok(())
         }
+        Expr::ArraySlice {
+            expr,
+            lower,
+            upper,
+            alias,
+        } => {
+            check_expr(&format!("{field}.slice_expr"), expr)?;
+            if let Some(lower) = lower {
+                check_expr(&format!("{field}.slice_lower"), lower)?;
+            }
+            if let Some(upper) = upper {
+                check_expr(&format!("{field}.slice_upper"), upper)?;
+            }
+            if let Some(a) = alias {
+                check_ident(&format!("{field}.alias"), a)?;
+            }
+            Ok(())
+        }
         Expr::Collate {
             expr,
             collation,
@@ -574,6 +592,24 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
         if let Some(ref rq) = cte.recursive_query {
             validate_ast(rq)?;
         }
+        if let Some(search) = &cte.search {
+            for col in &search.by {
+                check_ident("cte.search.by", col)?;
+            }
+            check_ident("cte.search.set", &search.set_column)?;
+        }
+        if let Some(cycle) = &cte.cycle {
+            for col in &cycle.columns {
+                check_ident("cte.cycle.column", col)?;
+            }
+            check_ident("cte.cycle.set", &cycle.set_column)?;
+            check_ident("cte.cycle.using", &cycle.using_column)?;
+        }
+    }
+
+    // ── Row lock OF names ────────────────────────────────────────────
+    for name in &cmd.lock_of {
+        check_ident("lock_of", name)?;
     }
 
     // ── DISTINCT ON ──────────────────────────────────────────────────

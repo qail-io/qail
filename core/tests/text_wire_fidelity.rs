@@ -2,9 +2,11 @@
 
 use proptest::prelude::*;
 use qail_core::ast::builders::*;
+use qail_core::ast::values::IntervalUnit;
 use qail_core::ast::{
-    Action, BinaryOp, CTEDef, Cage, CageKind, Constraint, Expr, FrameBound, IndexDef, JoinKind,
-    LogicalOp, Operator, Qail, SetOp, SortOrder, Value, WindowFrame,
+    Action, BinaryOp, CTEDef, Cage, CageKind, Constraint, CteMaterialization, Expr, FrameBound,
+    FrameExclusion, IndexDef, JoinKind, LogicalOp, Operator, Qail, SetOp, SortOrder, Value,
+    WindowFrame,
 };
 use qail_core::wire::*;
 
@@ -124,6 +126,7 @@ fn corpus() -> Vec<(&'static str, Qail)> {
                 Some(WindowFrame::Rows {
                     start: FrameBound::UnboundedPreceding,
                     end: FrameBound::CurrentRow,
+                    exclude: FrameExclusion::NoOthers,
                 }),
             )),
         ),
@@ -134,8 +137,47 @@ fn corpus() -> Vec<(&'static str, Qail)> {
                 Some(WindowFrame::Range {
                     start: FrameBound::Preceding(3),
                     end: FrameBound::Following(2),
+                    exclude: FrameExclusion::NoOthers,
                 }),
             )),
+        ),
+        (
+            "window groups frame with exclusion",
+            Qail::get("orders").column_expr(window(
+                "sum",
+                Some(WindowFrame::Groups {
+                    start: FrameBound::Preceding(1),
+                    end: FrameBound::CurrentRow,
+                    exclude: FrameExclusion::Ties,
+                }),
+            )),
+        ),
+        (
+            "window interval range frame",
+            Qail::get("orders").column_expr(window(
+                "avg",
+                Some(WindowFrame::Range {
+                    start: FrameBound::IntervalPreceding {
+                        amount: 7,
+                        unit: IntervalUnit::Day,
+                    },
+                    end: FrameBound::CurrentRow,
+                    exclude: FrameExclusion::CurrentRow,
+                }),
+            )),
+        ),
+        (
+            "array slice",
+            Qail::get("orders").column_expr(Expr::ArraySlice {
+                expr: Box::new(Expr::Named("tags".to_string())),
+                lower: Some(Box::new(Expr::Literal(Value::Int(1)))),
+                upper: Some(Box::new(Expr::Literal(Value::Int(2)))),
+                alias: Some("first_tags".to_string()),
+            }),
+        ),
+        (
+            "for update nowait of",
+            base().for_update().nowait().lock_of(["orders"]),
         ),
         ("for update", base().where_eq("id", 1).for_update()),
         ("skip locked", base().limit(5).for_update_skip_locked()),
@@ -160,8 +202,25 @@ fn corpus() -> Vec<(&'static str, Qail)> {
                         .inner_join("tree", "nodes.parent_id", "tree.id"),
                 )),
                 source_table: None,
+                materialization: None,
+                search: None,
+                cycle: None,
             };
             Qail::get("tree").with_cte(cte).columns(["id"])
+        }),
+        ("materialized cte", {
+            let cte = CTEDef {
+                name: "recent".to_string(),
+                recursive: false,
+                columns: Vec::new(),
+                base_query: Box::new(base().order_desc("id").limit(3)),
+                recursive_query: None,
+                source_table: None,
+                materialization: Some(CteMaterialization::Materialized),
+                search: None,
+                cycle: None,
+            };
+            Qail::get("recent").with_cte(cte).columns(["id"])
         }),
         (
             "joins",
@@ -369,6 +428,7 @@ proptest! {
                 4 => cmd.column_expr(window("sum", Some(WindowFrame::Rows {
                     start: FrameBound::Preceding(1),
                     end: FrameBound::CurrentRow,
+                    exclude: FrameExclusion::NoOthers,
                 }))),
                 5 => cmd.for_update(),
                 6 => cmd.for_update_skip_locked(),

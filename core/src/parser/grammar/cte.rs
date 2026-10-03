@@ -59,33 +59,114 @@ fn parse_cte_definition(input: &str, is_recursive: bool) -> IResult<&str, CTEDef
     let (input, _) = tag_no_case("as").parse(input)?;
     let (input, _) = multispace0(input)?;
 
+    // AS [NOT] MATERIALIZED
+    let (input, materialization) = opt(nom::sequence::terminated(
+        nom::branch::alt((
+            nom::combinator::value(
+                CteMaterialization::NotMaterialized,
+                (tag_no_case("not"), multispace1, tag_no_case("materialized")),
+            ),
+            nom::combinator::value(
+                CteMaterialization::Materialized,
+                tag_no_case("materialized"),
+            ),
+        )),
+        multispace0,
+    ))
+    .parse(input)?;
+
     // Subquery in parentheses - extract content
     let (input, cte_body) =
         delimited(char('('), take_until_matching_paren, char(')')).parse(input)?;
 
     let cte_body = cte_body.trim();
 
-    if is_recursive {
+    // SEARCH / CYCLE follow the body; encoders reject them on non-recursive CTEs.
+    let (input, search) = opt(preceded(multispace1, parse_cte_search)).parse(input)?;
+    let (input, cycle) = opt(preceded(multispace1, parse_cte_cycle)).parse(input)?;
+
+    let mut cte = if is_recursive {
         // Strict recursive path: split on UNION ALL, parse both halves, validate invariants
-        parse_recursive_cte_strict(input, name, columns.unwrap_or_default(), cte_body)
+        parse_recursive_cte_strict(input, name, columns.unwrap_or_default(), cte_body)?.1
     } else {
         // Non-recursive strict path: must be valid QAIL with full consumption.
         let base_query = parse_qail_strict(cte_body).map_err(|_| {
             nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
         })?;
 
-        Ok((
-            input,
-            CTEDef {
-                name: name.to_string(),
-                recursive: false,
-                columns: columns.unwrap_or_default(),
-                base_query: Box::new(base_query),
-                recursive_query: None,
-                source_table: None,
-            },
-        ))
-    }
+        CTEDef {
+            name: name.to_string(),
+            recursive: false,
+            columns: columns.unwrap_or_default(),
+            base_query: Box::new(base_query),
+            recursive_query: None,
+            source_table: None,
+            materialization: None,
+            search: None,
+            cycle: None,
+        }
+    };
+    cte.materialization = materialization;
+    cte.search = search;
+    cte.cycle = cycle;
+    Ok((input, cte))
+}
+
+fn parse_name_list(input: &str) -> IResult<&str, Vec<String>> {
+    separated_list1(
+        (multispace0, char(','), multispace0),
+        map(super::base::parse_bare_identifier, str::to_string),
+    )
+    .parse(input)
+}
+
+/// `search depth|breadth first by a, b set ord`
+fn parse_cte_search(input: &str) -> IResult<&str, CteSearch> {
+    let (input, _) = tag_no_case("search").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, order) = nom::branch::alt((
+        nom::combinator::value(CteSearchOrder::DepthFirst, tag_no_case("depth")),
+        nom::combinator::value(CteSearchOrder::BreadthFirst, tag_no_case("breadth")),
+    ))
+    .parse(input)?;
+    let (input, _) = (
+        multispace1,
+        tag_no_case("first"),
+        multispace1,
+        tag_no_case("by"),
+        multispace1,
+    )
+        .parse(input)?;
+    let (input, by) = parse_name_list(input)?;
+    let (input, _) = (multispace1, tag_no_case("set"), multispace1).parse(input)?;
+    let (input, set_column) = super::base::parse_bare_identifier(input)?;
+    Ok((
+        input,
+        CteSearch {
+            order,
+            by,
+            set_column: set_column.to_string(),
+        },
+    ))
+}
+
+/// `cycle a, b set is_cycle using path`
+fn parse_cte_cycle(input: &str) -> IResult<&str, CteCycle> {
+    let (input, _) = tag_no_case("cycle").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, columns) = parse_name_list(input)?;
+    let (input, _) = (multispace1, tag_no_case("set"), multispace1).parse(input)?;
+    let (input, set_column) = super::base::parse_bare_identifier(input)?;
+    let (input, _) = (multispace1, tag_no_case("using"), multispace1).parse(input)?;
+    let (input, using_column) = super::base::parse_bare_identifier(input)?;
+    Ok((
+        input,
+        CteCycle {
+            columns,
+            set_column: set_column.to_string(),
+            using_column: using_column.to_string(),
+        },
+    ))
 }
 
 /// Strict recursive CTE parser pipeline (steps 2-6 from QA spec).
@@ -150,6 +231,9 @@ fn parse_recursive_cte_strict<'a>(
             base_query: Box::new(base_query),
             recursive_query: Some(Box::new(recursive_query)),
             source_table: None,
+            materialization: None,
+            search: None,
+            cycle: None,
         },
     ))
 }

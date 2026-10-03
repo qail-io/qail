@@ -355,7 +355,8 @@ fn reject_unsupported_mutation_features(qail: &Qail) -> Result<(), NormalizeMuta
             "savepoint metadata",
         ));
     }
-    if qail.lock_mode.is_some() || qail.skip_locked {
+    if qail.lock_mode.is_some() || qail.skip_locked || qail.lock_nowait || !qail.lock_of.is_empty()
+    {
         return Err(NormalizeMutationError::UnsupportedFeature("row locks"));
     }
     if qail.fetch.is_some() {

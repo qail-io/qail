@@ -381,6 +381,9 @@ mod tests {
             base_query: Box::new(Qail::add("audit_log")),
             recursive_query: None,
             source_table: None,
+            materialization: None,
+            search: None,
+            cycle: None,
         });
 
         let mut cmd = Qail::get("orders");

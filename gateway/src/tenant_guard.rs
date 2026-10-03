@@ -765,6 +765,14 @@ fn prepare_expr_subquery_guards(
             prepare_expr_subquery_guards(state, auth, expr, plan)?;
             prepare_expr_subquery_guards(state, auth, index, plan)?;
         }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            for bound in [lower, upper].into_iter().flatten() {
+                prepare_expr_subquery_guards(state, auth, bound, plan)?;
+            }
+        }
         Expr::FieldAccess { expr, .. } => prepare_expr_subquery_guards(state, auth, expr, plan)?,
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             if let Some(subquery_plan) = prepare_tenant_guarded_query_inner(
@@ -886,6 +894,9 @@ pub fn expression_projects_tenant_column(expr: &Expr, tenant_column: &str) -> bo
             alias: Some(alias), ..
         }
         | Expr::Subscript {
+            alias: Some(alias), ..
+        }
+        | Expr::ArraySlice {
             alias: Some(alias), ..
         }
         | Expr::Collate {
