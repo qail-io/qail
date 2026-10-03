@@ -95,6 +95,15 @@ pub struct Qail {
     /// an RLS bypass unless this is set. Only meaningful for [`Action::CreateView`].
     #[serde(default)]
     pub view_security_invoker: bool,
+    /// `CREATE VIEW … WITH (security_barrier = true)`: keeps caller-supplied
+    /// functions from seeing rows the view's own WHERE filters out.
+    /// Only meaningful for [`Action::CreateView`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub view_security_barrier: bool,
+    /// `CREATE VIEW … WITH LOCAL|CASCADED CHECK OPTION`.
+    /// Only meaningful for [`Action::CreateView`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_check_option: Option<crate::ast::ViewCheckOption>,
 }
 
 /// Common Table Expression (WITH clause) definition.
@@ -282,6 +291,8 @@ impl Default for Qail {
             trigger_def: None,
             policy_def: None,
             view_security_invoker: false,
+            view_security_barrier: false,
+            view_check_option: None,
         }
     }
 }

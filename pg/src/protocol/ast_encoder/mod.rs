@@ -3028,6 +3028,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3149,6 +3150,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: Some("active = true".to_string()),
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3168,6 +3170,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3187,6 +3190,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3206,6 +3210,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3225,6 +3230,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3246,6 +3252,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3267,6 +3274,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3288,6 +3296,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: Some("active = true\0".to_string()),
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3309,6 +3318,7 @@ mod tests {
                 include: vec!["name".to_string(), "created_at".to_string()],
                 concurrently: true,
                 where_clause: Some("deleted_at IS NULL".to_string()),
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -3328,6 +3338,7 @@ mod tests {
                 include: vec!["lower(name)".to_string()],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };

@@ -64,6 +64,8 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
             trigger_def: None,
             policy_def: None,
             view_security_invoker: false,
+            view_security_barrier: false,
+            view_check_option: None,
         },
     ))
 }
@@ -316,6 +318,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             table_constraints: vec![],
             set_ops: vec![],
@@ -349,6 +352,8 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
             trigger_def: None,
             policy_def: None,
             view_security_invoker: false,
+            view_security_barrier: false,
+            view_check_option: None,
         },
     ))
 }

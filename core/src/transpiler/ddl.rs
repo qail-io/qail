@@ -241,7 +241,36 @@ fn parse_fk_action(tokens: &[&str], index: usize) -> Option<(String, usize)> {
     }
 }
 
-fn reference_tail_to_sql(tail: &str) -> Option<String> {
+/// `(a, b)` column list that may span several whitespace tokens.
+fn parse_fk_column_subset(tokens: &[&str], index: usize) -> Option<(Vec<String>, usize)> {
+    if !tokens.get(index)?.starts_with('(') {
+        return None;
+    }
+    let mut raw = String::new();
+    let mut i = index;
+    loop {
+        let token = tokens.get(i)?;
+        if !raw.is_empty() {
+            raw.push(' ');
+        }
+        raw.push_str(token);
+        i += 1;
+        if token.ends_with(')') {
+            break;
+        }
+    }
+    let inner = raw.strip_prefix('(')?.strip_suffix(')')?;
+    let columns = inner
+        .split(',')
+        .map(|col| col.trim().to_string())
+        .collect::<Vec<_>>();
+    if columns.iter().any(|col| !is_simple_identifier(col)) {
+        return None;
+    }
+    Some((columns, i))
+}
+
+fn reference_tail_to_sql(tail: &str, generator: &dyn SqlGenerator) -> Option<String> {
     let tail = tail.trim();
     if tail.is_empty() {
         return Some(String::new());
@@ -254,7 +283,17 @@ fn reference_tail_to_sql(tail: &str) -> Option<String> {
     let mut rendered = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
-        if tokens[i].eq_ignore_ascii_case("ON") {
+        if tokens[i].eq_ignore_ascii_case("MATCH") {
+            let mode = tokens.get(i + 1)?;
+            if mode.eq_ignore_ascii_case("FULL") {
+                rendered.push("MATCH FULL".to_string());
+            } else if mode.eq_ignore_ascii_case("SIMPLE") {
+                rendered.push("MATCH SIMPLE".to_string());
+            } else {
+                return None;
+            }
+            i += 2;
+        } else if tokens[i].eq_ignore_ascii_case("ON") {
             let event = tokens.get(i + 1)?;
             let event_sql = if event.eq_ignore_ascii_case("DELETE") {
                 "DELETE"
@@ -264,8 +303,28 @@ fn reference_tail_to_sql(tail: &str) -> Option<String> {
                 return None;
             };
             let (action, next) = parse_fk_action(&tokens, i + 2)?;
-            rendered.push(format!("ON {event_sql} {action}"));
             i = next;
+            // PostgreSQL 15+: ON DELETE SET NULL/SET DEFAULT may name a column subset.
+            if event_sql == "DELETE"
+                && action.starts_with("SET ")
+                && let Some((columns, next)) = parse_fk_column_subset(&tokens, i)
+            {
+                rendered.push(format!(
+                    "ON {event_sql} {action} ({})",
+                    quoted_column_list(&columns, generator)
+                ));
+                i = next;
+            } else {
+                rendered.push(format!("ON {event_sql} {action}"));
+            }
+        } else if tokens[i].eq_ignore_ascii_case("ENFORCED") {
+            rendered.push("ENFORCED".to_string());
+            i += 1;
+        } else if tokens[i].eq_ignore_ascii_case("NOT")
+            && tokens.get(i + 1)?.eq_ignore_ascii_case("ENFORCED")
+        {
+            rendered.push("NOT ENFORCED".to_string());
+            i += 2;
         } else if tokens[i].eq_ignore_ascii_case("DEFERRABLE") {
             rendered.push("DEFERRABLE".to_string());
             i += 1;
@@ -314,7 +373,7 @@ fn references_target_to_sql(target: &str, generator: &dyn SqlGenerator) -> Strin
         return generator.quote_identifier(target);
     }
 
-    let Some(tail) = reference_tail_to_sql(&rest[close_idx + 1..]) else {
+    let Some(tail) = reference_tail_to_sql(&rest[close_idx + 1..], generator) else {
         return generator.quote_identifier(target);
     };
 
@@ -371,9 +430,27 @@ fn fk_deferrable_option_to_sql(deferrable: &str) -> Option<&'static str> {
     }
 }
 
+/// `EXCLUDE ...` definition body, validated as one statement fragment.
+pub(crate) fn checked_exclude_definition(definition: &str) -> Option<&str> {
+    let definition = definition.trim();
+    let keyword = definition.get(..7)?;
+    let rest = definition.get(7..)?;
+    if !keyword.eq_ignore_ascii_case("EXCLUDE")
+        || !rest.starts_with(char::is_whitespace)
+        || definition.contains('\0')
+        || contains_unquoted_statement_delimiter(definition)
+    {
+        return None;
+    }
+    Some(definition)
+}
+
+/// `in_alter`: the constraint is rendered for `ALTER TABLE ... ADD`. PostgreSQL
+/// silently ignores NOT VALID inside CREATE TABLE, so it is rejected there.
 fn table_constraint_to_sql(
     constraint: &TableConstraint,
     generator: &dyn SqlGenerator,
+    in_alter: bool,
 ) -> Result<String, String> {
     match constraint {
         TableConstraint::Unique(cols) => {
@@ -383,6 +460,43 @@ fn table_constraint_to_sql(
             "PRIMARY KEY ({})",
             quoted_column_list(cols, generator)
         )),
+        TableConstraint::Check {
+            name,
+            expr,
+            not_valid,
+            not_enforced,
+        } => {
+            if *not_valid && !in_alter {
+                return Err(
+                    "/* ERROR: NOT VALID CHECK constraints require ALTER TABLE ADD */".to_string(),
+                );
+            }
+            let expr = checked_sql_expr_fragment(expr, "check constraint expression")?;
+            let mut sql = String::new();
+            if let Some(name) = name {
+                sql.push_str("CONSTRAINT ");
+                sql.push_str(&generator.quote_identifier(name));
+                sql.push(' ');
+            }
+            sql.push_str(&format!("CHECK ({expr})"));
+            if *not_enforced {
+                sql.push_str(" NOT ENFORCED");
+            }
+            if *not_valid {
+                sql.push_str(" NOT VALID");
+            }
+            Ok(sql)
+        }
+        TableConstraint::Exclude { name, definition } => {
+            let Some(definition) = checked_exclude_definition(definition) else {
+                return Err("/* ERROR: Invalid EXCLUDE constraint definition */".to_string());
+            };
+            Ok(format!(
+                "CONSTRAINT {} {}",
+                generator.quote_identifier(name),
+                definition
+            ))
+        }
         TableConstraint::ForeignKey {
             name,
             columns,
@@ -391,7 +505,13 @@ fn table_constraint_to_sql(
             on_delete,
             on_update,
             deferrable,
+            options,
         } => {
+            if options.not_valid && !in_alter {
+                return Err(
+                    "/* ERROR: NOT VALID foreign keys require ALTER TABLE ADD */".to_string(),
+                );
+            }
             let mut sql = String::new();
             if let Some(name) = name {
                 sql.push_str("CONSTRAINT ");
@@ -405,12 +525,31 @@ fn table_constraint_to_sql(
             sql.push('(');
             sql.push_str(&quoted_column_list(ref_columns, generator));
             sql.push(')');
+            if options.match_full {
+                sql.push_str(" MATCH FULL");
+            }
             if let Some(action) = on_delete {
                 let Some(action) = fk_action_option_to_sql(action) else {
                     return Err("/* ERROR: Invalid foreign key ON DELETE action */".to_string());
                 };
                 sql.push_str(" ON DELETE ");
                 sql.push_str(action);
+                if !options.on_delete_columns.is_empty() {
+                    if !matches!(action, "SET NULL" | "SET DEFAULT") {
+                        return Err(
+                            "/* ERROR: ON DELETE column list requires SET NULL or SET DEFAULT */"
+                                .to_string(),
+                        );
+                    }
+                    sql.push_str(" (");
+                    sql.push_str(&quoted_column_list(&options.on_delete_columns, generator));
+                    sql.push(')');
+                }
+            } else if !options.on_delete_columns.is_empty() {
+                return Err(
+                    "/* ERROR: ON DELETE column list requires SET NULL or SET DEFAULT */"
+                        .to_string(),
+                );
             }
             if let Some(action) = on_update {
                 let Some(action) = fk_action_option_to_sql(action) else {
@@ -425,6 +564,12 @@ fn table_constraint_to_sql(
                 };
                 sql.push(' ');
                 sql.push_str(deferrable);
+            }
+            if options.not_enforced {
+                sql.push_str(" NOT ENFORCED");
+            }
+            if options.not_valid {
+                sql.push_str(" NOT VALID");
             }
             Ok(sql)
         }
@@ -595,7 +740,7 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     for tc in &cmd.table_constraints {
-        let constraint_sql = match table_constraint_to_sql(tc, generator.as_ref()) {
+        let constraint_sql = match table_constraint_to_sql(tc, generator.as_ref(), false) {
             Ok(sql) => sql,
             Err(err) => return err,
         };
@@ -747,6 +892,12 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
                 sql.push_str(" INCLUDE (");
                 sql.push_str(&include_cols.join(", "));
                 sql.push(')');
+            }
+            if idx.nulls_not_distinct {
+                if !idx.unique {
+                    return "/* ERROR: NULLS NOT DISTINCT requires a UNIQUE index */".to_string();
+                }
+                sql.push_str(" NULLS NOT DISTINCT");
             }
             if let Some(where_clause) = &idx.where_clause {
                 if where_clause.trim().is_empty()
@@ -980,7 +1131,7 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
         parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
     }
     for constraint in &cmd.table_constraints {
-        let constraint_sql = match table_constraint_to_sql(constraint, generator.as_ref()) {
+        let constraint_sql = match table_constraint_to_sql(constraint, generator.as_ref(), true) {
             Ok(sql) => sql,
             Err(err) => return err,
         };

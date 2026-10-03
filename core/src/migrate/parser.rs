@@ -20,9 +20,9 @@
 use super::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use super::schema::{
     CheckComparisonOp, CheckConstraint, CheckExpr, Column, Comment, Deferrable, EnumType,
-    Extension, FkAction, Generated, Grant, Index, IndexMethod, MigrationHint,
-    MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema, SchemaFunctionDef,
-    SchemaTriggerDef, Sequence, Table, ViewDef,
+    ExclusionConstraint, Extension, FkAction, ForeignKeyOptions, Generated, Grant, Index,
+    IndexMethod, MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind,
+    Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewCheckOption, ViewDef,
 };
 use super::types::ColumnType;
 use crate::ast::Expr;
@@ -164,6 +164,8 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
                 return Err(format!("duplicate resource declaration '{}'", res.name));
             }
             schema.add_resource(res);
+        } else if let Some(rest) = line.strip_prefix("unsupported ") {
+            schema.unsupported.push(parse_comment_text(rest.trim())?);
         } else if line.starts_with("policy ") {
             let policy = parse_policy(line, &mut lines)?;
             if schema
@@ -268,6 +270,23 @@ where
             continue;
         }
 
+        // `exclusion <name> EXCLUDE ...`: the third token is the SQL keyword, so
+        // a column named `exclusion` (whose next token is a type) is unaffected.
+        if let Some(exclusion) = parse_exclusion_line(line)? {
+            if table
+                .exclusions
+                .iter()
+                .any(|existing| existing.name == exclusion.name)
+            {
+                return Err(format!(
+                    "duplicate exclusion constraint '{}' in table '{}'",
+                    exclusion.name, name
+                ));
+            }
+            table.exclusions.push(exclusion);
+            continue;
+        }
+
         // Table-level RLS directives
         if line == "enable_rls" {
             table.enable_rls = true;
@@ -315,6 +334,34 @@ where
     }
 
     Ok((table, consumed))
+}
+
+/// `exclusion <name> EXCLUDE USING ...` inside a table block.
+pub(crate) fn parse_exclusion_line(line: &str) -> Result<Option<ExclusionConstraint>, String> {
+    let Some(rest) = line.strip_prefix("exclusion ") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    let Some((name, definition)) = rest.split_once(char::is_whitespace) else {
+        return Ok(None);
+    };
+    let definition = definition.trim();
+    let starts_with_exclude = definition
+        .get(..7)
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("EXCLUDE"))
+        && definition
+            .get(7..)
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace));
+    if !starts_with_exclude {
+        return Ok(None);
+    }
+    if !is_native_identifier(name) {
+        return Err(format!("invalid exclusion constraint name '{}'", name));
+    }
+    Ok(Some(ExclusionConstraint {
+        name: name.to_string(),
+        definition: definition.to_string(),
+    }))
 }
 
 /// Parse a column definition.
@@ -529,7 +576,7 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 let expr = parse_check_expr_from_qail(inner).ok_or_else(|| {
                     format!("invalid check expression for column '{}': {}", name, inner)
                 })?;
-                push_column_check(&mut col, CheckConstraint { expr, name: None });
+                push_column_check(&mut col, CheckConstraint::new(expr, None));
             }
             "check_name" if i + 1 < parts.len() => {
                 i += 1;
@@ -547,6 +594,25 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
             }
             "check_name" => {
                 return Err(format!("check_name requires a name for column '{}'", name));
+            }
+            // Foreign-key state is consumed right after `references`; here the
+            // token belongs to the most recent CHECK.
+            state @ ("not_valid" | "not_enforced") => {
+                let Some(check) = last_column_check_mut(&mut col) else {
+                    return Err(format!(
+                        "{} requires a preceding check or foreign key for column '{}'",
+                        state, name
+                    ));
+                };
+                let flag = if state == "not_valid" {
+                    &mut check.not_valid
+                } else {
+                    &mut check.not_enforced
+                };
+                if *flag {
+                    return Err(format!("duplicate {} for column '{}'", state, name));
+                }
+                *flag = true;
             }
             _ => {
                 return Err(format!(
@@ -705,6 +771,19 @@ fn parse_index(line: &str) -> Result<Index, String> {
         }
         index.include = include_cols;
         trailing = include_rest[include_end + 1..].trim();
+    }
+
+    if let Some(rest) = trailing.strip_prefix("nulls_not_distinct")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        if !index.unique {
+            return Err(format!(
+                "nulls_not_distinct requires a unique index: {}",
+                index.name
+            ));
+        }
+        index.nulls_not_distinct = true;
+        trailing = rest.trim();
     }
 
     if let Some(pred) = trailing.strip_prefix("where ") {
@@ -1419,8 +1498,13 @@ fn apply_multi_column_fk_options(
     let mut seen_on_delete = false;
     let mut seen_on_update = false;
     let mut seen_deferrable = false;
+    let mut seen_state = HashSet::new();
 
     while i < parts.len() {
+        if apply_fk_state_token(&mut fk.options, parts[i], &mut seen_state)? {
+            i += 1;
+            continue;
+        }
         match parts[i] {
             "constraint" | "name" if i + 1 < parts.len() => {
                 if seen_name {
@@ -1442,7 +1526,9 @@ fn apply_multi_column_fk_options(
                     return Err("duplicate on_delete action".to_string());
                 }
                 seen_on_delete = true;
-                fk.on_delete = parse_fk_action_str(parts[i + 1])?;
+                let (action, columns) = parse_fk_on_delete_token(parts[i + 1])?;
+                fk.on_delete = action;
+                fk.options.on_delete_columns = columns;
                 i += 2;
             }
             "on_update" if i + 1 < parts.len() => {
@@ -1514,22 +1600,50 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
     };
 
     if let Some((dollar_pos, delimiter)) = find_dollar_delimiter(rest) {
-        let mut name = rest[..dollar_pos].trim();
-        // `view <name> [security_invoker] $$ … $$` — the modifier makes the
+        // `view <name> [security_invoker] [security_barrier]
+        //  [check_option local|cascaded] $$ … $$`. security_invoker makes the
         // view evaluate its base tables with the caller's rights so their RLS
         // still applies (see ViewDef::security_invoker).
-        let mut security_invoker = false;
-        if let Some(stripped) = name.strip_suffix("security_invoker")
-            && (stripped.is_empty() || stripped.ends_with(char::is_whitespace))
-        {
-            security_invoker = true;
-            name = stripped.trim();
-        }
+        let mut header = rest[..dollar_pos].split_whitespace();
+        let name = header.next().unwrap_or("");
         if name.is_empty() {
             return Err("view name is required".to_string());
         }
         if !is_native_table_ref(name) {
             return Err(format!("invalid view name '{}'", name));
+        }
+        let mut security_invoker = false;
+        let mut security_barrier = false;
+        let mut check_option = None;
+        while let Some(option) = header.next() {
+            match option {
+                "security_invoker" if !security_invoker => security_invoker = true,
+                "security_barrier" if !security_barrier => security_barrier = true,
+                "check_option" if check_option.is_none() => {
+                    check_option = Some(match header.next() {
+                        Some("local") => ViewCheckOption::Local,
+                        Some("cascaded") => ViewCheckOption::Cascaded,
+                        other => {
+                            return Err(format!(
+                                "view '{}' check_option must be local or cascaded, got {:?}",
+                                name, other
+                            ));
+                        }
+                    });
+                }
+                other => {
+                    return Err(format!(
+                        "unknown or duplicate view option '{}' on '{}'",
+                        other, name
+                    ));
+                }
+            }
+        }
+        if materialized && (security_barrier || check_option.is_some()) {
+            return Err(format!(
+                "materialized view '{}' cannot use security_barrier or check_option",
+                name
+            ));
         }
         let body = collect_dollar_body(
             &rest[dollar_pos + delimiter.len()..],
@@ -1544,6 +1658,12 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
         }
         if security_invoker {
             view = view.security_invoker();
+        }
+        if security_barrier {
+            view = view.security_barrier();
+        }
+        if let Some(option) = check_option {
+            view = view.check_option(option);
         }
         Ok(view)
     } else {
@@ -2183,6 +2303,55 @@ fn parse_fk_action_str(s: &str) -> Result<FkAction, String> {
     }
 }
 
+/// `on_delete` token: an action, optionally with a column subset written as
+/// `set_null(a,b)` / `set_default(a)` (PostgreSQL 15+).
+fn parse_fk_on_delete_token(token: &str) -> Result<(FkAction, Vec<String>), String> {
+    let Some((action, rest)) = token.split_once('(') else {
+        return Ok((parse_fk_action_str(token)?, Vec::new()));
+    };
+    let action = parse_fk_action_str(action)?;
+    if !matches!(action, FkAction::SetNull | FkAction::SetDefault) {
+        return Err(format!(
+            "on_delete column list requires set_null or set_default: {token}"
+        ));
+    }
+    let inner = rest
+        .strip_suffix(')')
+        .ok_or_else(|| format!("unclosed on_delete column list: {token}"))?;
+    let columns = inner
+        .split(',')
+        .map(|col| col.trim().to_string())
+        .collect::<Vec<_>>();
+    if columns.iter().any(|col| !is_native_identifier(col)) {
+        return Err(format!("invalid on_delete column list: {token}"));
+    }
+    Ok((action, columns))
+}
+
+/// Shared parsing for the FK state tokens accepted after a column FK and a
+/// table-level `foreign_key` line. Returns false when `token` is not one.
+fn apply_fk_state_token(
+    options: &mut ForeignKeyOptions,
+    token: &str,
+    seen: &mut HashSet<&'static str>,
+) -> Result<bool, String> {
+    let key = match token {
+        "match_full" => "match_full",
+        "not_valid" => "not_valid",
+        "not_enforced" => "not_enforced",
+        _ => return Ok(false),
+    };
+    if !seen.insert(key) {
+        return Err(format!("duplicate foreign key option '{}'", key));
+    }
+    match key {
+        "match_full" => options.match_full = true,
+        "not_valid" => options.not_valid = true,
+        _ => options.not_enforced = true,
+    }
+    Ok(true)
+}
+
 fn apply_fk_action_options(
     mut col: Column,
     parts: &[&str],
@@ -2191,15 +2360,25 @@ fn apply_fk_action_options(
     let mut seen_on_delete = false;
     let mut seen_on_update = false;
     let mut seen_deferrable = false;
+    let mut seen_state = HashSet::new();
     while *i + 1 < parts.len() {
+        if let Some(fk) = col.foreign_key.as_mut()
+            && apply_fk_state_token(&mut fk.options, parts[*i + 1], &mut seen_state)?
+        {
+            *i += 1;
+            continue;
+        }
         match parts[*i + 1] {
             "on_delete" if *i + 2 < parts.len() => {
                 if seen_on_delete {
                     return Err("duplicate on_delete action".to_string());
                 }
                 seen_on_delete = true;
-                let action = parse_fk_action_str(parts[*i + 2])?;
+                let (action, columns) = parse_fk_on_delete_token(parts[*i + 2])?;
                 col = col.on_delete(action);
+                if let Some(fk) = col.foreign_key.as_mut() {
+                    fk.options.on_delete_columns = columns;
+                }
                 *i += 2;
             }
             "on_update" if *i + 2 < parts.len() => {
@@ -2320,6 +2499,9 @@ fn is_column_constraint_keyword(token: &str) -> bool {
             | "initially_deferred"
             | "initially_immediate"
             | "check_name"
+            | "match_full"
+            | "not_valid"
+            | "not_enforced"
     ) || token.starts_with("check(")
         || token.starts_with("generated_stored(")
 }
@@ -3283,11 +3465,12 @@ fn parse_policy_clause_tokens(
             }
             "to" => {
                 idx += 1;
-                let role = parts
-                    .get(idx)
-                    .ok_or_else(|| format!("policy missing role after 'to': {}", source))?;
-                policy.role = Some((*role).to_string());
-                idx += 1;
+                let (roles, next) = parse_policy_role_list(parts, idx, source)?;
+                let mut roles = roles.into_iter();
+                policy.role = roles.next();
+                policy.additional_roles = roles.collect();
+                policy.validate_roles()?;
+                idx = next;
             }
             "restrictive" => {
                 policy.permissiveness = PolicyPermissiveness::Restrictive;
@@ -3307,6 +3490,62 @@ fn parse_policy_clause_tokens(
     }
 
     Ok(())
+}
+
+/// `to a, b` / `to "space role", b`: a comma-separated role list. Unquoted
+/// tokens are split on `,` so `to a,b` reads as two roles; a role whose name
+/// contains `,` or spaces must be double-quoted (`""` escapes a quote).
+fn parse_policy_role_list(
+    parts: &[&str],
+    start: usize,
+    source: &str,
+) -> Result<(Vec<String>, usize), String> {
+    let mut roles = Vec::new();
+    let mut idx = start;
+    let mut expect_role = true;
+    while expect_role {
+        let Some(first) = parts.get(idx) else {
+            return Err(format!("policy missing role after 'to': {}", source));
+        };
+        let mut token = (*first).to_string();
+        idx += 1;
+        if token.starts_with('"') {
+            while !quoted_role_closed(token.trim_end_matches(',')) {
+                let Some(next) = parts.get(idx) else {
+                    return Err(format!("unterminated quoted policy role: {}", source));
+                };
+                token.push(' ');
+                token.push_str(next);
+                idx += 1;
+            }
+            expect_role = token.ends_with(',');
+            let quoted = token.trim_end_matches(',');
+            roles.push(quoted[1..quoted.len() - 1].replace("\"\"", "\""));
+        } else {
+            expect_role = token.ends_with(',');
+            for role in token.split(',').filter(|role| !role.is_empty()) {
+                roles.push(role.to_string());
+            }
+        }
+        if !expect_role && parts.get(idx).is_some_and(|next| next.starts_with(',')) {
+            return Err(format!("misplaced ',' in policy role list: {}", source));
+        }
+    }
+    if roles.is_empty() {
+        return Err(format!("policy missing role after 'to': {}", source));
+    }
+    Ok((roles, idx))
+}
+
+fn quoted_role_closed(token: &str) -> bool {
+    if token.len() < 2 || !token.ends_with('"') {
+        return false;
+    }
+    // Inner quotes come in `""` pairs in a closed token.
+    token[1..token.len() - 1]
+        .replace("\"\"", "")
+        .chars()
+        .all(|c| c != '"')
 }
 
 fn parse_policy_target(target_str: &str) -> Result<PolicyTarget, String> {

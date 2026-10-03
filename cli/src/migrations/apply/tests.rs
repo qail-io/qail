@@ -489,6 +489,7 @@ table trips {
                     on_delete,
                     on_update,
                     deferrable,
+                    ..
                 } if name.as_deref() == Some("fk_trips_schedule")
                     && columns == &["route_id", "schedule_id"]
                     && ref_table == "schedules"
@@ -1365,5 +1366,181 @@ table idempotency_keys {
             sql.contains("DEFAULT (now() + '24:00:00'::interval)"),
             "expected interval default preserved"
         );
+    }
+
+    /// Native (executed) SQL and preview SQL for every compiled command.
+    fn pull_security_sql(input: &str) -> (Vec<String>, String) {
+        let cmds = parse_qail_to_commands_strict(input).expect("schema should compile");
+        let native = cmds
+            .iter()
+            .map(|cmd| {
+                qail_pg::protocol::AstEncoder::encode_cmd_sql(cmd)
+                    .expect("native encode")
+                    .0
+            })
+            .collect();
+        (native, commands_to_sql(&cmds))
+    }
+
+    #[test]
+    fn pull_security_view_security_invoker_reaches_native_encoder() {
+        let (native, preview) =
+            pull_security_sql("view v_owned security_invoker $$ SELECT 1 AS x $$\n");
+        assert!(
+            preview.contains("WITH (security_invoker = true)"),
+            "{preview}"
+        );
+        assert!(
+            native
+                .iter()
+                .any(|sql| sql.contains("WITH (security_invoker = true)")),
+            "executed SQL dropped security_invoker: {native:?}"
+        );
+    }
+
+    #[test]
+    fn pull_security_view_barrier_and_check_option_compile() {
+        let input = r#"
+table handles {
+  id INT primary_key
+  org_id INT
+}
+
+view v_barrier security_barrier $$
+SELECT id FROM handles
+$$
+
+view v_local check_option local $$
+SELECT id, org_id FROM handles WHERE (org_id > 0)
+$$
+
+view v_all security_invoker security_barrier check_option cascaded $$
+SELECT id, org_id FROM handles
+$$
+"#;
+        let (native, preview) = pull_security_sql(input);
+        for sql in [
+            "CREATE VIEW v_barrier WITH (security_barrier = true) AS SELECT id FROM handles",
+            "CREATE VIEW v_local AS SELECT id, org_id FROM handles WHERE (org_id > 0) WITH LOCAL CHECK OPTION",
+            "CREATE VIEW v_all WITH (security_invoker = true, security_barrier = true) AS SELECT id, org_id FROM handles WITH CASCADED CHECK OPTION",
+        ] {
+            assert!(
+                native.iter().any(|native| native == sql),
+                "{sql}\n{native:?}"
+            );
+            assert!(preview.contains(sql), "{sql}\n{preview}");
+        }
+    }
+
+    #[test]
+    fn pull_security_policy_role_list_reaches_every_role() {
+        let base = r#"
+table handles {
+  id INT primary_key
+  enable_rls
+}
+
+"#;
+        for header in [
+            "policy p_multi on handles for select to app_user, qail_app",
+            // Text written by earlier pulls: one token, comma inside.
+            "policy p_multi on handles for select to app_user,qail_app",
+        ] {
+            let input = format!("{base}{header}\n  using $$ true $$\n");
+            let (native, preview) = pull_security_sql(&input);
+            let expected =
+                "CREATE POLICY p_multi ON handles FOR SELECT TO app_user, qail_app USING (true)";
+            assert!(native.iter().any(|sql| sql == expected), "{native:?}");
+            assert!(preview.contains(expected), "{preview}");
+        }
+    }
+
+    #[test]
+    fn pull_security_exclusion_and_constraint_state_compile_after_create_table() {
+        let input = r#"
+table rooms {
+  id INT primary_key
+  tenant_id INT not_null
+}
+
+table bookings {
+  id INT primary_key check(id > 0) check_name bookings_id_positive not_valid
+  tenant_id INT not_null check(tenant_id < 1000000) check_name bookings_tenant_bounded not_enforced
+  room_id INT references rooms(id) not_valid
+  author_id INT references rooms(id) not_enforced
+  starts_at TIMESTAMPTZ not_null
+  ends_at TIMESTAMPTZ not_null
+  active BOOLEAN not_null default true
+  foreign_key (tenant_id, room_id) references rooms(tenant_id, id) constraint bookings_room_fk match_full on_delete set_null(room_id)
+  exclusion bookings_no_overlap EXCLUDE USING gist (room_id WITH =, tstzrange(starts_at, ends_at) WITH &&) WHERE (active) DEFERRABLE INITIALLY DEFERRED
+}
+
+unique index rooms_tenant_id_id_key on rooms (tenant_id, id)
+"#;
+        let (native, preview) = pull_security_sql(input);
+        let create = native
+            .iter()
+            .find(|sql| sql.starts_with("CREATE TABLE bookings"))
+            .expect("bookings CREATE TABLE");
+        // PostgreSQL ignores NOT VALID inside CREATE TABLE.
+        assert!(!create.contains("NOT VALID"), "{create}");
+        assert!(
+            create.contains("author_id INT REFERENCES rooms(id) NOT ENFORCED"),
+            "{create}"
+        );
+        assert!(!create.contains("room_id INT REFERENCES"), "{create}");
+        assert!(!create.contains("CHECK (id > 0)"), "{create}");
+        for sql in [
+            "ALTER TABLE bookings ADD CONSTRAINT bookings_room_fk FOREIGN KEY (tenant_id, room_id) REFERENCES rooms(tenant_id, id) MATCH FULL ON DELETE SET NULL (room_id)",
+            "ALTER TABLE bookings ADD CONSTRAINT bookings_id_positive CHECK (id > 0) NOT VALID, ADD CONSTRAINT bookings_tenant_bounded CHECK (tenant_id < 1000000) NOT ENFORCED, ADD FOREIGN KEY (room_id) REFERENCES rooms(id) NOT VALID, ADD CONSTRAINT bookings_no_overlap EXCLUDE USING gist (room_id WITH =, tstzrange(starts_at, ends_at) WITH &&) WHERE (active) DEFERRABLE INITIALLY DEFERRED",
+        ] {
+            assert!(
+                native.iter().any(|native| native == sql),
+                "{sql}\n{native:?}"
+            );
+        }
+        assert!(
+            preview.contains("MATCH FULL ON DELETE SET NULL (room_id)"),
+            "{preview}"
+        );
+        assert!(preview.contains("CHECK (id > 0) NOT VALID"), "{preview}");
+        assert!(
+            preview.contains("CONSTRAINT bookings_no_overlap EXCLUDE USING gist"),
+            "{preview}"
+        );
+    }
+
+    #[test]
+    fn pull_security_unique_nulls_not_distinct_compiles() {
+        let input = r#"
+table handles {
+  id INT primary_key
+  org_id INT
+  handle TEXT
+}
+
+unique index handles_org_partial on handles (org_id) include (handle) nulls_not_distinct where (id > 0)
+"#;
+        let (native, preview) = pull_security_sql(input);
+        let expected = "CREATE UNIQUE INDEX handles_org_partial ON handles USING btree (org_id) INCLUDE (handle) NULLS NOT DISTINCT WHERE (id > 0)";
+        assert!(native.iter().any(|sql| sql == expected), "{native:?}");
+        assert!(preview.contains(expected), "{preview}");
+    }
+
+    #[test]
+    fn pull_security_unsupported_marker_refuses_strict_compile() {
+        let input = r#"
+unsupported "table events is partitioned (RANGE (created_at)); partitioning is not modelled"
+
+table events {
+  id BIGINT not_null
+  enable_rls
+  force_rls
+}
+"#;
+        let err = parse_qail_to_commands_strict(input)
+            .expect_err("a schema with unsupported objects must not compile");
+        let err = format!("{err:#}");
+        assert!(err.contains("table events is partitioned"), "{err}");
     }
 }

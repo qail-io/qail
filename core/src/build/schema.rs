@@ -507,6 +507,20 @@ impl Schema {
                     current_owner_column = Some(owner.to_string());
                     continue;
                 }
+                // Table-level EXCLUDE constraint written by `qail pull`; it does
+                // not change the query shape build validation needs.
+                if crate::migrate::parser::parse_exclusion_line(line)
+                    .map_err(|e| {
+                        format!(
+                            "{} in table '{}'",
+                            e,
+                            current_table.as_deref().unwrap_or("<unknown>")
+                        )
+                    })?
+                    .is_some()
+                {
+                    continue;
+                }
                 // Table-level composite FK written by `qail pull`. Validated but not
                 // stored: `foreign_keys` models single-column joins only.
                 if line == "foreign_key"
@@ -700,6 +714,23 @@ impl Schema {
                                 ));
                             }
                             i += 1;
+                        } else if matches!(
+                            part,
+                            "deferrable"
+                                | "initially_deferred"
+                                | "initially_immediate"
+                                | "match_full"
+                                | "not_valid"
+                                | "not_enforced"
+                        ) {
+                            // FK attributes `qail pull` writes; they do not change
+                            // the join shape build validation needs.
+                            if !has_foreign_key {
+                                return Err(format!(
+                                    "{} requires a preceding foreign key for column '{}' in table '{}'",
+                                    part, col_name, table_name
+                                ));
+                            }
                         } else {
                             return Err(format!(
                                 "Unknown column option '{}' for column '{}' in table '{}'",
@@ -1472,8 +1503,18 @@ fn is_build_identifier(value: &str) -> bool {
 }
 
 fn is_build_fk_action(value: &str) -> bool {
+    // `set_null(a,b)` / `set_default(a)`: ON DELETE column subset.
+    let action = match value.split_once('(') {
+        Some((action, rest))
+            if matches!(action, "set_null" | "set_default") && rest.ends_with(')') =>
+        {
+            action
+        }
+        Some(_) => return false,
+        None => value,
+    };
     matches!(
-        value,
+        action,
         "cascade" | "set_null" | "set_default" | "restrict" | "no_action"
     )
 }

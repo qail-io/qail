@@ -518,6 +518,42 @@ fn parse_fk_action(tokens: &[&str], index: usize) -> Option<(String, usize)> {
     }
 }
 
+/// `(a, b)` column list that may span several whitespace tokens.
+fn parse_fk_column_subset(tokens: &[&str], index: usize) -> Option<(Vec<String>, usize)> {
+    if !tokens.get(index)?.starts_with('(') {
+        return None;
+    }
+    let mut raw = String::new();
+    let mut i = index;
+    loop {
+        let token = tokens.get(i)?;
+        if !raw.is_empty() {
+            raw.push(' ');
+        }
+        raw.push_str(token);
+        i += 1;
+        if token.ends_with(')') {
+            break;
+        }
+    }
+    let inner = raw.strip_prefix('(')?.strip_suffix(')')?;
+    let columns = inner
+        .split(',')
+        .map(|col| col.trim().to_string())
+        .collect::<Vec<_>>();
+    if columns.iter().any(|col| !is_simple_identifier(col)) {
+        return None;
+    }
+    Some((columns, i))
+}
+
+fn joined_ident_list(cols: &[String]) -> String {
+    cols.iter()
+        .map(|col| escape_identifier(col))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn reference_tail_to_sql(tail: &str) -> Option<String> {
     let tail = tail.trim();
     if tail.is_empty() {
@@ -531,7 +567,17 @@ fn reference_tail_to_sql(tail: &str) -> Option<String> {
     let mut rendered = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
-        if tokens[i].eq_ignore_ascii_case("ON") {
+        if tokens[i].eq_ignore_ascii_case("MATCH") {
+            let mode = tokens.get(i + 1)?;
+            if mode.eq_ignore_ascii_case("FULL") {
+                rendered.push("MATCH FULL".to_string());
+            } else if mode.eq_ignore_ascii_case("SIMPLE") {
+                rendered.push("MATCH SIMPLE".to_string());
+            } else {
+                return None;
+            }
+            i += 2;
+        } else if tokens[i].eq_ignore_ascii_case("ON") {
             let event = tokens.get(i + 1)?;
             let event_sql = if event.eq_ignore_ascii_case("DELETE") {
                 "DELETE"
@@ -541,8 +587,28 @@ fn reference_tail_to_sql(tail: &str) -> Option<String> {
                 return None;
             };
             let (action, next) = parse_fk_action(&tokens, i + 2)?;
-            rendered.push(format!("ON {event_sql} {action}"));
             i = next;
+            // PostgreSQL 15+: ON DELETE SET NULL/SET DEFAULT may name a column subset.
+            if event_sql == "DELETE"
+                && action.starts_with("SET ")
+                && let Some((columns, next)) = parse_fk_column_subset(&tokens, i)
+            {
+                rendered.push(format!(
+                    "ON {event_sql} {action} ({})",
+                    joined_ident_list(&columns)
+                ));
+                i = next;
+            } else {
+                rendered.push(format!("ON {event_sql} {action}"));
+            }
+        } else if tokens[i].eq_ignore_ascii_case("ENFORCED") {
+            rendered.push("ENFORCED".to_string());
+            i += 1;
+        } else if tokens[i].eq_ignore_ascii_case("NOT")
+            && tokens.get(i + 1)?.eq_ignore_ascii_case("ENFORCED")
+        {
+            rendered.push("NOT ENFORCED".to_string());
+            i += 2;
         } else if tokens[i].eq_ignore_ascii_case("DEFERRABLE") {
             rendered.push("DEFERRABLE".to_string());
             i += 1;
@@ -641,9 +707,31 @@ fn fk_deferrable_option_to_sql(deferrable: &str) -> Option<&'static str> {
     }
 }
 
+/// `EXCLUDE ...` definition body, validated as one statement fragment.
+fn checked_exclude_definition(definition: &str) -> Result<&str, crate::protocol::EncodeError> {
+    let definition = definition.trim();
+    let well_formed = definition
+        .get(..7)
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("EXCLUDE"))
+        && definition
+            .get(7..)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        && !definition.contains('\0')
+        && !contains_unquoted_statement_delimiter(definition);
+    if !well_formed {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "invalid EXCLUDE constraint definition: {definition:?}"
+        )));
+    }
+    Ok(definition)
+}
+
+/// `in_alter`: the constraint is encoded for `ALTER TABLE ... ADD`. PostgreSQL
+/// silently ignores NOT VALID inside CREATE TABLE, so it is rejected there.
 fn encode_table_constraint(
     constraint: &TableConstraint,
     buf: &mut BytesMut,
+    in_alter: bool,
 ) -> Result<(), crate::protocol::EncodeError> {
     match constraint {
         TableConstraint::Unique(cols) => {
@@ -656,6 +744,40 @@ fn encode_table_constraint(
             push_joined_ident_list(buf, cols);
             buf.extend_from_slice(b")");
         }
+        TableConstraint::Check {
+            name,
+            expr,
+            not_valid,
+            not_enforced,
+        } => {
+            if *not_valid && !in_alter {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "NOT VALID CHECK constraints require ALTER TABLE ADD".to_string(),
+                ));
+            }
+            let expr = checked_sql_expr_fragment(expr, "check constraint expression")?;
+            if let Some(name) = name {
+                buf.extend_from_slice(b"CONSTRAINT ");
+                push_identifier(buf, name);
+                buf.extend_from_slice(b" ");
+            }
+            buf.extend_from_slice(b"CHECK (");
+            buf.extend_from_slice(expr.as_bytes());
+            buf.extend_from_slice(b")");
+            if *not_enforced {
+                buf.extend_from_slice(b" NOT ENFORCED");
+            }
+            if *not_valid {
+                buf.extend_from_slice(b" NOT VALID");
+            }
+        }
+        TableConstraint::Exclude { name, definition } => {
+            let definition = checked_exclude_definition(definition)?;
+            buf.extend_from_slice(b"CONSTRAINT ");
+            push_identifier(buf, name);
+            buf.extend_from_slice(b" ");
+            buf.extend_from_slice(definition.as_bytes());
+        }
         TableConstraint::ForeignKey {
             name,
             columns,
@@ -664,7 +786,13 @@ fn encode_table_constraint(
             on_delete,
             on_update,
             deferrable,
+            options,
         } => {
+            if options.not_valid && !in_alter {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "NOT VALID foreign keys require ALTER TABLE ADD".to_string(),
+                ));
+            }
             if let Some(name) = name {
                 buf.extend_from_slice(b"CONSTRAINT ");
                 push_identifier(buf, name);
@@ -677,6 +805,9 @@ fn encode_table_constraint(
             buf.extend_from_slice(b"(");
             push_joined_ident_list(buf, ref_columns);
             buf.extend_from_slice(b")");
+            if options.match_full {
+                buf.extend_from_slice(b" MATCH FULL");
+            }
             if let Some(action) = on_delete {
                 let Some(action) = fk_action_option_to_sql(action) else {
                     return Err(crate::protocol::EncodeError::InvalidAst(
@@ -685,6 +816,20 @@ fn encode_table_constraint(
                 };
                 buf.extend_from_slice(b" ON DELETE ");
                 buf.extend_from_slice(action.as_bytes());
+                if !options.on_delete_columns.is_empty() {
+                    if !matches!(action, "SET NULL" | "SET DEFAULT") {
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "ON DELETE column list requires SET NULL or SET DEFAULT".to_string(),
+                        ));
+                    }
+                    buf.extend_from_slice(b" (");
+                    push_joined_ident_list(buf, &options.on_delete_columns);
+                    buf.extend_from_slice(b")");
+                }
+            } else if !options.on_delete_columns.is_empty() {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "ON DELETE column list requires SET NULL or SET DEFAULT".to_string(),
+                ));
             }
             if let Some(action) = on_update {
                 let Some(action) = fk_action_option_to_sql(action) else {
@@ -703,6 +848,12 @@ fn encode_table_constraint(
                 };
                 buf.extend_from_slice(b" ");
                 buf.extend_from_slice(deferrable.as_bytes());
+            }
+            if options.not_enforced {
+                buf.extend_from_slice(b" NOT ENFORCED");
+            }
+            if options.not_valid {
+                buf.extend_from_slice(b" NOT VALID");
             }
         }
     }
@@ -895,7 +1046,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol
             buf.extend_from_slice(b", ");
         }
         first = false;
-        encode_table_constraint(tc, buf)?;
+        encode_table_constraint(tc, buf, false)?;
     }
 
     buf.extend_from_slice(b")");
@@ -954,6 +1105,14 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
             push_index_include_column(buf, col)?;
         }
         buf.extend_from_slice(b")");
+    }
+    if idx.nulls_not_distinct {
+        if !idx.unique {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "NULLS NOT DISTINCT requires a UNIQUE index".to_string(),
+            ));
+        }
+        buf.extend_from_slice(b" NULLS NOT DISTINCT");
     }
     if let Some(where_clause) = &idx.where_clause {
         if where_clause.trim().is_empty()
@@ -1087,7 +1246,7 @@ pub fn encode_alter_add_column(
         }
         first = false;
         buf.extend_from_slice(b"ADD ");
-        encode_table_constraint(constraint, buf)?;
+        encode_table_constraint(constraint, buf, true)?;
     }
 
     Ok(())
@@ -1281,6 +1440,12 @@ pub fn encode_create_view(
 ) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(b"CREATE VIEW ");
     push_identifier(buf, &cmd.table);
+    // Same options the transpiler preview renders; dropping them here would
+    // create an owner-rights / non-barrier / unchecked view on execution.
+    buf.extend_from_slice(
+        qail_core::ast::view_with_clause(cmd.view_security_invoker, cmd.view_security_barrier)
+            .as_bytes(),
+    );
     buf.extend_from_slice(b" AS ");
 
     // The source_query contains the SELECT statement for the view
@@ -1294,6 +1459,9 @@ pub fn encode_create_view(
             Action::CreateView,
         ));
     }
+    buf.extend_from_slice(
+        qail_core::ast::view_check_option_clause(cmd.view_check_option).as_bytes(),
+    );
     Ok(())
 }
 
@@ -1309,6 +1477,11 @@ pub fn encode_create_materialized_view(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), super::super::EncodeError> {
+    if cmd.view_security_barrier || cmd.view_check_option.is_some() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "security_barrier and CHECK OPTION apply to plain views only".to_string(),
+        ));
+    }
     buf.extend_from_slice(b"CREATE MATERIALIZED VIEW ");
     push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" AS ");
@@ -1688,9 +1861,16 @@ pub fn encode_create_policy(
     buf.extend_from_slice(b" FOR ");
     buf.extend_from_slice(target.as_bytes());
 
+    policy
+        .validate_roles()
+        .map_err(crate::protocol::EncodeError::InvalidAst)?;
     if let Some(role) = &policy.role {
         buf.extend_from_slice(b" TO ");
         push_identifier(buf, role);
+        for role in &policy.additional_roles {
+            buf.extend_from_slice(b", ");
+            push_identifier(buf, role);
+        }
     }
 
     if let Some(expr) = &policy.using {
@@ -2236,6 +2416,7 @@ mod tests {
                 on_delete: Some("CASCADE".to_string()),
                 on_update: Some("RESTRICT".to_string()),
                 deferrable: Some("DEFERRABLE INITIALLY DEFERRED".to_string()),
+                options: Default::default(),
             }],
             ..Default::default()
         };
@@ -2248,6 +2429,192 @@ mod tests {
             sql.contains("ADD CONSTRAINT fk_trips_schedule FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"),
             "composite FK SQL should preserve options, got: {sql}"
         );
+    }
+
+    fn alter_with(constraint: TableConstraint) -> Qail {
+        Qail {
+            action: Action::Alter,
+            table: "bookings".to_string(),
+            table_constraints: vec![constraint],
+            ..Default::default()
+        }
+    }
+
+    fn make_with(constraint: TableConstraint) -> Qail {
+        Qail {
+            action: Action::Make,
+            table: "bookings".to_string(),
+            columns: vec![Expr::Def {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            }],
+            table_constraints: vec![constraint],
+            ..Default::default()
+        }
+    }
+
+    fn encoded(cmd: &Qail) -> Result<String, crate::protocol::EncodeError> {
+        crate::protocol::AstEncoder::encode_cmd_sql(cmd).map(|(sql, _)| sql)
+    }
+
+    #[test]
+    fn not_valid_constraints_are_alter_only() {
+        let fk = TableConstraint::ForeignKey {
+            name: None,
+            columns: vec!["room_id".to_string()],
+            ref_table: "rooms".to_string(),
+            ref_columns: vec!["id".to_string()],
+            on_delete: Some("SET NULL".to_string()),
+            on_update: None,
+            deferrable: None,
+            options: qail_core::ast::ForeignKeyOptions {
+                match_full: true,
+                on_delete_columns: vec!["room_id".to_string()],
+                not_valid: true,
+                not_enforced: false,
+            },
+        };
+        assert_eq!(
+            encoded(&alter_with(fk.clone())).unwrap(),
+            "ALTER TABLE bookings ADD FOREIGN KEY (room_id) REFERENCES rooms(id) MATCH FULL ON DELETE SET NULL (room_id) NOT VALID"
+        );
+        // CREATE TABLE would silently validate it.
+        assert!(encoded(&make_with(fk)).is_err());
+
+        let check = TableConstraint::Check {
+            name: Some("bookings_id_positive".to_string()),
+            expr: "id > 0".to_string(),
+            not_valid: true,
+            not_enforced: false,
+        };
+        assert_eq!(
+            encoded(&alter_with(check.clone())).unwrap(),
+            "ALTER TABLE bookings ADD CONSTRAINT bookings_id_positive CHECK (id > 0) NOT VALID"
+        );
+        assert!(encoded(&make_with(check)).is_err());
+
+        let not_enforced = TableConstraint::Check {
+            name: None,
+            expr: "id < 10".to_string(),
+            not_valid: false,
+            not_enforced: true,
+        };
+        assert!(
+            encoded(&make_with(not_enforced))
+                .unwrap()
+                .contains("CHECK (id < 10) NOT ENFORCED")
+        );
+    }
+
+    #[test]
+    fn foreign_key_on_delete_columns_require_set_action() {
+        let fk = TableConstraint::ForeignKey {
+            name: None,
+            columns: vec!["room_id".to_string()],
+            ref_table: "rooms".to_string(),
+            ref_columns: vec!["id".to_string()],
+            on_delete: Some("CASCADE".to_string()),
+            on_update: None,
+            deferrable: None,
+            options: qail_core::ast::ForeignKeyOptions {
+                on_delete_columns: vec!["room_id".to_string()],
+                ..Default::default()
+            },
+        };
+        assert!(encoded(&alter_with(fk)).is_err());
+    }
+
+    #[test]
+    fn exclude_constraint_definition_is_one_fragment() {
+        let ok = TableConstraint::Exclude {
+            name: "no_overlap".to_string(),
+            definition: "EXCLUDE USING gist (room_id WITH =, during WITH &&) WHERE (active)"
+                .to_string(),
+        };
+        assert_eq!(
+            encoded(&alter_with(ok)).unwrap(),
+            "ALTER TABLE bookings ADD CONSTRAINT no_overlap EXCLUDE USING gist (room_id WITH =, during WITH &&) WHERE (active)"
+        );
+        for definition in [
+            "EXCLUDE USING gist (a WITH =); DROP TABLE rooms",
+            "EXCLUDE USING gist (a WITH =) -- tail",
+            "CHECK (true)",
+            "EXCLUDEUSING gist (a WITH =)",
+        ] {
+            let bad = TableConstraint::Exclude {
+                name: "x".to_string(),
+                definition: definition.to_string(),
+            };
+            assert!(encoded(&alter_with(bad)).is_err(), "{definition}");
+        }
+    }
+
+    #[test]
+    fn view_options_and_policy_roles_encode_or_fail_closed() {
+        let view = Qail {
+            action: Action::CreateView,
+            table: "v".to_string(),
+            payload: Some("SELECT id FROM t WHERE id > 0".to_string()),
+            view_security_invoker: true,
+            view_security_barrier: true,
+            view_check_option: Some(qail_core::ast::ViewCheckOption::Local),
+            ..Default::default()
+        };
+        assert_eq!(
+            encoded(&view).unwrap(),
+            "CREATE VIEW v WITH (security_invoker = true, security_barrier = true) AS SELECT id FROM t WHERE id > 0 WITH LOCAL CHECK OPTION"
+        );
+        let matview = Qail {
+            action: Action::CreateMaterializedView,
+            view_security_barrier: true,
+            ..view
+        };
+        assert!(encoded(&matview).is_err());
+
+        let policy = qail_core::migrate::policy::RlsPolicy::create("p", "t")
+            .for_select()
+            .to_roles(["app_user", "audit user"]);
+        let cmd = Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(policy),
+            ..Default::default()
+        };
+        assert_eq!(
+            encoded(&cmd).unwrap(),
+            "CREATE POLICY p ON t FOR SELECT TO app_user, \"audit user\""
+        );
+        let public_mix = Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(
+                qail_core::migrate::policy::RlsPolicy::create("p", "t")
+                    .to_roles(["public", "app_user"]),
+            ),
+            ..Default::default()
+        };
+        assert!(encoded(&public_mix).is_err());
+    }
+
+    #[test]
+    fn nulls_not_distinct_requires_unique_index() {
+        let mut index = Qail {
+            action: Action::Index,
+            index_def: Some(qail_core::ast::IndexDef {
+                name: "handles_handle_key".to_string(),
+                table: "handles".to_string(),
+                columns: vec!["handle".to_string()],
+                unique: true,
+                nulls_not_distinct: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            encoded(&index).unwrap(),
+            "CREATE UNIQUE INDEX handles_handle_key ON handles (handle) NULLS NOT DISTINCT"
+        );
+        index.index_def.as_mut().unwrap().unique = false;
+        assert!(encoded(&index).is_err());
     }
 
     #[test]

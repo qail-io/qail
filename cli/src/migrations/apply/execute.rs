@@ -1309,6 +1309,7 @@ async fn verify_table_constraints(
                 on_delete,
                 on_update,
                 deferrable,
+                options,
             } => {
                 let expected = ExpectedForeignKeyConstraint {
                     name: name.as_deref(),
@@ -1318,6 +1319,7 @@ async fn verify_table_constraints(
                     on_delete: on_delete.as_deref(),
                     on_update: on_update.as_deref(),
                     deferrable: deferrable.as_deref(),
+                    options,
                 };
                 if !table_has_foreign_key_constraint(pg, &cmd.table, &expected).await? {
                     failures.push(format!(
@@ -1329,10 +1331,82 @@ async fn verify_table_constraints(
                     ));
                 }
             }
+            TableConstraint::Check {
+                name,
+                not_valid,
+                not_enforced,
+                ..
+            } => {
+                // An unnamed CHECK gets a server-chosen name; nothing to look up.
+                let Some(name) = name else {
+                    continue;
+                };
+                let expected_state = (!*not_valid && !*not_enforced, !*not_enforced);
+                match named_constraint_state(pg, &cmd.table, name, "c").await? {
+                    Some(state) if state == expected_state => {}
+                    live => failures.push(format!(
+                        "expected table '{}' to have CHECK constraint '{}' (validated={}, enforced={}), found {:?}",
+                        cmd.table, name, expected_state.0, expected_state.1, live
+                    )),
+                }
+            }
+            TableConstraint::Exclude { name, .. } => {
+                if named_constraint_state(pg, &cmd.table, name, "x")
+                    .await?
+                    .is_none()
+                {
+                    failures.push(format!(
+                        "expected table '{}' to have EXCLUDE constraint '{}'",
+                        cmd.table, name
+                    ));
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+/// `(validated, enforced)` of a named constraint of `contype`, or None when absent.
+async fn named_constraint_state(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    name: &str,
+    contype: &str,
+) -> Result<Option<(bool, bool)>> {
+    let (schema, table_name) = split_schema_ident(table);
+    let version_num = crate::introspection::server_version_num(pg).await?;
+    let mut columns = vec!["con.convalidated"];
+    if version_num >= 180_000 {
+        columns.push("con.conenforced");
+    }
+    let cmd = Qail::get("pg_catalog.pg_constraint con")
+        .columns(columns)
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
+        )
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_namespace ns",
+            "ns.oid",
+            "src.relnamespace",
+        )
+        .where_eq("ns.nspname", schema)
+        .where_eq("src.relname", table_name)
+        .where_eq("con.conname", name)
+        .where_eq("con.contype", contype)
+        .limit(1);
+    let rows = pg
+        .fetch_all(&cmd)
+        .await
+        .with_context(|| format!("Failed constraint state check for '{}.{}'", table, name))?;
+    Ok(rows.first().map(|row| {
+        let enforced = version_num < 180_000 || row.text(1) == "t";
+        (row.text(0) == "t", enforced)
+    }))
 }
 
 fn column_type_matches(expected: &str, live: &LiveColumnDefinition) -> bool {
@@ -1611,6 +1685,7 @@ struct ExpectedForeignKeyConstraint<'a> {
     on_delete: Option<&'a str>,
     on_update: Option<&'a str>,
     deferrable: Option<&'a str>,
+    options: &'a qail_core::ast::ForeignKeyOptions,
 }
 
 #[derive(Debug, Default)]
@@ -1622,6 +1697,7 @@ struct LiveForeignKeyConstraint {
     update_rule: String,
     is_deferrable: bool,
     initially_deferred: bool,
+    options: qail_core::ast::ForeignKeyOptions,
 }
 
 async fn table_has_foreign_key_constraint(
@@ -1629,52 +1705,64 @@ async fn table_has_foreign_key_constraint(
     table: &str,
     expected: &ExpectedForeignKeyConstraint<'_>,
 ) -> Result<bool> {
+    // pg_constraint, not information_schema: referential_constraints has no
+    // unique_constraint_name when the referenced key is a unique INDEX (what a
+    // pulled composite unique constraint is recreated as), and it carries no
+    // MATCH column subset, validation, or enforcement state.
     let (schema, table_name) = split_schema_ident(table);
-    let cmd = Qail::get("information_schema.table_constraints tc")
-        .columns([
-            "tc.constraint_name",
-            "kcu.column_name",
-            "kcu.ordinal_position",
-            "rkcu.table_schema",
-            "rkcu.table_name",
-            "rkcu.column_name",
-            "rc.delete_rule",
-            "rc.update_rule",
-            "tc.is_deferrable",
-            "tc.initially_deferred",
-        ])
-        .join_conds(
+    let version_num = crate::introspection::server_version_num(pg).await?;
+    let mut columns = vec![
+        "con.conname",
+        "rns.nspname",
+        "ref.relname",
+        "con.confdeltype",
+        "con.confupdtype",
+        "con.condeferrable",
+        "con.condeferred",
+        "con.conkey",
+        "con.confkey",
+        "con.conrelid",
+        "con.confrelid",
+        "con.confmatchtype",
+        "con.convalidated",
+    ];
+    if version_num >= 150_000 {
+        columns.push("con.confdelsetcols");
+    }
+    if version_num >= 180_000 {
+        columns.push("con.conenforced");
+    }
+    let cmd = Qail::get("pg_catalog.pg_constraint con")
+        .columns(columns)
+        .join(
             JoinKind::Inner,
-            "information_schema.key_column_usage kcu",
-            vec![
-                join_column_eq("kcu.constraint_schema", "tc.constraint_schema"),
-                join_column_eq("kcu.constraint_name", "tc.constraint_name"),
-            ],
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
         )
-        .join_conds(
+        .join(
             JoinKind::Inner,
-            "information_schema.referential_constraints rc",
-            vec![
-                join_column_eq("rc.constraint_schema", "tc.constraint_schema"),
-                join_column_eq("rc.constraint_name", "tc.constraint_name"),
-            ],
+            "pg_catalog.pg_namespace ns",
+            "ns.oid",
+            "src.relnamespace",
         )
-        .join_conds(
+        .join(
             JoinKind::Inner,
-            "information_schema.key_column_usage rkcu",
-            vec![
-                join_column_eq("rkcu.constraint_schema", "rc.unique_constraint_schema"),
-                join_column_eq("rkcu.constraint_name", "rc.unique_constraint_name"),
-                join_column_eq("rkcu.ordinal_position", "kcu.position_in_unique_constraint"),
-            ],
+            "pg_catalog.pg_class ref",
+            "ref.oid",
+            "con.confrelid",
         )
-        .where_eq("tc.table_schema", schema)
-        .where_eq("tc.table_name", table_name)
-        .where_eq("tc.constraint_type", "FOREIGN KEY")
-        .where_eq("kcu.table_schema", schema)
-        .where_eq("kcu.table_name", table_name);
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_namespace rns",
+            "rns.oid",
+            "ref.relnamespace",
+        )
+        .where_eq("ns.nspname", schema)
+        .where_eq("src.relname", table_name)
+        .where_eq("con.contype", "f");
     let cmd = if let Some(name) = expected.name {
-        cmd.where_eq("tc.constraint_name", name)
+        cmd.where_eq("con.conname", name)
     } else {
         cmd
     };
@@ -1684,43 +1772,109 @@ async fn table_has_foreign_key_constraint(
         .await
         .with_context(|| format!("Failed foreign key table constraint check for '{}'", table))?;
 
-    let mut by_constraint = HashMap::<String, LiveForeignKeyConstraint>::new();
+    let mut attnames = HashMap::<(String, i32), String>::new();
+    let mut by_constraint = Vec::<LiveForeignKeyConstraint>::new();
     for row in rows {
-        let Some(name) = row.get_string(0) else {
-            continue;
+        let conrelid = row.text(9);
+        let confrelid = row.text(10);
+        for relid in [&conrelid, &confrelid] {
+            if attnames.keys().any(|(rel, _)| rel == relid) {
+                continue;
+            }
+            let attr_cmd = Qail::get("pg_catalog.pg_attribute")
+                .columns(["attnum", "attname"])
+                .filter("attrelid", Operator::Eq, relid.clone())
+                .filter("attnum", Operator::Gt, 0);
+            let attr_rows = pg
+                .fetch_all(&attr_cmd)
+                .await
+                .with_context(|| format!("Failed foreign key column lookup for '{}'", table))?;
+            for attr in attr_rows {
+                let attnum = attr.text(0).parse::<i32>().with_context(|| {
+                    format!("Invalid pg_attribute.attnum for foreign key on '{}'", table)
+                })?;
+                attnames.insert((relid.clone(), attnum), attr.text(1));
+            }
+        }
+        let names = |relid: &str, raw: &str| -> Result<Vec<String>> {
+            parse_pg_int_array(raw)?
+                .into_iter()
+                .map(|attnum| {
+                    attnames
+                        .get(&(relid.to_string(), attnum))
+                        .cloned()
+                        .ok_or_else(|| anyhow!("Unknown attnum {} on '{}'", attnum, table))
+                })
+                .collect()
         };
-        let Some(column) = row.get_string(1) else {
-            continue;
+        let source_columns = names(&conrelid, &row.text(7))?;
+        let ref_columns = names(&confrelid, &row.text(8))?;
+        let mut next = 13;
+        let on_delete_columns = if version_num >= 150_000 {
+            next += 1;
+            match row.get_string(13).filter(|raw| !raw.trim().is_empty()) {
+                Some(raw) => names(&conrelid, &raw)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
         };
-        let ordinal = row
-            .get_string(2)
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or_default();
-        let ref_schema = row.get_string(3).unwrap_or_default();
-        let ref_table = row.get_string(4).unwrap_or_default();
-        let ref_column = row.get_string(5).unwrap_or_default();
-        let delete_rule = row.get_string(6).unwrap_or_default();
-        let update_rule = row.get_string(7).unwrap_or_default();
-        let is_deferrable = row
-            .get_string(8)
-            .is_some_and(|v| v.eq_ignore_ascii_case("YES"));
-        let initially_deferred = row
-            .get_string(9)
-            .is_some_and(|v| v.eq_ignore_ascii_case("YES"));
-
-        let live = by_constraint.entry(name).or_default();
-        live.columns.push((ordinal, column, ref_column));
-        live.ref_schema = ref_schema;
-        live.ref_table = ref_table;
-        live.delete_rule = delete_rule;
-        live.update_rule = update_rule;
-        live.is_deferrable = is_deferrable;
-        live.initially_deferred = initially_deferred;
+        let enforced = version_num < 180_000 || row.text(next) == "t";
+        let validated = row.text(12) == "t";
+        by_constraint.push(LiveForeignKeyConstraint {
+            columns: source_columns
+                .into_iter()
+                .zip(ref_columns)
+                .enumerate()
+                .map(|(idx, (column, ref_column))| (idx as i32, column, ref_column))
+                .collect(),
+            ref_schema: row.text(1),
+            ref_table: row.text(2),
+            delete_rule: pg_fk_action_rule(&row.text(3)).to_string(),
+            update_rule: pg_fk_action_rule(&row.text(4)).to_string(),
+            is_deferrable: row.text(5) == "t",
+            initially_deferred: row.text(6) == "t",
+            options: qail_core::ast::ForeignKeyOptions {
+                match_full: row.text(11) == "f",
+                on_delete_columns,
+                not_valid: enforced && !validated,
+                not_enforced: !enforced,
+            },
+        });
     }
 
     Ok(by_constraint
-        .into_values()
+        .into_iter()
         .any(|live| foreign_key_constraint_matches(live, expected)))
+}
+
+fn pg_fk_action_rule(code: &str) -> &'static str {
+    match code {
+        "r" => "RESTRICT",
+        "c" => "CASCADE",
+        "n" => "SET NULL",
+        "d" => "SET DEFAULT",
+        _ => "NO ACTION",
+    }
+}
+
+fn parse_pg_int_array(raw: &str) -> Result<Vec<i32>> {
+    let inner = raw
+        .trim()
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| anyhow!("Invalid PostgreSQL int array {:?}", raw))?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<i32>()
+                .map_err(|e| anyhow!("Invalid PostgreSQL int array {:?}: {}", raw, e))
+        })
+        .collect()
 }
 
 fn foreign_key_constraint_matches(
@@ -1753,6 +1907,14 @@ fn foreign_key_constraint_matches(
             live.initially_deferred,
             expected.deferrable,
         )
+        && live.options.match_full == expected.options.match_full
+        && constraint_columns_match(
+            &live.options.on_delete_columns,
+            &expected.options.on_delete_columns,
+        )
+        // The server records NOT ENFORCED as not validated, never as NOT VALID.
+        && live.options.not_valid == (expected.options.not_valid && !expected.options.not_enforced)
+        && live.options.not_enforced == expected.options.not_enforced
 }
 
 fn fk_rule_matches(live_rule: &str, expected_rule: Option<&str>) -> bool {
@@ -2670,6 +2832,7 @@ mod tests {
             update_rule: "RESTRICT".to_string(),
             is_deferrable: true,
             initially_deferred: true,
+            options: Default::default(),
         };
         let expected = ExpectedForeignKeyConstraint {
             name: Some("fk_trips_schedule"),
@@ -2679,9 +2842,72 @@ mod tests {
             on_delete: Some("cascade"),
             on_update: Some("restrict"),
             deferrable: Some("deferrable initially deferred"),
+            options: &qail_core::ast::ForeignKeyOptions::default(),
         };
 
         assert!(foreign_key_constraint_matches(live, &expected));
+    }
+
+    #[test]
+    fn foreign_key_constraint_matching_checks_match_mode_and_validation_state() {
+        let live = || LiveForeignKeyConstraint {
+            columns: vec![(1, "room_id".to_string(), "id".to_string())],
+            ref_schema: "public".to_string(),
+            ref_table: "rooms".to_string(),
+            delete_rule: "SET NULL".to_string(),
+            update_rule: "NO ACTION".to_string(),
+            options: qail_core::ast::ForeignKeyOptions {
+                match_full: true,
+                on_delete_columns: vec!["room_id".to_string()],
+                not_valid: true,
+                not_enforced: false,
+            },
+            ..Default::default()
+        };
+        let declared = qail_core::ast::ForeignKeyOptions {
+            match_full: true,
+            on_delete_columns: vec!["room_id".to_string()],
+            not_valid: true,
+            not_enforced: false,
+        };
+        // A server that silently validated, dropped MATCH FULL, or nulled
+        // every column must fail verification.
+        let validated = qail_core::ast::ForeignKeyOptions {
+            not_valid: false,
+            ..declared.clone()
+        };
+        let match_simple = qail_core::ast::ForeignKeyOptions {
+            match_full: false,
+            ..declared.clone()
+        };
+        let all_columns = qail_core::ast::ForeignKeyOptions {
+            on_delete_columns: Vec::new(),
+            ..declared.clone()
+        };
+        let columns = ["room_id".to_string()];
+        let ref_columns = ["id".to_string()];
+        for (options, matches) in [
+            (&declared, true),
+            (&validated, false),
+            (&match_simple, false),
+            (&all_columns, false),
+        ] {
+            let expected = ExpectedForeignKeyConstraint {
+                name: None,
+                columns: &columns,
+                ref_table: "rooms",
+                ref_columns: &ref_columns,
+                on_delete: Some("SET NULL"),
+                on_update: None,
+                deferrable: None,
+                options,
+            };
+            assert_eq!(
+                foreign_key_constraint_matches(live(), &expected),
+                matches,
+                "{options:?}"
+            );
+        }
     }
 
     /// A policy someone actually declared, with the given destructive mode.
@@ -3501,6 +3727,7 @@ mod tests {
                 on_delete: Some("CASCADE".to_string()),
                 on_update: Some("RESTRICT".to_string()),
                 deferrable: Some("DEFERRABLE INITIALLY DEFERRED".to_string()),
+                options: Default::default(),
             }],
             ..Default::default()
         };

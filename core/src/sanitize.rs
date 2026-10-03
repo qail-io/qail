@@ -512,12 +512,16 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                 on_delete,
                 on_update,
                 deferrable,
+                options,
             } => {
                 if let Some(name) = name {
                     check_ident(&format!("table_constraints[{i}].name"), name)?;
                 }
                 for col in columns {
                     check_ident(&format!("table_constraints[{i}].column"), col)?;
+                }
+                for col in &options.on_delete_columns {
+                    check_ident(&format!("table_constraints[{i}].on_delete_column"), col)?;
                 }
                 check_ident(&format!("table_constraints[{i}].ref_table"), ref_table)?;
                 for col in ref_columns {
@@ -532,6 +536,16 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                 if let Some(clause) = deferrable {
                     check_fk_deferrable(&format!("table_constraints[{i}].deferrable"), clause)?;
                 }
+            }
+            TableConstraint::Check { name, expr, .. } => {
+                if let Some(name) = name {
+                    check_ident(&format!("table_constraints[{i}].name"), name)?;
+                }
+                check_sql_expr_fragment(&format!("table_constraints[{i}].check"), expr)?;
+            }
+            TableConstraint::Exclude { name, definition } => {
+                check_ident(&format!("table_constraints[{i}].name"), name)?;
+                check_sql_expr_fragment(&format!("table_constraints[{i}].exclude"), definition)?;
             }
         }
     }
