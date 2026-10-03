@@ -504,14 +504,39 @@ pub(crate) fn validate_expr_ref(
             validate_ident_atom(&format!("{field}.alias"), alias)
         }
         Expr::Aggregate {
-            col, alias, filter, ..
+            col,
+            func,
+            distinct,
+            alias,
+            filter,
+            args,
+            order_by,
+            within_group,
         } => {
-            validate_qualified_ident(field, col, true)?;
+            qail_core::ast::check_aggregate_shape(
+                *func,
+                col,
+                *distinct,
+                args,
+                order_by,
+                within_group,
+            )
+            .map_err(crate::protocol::EncodeError::InvalidAst)?;
+            // `col` is empty when the arguments live in `args` (or MODE() has none).
+            if !col.is_empty() {
+                validate_qualified_ident(field, col, true)?;
+            }
+            for arg in args {
+                validate_expr_ref(&format!("{field}.arg"), arg)?;
+            }
             if let Some(alias) = alias {
                 validate_ident_atom(&format!("{field}.alias"), alias)?;
             }
             if let Some(filter) = filter {
                 validate_conditions(&format!("{field}.filter"), filter)?;
+            }
+            for cage in order_by.iter().chain(within_group) {
+                validate_cage_conditions(&format!("{field}.order_by"), false, &cage.conditions)?;
             }
             Ok(())
         }
@@ -1015,6 +1040,9 @@ pub fn encode_count(
         distinct: false,
         filter: None,
         alias: None,
+        args: Vec::new(),
+        order_by: Vec::new(),
+        within_group: Vec::new(),
     }];
     encode_select_with_columns(cmd, &count_columns, buf, params)
 }

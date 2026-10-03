@@ -19,6 +19,9 @@ fn main() {
         distinct: true,
         filter: None,
         alias: Some("total_contacts".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     // COUNT(*) AS total_messages
@@ -28,6 +31,9 @@ fn main() {
         distinct: false,
         filter: None,
         alias: Some("total_messages".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     // COUNT(*) FILTER (WHERE direction = 'outbound' AND created_at > NOW() - INTERVAL '24 hours') AS messages_sent_24h
@@ -50,6 +56,9 @@ fn main() {
             },
         ]),
         alias: Some("messages_sent_24h".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     // COUNT(*) FILTER (WHERE direction = 'inbound' AND created_at > NOW() - INTERVAL '24 hours') AS messages_received_24h
@@ -72,6 +81,9 @@ fn main() {
             },
         ]),
         alias: Some("messages_received_24h".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     // COUNT(*) FILTER (WHERE direction = 'inbound' AND status = 'received') AS unread_messages
@@ -94,6 +106,9 @@ fn main() {
             },
         ]),
         alias: Some("unread_messages".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     // COUNT(*) FILTER (WHERE direction = 'outbound' AND created_at > NOW() - INTERVAL '24 hours' AND status IN ('delivered', 'read')) AS successful_deliveries_24h
@@ -125,6 +140,9 @@ fn main() {
             },
         ]),
         alias: Some("successful_deliveries_24h".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     // Create CTE definition (using new API)

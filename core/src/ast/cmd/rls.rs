@@ -665,11 +665,22 @@ impl Qail {
     fn scope_expr_nested_rls(expr: &mut Expr, ctx: &RlsContext) -> QailBuildResult<()> {
         match expr {
             Expr::Aggregate {
-                filter: Some(filter),
+                filter,
+                args,
+                order_by,
+                within_group,
                 ..
             } => {
-                for condition in filter {
+                for expr in args {
+                    Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+                for condition in filter.iter_mut().flatten() {
                     Self::scope_condition_nested_rls(condition, ctx)?;
+                }
+                for cage in order_by.iter_mut().chain(within_group.iter_mut()) {
+                    for condition in &mut cage.conditions {
+                        Self::scope_condition_nested_rls(condition, ctx)?;
+                    }
                 }
             }
             Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
@@ -729,7 +740,6 @@ impl Qail {
             Expr::Star
             | Expr::Named(_)
             | Expr::Aliased { .. }
-            | Expr::Aggregate { filter: None, .. }
             | Expr::Def { .. }
             | Expr::JsonAccess { .. } => {}
         }
@@ -2480,6 +2490,9 @@ mod tests {
             distinct: false,
             filter: None,
             alias: Some("total".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         });
 
         let err = Qail::merge_into("_rls_merge_aggregate_target")

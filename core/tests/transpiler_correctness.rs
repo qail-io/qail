@@ -377,6 +377,9 @@ fn aggregate_count() {
             distinct: false,
             filter: None,
             alias: None,
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         }],
         ..Default::default()
     };
@@ -395,6 +398,9 @@ fn aggregate_sum_with_alias() {
             distinct: false,
             filter: None,
             alias: Some("total_amount".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         }],
         ..Default::default()
     };
@@ -414,6 +420,9 @@ fn aggregate_count_distinct() {
             distinct: true,
             filter: None,
             alias: None,
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         }],
         ..Default::default()
     };

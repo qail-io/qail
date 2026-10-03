@@ -23,11 +23,22 @@ fn reject_condition_subqueries(condition: &Condition) -> Result<(), ApiError> {
 fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
     match expr {
         Expr::Aggregate {
-            filter: Some(filter),
+            filter,
+            args,
+            order_by,
+            within_group,
             ..
         } => {
-            for condition in filter {
+            for expr in args {
+                reject_expr_subqueries(expr)?;
+            }
+            for condition in filter.iter().flatten() {
                 reject_condition_subqueries(condition)?;
+            }
+            for cage in order_by.iter().chain(within_group) {
+                for condition in &cage.conditions {
+                    reject_condition_subqueries(condition)?;
+                }
             }
         }
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
@@ -87,7 +98,6 @@ fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
         Expr::Star
         | Expr::Named(_)
         | Expr::Aliased { .. }
-        | Expr::Aggregate { filter: None, .. }
         | Expr::Def { .. }
         | Expr::JsonAccess { .. } => {}
     }

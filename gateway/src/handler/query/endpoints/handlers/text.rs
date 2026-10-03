@@ -16,6 +16,9 @@ fn build_export_tenant_violation_check(
         distinct: false,
         filter: None,
         alias: Some("violation_count".to_string()),
+        args: Vec::new(),
+        order_by: Vec::new(),
+        within_group: Vec::new(),
     }];
     guard_cmd.distinct = false;
     guard_cmd.distinct_on.clear();

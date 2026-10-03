@@ -442,12 +442,34 @@ impl AccessPolicy {
             | Expr::JsonAccess { column: name, .. } => {
                 check_named_read_column(table, rule, target_refs, name, context)
             }
-            Expr::Aggregate { col, filter, .. } => {
-                if col != "*" {
+            Expr::Aggregate {
+                col,
+                filter,
+                args,
+                order_by,
+                within_group,
+                ..
+            } => {
+                // `col` is empty when the arguments live in `args`.
+                if col != "*" && !col.is_empty() {
                     check_named_read_column(table, rule, target_refs, col, context)?;
+                }
+                for arg in args {
+                    self.check_expr_column_refs(table, rule, target_refs, arg, context)?;
                 }
                 if let Some(conditions) = filter {
                     for condition in conditions {
+                        self.check_condition_column_refs(
+                            table,
+                            rule,
+                            target_refs,
+                            condition,
+                            context,
+                        )?;
+                    }
+                }
+                for cage in order_by.iter().chain(within_group) {
+                    for condition in &cage.conditions {
                         self.check_condition_column_refs(
                             table,
                             rule,
@@ -673,12 +695,33 @@ impl AccessPolicy {
             | Expr::JsonAccess { column: name, .. } => {
                 check_qualified_read_column(table, rule, target_refs, name)
             }
-            Expr::Aggregate { col, filter, .. } => {
-                if col != "*" {
+            Expr::Aggregate {
+                col,
+                filter,
+                args,
+                order_by,
+                within_group,
+                ..
+            } => {
+                // `col` is empty when the arguments live in `args`.
+                if col != "*" && !col.is_empty() {
                     check_qualified_read_column(table, rule, target_refs, col)?;
+                }
+                for arg in args {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, arg)?;
                 }
                 if let Some(conditions) = filter {
                     for condition in conditions {
+                        self.check_outer_condition_column_refs(
+                            table,
+                            rule,
+                            target_refs,
+                            condition,
+                        )?;
+                    }
+                }
+                for cage in order_by.iter().chain(within_group) {
+                    for condition in &cage.conditions {
                         self.check_outer_condition_column_refs(
                             table,
                             rule,
@@ -992,9 +1035,23 @@ impl AccessPolicy {
                 }
                 Ok(())
             }
-            Expr::Aggregate { filter, .. } => {
+            Expr::Aggregate {
+                filter,
+                args,
+                order_by,
+                within_group,
+                ..
+            } => {
+                for arg in args {
+                    self.check_expr(ctx, arg)?;
+                }
                 if let Some(conditions) = filter {
                     for condition in conditions {
+                        self.check_condition(ctx, condition)?;
+                    }
+                }
+                for cage in order_by.iter().chain(within_group) {
+                    for condition in &cage.conditions {
                         self.check_condition(ctx, condition)?;
                     }
                 }

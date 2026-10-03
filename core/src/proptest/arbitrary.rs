@@ -76,6 +76,9 @@ pub fn arb_aggregate_func() -> impl Strategy<Value = AggregateFunc> {
         Just(AggregateFunc::JsonbAgg),
         Just(AggregateFunc::BoolAnd),
         Just(AggregateFunc::BoolOr),
+        Just(AggregateFunc::PercentileCont),
+        Just(AggregateFunc::PercentileDisc),
+        Just(AggregateFunc::Mode),
     ]
 }
 

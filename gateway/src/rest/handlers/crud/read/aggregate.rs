@@ -71,6 +71,9 @@ pub(crate) async fn aggregate_handler(
         distinct: is_distinct,
         filter: None,
         alias: None,
+        args: Vec::new(),
+        order_by: Vec::new(),
+        within_group: Vec::new(),
     };
 
     let mut cmd = qail_core::ast::Qail::get(&table_name).column_expr(agg_expr);

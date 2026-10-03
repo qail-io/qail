@@ -7,6 +7,7 @@ use qail_core::ast::{
     CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value,
     WindowFrame,
 };
+use qail_core::ast::{aggregate_sort_key, check_aggregate_shape, sort_order_sql};
 use qail_core::transpiler::escape_identifier;
 
 use super::super::helpers::{NUMERIC_VALUES, i64_to_bytes, write_param_placeholder};
@@ -149,14 +150,40 @@ fn encode_column_expr_inner(
             distinct,
             filter,
             alias,
+            args,
+            order_by,
+            within_group,
         } => {
+            check_aggregate_shape(*func, col, *distinct, args, order_by, within_group)
+                .map_err(crate::protocol::EncodeError::InvalidAst)?;
             buf.extend_from_slice(func.to_string().as_bytes());
             buf.extend_from_slice(b"(");
             if *distinct {
                 buf.extend_from_slice(b"DISTINCT ");
             }
-            push_identifier_ref(buf, col, true);
+            if args.is_empty() {
+                // Empty only for MODE(), which has no direct argument.
+                if !col.is_empty() {
+                    push_identifier_ref(buf, col, true);
+                }
+            } else {
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    encode_column_expr_inner(arg, buf, params.as_deref_mut())?;
+                }
+            }
+            if !order_by.is_empty() {
+                buf.extend_from_slice(b" ORDER BY ");
+                encode_aggregate_sort_keys(order_by, buf, params.as_deref_mut())?;
+            }
             buf.extend_from_slice(b")");
+            if !within_group.is_empty() {
+                buf.extend_from_slice(b" WITHIN GROUP (ORDER BY ");
+                encode_aggregate_sort_keys(within_group, buf, params.as_deref_mut())?;
+                buf.extend_from_slice(b")");
+            }
 
             // FILTER (WHERE ...) clause for aggregates
             if let Some(conditions) = filter
@@ -1385,6 +1412,25 @@ fn encode_frame_bound(bound: &FrameBound, buf: &mut BytesMut) {
         }
         FrameBound::UnboundedFollowing => buf.extend_from_slice(b"UNBOUNDED FOLLOWING"),
     }
+}
+
+/// `key DIR, ...` of an aggregate ORDER BY / WITHIN GROUP; sort-key values
+/// bind in text order like any other projection expression.
+fn encode_aggregate_sort_keys(
+    cages: &[qail_core::ast::Cage],
+    buf: &mut BytesMut,
+    mut params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    for (i, cage) in cages.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        let (key, order) =
+            aggregate_sort_key(cage).map_err(crate::protocol::EncodeError::InvalidAst)?;
+        encode_column_expr_inner(key, buf, params.as_deref_mut())?;
+        buf.extend_from_slice(sort_order_sql(order).as_bytes());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

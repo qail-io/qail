@@ -25,11 +25,22 @@ fn for_each_condition_subquery(
 fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Qail)) {
     match expr {
         Expr::Aggregate {
-            filter: Some(filter),
+            filter,
+            args,
+            order_by,
+            within_group,
             ..
         } => {
-            for condition in filter {
+            for expr in args {
+                for_each_expr_subquery(expr, visit);
+            }
+            for condition in filter.iter().flatten() {
                 for_each_condition_subquery(condition, visit);
+            }
+            for cage in order_by.iter().chain(within_group) {
+                for condition in &cage.conditions {
+                    for_each_condition_subquery(condition, visit);
+                }
             }
         }
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
@@ -87,7 +98,6 @@ fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Q
         Expr::Star
         | Expr::Named(_)
         | Expr::Aliased { .. }
-        | Expr::Aggregate { filter: None, .. }
         | Expr::Def { .. }
         | Expr::JsonAccess { .. } => {}
     }
@@ -235,9 +245,20 @@ fn condition_is_read_only(condition: &Condition) -> bool {
 fn expr_is_read_only(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate {
-            filter: Some(filter),
+            filter,
+            args,
+            order_by,
+            within_group,
             ..
-        } => filter.iter().all(condition_is_read_only),
+        } => {
+            args.iter().all(expr_is_read_only)
+                && filter.iter().flatten().all(condition_is_read_only)
+                && order_by
+                    .iter()
+                    .chain(within_group)
+                    .flat_map(|cage| &cage.conditions)
+                    .all(condition_is_read_only)
+        }
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
             expr_is_read_only(expr)
         }
@@ -273,8 +294,7 @@ fn expr_is_read_only(expr: &Expr) -> bool {
         | Expr::Named(_)
         | Expr::Aliased { .. }
         | Expr::Def { .. }
-        | Expr::JsonAccess { .. }
-        | Expr::Aggregate { filter: None, .. } => true,
+        | Expr::JsonAccess { .. } => true,
     }
 }
 

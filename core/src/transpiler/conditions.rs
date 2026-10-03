@@ -176,6 +176,21 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             ..
         } => render_json_access(column, path_segments, generator),
         Expr::Literal(value) => condition_value_sql_with_context(value, generator, context),
+        Expr::Aggregate { .. } => crate::transpiler::aggregate::aggregate_call_sql(
+            expr,
+            &|col| match context {
+                Some(cmd) => resolve_col_syntax(col, cmd, generator),
+                None => generator.quote_identifier(col),
+            },
+            &|arg| condition_left_sql(arg, generator, context),
+            &|conditions| {
+                conditions
+                    .iter()
+                    .map(|condition| condition.to_sql(generator, context))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            },
+        ),
         Expr::Case {
             when_clauses,
             else_value,

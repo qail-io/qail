@@ -87,6 +87,9 @@ impl ExprExt for Expr {
                 func,
                 distinct,
                 filter,
+                args,
+                order_by,
+                within_group,
                 ..
             } => Expr::Aggregate {
                 col,
@@ -94,6 +97,9 @@ impl ExprExt for Expr {
                 distinct,
                 filter,
                 alias: Some(alias.to_string()),
+                args,
+                order_by,
+                within_group,
             },
             Expr::Cast {
                 expr, target_type, ..

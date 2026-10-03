@@ -286,24 +286,30 @@ impl Formatter {
                 distinct,
                 filter,
                 alias,
+                args,
+                order_by,
+                within_group,
             } => {
-                let func_name = match func {
-                    crate::ast::AggregateFunc::Count => "count",
-                    crate::ast::AggregateFunc::Sum => "sum",
-                    crate::ast::AggregateFunc::Avg => "avg",
-                    crate::ast::AggregateFunc::Min => "min",
-                    crate::ast::AggregateFunc::Max => "max",
-                    crate::ast::AggregateFunc::ArrayAgg => "array_agg",
-                    crate::ast::AggregateFunc::StringAgg => "string_agg",
-                    crate::ast::AggregateFunc::JsonAgg => "json_agg",
-                    crate::ast::AggregateFunc::JsonbAgg => "jsonb_agg",
-                    crate::ast::AggregateFunc::BoolAnd => "bool_and",
-                    crate::ast::AggregateFunc::BoolOr => "bool_or",
-                };
+                write!(self.buffer, "{}(", func.dsl_name())?;
                 if *distinct {
-                    write!(self.buffer, "{}(distinct {})", func_name, col)?;
+                    write!(self.buffer, "distinct ")?;
+                }
+                if args.is_empty() {
+                    write!(self.buffer, "{}", col)?;
                 } else {
-                    write!(self.buffer, "{}({})", func_name, col)?;
+                    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                    write!(self.buffer, "{}", args.join(", "))?;
+                }
+                if !order_by.is_empty() {
+                    write!(self.buffer, " order by {}", aggregate_sort_text(order_by))?;
+                }
+                write!(self.buffer, ")")?;
+                if !within_group.is_empty() {
+                    write!(
+                        self.buffer,
+                        " within group (order by {})",
+                        aggregate_sort_text(within_group)
+                    )?;
                 }
                 if let Some(conditions) = filter {
                     write!(
@@ -653,4 +659,27 @@ impl Formatter {
         }
         Ok(())
     }
+}
+
+/// Aggregate ORDER BY / WITHIN GROUP keys in the DSL spelling the parser
+/// reads back. A malformed cage writes text that fails to parse.
+fn aggregate_sort_text(cages: &[Cage]) -> String {
+    cages
+        .iter()
+        .map(|cage| match crate::ast::aggregate_sort_key(cage) {
+            Ok((key, order)) => {
+                let suffix = match order {
+                    SortOrder::Asc => "",
+                    SortOrder::Desc => " desc",
+                    SortOrder::AscNullsFirst => " nulls first",
+                    SortOrder::AscNullsLast => " nulls last",
+                    SortOrder::DescNullsFirst => " desc nulls first",
+                    SortOrder::DescNullsLast => " desc nulls last",
+                };
+                format!("{key}{suffix}")
+            }
+            Err(message) => format!("<{message}>"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

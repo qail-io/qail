@@ -2095,6 +2095,9 @@ fn test_json_access_escapes_path_segments_in_select_renderers() {
         distinct: false,
         filter: None,
         alias: Some("total".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
@@ -2562,6 +2565,9 @@ fn test_having_clause() {
         distinct: false,
         filter: None,
         alias: None,
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
     cmd.having.push(Condition {
         left: Expr::Named("SUM(total)".to_string()),
@@ -2589,6 +2595,9 @@ fn test_group_by_rollup() {
         distinct: false,
         filter: None,
         alias: None,
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
     cmd.group_by_mode = GroupByMode::Rollup;
 
@@ -2608,6 +2617,9 @@ fn test_group_by_cube() {
         distinct: false,
         filter: None,
         alias: None,
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
     cmd.group_by_mode = GroupByMode::Cube;
 
@@ -2635,6 +2647,9 @@ fn test_aggregate_filter() {
             is_array_unnest: false,
         }]),
         alias: Some("sent_count".to_string()),
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     });
 
     let sql = cmd.to_sql();
@@ -2995,6 +3010,9 @@ fn test_schema_qualified_alias_aggregate_group_by_prefers_alias() {
             distinct: false,
             filter: None,
             alias: Some("total".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         },
     ]);
 

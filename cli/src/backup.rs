@@ -192,6 +192,9 @@ fn count_table_rows_cmd(table: &str) -> Qail {
         distinct: false,
         filter: None,
         alias: None,
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     })
 }
 
@@ -219,6 +222,9 @@ fn count_column_values_cmd(table: &str, column: &str) -> Qail {
         distinct: false,
         filter: None,
         alias: None,
+        args: vec![],
+        order_by: vec![],
+        within_group: vec![],
     })
 }
 
@@ -931,6 +937,9 @@ fn list_snapshots_cmd(migration_version: Option<&str>) -> Qail {
             distinct: false,
             filter: None,
             alias: None,
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         },
     ]);
 

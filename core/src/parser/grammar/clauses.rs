@@ -116,6 +116,9 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
                 func,
                 distinct,
                 filter,
+                args,
+                order_by,
+                within_group,
                 ..
             } => Expr::Aggregate {
                 col,
@@ -123,6 +126,9 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
                 distinct,
                 filter,
                 alias: Some(a.to_string()),
+                args,
+                order_by,
+                within_group,
             },
             Expr::Cast {
                 expr: inner,

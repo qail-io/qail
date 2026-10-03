@@ -1,3 +1,4 @@
+use crate::ast::aggregate::sort_keys_text;
 use crate::ast::{AggregateFunc, Cage, Condition, ModKind, Value};
 
 /// Binary operators for expressions
@@ -79,8 +80,15 @@ pub enum Expr {
         alias: String,
     },
     /// An aggregate function (COUNT(col)) with optional FILTER and DISTINCT
+    ///
+    /// Shape rules, checked by [`check_aggregate_shape`](crate::ast::check_aggregate_shape)
+    /// in both the transpiler and the native encoder: `col` and `args` are
+    /// never both set; `order_by` and `within_group` are never both set;
+    /// `within_group` is set exactly for ordered-set functions; STRING_AGG
+    /// takes `args: [value, delimiter]`.
     Aggregate {
-        /// Column to aggregate.
+        /// Column to aggregate (`*`, `col`, `t.col`) when `args` is empty.
+        /// Must be empty when `args` is set.
         col: String,
         /// Aggregate function.
         func: AggregateFunc,
@@ -90,6 +98,18 @@ pub enum Expr {
         filter: Option<Vec<Condition>>,
         /// Optional alias.
         alias: Option<String>,
+        /// Argument expressions, in call order (`SUM(price * quantity)`,
+        /// `STRING_AGG(status, ',')`; the direct arguments of an ordered-set
+        /// aggregate). Empty means the one argument is `col`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<Expr>,
+        /// Aggregate-local ORDER BY inside the call: `ARRAY_AGG(x ORDER BY y)`.
+        /// One `CageKind::Sort` cage per key; the key is its single condition's `left`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        order_by: Vec<Cage>,
+        /// `WITHIN GROUP (ORDER BY ...)` of an ordered-set aggregate, same cage shape.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within_group: Vec<Cage>,
     },
     /// Type cast expression (expr::type)
     Cast {
@@ -257,11 +277,34 @@ impl std::fmt::Display for Expr {
                 distinct,
                 filter,
                 alias,
+                args,
+                order_by,
+                within_group,
             } => {
+                write!(f, "{}(", func)?;
                 if *distinct {
-                    write!(f, "{}(DISTINCT {})", func, col)?;
+                    write!(f, "DISTINCT ")?;
+                }
+                if args.is_empty() {
+                    write!(f, "{}", col)?;
                 } else {
-                    write!(f, "{}({})", func, col)?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", arg)?;
+                    }
+                }
+                if !order_by.is_empty() {
+                    write!(f, " ORDER BY {}", sort_keys_text(order_by))?;
+                }
+                write!(f, ")")?;
+                if !within_group.is_empty() {
+                    write!(
+                        f,
+                        " WITHIN GROUP (ORDER BY {})",
+                        sort_keys_text(within_group)
+                    )?;
                 }
                 if let Some(conditions) = filter {
                     write!(
