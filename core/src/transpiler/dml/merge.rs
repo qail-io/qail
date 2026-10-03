@@ -79,16 +79,11 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
         ));
     }
 
-    if let Some(returning) = &cmd.returning
-        && !returning.is_empty()
-    {
-        sql.push_str(" RETURNING ");
-        let returning_sql: Vec<String> = returning
-            .iter()
-            .map(|expr| expr_sql(expr, generator.as_ref(), &reference_context))
-            .collect();
-        sql.push_str(&returning_sql.join(", "));
-    }
+    sql.push_str(&crate::transpiler::conditions::returning_clause_sql(
+        cmd.returning.as_ref(),
+        generator.as_ref(),
+        |expr| expr_sql(expr, generator.as_ref(), &reference_context),
+    ));
 
     sql
 }
@@ -432,12 +427,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String
         Expr::Binary {
             left, op, right, ..
         } => match op {
-            crate::ast::BinaryOp::IsNull => {
-                format!("({} IS NULL)", expr_sql(left, generator, context))
-            }
-            crate::ast::BinaryOp::IsNotNull => {
-                format!("({} IS NOT NULL)", expr_sql(left, generator, context))
-            }
+            op if op.is_postfix() => format!("({} {})", expr_sql(left, generator, context), op),
             _ => format!(
                 "({} {} {})",
                 expr_sql(left, generator, context),

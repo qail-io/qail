@@ -262,6 +262,25 @@ fn parse_json_literal(input: &str) -> IResult<&str, Value> {
 /// Parse comparison operator
 pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
     alt((
+        // Null-safe / boolean tests and SYMMETRIC before their prefixes.
+        alt((
+            value(
+                Operator::IsNotDistinctFrom,
+                tag_no_case("is not distinct from"),
+            ),
+            value(Operator::IsDistinctFrom, tag_no_case("is distinct from")),
+            value(Operator::IsNotTrue, tag_no_case("is not true")),
+            value(Operator::IsTrue, tag_no_case("is true")),
+            value(Operator::IsNotFalse, tag_no_case("is not false")),
+            value(Operator::IsFalse, tag_no_case("is false")),
+            value(Operator::IsNotUnknown, tag_no_case("is not unknown")),
+            value(Operator::IsUnknown, tag_no_case("is unknown")),
+            value(
+                Operator::NotBetweenSymmetric,
+                tag_no_case("not between symmetric"),
+            ),
+            value(Operator::BetweenSymmetric, tag_no_case("between symmetric")),
+        )),
         // Multi-char keyword operators first
         alt((
             value(Operator::NotBetween, tag_no_case("not between")),

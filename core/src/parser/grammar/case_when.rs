@@ -59,9 +59,16 @@ pub fn parse_when(input: &str) -> IResult<&str, (Condition, Box<Expr>)> {
     let (input, op) = parse_operator(input)?;
     let (input, _) = multispace0(input)?;
 
-    // For IS NULL / IS NOT NULL, there's no value to parse
-    let (input, val) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
+    // IS NULL / IS TRUE / ... take no value; BETWEEN takes `low AND high`.
+    let (input, val) = if op.is_postfix() {
         (input, Value::Null)
+    } else if op.is_range() {
+        let (input, low) = parse_value(input)?;
+        let (input, _) = multispace1(input)?;
+        let (input, _) = tag_no_case("and").parse(input)?;
+        let (input, _) = multispace1(input)?;
+        let (input, high) = parse_value(input)?;
+        (input, Value::Array(vec![low, high]))
     } else {
         parse_value(input)?
     };

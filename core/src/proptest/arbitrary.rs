@@ -47,6 +47,11 @@ pub fn arb_operator() -> impl Strategy<Value = Operator> {
         1 => Just(Operator::Contains),
         1 => Just(Operator::Regex),
         1 => Just(Operator::RegexI),
+        1 => Just(Operator::IsDistinctFrom),
+        1 => Just(Operator::IsNotDistinctFrom),
+        1 => Just(Operator::IsTrue),
+        1 => Just(Operator::IsNotUnknown),
+        1 => Just(Operator::BetweenSymmetric),
     ]
 }
 

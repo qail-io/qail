@@ -40,9 +40,11 @@ proptest! {
         let symbol = op.sql_symbol();
         let needs_val = op.needs_value();
 
-        // IS NULL, IS NOT NULL shouldn't need values
-        if symbol == "IS NULL" || symbol == "IS NOT NULL" {
+        // IS NULL, IS TRUE, ... shouldn't need values; IS DISTINCT FROM does
+        if op.is_postfix() {
             prop_assert!(!needs_val, "{} should not need a value", symbol);
+        } else if symbol.contains("DISTINCT FROM") {
+            prop_assert!(needs_val, "{} needs a value", symbol);
         }
     }
 

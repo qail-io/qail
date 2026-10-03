@@ -39,6 +39,41 @@ pub enum BinaryOp {
     IsNull,
     /// IS NOT NULL.
     IsNotNull,
+    /// Null-safe inequality `IS DISTINCT FROM`.
+    IsDistinctFrom,
+    /// Null-safe equality `IS NOT DISTINCT FROM`.
+    IsNotDistinctFrom,
+    // Boolean tests (unary, like the null checks)
+    /// IS TRUE.
+    IsTrue,
+    /// IS NOT TRUE.
+    IsNotTrue,
+    /// IS FALSE.
+    IsFalse,
+    /// IS NOT FALSE.
+    IsNotFalse,
+    /// IS UNKNOWN.
+    IsUnknown,
+    /// IS NOT UNKNOWN.
+    IsNotUnknown,
+}
+
+impl BinaryOp {
+    /// Unary postfix tests (`IS NULL`, `IS TRUE`, ...): `right` is a
+    /// placeholder that must not be rendered.
+    pub fn is_postfix(&self) -> bool {
+        matches!(
+            self,
+            BinaryOp::IsNull
+                | BinaryOp::IsNotNull
+                | BinaryOp::IsTrue
+                | BinaryOp::IsNotTrue
+                | BinaryOp::IsFalse
+                | BinaryOp::IsNotFalse
+                | BinaryOp::IsUnknown
+                | BinaryOp::IsNotUnknown
+        )
+    }
 }
 
 impl std::fmt::Display for BinaryOp {
@@ -60,6 +95,14 @@ impl std::fmt::Display for BinaryOp {
             BinaryOp::Lte => write!(f, "<="),
             BinaryOp::IsNull => write!(f, "IS NULL"),
             BinaryOp::IsNotNull => write!(f, "IS NOT NULL"),
+            BinaryOp::IsDistinctFrom => write!(f, "IS DISTINCT FROM"),
+            BinaryOp::IsNotDistinctFrom => write!(f, "IS NOT DISTINCT FROM"),
+            BinaryOp::IsTrue => write!(f, "IS TRUE"),
+            BinaryOp::IsNotTrue => write!(f, "IS NOT TRUE"),
+            BinaryOp::IsFalse => write!(f, "IS FALSE"),
+            BinaryOp::IsNotFalse => write!(f, "IS NOT FALSE"),
+            BinaryOp::IsUnknown => write!(f, "IS UNKNOWN"),
+            BinaryOp::IsNotUnknown => write!(f, "IS NOT UNKNOWN"),
         }
     }
 }
@@ -415,7 +458,11 @@ impl std::fmt::Display for Expr {
                 right,
                 alias,
             } => {
-                write!(f, "({} {} {})", left, op, right)?;
+                if op.is_postfix() {
+                    write!(f, "({} {})", left, op)?;
+                } else {
+                    write!(f, "({} {} {})", left, op, right)?;
+                }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }

@@ -204,8 +204,7 @@ fn render_window_expr(expr: &Expr, generator: &dyn SqlGenerator, cmd: &Qail) -> 
             let left_sql = render_window_expr(left, generator, cmd);
             let right_sql = render_window_expr(right, generator, cmd);
             match op {
-                BinaryOp::IsNull => format!("({left_sql} IS NULL)"),
-                BinaryOp::IsNotNull => format!("({left_sql} IS NOT NULL)"),
+                op if op.is_postfix() => format!("({left_sql} {op})"),
                 _ => format!("({left_sql} {op} {right_sql})"),
             }
         }

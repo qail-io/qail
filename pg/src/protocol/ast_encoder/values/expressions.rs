@@ -163,10 +163,15 @@ fn encode_column_expr_inner(
                 && !conditions.is_empty()
             {
                 buf.extend_from_slice(b" FILTER (WHERE ");
-                if let Some(params) = params.as_deref_mut() {
-                    encode_conditions(conditions, buf, params)?;
-                } else {
-                    encode_conditions_inline(conditions, buf)?;
+                for (i, cond) in conditions.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b" AND ");
+                    }
+                    let mode = match params.as_deref_mut() {
+                        Some(params) => OperandMode::Bind(params),
+                        None => OperandMode::Literal(None),
+                    };
+                    encode_condition(cond, buf, mode)?;
                 }
                 buf.extend_from_slice(b")");
             }
@@ -214,8 +219,11 @@ fn encode_column_expr_inner(
             encode_column_expr_inner(left, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(op.to_string().as_bytes());
-            buf.extend_from_slice(b" ");
-            encode_column_expr_inner(right, buf, params.as_deref_mut())?;
+            // IS NULL / IS TRUE / ... carry a placeholder right operand.
+            if !op.is_postfix() {
+                buf.extend_from_slice(b" ");
+                encode_column_expr_inner(right, buf, params.as_deref_mut())?;
+            }
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
@@ -223,7 +231,7 @@ fn encode_column_expr_inner(
             }
         }
         Expr::Literal(val) => {
-            encode_inline_value(val, buf)?;
+            encode_literal_operand(val, buf, params.as_deref_mut())?;
         }
         Expr::Case {
             when_clauses,
@@ -233,13 +241,7 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"CASE");
             for (cond, then_expr) in when_clauses {
                 buf.extend_from_slice(b" WHEN ");
-                encode_column_expr_inner(&cond.left, buf, params.as_deref_mut())?;
-                buf.extend_from_slice(b" ");
-                encode_operator(&cond.op, buf);
-                if !matches!(cond.op, Operator::IsNull | Operator::IsNotNull) {
-                    buf.extend_from_slice(b" ");
-                    encode_case_condition_value(&cond.value, buf, params.as_deref_mut())?;
-                }
+                encode_condition(cond, buf, OperandMode::Literal(params.as_deref_mut()))?;
                 buf.extend_from_slice(b" THEN ");
                 encode_column_expr_inner(then_expr, buf, params.as_deref_mut())?;
             }
@@ -544,56 +546,52 @@ fn encode_column_expr_inner(
     Ok(())
 }
 
-/// Encode an operator to bytes.
-pub fn encode_operator(op: &Operator, buf: &mut BytesMut) {
-    let bytes: &[u8] = match op {
-        Operator::Eq => b"=",
-        Operator::Ne => b"!=",
-        Operator::Gt => b">",
-        Operator::Gte => b">=",
-        Operator::Lt => b"<",
-        Operator::Lte => b"<=",
-        Operator::Like => b"LIKE",
-        Operator::NotLike => b"NOT LIKE",
-        Operator::ILike => b"ILIKE",
-        Operator::NotILike => b"NOT ILIKE",
-        Operator::Fuzzy => b"ILIKE",
-        Operator::In => b"IN",
-        Operator::NotIn => b"NOT IN",
-        Operator::IsNull => b"IS NULL",
-        Operator::IsNotNull => b"IS NOT NULL",
-        Operator::Between => b"BETWEEN",
-        Operator::NotBetween => b"NOT BETWEEN",
-        Operator::Regex => b"~",
-        Operator::RegexI => b"~*",
-        Operator::SimilarTo => b"SIMILAR TO",
-        Operator::Contains => b"@>",
-        Operator::ContainedBy => b"<@",
-        Operator::Overlaps => b"&&",
-        Operator::KeyExists => b"?",
-        Operator::JsonExists => b"JSON_EXISTS",
-        Operator::JsonQuery => b"JSON_QUERY",
-        Operator::JsonValue => b"JSON_VALUE",
-        Operator::Exists => b"EXISTS",
-        Operator::NotExists => b"NOT EXISTS",
-        Operator::TextSearch => b"@@",
-        Operator::KeyExistsAny => b"?|",
-        Operator::KeyExistsAll => b"?&",
-        Operator::JsonPath => b"#>",
-        Operator::JsonPathText => b"#>>",
-        Operator::ArrayElemContainedInText => b"CONTAINS_ANY_TOKEN",
-    };
-    buf.extend_from_slice(bytes);
+/// Where a condition's right-hand operands go.
+///
+/// The predicate shape (arity, lists, ranges, function syntax) is written
+/// once by [`encode_condition`]; contexts differ only in how operands are
+/// written, so plain comparisons keep the SQL text each context had.
+pub(crate) enum OperandMode<'a> {
+    /// Every scalar is a bind parameter (WHERE, MERGE, FILTER in a projection).
+    Bind(&'a mut Vec<Option<Vec<u8>>>),
+    /// JOIN ON: columns stay identifiers, NULL/bool/integers are inlined,
+    /// other scalars bind.
+    Join(&'a mut Vec<Option<Vec<u8>>>),
+    /// CASE WHEN, and FILTER without a parameter buffer: scalars are SQL
+    /// literals; nested subqueries share the buffer when there is one.
+    Literal(Option<&'a mut Vec<Option<Vec<u8>>>>),
 }
 
-fn encode_case_condition_value(
+impl OperandMode<'_> {
+    fn params(&mut self) -> Option<&mut Vec<Option<Vec<u8>>>> {
+        match self {
+            OperandMode::Bind(params) | OperandMode::Join(params) => Some(&mut **params),
+            OperandMode::Literal(params) => params.as_deref_mut(),
+        }
+    }
+
+    fn operand(
+        &mut self,
+        value: &Value,
+        buf: &mut BytesMut,
+    ) -> Result<(), crate::protocol::EncodeError> {
+        match self {
+            OperandMode::Bind(params) => encode_value(value, buf, params),
+            OperandMode::Join(params) => encode_join_value(value, buf, params),
+            OperandMode::Literal(params) => {
+                encode_literal_operand(value, buf, params.as_deref_mut())
+            }
+        }
+    }
+}
+
+fn encode_literal_operand(
     value: &Value,
     buf: &mut BytesMut,
-    params: Option<&mut Vec<Option<Vec<u8>>>>,
+    mut params: Option<&mut Vec<Option<Vec<u8>>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    let mut params = params;
     match value {
-        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params.as_deref_mut())?,
+        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params)?,
         Value::Column(column) => push_identifier_ref(buf, column, false),
         Value::Array(values) => {
             buf.extend_from_slice(b"(");
@@ -601,123 +599,199 @@ fn encode_case_condition_value(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_case_condition_value(value, buf, params.as_deref_mut())?;
+                encode_literal_operand(value, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b")");
         }
-        Value::Subquery(query) => {
-            buf.extend_from_slice(b"(");
-            if let Some(params) = params {
-                super::super::dml::encode_select(query, buf, params)?;
-            } else {
-                let mut sub_params = Vec::new();
-                super::super::dml::encode_select(query, buf, &mut sub_params)?;
-                if !sub_params.is_empty() {
-                    return Err(crate::protocol::EncodeError::InvalidAst(
-                        "CASE condition subquery requires a parameter context".to_string(),
-                    ));
-                }
-            }
-            buf.extend_from_slice(b")");
-        }
+        Value::Subquery(query) => encode_subquery_operand(query, buf, params)?,
         _ => encode_inline_value(value, buf)?,
     }
     Ok(())
 }
 
-fn encode_conditions_inline(
-    conditions: &[Condition],
+/// `(SELECT ...)`, sharing `params` so `$N` stays continuous. Without a
+/// buffer a subquery that would bind is rejected rather than dropping binds.
+fn encode_subquery_operand(
+    query: &qail_core::ast::Qail,
     buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    for (i, cond) in conditions.iter().enumerate() {
-        if i > 0 {
-            buf.extend_from_slice(b" AND ");
+    buf.extend_from_slice(b"(");
+    if let Some(params) = params {
+        super::super::dml::encode_select(query, buf, params)?;
+    } else {
+        let mut sub_params = Vec::new();
+        super::super::dml::encode_select(query, buf, &mut sub_params)?;
+        if !sub_params.is_empty() {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "subquery operand requires a parameter context".to_string(),
+            ));
         }
+    }
+    buf.extend_from_slice(b")");
+    Ok(())
+}
 
-        if matches!(cond.op, Operator::Exists | Operator::NotExists) {
+/// Encode one condition. WHERE, CASE WHEN, JOIN ON, FILTER and MERGE all
+/// come through here; see [`OperandMode`].
+pub(crate) fn encode_condition(
+    cond: &Condition,
+    buf: &mut BytesMut,
+    mut mode: OperandMode<'_>,
+) -> Result<(), crate::protocol::EncodeError> {
+    use crate::protocol::EncodeError;
+
+    if cond.is_array_unnest {
+        return encode_array_membership(cond, buf, mode);
+    }
+
+    match cond.op {
+        Operator::Exists | Operator::NotExists => {
+            // The left side is ignored: EXISTS is a standalone predicate.
+            let Value::Subquery(query) = &cond.value else {
+                return Err(EncodeError::InvalidAst(
+                    "EXISTS condition requires a subquery value".to_string(),
+                ));
+            };
             if cond.op == Operator::NotExists {
                 buf.extend_from_slice(b"NOT ");
             }
-            buf.extend_from_slice(b"EXISTS (");
-            if let Value::Subquery(query) = &cond.value {
-                let mut sub_params = Vec::new();
-                super::super::dml::encode_select(query, buf, &mut sub_params)?;
-                if !sub_params.is_empty() {
-                    return Err(crate::protocol::EncodeError::InvalidAst(
-                        "inline EXISTS condition requires a parameter context".to_string(),
-                    ));
-                }
-            } else {
-                return Err(crate::protocol::EncodeError::InvalidAst(
-                    "EXISTS condition requires a subquery value".to_string(),
-                ));
-            }
+            buf.extend_from_slice(b"EXISTS ");
+            return encode_subquery_operand(query, buf, mode.params());
+        }
+        Operator::TextSearch => {
+            // The left side is a comma-separated column list.
+            buf.extend_from_slice(b"to_tsvector('english', ");
+            encode_text_search_vector(&cond.left, buf)?;
+            buf.extend_from_slice(b") @@ websearch_to_tsquery('english', ");
+            mode.operand(&cond.value, buf)?;
             buf.extend_from_slice(b")");
-            continue;
+            return Ok(());
         }
-
-        let left_start = buf.len();
-        encode_expr(&cond.left, buf)?;
-
-        if matches!(
-            cond.op,
-            Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue
-        ) {
-            let left = buf[left_start..].to_vec();
-            buf.truncate(left_start);
-            encode_json_sql_condition(cond.op, &left, &cond.value, buf, None)?;
-            continue;
+        Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue => {
+            buf.extend_from_slice(cond.op.sql_symbol().as_bytes());
+            buf.extend_from_slice(b"(");
+            encode_ref_expr(&cond.left, buf, mode.params())?;
+            buf.extend_from_slice(b", ");
+            mode.operand(&cond.value, buf)?;
+            buf.extend_from_slice(b")");
+            if cond.op != Operator::JsonExists {
+                buf.extend_from_slice(b" IS NOT NULL");
+            }
+            return Ok(());
         }
+        Operator::ArrayElemContainedInText => {
+            return Err(EncodeError::InvalidAst(
+                "ArrayElemContainedInText requires is_array_unnest".to_string(),
+            ));
+        }
+        _ => {}
+    }
 
-        buf.extend_from_slice(b" ");
-        encode_operator(&cond.op, buf);
+    encode_ref_expr(&cond.left, buf, mode.params())?;
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(cond.op.sql_symbol().as_bytes());
 
-        match cond.op {
-            Operator::IsNull | Operator::IsNotNull => {}
-            Operator::In | Operator::NotIn => {
-                buf.extend_from_slice(b" ");
-                if let Value::Array(values) = &cond.value {
-                    if values.is_empty() {
-                        return Err(crate::protocol::EncodeError::InvalidAst(
-                            "IN condition requires a non-empty array or subquery value".to_string(),
-                        ));
-                    }
+    if cond.op.is_postfix() {
+        return Ok(());
+    }
+
+    match cond.op {
+        Operator::In | Operator::NotIn => {
+            buf.extend_from_slice(b" ");
+            match &cond.value {
+                Value::Array(values) if !values.is_empty() => {
                     buf.extend_from_slice(b"(");
-                    for (j, value) in values.iter().enumerate() {
-                        if j > 0 {
+                    for (i, value) in values.iter().enumerate() {
+                        if i > 0 {
                             buf.extend_from_slice(b", ");
                         }
-                        encode_inline_value(value, buf)?;
+                        mode.operand(value, buf)?;
                     }
                     buf.extend_from_slice(b")");
-                } else if matches!(&cond.value, Value::Subquery(_)) {
-                    encode_inline_value(&cond.value, buf)?;
-                } else {
-                    return Err(crate::protocol::EncodeError::InvalidAst(
+                }
+                Value::Subquery(query) => encode_subquery_operand(query, buf, mode.params())?,
+                _ => {
+                    return Err(EncodeError::InvalidAst(
                         "IN condition requires a non-empty array or subquery value".to_string(),
                     ));
                 }
             }
-            Operator::Between | Operator::NotBetween => {
-                if let Value::Array(values) = &cond.value
-                    && values.len() == 2
-                {
-                    buf.extend_from_slice(b" ");
-                    encode_inline_value(&values[0], buf)?;
-                    buf.extend_from_slice(b" AND ");
-                    encode_inline_value(&values[1], buf)?;
-                } else {
-                    return Err(crate::protocol::EncodeError::InvalidAst(
-                        "BETWEEN condition requires exactly two array values".to_string(),
-                    ));
-                }
-            }
-            _ => {
-                buf.extend_from_slice(b" ");
-                encode_inline_value(&cond.value, buf)?;
-            }
+        }
+        op if op.is_range() => {
+            let Value::Array(values) = &cond.value else {
+                return Err(EncodeError::InvalidAst(
+                    "BETWEEN condition requires exactly two array values".to_string(),
+                ));
+            };
+            let [low, high] = values.as_slice() else {
+                return Err(EncodeError::InvalidAst(
+                    "BETWEEN condition requires exactly two array values".to_string(),
+                ));
+            };
+            buf.extend_from_slice(b" ");
+            mode.operand(low, buf)?;
+            buf.extend_from_slice(b" AND ");
+            mode.operand(high, buf)?;
+        }
+        Operator::Fuzzy => {
+            buf.extend_from_slice(b" '%' || ");
+            mode.operand(&cond.value, buf)?;
+            buf.extend_from_slice(b" || '%'");
+        }
+        _ => {
+            buf.extend_from_slice(b" ");
+            mode.operand(&cond.value, buf)?;
         }
     }
+    Ok(())
+}
+
+/// `EXISTS (SELECT 1 FROM unnest(left) _el WHERE _el <op> value)`.
+fn encode_array_membership(
+    cond: &Condition,
+    buf: &mut BytesMut,
+    mut mode: OperandMode<'_>,
+) -> Result<(), crate::protocol::EncodeError> {
+    if !matches!(
+        cond.op,
+        Operator::Eq
+            | Operator::Ne
+            | Operator::Gt
+            | Operator::Gte
+            | Operator::Lt
+            | Operator::Lte
+            | Operator::Fuzzy
+            | Operator::ArrayElemContainedInText
+    ) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "is_array_unnest supports comparisons, Fuzzy and ArrayElemContainedInText, got {:?}",
+            cond.op
+        )));
+    }
+
+    buf.extend_from_slice(b"EXISTS (SELECT 1 FROM unnest(");
+    encode_ref_expr(&cond.left, buf, mode.params())?;
+    buf.extend_from_slice(b") _el WHERE ");
+    match cond.op {
+        Operator::Fuzzy => {
+            buf.extend_from_slice(b"_el ILIKE '%' || ");
+            mode.operand(&cond.value, buf)?;
+            buf.extend_from_slice(b" || '%'");
+        }
+        Operator::ArrayElemContainedInText => {
+            buf.extend_from_slice(b"LOWER(");
+            mode.operand(&cond.value, buf)?;
+            buf.extend_from_slice(b") LIKE '%' || LOWER(_el) || '%'");
+        }
+        _ => {
+            buf.extend_from_slice(b"_el ");
+            buf.extend_from_slice(cond.op.sql_symbol().as_bytes());
+            buf.extend_from_slice(b" ");
+            mode.operand(&cond.value, buf)?;
+        }
+    }
+    buf.extend_from_slice(b")");
     Ok(())
 }
 
@@ -812,12 +886,25 @@ fn encode_inline_value(
 
 /// Encode simple expression (for WHERE left side).
 pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) -> Result<(), crate::protocol::EncodeError> {
+    encode_ref_expr(expr, buf, None)
+}
+
+/// Encode an expression used as a reference (condition left side, ORDER BY,
+/// GROUP BY, DISTINCT ON, assignment value): an alias is not rendered.
+/// `params` lets bound subqueries share the statement's `$N` numbering.
+pub fn encode_ref_expr(
+    expr: &Expr,
+    buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     match expr {
         Expr::Named(name) => push_identifier_ref(buf, name, true),
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Aliased { name, .. } => push_identifier_ref(buf, name, true),
-        // Delegate complex expressions to the full encoder
-        _ => encode_column_expr(expr, buf)?,
+        _ => {
+            super::super::dml::validate_expr_ref("column", expr)?;
+            encode_column_expr_inner(expr, buf, params)?;
+        }
     }
     Ok(())
 }
@@ -833,6 +920,9 @@ pub fn encode_expr_with_params(
 }
 
 /// Encode JOIN ON value - AST-native, no allocations for column references.
+///
+/// Only `Value::Column` emits an identifier; a `Value::String` binds as a
+/// parameter even when it contains a dot (`'red.blue'`, `'$.a'`).
 pub fn encode_join_value(
     value: &Value,
     buf: &mut BytesMut,
@@ -840,7 +930,6 @@ pub fn encode_join_value(
 ) -> Result<(), crate::protocol::EncodeError> {
     match value {
         Value::Column(col) => push_identifier_ref(buf, col, false),
-        Value::String(s) if s.contains('.') => push_identifier_ref(buf, s, false),
         Value::Null => buf.extend_from_slice(b"NULL"),
         Value::Bool(b) => buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" }),
         Value::Int(n) => {
@@ -866,265 +955,8 @@ pub fn encode_conditions(
             buf.extend_from_slice(b" AND ");
         }
 
-        if cond.is_array_unnest {
-            buf.extend_from_slice(b"EXISTS (SELECT 1 FROM unnest(");
-            encode_expr(&cond.left, buf)?;
-            buf.extend_from_slice(b") _el WHERE ");
-
-            match cond.op {
-                Operator::Eq => {
-                    buf.extend_from_slice(b"_el = ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-                Operator::Ne => {
-                    buf.extend_from_slice(b"_el != ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-                Operator::Gt => {
-                    buf.extend_from_slice(b"_el > ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-                Operator::Gte => {
-                    buf.extend_from_slice(b"_el >= ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-                Operator::Lt => {
-                    buf.extend_from_slice(b"_el < ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-                Operator::Lte => {
-                    buf.extend_from_slice(b"_el <= ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-                Operator::Fuzzy => {
-                    buf.extend_from_slice(b"_el ILIKE '%' || ");
-                    encode_value(&cond.value, buf, params)?;
-                    buf.extend_from_slice(b" || '%'");
-                }
-                Operator::ArrayElemContainedInText => {
-                    buf.extend_from_slice(b"LOWER(");
-                    encode_value(&cond.value, buf, params)?;
-                    buf.extend_from_slice(b") LIKE '%' || LOWER(_el) || '%'");
-                }
-                _ => {
-                    buf.extend_from_slice(b"_el = ");
-                    encode_value(&cond.value, buf, params)?;
-                }
-            }
-
-            buf.extend_from_slice(b")");
-            continue;
-        }
-
-        let left_start = buf.len();
-        encode_expr(&cond.left, buf)?;
-
-        match cond.op {
-            Operator::Eq => buf.extend_from_slice(b" = "),
-            Operator::Ne => buf.extend_from_slice(b" != "),
-            Operator::Gt => buf.extend_from_slice(b" > "),
-            Operator::Gte => buf.extend_from_slice(b" >= "),
-            Operator::Lt => buf.extend_from_slice(b" < "),
-            Operator::Lte => buf.extend_from_slice(b" <= "),
-            Operator::Like => buf.extend_from_slice(b" LIKE "),
-            Operator::NotLike => buf.extend_from_slice(b" NOT LIKE "),
-            Operator::ILike => buf.extend_from_slice(b" ILIKE "),
-            Operator::NotILike => buf.extend_from_slice(b" NOT ILIKE "),
-            Operator::In => {
-                if let Value::Array(vals) = &cond.value {
-                    if vals.is_empty() {
-                        return Err(crate::protocol::EncodeError::InvalidAst(
-                            "IN condition requires a non-empty array or subquery value".to_string(),
-                        ));
-                    }
-                    buf.extend_from_slice(b" IN (");
-                    for (j, v) in vals.iter().enumerate() {
-                        if j > 0 {
-                            buf.extend_from_slice(b", ");
-                        }
-                        encode_value(v, buf, params)?;
-                    }
-                    buf.extend_from_slice(b")");
-                    continue;
-                } else if matches!(&cond.value, Value::Subquery(_)) {
-                    buf.extend_from_slice(b" IN ");
-                    encode_value(&cond.value, buf, params)?;
-                    continue;
-                }
-                return Err(crate::protocol::EncodeError::InvalidAst(
-                    "IN condition requires a non-empty array or subquery value".to_string(),
-                ));
-            }
-            Operator::NotIn => {
-                if let Value::Array(vals) = &cond.value {
-                    if vals.is_empty() {
-                        return Err(crate::protocol::EncodeError::InvalidAst(
-                            "IN condition requires a non-empty array or subquery value".to_string(),
-                        ));
-                    }
-                    buf.extend_from_slice(b" NOT IN (");
-                    for (j, v) in vals.iter().enumerate() {
-                        if j > 0 {
-                            buf.extend_from_slice(b", ");
-                        }
-                        encode_value(v, buf, params)?;
-                    }
-                    buf.extend_from_slice(b")");
-                    continue;
-                } else if matches!(&cond.value, Value::Subquery(_)) {
-                    buf.extend_from_slice(b" NOT IN ");
-                    encode_value(&cond.value, buf, params)?;
-                    continue;
-                }
-                return Err(crate::protocol::EncodeError::InvalidAst(
-                    "IN condition requires a non-empty array or subquery value".to_string(),
-                ));
-            }
-            Operator::IsNull => {
-                buf.extend_from_slice(b" IS NULL");
-                continue;
-            }
-            Operator::IsNotNull => {
-                buf.extend_from_slice(b" IS NOT NULL");
-                continue;
-            }
-            Operator::Between => {
-                if let Value::Array(vals) = &cond.value
-                    && vals.len() == 2
-                {
-                    buf.extend_from_slice(b" BETWEEN ");
-                    encode_value(&vals[0], buf, params)?;
-                    buf.extend_from_slice(b" AND ");
-                    encode_value(&vals[1], buf, params)?;
-                    continue;
-                }
-                return Err(crate::protocol::EncodeError::InvalidAst(
-                    "BETWEEN condition requires exactly two array values".to_string(),
-                ));
-            }
-            Operator::NotBetween => {
-                if let Value::Array(vals) = &cond.value
-                    && vals.len() == 2
-                {
-                    buf.extend_from_slice(b" NOT BETWEEN ");
-                    encode_value(&vals[0], buf, params)?;
-                    buf.extend_from_slice(b" AND ");
-                    encode_value(&vals[1], buf, params)?;
-                    continue;
-                }
-                return Err(crate::protocol::EncodeError::InvalidAst(
-                    "BETWEEN condition requires exactly two array values".to_string(),
-                ));
-            }
-            Operator::Regex => buf.extend_from_slice(b" ~ "),
-            Operator::RegexI => buf.extend_from_slice(b" ~* "),
-            Operator::SimilarTo => buf.extend_from_slice(b" SIMILAR TO "),
-            Operator::Contains => buf.extend_from_slice(b" @> "),
-            Operator::ContainedBy => buf.extend_from_slice(b" <@ "),
-            Operator::Overlaps => buf.extend_from_slice(b" && "),
-            Operator::Fuzzy => {
-                buf.extend_from_slice(b" ILIKE '%' || ");
-                encode_value(&cond.value, buf, params)?;
-                buf.extend_from_slice(b" || '%'");
-                continue;
-            }
-            Operator::KeyExists => buf.extend_from_slice(b" ? "),
-            Operator::KeyExistsAny => buf.extend_from_slice(b" ?| "),
-            Operator::KeyExistsAll => buf.extend_from_slice(b" ?& "),
-            Operator::JsonPath => buf.extend_from_slice(b" #> "),
-            Operator::JsonPathText => buf.extend_from_slice(b" #>> "),
-            Operator::ArrayElemContainedInText => buf.extend_from_slice(b" = "),
-            Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue => {
-                let left = buf[left_start..].to_vec();
-                buf.truncate(left_start);
-                encode_json_sql_condition(cond.op, &left, &cond.value, buf, Some(&mut *params))?;
-                continue;
-            }
-            Operator::Exists | Operator::NotExists => {
-                // EXISTS/NOT EXISTS: rewrite as a standalone subquery check.
-                // Truncate the left-side expression that was already written.
-                buf.truncate(left_start);
-                // Remove the preceding " AND " if this isn't the first condition
-                if i > 0 {
-                    // " AND " was already written before encode_expr
-                    // but we already truncated the left expr, the " AND " is still there
-                }
-                if cond.op == Operator::NotExists {
-                    buf.extend_from_slice(b"NOT EXISTS (");
-                } else {
-                    buf.extend_from_slice(b"EXISTS (");
-                }
-                // Encode the subquery from the value
-                match &cond.value {
-                    Value::Subquery(q) => {
-                        super::super::dml::encode_select(q, buf, params)?;
-                    }
-                    _ => {
-                        return Err(crate::protocol::EncodeError::InvalidAst(
-                            "EXISTS condition requires a subquery value".to_string(),
-                        ));
-                    }
-                }
-                buf.extend_from_slice(b")");
-                continue;
-            }
-            Operator::TextSearch => {
-                // Full-text search: to_tsvector('english', coalesce(col1,'') || ' ' || coalesce(col2,'')) @@ websearch_to_tsquery('english', $N)
-                // The left expression contains comma-separated column names
-                // We need to rewrite the entire condition
-                let mut tsvector_expr = BytesMut::new();
-                encode_text_search_vector(&cond.left, &mut tsvector_expr)?;
-
-                buf.truncate(left_start);
-
-                // Write the full tsvector expression
-                buf.extend_from_slice(b"to_tsvector('english', ");
-                buf.extend_from_slice(&tsvector_expr);
-                buf.extend_from_slice(b") @@ websearch_to_tsquery('english', ");
-                encode_value(&cond.value, buf, params)?;
-                buf.extend_from_slice(b")");
-                continue;
-            }
-        }
-
-        encode_value(&cond.value, buf, params)?;
+        encode_condition(cond, buf, OperandMode::Bind(params))?;
     }
-    Ok(())
-}
-
-fn encode_json_sql_condition(
-    op: Operator,
-    left: &[u8],
-    path: &Value,
-    buf: &mut BytesMut,
-    params: Option<&mut Vec<Option<Vec<u8>>>>,
-) -> Result<(), crate::protocol::EncodeError> {
-    let function = match op {
-        Operator::JsonExists => b"JSON_EXISTS" as &[u8],
-        Operator::JsonQuery => b"JSON_QUERY" as &[u8],
-        Operator::JsonValue => b"JSON_VALUE" as &[u8],
-        _ => {
-            return Err(crate::protocol::EncodeError::InvalidAst(
-                "expected SQL/JSON condition operator".to_string(),
-            ));
-        }
-    };
-
-    buf.extend_from_slice(function);
-    buf.extend_from_slice(b"(");
-    buf.extend_from_slice(left);
-    buf.extend_from_slice(b", ");
-    if let Some(params) = params {
-        encode_value(path, buf, params)?;
-    } else {
-        encode_inline_value(path, buf)?;
-    }
-    buf.extend_from_slice(b")");
-
-    if matches!(op, Operator::JsonQuery | Operator::JsonValue) {
-        buf.extend_from_slice(b" IS NOT NULL");
-    }
-
     Ok(())
 }
 
