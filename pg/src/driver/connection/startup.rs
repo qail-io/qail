@@ -553,4 +553,128 @@ impl PgConnection {
         self.column_info_cache.clear();
         self.pending_statement_closes.clear();
     }
+
+    /// Decide how a cached path runs `sql` (cache key `sql_hash`).
+    ///
+    /// The key is a 64-bit SipHash with fixed public keys, so two SQL texts
+    /// can share it. A name is reused only when `prepared_statements`
+    /// records it as parsed from exactly `sql`; a key or derived name that
+    /// holds other SQL yields [`StatementSlot::Unnamed`].
+    ///
+    /// `derive_name` gives the statement name a fresh Parse would use.
+    /// A name recorded for `sql` but missing from `stmt_cache` (dropped by
+    /// the cache's capacity) is re-cached when `recorded` is
+    /// [`RecordedName::Reuse`]; with [`RecordedName::Reparse`] it is closed
+    /// and parsed again so the caller gets a fresh Describe.
+    pub(crate) fn resolve_cached_statement(
+        &mut self,
+        sql_hash: u64,
+        sql: &[u8],
+        derive_name: fn(u64) -> String,
+        recorded: RecordedName,
+    ) -> StatementSlot {
+        if let Some(name) = self.stmt_cache.peek(&sql_hash) {
+            match self.prepared_statements.get(name) {
+                Some(record) if record.as_bytes() == sql => {
+                    let name = name.to_string();
+                    self.stmt_cache.touch(sql_hash);
+                    return StatementSlot::Reuse(name);
+                }
+                Some(_) => return StatementSlot::Unnamed,
+                None => {
+                    // Entry outlived its record; the server may still hold
+                    // the name with SQL nobody can vouch for.
+                    let name = name.to_string();
+                    self.stmt_cache.remove(&sql_hash);
+                    self.column_info_cache.remove(&sql_hash);
+                    self.pending_statement_closes.push(name);
+                }
+            }
+        }
+
+        let name = derive_name(sql_hash);
+        match self.prepared_statements.get(&name) {
+            None => StatementSlot::Parse(name),
+            Some(record) if record.as_bytes() != sql => StatementSlot::Unnamed,
+            Some(_) => {
+                // Column metadata under this key may belong to other SQL.
+                self.column_info_cache.remove(&sql_hash);
+                match recorded {
+                    RecordedName::Reuse => {
+                        self.stmt_cache.put(sql_hash, name.clone());
+                        StatementSlot::Reuse(name)
+                    }
+                    RecordedName::Reparse => {
+                        self.prepared_statements.remove(&name);
+                        self.pending_statement_closes.push(name.clone());
+                        StatementSlot::Parse(name)
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`Self::resolve_cached_statement`] for the SQL encoded in `sql_buf`.
+    pub(crate) fn resolve_cached_statement_for_sql_buf(
+        &mut self,
+        sql_hash: u64,
+        derive_name: fn(u64) -> String,
+        recorded: RecordedName,
+    ) -> StatementSlot {
+        let sql = std::mem::take(&mut self.sql_buf);
+        let slot = self.resolve_cached_statement(sql_hash, &sql, derive_name, recorded);
+        self.sql_buf = sql;
+        slot
+    }
+
+    /// True when this connection records `stmt.name` as parsed from exactly
+    /// the SQL the handle stands for.
+    pub(crate) fn records_prepared_statement(
+        &self,
+        stmt: &crate::driver::PreparedStatement,
+    ) -> bool {
+        self.prepared_statements
+            .get(&stmt.name)
+            .is_some_and(|record| record.as_bytes() == &*stmt.sql)
+    }
+
+    /// Forget a statement whose Parse the server refused with 42P05 and
+    /// queue a Close for it.
+    ///
+    /// The server holds `name` with SQL this connection did not record
+    /// (local state cleared after a replan error, or a hash collision on
+    /// the derived name), so the name must not be bound. The Close is
+    /// flushed before the next write, so a retry parses afresh.
+    pub(crate) fn release_unrecorded_statement(&mut self, sql_hash: Option<u64>, name: &str) {
+        if let Some(sql_hash) = sql_hash
+            && self.stmt_cache.peek(&sql_hash) == Some(name)
+        {
+            self.stmt_cache.remove(&sql_hash);
+            self.column_info_cache.remove(&sql_hash);
+        }
+        self.prepared_statements.remove(name);
+        self.pending_statement_closes.push(name.to_string());
+    }
+}
+
+/// How a cached path runs one SQL text on a connection.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StatementSlot {
+    /// The name was parsed from exactly this SQL: Bind only.
+    Reuse(String),
+    /// Nothing recorded under this name: Parse it, then register it.
+    Parse(String),
+    /// The cache key or derived name holds other SQL. Parse into the
+    /// unnamed statement and register nothing.
+    Unnamed,
+}
+
+/// What [`PgConnection::resolve_cached_statement`] does with a name that is
+/// recorded for the same SQL but no longer in `stmt_cache`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordedName {
+    /// Re-cache and Bind it (paths that never read column metadata).
+    Reuse,
+    /// Close it and Parse + Describe it again.
+    Reparse,
 }

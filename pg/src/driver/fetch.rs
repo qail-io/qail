@@ -85,6 +85,8 @@ impl PgDriver {
         self.connection
             .stmt_cache
             .put(sql_hash, stmt.name().to_string());
+        // No Describe ran; metadata under this key may describe other SQL.
+        self.connection.column_info_cache.remove(&sql_hash);
         self.connection
             .prepared_statements
             .insert(stmt.name().to_string(), sql.clone());
@@ -455,9 +457,8 @@ impl PgDriver {
         cmd: &Qail,
         result_format: ResultFormat,
     ) -> PgResult<Vec<PgRow>> {
+        use super::connection::{RecordedName, StatementSlot};
         use crate::protocol::AstEncoder;
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         if !AstEncoder::encode_cacheable_cmd_sql_to(
             cmd,
@@ -480,38 +481,51 @@ impl PgDriver {
                 .collect());
         }
 
-        let mut hasher = DefaultHasher::new();
-        self.connection.sql_buf.hash(&mut hasher);
-        let sql_hash = hasher.finish();
-
-        let is_cache_miss = !self.connection.stmt_cache.contains(&sql_hash);
+        let sql_hash = super::prepared::sql_bytes_hash(&self.connection.sql_buf);
+        let slot = self.connection.resolve_cached_statement_for_sql_buf(
+            sql_hash,
+            super::prepared::ast_stmt_name_from_hash,
+            RecordedName::Reparse,
+        );
+        // Parse + Describe go out unless the name is reused. Only a named
+        // Parse is registered, so only it is rolled back on failure.
+        let is_cache_miss = !matches!(slot, StatementSlot::Reuse(_));
+        let registers = matches!(slot, StatementSlot::Parse(_));
 
         // Build ALL wire messages into write_buf (single syscall)
         self.connection.write_buf.clear();
 
-        let stmt_name = if let Some(name) = self.connection.stmt_cache.get(&sql_hash) {
-            name
-        } else {
-            let name = format!("qail_{:x}", sql_hash);
+        let stmt_name = match slot {
+            StatementSlot::Reuse(name) => name,
+            StatementSlot::Parse(name) => {
+                // Evict LRU before borrowing sql_buf to avoid borrow conflict
+                self.connection.evict_prepared_if_full();
 
-            // Evict LRU before borrowing sql_buf to avoid borrow conflict
-            self.connection.evict_prepared_if_full();
+                let sql_str = encoded_sql_str(&self.connection.sql_buf)?;
 
-            let sql_str = encoded_sql_str(&self.connection.sql_buf)?;
+                // Buffer Parse + Describe(Statement) for first call
+                use crate::protocol::PgEncoder;
+                let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
+                let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
+                self.connection.write_buf.extend_from_slice(&parse_msg);
+                self.connection.write_buf.extend_from_slice(&describe_msg);
 
-            // Buffer Parse + Describe(Statement) for first call
-            use crate::protocol::PgEncoder;
-            let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
-            let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
-            self.connection.write_buf.extend_from_slice(&parse_msg);
-            self.connection.write_buf.extend_from_slice(&describe_msg);
+                self.connection.stmt_cache.put(sql_hash, name.clone());
+                self.connection
+                    .prepared_statements
+                    .insert(name.clone(), sql_str.to_string());
 
-            self.connection.stmt_cache.put(sql_hash, name.clone());
-            self.connection
-                .prepared_statements
-                .insert(name.clone(), sql_str.to_string());
-
-            name
+                name
+            }
+            StatementSlot::Unnamed => {
+                let sql_str = encoded_sql_str(&self.connection.sql_buf)?;
+                use crate::protocol::PgEncoder;
+                let parse_msg = PgEncoder::try_encode_parse("", sql_str, &[])?;
+                let describe_msg = PgEncoder::try_encode_describe(false, "")?;
+                self.connection.write_buf.extend_from_slice(&parse_msg);
+                self.connection.write_buf.extend_from_slice(&describe_msg);
+                String::new()
+            }
         };
 
         // Append Bind + Execute + Sync to same buffer
@@ -522,7 +536,7 @@ impl PgDriver {
             &self.connection.params_buf,
             result_format.as_wire_code(),
         ) {
-            if is_cache_miss {
+            if registers {
                 self.connection.stmt_cache.remove(&sql_hash);
                 self.connection.prepared_statements.remove(&stmt_name);
                 self.connection.column_info_cache.remove(&sql_hash);
@@ -534,7 +548,7 @@ impl PgDriver {
 
         // Single write_all syscall for all messages
         if let Err(err) = self.connection.flush_write_buf().await {
-            if is_cache_miss {
+            if registers {
                 self.connection.stmt_cache.remove(&sql_hash);
                 self.connection.prepared_statements.remove(&stmt_name);
                 self.connection.column_info_cache.remove(&sql_hash);
@@ -542,8 +556,13 @@ impl PgDriver {
             return Err(err);
         }
 
-        // On cache hit, use the previously cached ColumnInfo
-        let cached_column_info = self.connection.column_info_cache.get(&sql_hash).cloned();
+        // On cache hit, use the previously cached ColumnInfo. A Parse gets a
+        // fresh RowDescription; the key's entry may describe other SQL.
+        let cached_column_info = if is_cache_miss {
+            None
+        } else {
+            self.connection.column_info_cache.get(&sql_hash).cloned()
+        };
 
         let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
@@ -558,7 +577,7 @@ impl PgDriver {
             let msg = match self.connection.recv().await {
                 Ok(msg) => msg,
                 Err(err) => {
-                    if is_cache_miss && !flow.saw_parse_complete() {
+                    if registers && !flow.saw_parse_complete() {
                         self.connection.stmt_cache.remove(&sql_hash);
                         self.connection.prepared_statements.remove(&stmt_name);
                         self.connection.column_info_cache.remove(&sql_hash);
@@ -569,7 +588,7 @@ impl PgDriver {
             if let Err(err) =
                 flow.validate(&msg, "driver fetch_all_cached execute", error.is_some())
             {
-                if is_cache_miss && !flow.saw_parse_complete() {
+                if registers && !flow.saw_parse_complete() {
                     self.connection.stmt_cache.remove(&sql_hash);
                     self.connection.prepared_statements.remove(&stmt_name);
                     self.connection.column_info_cache.remove(&sql_hash);
@@ -585,7 +604,7 @@ impl PgDriver {
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     // Received after Describe(Statement) on cache miss
                     let info = Arc::new(ColumnInfo::from_fields(&fields));
-                    if is_cache_miss {
+                    if registers {
                         self.connection
                             .column_info_cache
                             .insert(sql_hash, Arc::clone(&info));
@@ -606,20 +625,24 @@ impl PgDriver {
                 }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
-                        if is_cache_miss
-                            && !flow.saw_parse_complete()
-                            && !err.is_prepared_statement_already_exists()
-                        {
-                            self.connection.stmt_cache.remove(&sql_hash);
-                            self.connection.prepared_statements.remove(&stmt_name);
-                            self.connection.column_info_cache.remove(&sql_hash);
+                        if registers && !flow.saw_parse_complete() {
+                            if err.is_prepared_statement_already_exists() {
+                                self.connection
+                                    .release_unrecorded_statement(Some(sql_hash), &stmt_name);
+                            } else {
+                                self.connection.stmt_cache.remove(&sql_hash);
+                                self.connection.prepared_statements.remove(&stmt_name);
+                                self.connection.column_info_cache.remove(&sql_hash);
+                            }
                         }
                         return Err(err);
                     }
                     if is_cache_miss && !flow.saw_parse_complete() {
-                        self.connection.stmt_cache.remove(&sql_hash);
-                        self.connection.prepared_statements.remove(&stmt_name);
-                        self.connection.column_info_cache.remove(&sql_hash);
+                        if registers {
+                            self.connection.stmt_cache.remove(&sql_hash);
+                            self.connection.prepared_statements.remove(&stmt_name);
+                            self.connection.column_info_cache.remove(&sql_hash);
+                        }
                         return return_with_desync(
                             self,
                             PgError::Protocol(
@@ -641,7 +664,7 @@ impl PgDriver {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    if is_cache_miss && !flow.saw_parse_complete() {
+                    if registers && !flow.saw_parse_complete() {
                         self.connection.stmt_cache.remove(&sql_hash);
                         self.connection.prepared_statements.remove(&stmt_name);
                         self.connection.column_info_cache.remove(&sql_hash);

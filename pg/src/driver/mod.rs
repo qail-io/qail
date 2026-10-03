@@ -41,6 +41,8 @@ mod query;
 mod replication;
 pub mod rls;
 mod row;
+#[cfg(test)]
+mod stmt_identity_tests;
 mod stream;
 mod transaction;
 mod types;

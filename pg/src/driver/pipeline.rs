@@ -110,9 +110,24 @@ fn enforce_prepared_statement_cache_limit(conn: &mut PgConnection) {
 fn reconcile_new_cached_statements_after_server_error(
     conn: &mut PgConnection,
     new_stmt_hashes: &[u64],
+    parses: &[Option<u64>],
     parse_completes: usize,
+    err: &PgError,
 ) {
-    rollback_new_cached_statements_from(conn, new_stmt_hashes, parse_completes);
+    // Unnamed Parses complete too; count only registered ones.
+    let registered_parsed = parses[..parse_completes.min(parses.len())]
+        .iter()
+        .filter(|parse| parse.is_some())
+        .count();
+    if err.is_prepared_statement_already_exists() {
+        // The server holds a name this batch tried to register, with SQL
+        // this connection did not record: close it so a retry parses afresh.
+        for sql_hash in &new_stmt_hashes[registered_parsed.min(new_stmt_hashes.len())..] {
+            conn.pending_statement_closes
+                .push(super::prepared::stmt_name_from_hash(*sql_hash));
+        }
+    }
+    rollback_new_cached_statements_from(conn, new_stmt_hashes, registered_parsed);
     enforce_prepared_statement_cache_limit(conn);
 }
 
@@ -1099,12 +1114,16 @@ impl PgConnection {
             return Ok(0);
         }
 
+        use super::connection::{RecordedName, StatementSlot};
         use super::prepared::{sql_bytes_hash, stmt_name_from_hash};
 
         let mut buf = BytesMut::with_capacity(cmds.len() * 64);
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
         let mut new_stmt_hashes: Vec<u64> = Vec::new();
+        // One entry per Parse sent, in wire order: the registered key, or
+        // None for an unnamed Parse (SQL whose key belongs to other SQL).
+        let mut parses: Vec<Option<u64>> = Vec::new();
 
         for cmd in cmds {
             if let Err(e) = AstEncoder::encode_cmd_sql_reuse(cmd, &mut sql_buf, &mut params) {
@@ -1113,18 +1132,18 @@ impl PgConnection {
             }
 
             let sql_hash = sql_bytes_hash(sql_buf.as_ref());
+            let slot = self.resolve_cached_statement(
+                sql_hash,
+                sql_buf.as_ref(),
+                stmt_name_from_hash,
+                RecordedName::Reuse,
+            );
 
-            if self.stmt_cache.contains(&sql_hash) {
-                self.stmt_cache.touch_key(sql_hash);
-            } else {
-                let stmt_name = stmt_name_from_hash(sql_hash);
-                if self.prepared_statements.contains_key(&stmt_name) {
-                    // Recover from old cache states where prepared_statements had
-                    // entries that were not mirrored in stmt_cache.
-                    self.stmt_cache.put(sql_hash, stmt_name.clone());
-                } else {
+            let stmt_name = match slot {
+                StatementSlot::Reuse(name) => name,
+                StatementSlot::Parse(_) | StatementSlot::Unnamed => {
                     let sql = match std::str::from_utf8(sql_buf.as_ref()) {
-                        Ok(sql) => sql.to_string(),
+                        Ok(sql) => sql,
                         Err(e) => {
                             rollback_new_cached_statements(self, &new_stmt_hashes);
                             return Err(PgError::Encode(format!(
@@ -1133,7 +1152,11 @@ impl PgConnection {
                             )));
                         }
                     };
-                    let parse_msg = match PgEncoder::try_encode_parse(&stmt_name, &sql, &[]) {
+                    let name = match &slot {
+                        StatementSlot::Parse(name) => name.as_str(),
+                        _ => "",
+                    };
+                    let parse_msg = match PgEncoder::try_encode_parse(name, sql, &[]) {
                         Ok(msg) => msg,
                         Err(e) => {
                             rollback_new_cached_statements(self, &new_stmt_hashes);
@@ -1141,20 +1164,22 @@ impl PgConnection {
                         }
                     };
                     buf.extend(parse_msg);
-                    self.stmt_cache.put(sql_hash, stmt_name.clone());
-                    self.prepared_statements.insert(stmt_name.clone(), sql);
-                    new_stmt_hashes.push(sql_hash);
+                    if let StatementSlot::Parse(name) = slot {
+                        self.stmt_cache.put(sql_hash, name.clone());
+                        self.column_info_cache.remove(&sql_hash);
+                        self.prepared_statements
+                            .insert(name.clone(), sql.to_string());
+                        new_stmt_hashes.push(sql_hash);
+                        parses.push(Some(sql_hash));
+                        name
+                    } else {
+                        parses.push(None);
+                        String::new()
+                    }
                 }
-            }
-
-            let Some(stmt_name) = self.stmt_cache.peek(&sql_hash) else {
-                rollback_new_cached_statements(self, &new_stmt_hashes);
-                return Err(PgError::Protocol(
-                    "stmt_cache lookup failed after statement registration".to_string(),
-                ));
             };
 
-            if let Err(e) = PgEncoder::encode_bind_to(&mut buf, stmt_name, &params) {
+            if let Err(e) = PgEncoder::encode_bind_to(&mut buf, &stmt_name, &params) {
                 rollback_new_cached_statements(self, &new_stmt_hashes);
                 return Err(PgError::Encode(e.to_string()));
             }
@@ -1173,7 +1198,7 @@ impl PgConnection {
         }
 
         let mut error: Option<PgError> = None;
-        let expected_parse_completes = new_stmt_hashes.len();
+        let expected_parse_completes = parses.len();
         let mut flow = FastExtendedFlowTracker::new(FastExtendedFlowConfig {
             expected_queries: cmds.len(),
             allow_parse_complete: true,
@@ -1197,7 +1222,9 @@ impl PgConnection {
                                 reconcile_new_cached_statements_after_server_error(
                                     self,
                                     &new_stmt_hashes,
+                                    &parses,
                                     flow.parse_completes,
+                                    &err,
                                 );
                                 return Err(err);
                             }
@@ -1245,7 +1272,7 @@ impl PgConnection {
             return Ok(0);
         }
 
-        let is_new = !self.prepared_statements.contains_key(&stmt.name);
+        let is_new = !self.records_prepared_statement(stmt);
 
         if is_new {
             return Err(PgError::Query(
@@ -1307,12 +1334,36 @@ impl PgConnection {
 
     /// Prepare a statement and return a handle for fast execution.
     /// PreparedStatement handle for use with pipeline_execute_prepared_count.
+    ///
+    /// The name is `s{hash}`; when this connection already holds that name
+    /// for other SQL (a 64-bit hash collision) it is `s{hash}_{n}` instead.
     pub async fn prepare(&mut self, sql: &str) -> PgResult<super::PreparedStatement> {
+        match self.prepare_once(sql).await {
+            // The server holds the name with SQL this connection did not
+            // record; prepare_once queued a Close, so parse afresh.
+            Err(err) if err.is_prepared_statement_already_exists() => self.prepare_once(sql).await,
+            other => other,
+        }
+    }
+
+    async fn prepare_once(&mut self, sql: &str) -> PgResult<super::PreparedStatement> {
         use super::prepared::sql_bytes_to_stmt_name;
 
-        let stmt_name = sql_bytes_to_stmt_name(sql.as_bytes());
+        let base_name = sql_bytes_to_stmt_name(sql.as_bytes());
+        let mut stmt_name = base_name.clone();
+        let mut suffix = 0usize;
+        let recorded = loop {
+            match self.prepared_statements.get(&stmt_name) {
+                Some(record) if record == sql => break true,
+                Some(_) => {
+                    suffix += 1;
+                    stmt_name = format!("{base_name}_{suffix}");
+                }
+                None => break false,
+            }
+        };
 
-        if !self.prepared_statements.contains_key(&stmt_name) {
+        if !recorded {
             self.evict_prepared_if_full();
             let mut buf = BytesMut::with_capacity(sql.len() + 32);
             buf.extend(PgEncoder::try_encode_parse(&stmt_name, sql, &[])?);
@@ -1339,6 +1390,9 @@ impl PgConnection {
                         }
                         b'Z' => {
                             if let Some(err) = error {
+                                if err.is_prepared_statement_already_exists() {
+                                    self.release_unrecorded_statement(None, &stmt_name);
+                                }
                                 return Err(err);
                             }
                             if !saw_parse_complete {
@@ -1368,7 +1422,10 @@ impl PgConnection {
             }
         }
 
-        Ok(super::PreparedStatement { name: stmt_name })
+        Ok(super::PreparedStatement {
+            name: stmt_name,
+            sql: std::sync::Arc::from(sql.as_bytes()),
+        })
     }
 
     /// Execute a prepared statement pipeline and return all row data.
@@ -1381,7 +1438,7 @@ impl PgConnection {
             return Ok(Vec::new());
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));
@@ -1489,7 +1546,7 @@ impl PgConnection {
             return Ok(Vec::new());
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));
@@ -1605,7 +1662,7 @@ impl PgConnection {
             return Ok(0);
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));
@@ -1698,7 +1755,7 @@ impl PgConnection {
             return Ok(0);
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));
@@ -1789,7 +1846,7 @@ impl PgConnection {
             return Ok(0);
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));
@@ -1882,7 +1939,7 @@ impl PgConnection {
             return Ok(0);
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));
@@ -1976,7 +2033,7 @@ impl PgConnection {
             return Ok(Vec::new());
         }
 
-        if !self.prepared_statements.contains_key(&stmt.name) {
+        if !self.records_prepared_statement(stmt) {
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string(),
             ));

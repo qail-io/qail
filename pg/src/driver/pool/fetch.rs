@@ -2,6 +2,7 @@
 
 use super::connection::PooledConnection;
 use super::lifecycle::MAX_HOT_STATEMENTS;
+use crate::driver::connection::{RecordedName, StatementSlot};
 use crate::driver::{
     PgConnection, PgError, PgResult, ResultFormat,
     extended_flow::{ExtendedFlowConfig, ExtendedFlowTracker},
@@ -12,15 +13,63 @@ use std::sync::Arc;
 #[inline]
 fn rollback_cache_miss_statement_registration(
     conn: &mut PgConnection,
-    is_cache_miss: bool,
+    registered: bool,
     sql_hash: u64,
     stmt_name: &str,
 ) {
-    if is_cache_miss {
+    if registered {
         conn.stmt_cache.remove(&sql_hash);
         conn.prepared_statements.remove(stmt_name);
         conn.column_info_cache.remove(&sql_hash);
     }
+}
+
+/// Roll back a registered Parse that did not complete. On 42P05 the server
+/// holds the name with SQL this connection did not record, so it is also
+/// closed before the retry parses again.
+#[inline]
+fn release_failed_cache_miss_registration(
+    conn: &mut PgConnection,
+    registers: bool,
+    sql_hash: u64,
+    stmt_name: &str,
+    err: &PgError,
+) {
+    if registers && err.is_prepared_statement_already_exists() {
+        conn.release_unrecorded_statement(Some(sql_hash), stmt_name);
+    } else {
+        rollback_cache_miss_statement_registration(conn, registers, sql_hash, stmt_name);
+    }
+}
+
+/// Buffer Parse + Describe(Statement) for `slot` into `write_buf` and return
+/// the statement name to Bind. A named Parse is registered here.
+fn write_cached_statement_parse(
+    conn: &mut PgConnection,
+    slot: StatementSlot,
+    sql_hash: u64,
+) -> PgResult<String> {
+    use crate::protocol::PgEncoder;
+
+    let name = match slot {
+        StatementSlot::Reuse(name) => return Ok(name),
+        StatementSlot::Parse(name) => {
+            conn.evict_prepared_if_full();
+            name
+        }
+        StatementSlot::Unnamed => String::new(),
+    };
+    let sql_str = encoded_sql_str(&conn.sql_buf)?;
+    let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
+    let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
+    conn.write_buf.extend_from_slice(&parse_msg);
+    conn.write_buf.extend_from_slice(&describe_msg);
+    if !name.is_empty() {
+        let sql = sql_str.to_string();
+        conn.stmt_cache.put(sql_hash, name.clone());
+        conn.prepared_statements.insert(name.clone(), sql);
+    }
+    Ok(name)
 }
 
 #[inline]
@@ -529,8 +578,6 @@ impl PooledConnection {
         result_format: ResultFormat,
     ) -> PgResult<Vec<crate::driver::PgRow>> {
         use crate::driver::ColumnInfo;
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         let pool = std::sync::Arc::clone(&self.pool);
         let conn = self.conn.as_mut().ok_or_else(|| {
@@ -578,35 +625,20 @@ impl PooledConnection {
             }
         }
 
-        let mut hasher = DefaultHasher::new();
-        conn.sql_buf.hash(&mut hasher);
-        let sql_hash = hasher.finish();
-
-        let is_cache_miss = !conn.stmt_cache.contains(&sql_hash);
+        let sql_hash = crate::driver::prepared::sql_bytes_hash(&conn.sql_buf);
+        let slot = conn.resolve_cached_statement_for_sql_buf(
+            sql_hash,
+            crate::driver::prepared::ast_stmt_name_from_hash,
+            RecordedName::Reparse,
+        );
+        // Parse + Describe go out unless the name is reused. Only a named
+        // Parse is registered, so only it is rolled back on failure.
+        let is_cache_miss = !matches!(slot, StatementSlot::Reuse(_));
+        let registers = matches!(slot, StatementSlot::Parse(_));
 
         conn.write_buf.clear();
 
-        let stmt_name = if let Some(name) = conn.stmt_cache.get(&sql_hash) {
-            name
-        } else {
-            let name = format!("qail_{:x}", sql_hash);
-
-            conn.evict_prepared_if_full();
-
-            let sql_str = encoded_sql_str(&conn.sql_buf)?;
-
-            use crate::protocol::PgEncoder;
-            let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
-            let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
-            conn.write_buf.extend_from_slice(&parse_msg);
-            conn.write_buf.extend_from_slice(&describe_msg);
-
-            conn.stmt_cache.put(sql_hash, name.clone());
-            conn.prepared_statements
-                .insert(name.clone(), sql_str.to_string());
-
-            name
-        };
+        let stmt_name = write_cached_statement_parse(conn, slot, sql_hash)?;
 
         use crate::protocol::PgEncoder;
         if let Err(e) = PgEncoder::encode_bind_to_with_result_format(
@@ -615,26 +647,24 @@ impl PooledConnection {
             &conn.params_buf,
             result_format.as_wire_code(),
         ) {
-            if is_cache_miss {
-                conn.stmt_cache.remove(&sql_hash);
-                conn.prepared_statements.remove(&stmt_name);
-                conn.column_info_cache.remove(&sql_hash);
-            }
+            rollback_cache_miss_statement_registration(conn, registers, sql_hash, &stmt_name);
             return Err(PgError::Encode(e.to_string()));
         }
         PgEncoder::encode_execute_to(&mut conn.write_buf);
         PgEncoder::encode_sync_to(&mut conn.write_buf);
 
         if let Err(err) = conn.flush_write_buf().await {
-            if is_cache_miss {
-                conn.stmt_cache.remove(&sql_hash);
-                conn.prepared_statements.remove(&stmt_name);
-                conn.column_info_cache.remove(&sql_hash);
-            }
+            rollback_cache_miss_statement_registration(conn, registers, sql_hash, &stmt_name);
             return Err(err);
         }
 
-        let cached_column_info = conn.column_info_cache.get(&sql_hash).cloned();
+        // A Parse gets a fresh RowDescription; the key's entry may describe
+        // other SQL.
+        let cached_column_info = if is_cache_miss {
+            None
+        } else {
+            conn.column_info_cache.get(&sql_hash).cloned()
+        };
 
         let mut rows: Vec<crate::driver::PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
@@ -647,20 +677,20 @@ impl PooledConnection {
             let msg = match conn.recv().await {
                 Ok(msg) => msg,
                 Err(err) => {
-                    if is_cache_miss && !flow.saw_parse_complete() {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
+                    if !flow.saw_parse_complete() {
+                        rollback_cache_miss_statement_registration(
+                            conn, registers, sql_hash, &stmt_name,
+                        );
                     }
                     return Err(err);
                 }
             };
             if let Err(err) = flow.validate(&msg, "pool fetch_all_cached execute", error.is_some())
             {
-                if is_cache_miss && !flow.saw_parse_complete() {
-                    conn.stmt_cache.remove(&sql_hash);
-                    conn.prepared_statements.remove(&stmt_name);
-                    conn.column_info_cache.remove(&sql_hash);
+                if !flow.saw_parse_complete() {
+                    rollback_cache_miss_statement_registration(
+                        conn, registers, sql_hash, &stmt_name,
+                    );
                 }
                 return return_with_desync(conn, err);
             }
@@ -670,7 +700,7 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::ParameterDescription(_) => {}
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     let info = Arc::new(ColumnInfo::from_fields(&fields));
-                    if is_cache_miss {
+                    if registers {
                         conn.column_info_cache.insert(sql_hash, Arc::clone(&info));
                     }
                     column_info = Some(info);
@@ -686,20 +716,17 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
-                        if is_cache_miss
-                            && !flow.saw_parse_complete()
-                            && !err.is_prepared_statement_already_exists()
-                        {
-                            conn.stmt_cache.remove(&sql_hash);
-                            conn.prepared_statements.remove(&stmt_name);
-                            conn.column_info_cache.remove(&sql_hash);
+                        if !flow.saw_parse_complete() {
+                            release_failed_cache_miss_registration(
+                                conn, registers, sql_hash, &stmt_name, &err,
+                            );
                         }
                         return Err(err);
                     }
                     if is_cache_miss && !flow.saw_parse_complete() {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
+                        rollback_cache_miss_statement_registration(
+                            conn, registers, sql_hash, &stmt_name,
+                        );
                         return return_with_desync(
                             conn,
                             PgError::Protocol(
@@ -708,7 +735,7 @@ impl PooledConnection {
                             ),
                         );
                     }
-                    if is_cache_miss && let Some(sql) = conn.prepared_statements.get(&stmt_name) {
+                    if registers && let Some(sql) = conn.prepared_statements.get(&stmt_name) {
                         register_hot_statement_after_parse_success(
                             &pool, sql_hash, &stmt_name, sql,
                         );
@@ -722,10 +749,10 @@ impl PooledConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    if is_cache_miss && !flow.saw_parse_complete() {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
+                    if !flow.saw_parse_complete() {
+                        rollback_cache_miss_statement_registration(
+                            conn, registers, sql_hash, &stmt_name,
+                        );
                     }
                     return return_with_desync(
                         conn,
@@ -805,8 +832,6 @@ impl PooledConnection {
         result_format: ResultFormat,
     ) -> PgResult<Vec<crate::driver::PgRow>> {
         use crate::driver::ColumnInfo;
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         let pool = std::sync::Arc::clone(&self.pool);
         let conn = self.conn.as_mut().ok_or_else(|| {
@@ -826,11 +851,16 @@ impl PooledConnection {
                 .await;
         }
 
-        let mut hasher = DefaultHasher::new();
-        conn.sql_buf.hash(&mut hasher);
-        let sql_hash = hasher.finish();
-
-        let is_cache_miss = !conn.stmt_cache.contains(&sql_hash);
+        let sql_hash = crate::driver::prepared::sql_bytes_hash(&conn.sql_buf);
+        let slot = conn.resolve_cached_statement_for_sql_buf(
+            sql_hash,
+            crate::driver::prepared::ast_stmt_name_from_hash,
+            RecordedName::Reparse,
+        );
+        // Parse + Describe go out unless the name is reused. Only a named
+        // Parse is registered, so only it is rolled back on failure.
+        let is_cache_miss = !matches!(slot, StatementSlot::Reuse(_));
+        let registers = matches!(slot, StatementSlot::Parse(_));
 
         conn.write_buf.clear();
 
@@ -842,27 +872,7 @@ impl PooledConnection {
         conn.write_buf.extend_from_slice(&rls_msg);
 
         // ── Then append the query messages (same as fetch_all_cached) ──
-        let stmt_name = if let Some(name) = conn.stmt_cache.get(&sql_hash) {
-            name
-        } else {
-            let name = format!("qail_{:x}", sql_hash);
-
-            conn.evict_prepared_if_full();
-
-            let sql_str = encoded_sql_str(&conn.sql_buf)?;
-
-            use crate::protocol::PgEncoder;
-            let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
-            let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
-            conn.write_buf.extend_from_slice(&parse_msg);
-            conn.write_buf.extend_from_slice(&describe_msg);
-
-            conn.stmt_cache.put(sql_hash, name.clone());
-            conn.prepared_statements
-                .insert(name.clone(), sql_str.to_string());
-
-            name
-        };
+        let stmt_name = write_cached_statement_parse(conn, slot, sql_hash)?;
 
         use crate::protocol::PgEncoder;
         if let Err(e) = PgEncoder::encode_bind_to_with_result_format(
@@ -871,7 +881,7 @@ impl PooledConnection {
             &conn.params_buf,
             result_format.as_wire_code(),
         ) {
-            rollback_cache_miss_statement_registration(conn, is_cache_miss, sql_hash, &stmt_name);
+            rollback_cache_miss_statement_registration(conn, registers, sql_hash, &stmt_name);
             return Err(PgError::Encode(e.to_string()));
         }
         PgEncoder::encode_execute_to(&mut conn.write_buf);
@@ -879,7 +889,7 @@ impl PooledConnection {
 
         // ── Single write_all for RLS + Query ────────────────────────
         if let Err(err) = conn.flush_write_buf().await {
-            rollback_cache_miss_statement_registration(conn, is_cache_miss, sql_hash, &stmt_name);
+            rollback_cache_miss_statement_registration(conn, registers, sql_hash, &stmt_name);
             return Err(err);
         }
 
@@ -895,10 +905,7 @@ impl PooledConnection {
                 Ok(msg) => msg,
                 Err(err) => {
                     rollback_cache_miss_statement_registration(
-                        conn,
-                        is_cache_miss,
-                        sql_hash,
-                        &stmt_name,
+                        conn, registers, sql_hash, &stmt_name,
                     );
                     return Err(err);
                 }
@@ -908,10 +915,7 @@ impl PooledConnection {
                     // RLS setup done — break to Extended Query phase
                     if let Some(err) = rls_error {
                         rollback_cache_miss_statement_registration(
-                            conn,
-                            is_cache_miss,
-                            sql_hash,
-                            &stmt_name,
+                            conn, registers, sql_hash, &stmt_name,
                         );
                         if let Err(drain_err) =
                             drain_extended_responses_after_rls_setup_error(conn).await
@@ -939,10 +943,7 @@ impl PooledConnection {
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
                     rollback_cache_miss_statement_registration(
-                        conn,
-                        is_cache_miss,
-                        sql_hash,
-                        &stmt_name,
+                        conn, registers, sql_hash, &stmt_name,
                     );
                     return return_with_desync(
                         conn,
@@ -953,7 +954,13 @@ impl PooledConnection {
         }
 
         // ── Phase 2: Consume Extended Query responses (actual data) ──
-        let cached_column_info = conn.column_info_cache.get(&sql_hash).cloned();
+        // A Parse gets a fresh RowDescription; the key's entry may describe
+        // other SQL.
+        let cached_column_info = if is_cache_miss {
+            None
+        } else {
+            conn.column_info_cache.get(&sql_hash).cloned()
+        };
 
         let mut rows: Vec<crate::driver::PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<std::sync::Arc<ColumnInfo>> = cached_column_info;
@@ -968,10 +975,7 @@ impl PooledConnection {
                 Err(err) => {
                     if is_cache_miss && !flow.saw_parse_complete() {
                         rollback_cache_miss_statement_registration(
-                            conn,
-                            is_cache_miss,
-                            sql_hash,
-                            &stmt_name,
+                            conn, registers, sql_hash, &stmt_name,
                         );
                     }
                     return Err(err);
@@ -982,10 +986,7 @@ impl PooledConnection {
             {
                 if is_cache_miss && !flow.saw_parse_complete() {
                     rollback_cache_miss_statement_registration(
-                        conn,
-                        is_cache_miss,
-                        sql_hash,
-                        &stmt_name,
+                        conn, registers, sql_hash, &stmt_name,
                     );
                 }
                 return return_with_desync(conn, err);
@@ -996,7 +997,7 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::ParameterDescription(_) => {}
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     let info = std::sync::Arc::new(ColumnInfo::from_fields(&fields));
-                    if is_cache_miss {
+                    if registers {
                         conn.column_info_cache
                             .insert(sql_hash, std::sync::Arc::clone(&info));
                     }
@@ -1013,25 +1014,16 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
-                        if is_cache_miss
-                            && !flow.saw_parse_complete()
-                            && !err.is_prepared_statement_already_exists()
-                        {
-                            rollback_cache_miss_statement_registration(
-                                conn,
-                                is_cache_miss,
-                                sql_hash,
-                                &stmt_name,
+                        if !flow.saw_parse_complete() {
+                            release_failed_cache_miss_registration(
+                                conn, registers, sql_hash, &stmt_name, &err,
                             );
                         }
                         return Err(err);
                     }
                     if is_cache_miss && !flow.saw_parse_complete() {
                         rollback_cache_miss_statement_registration(
-                            conn,
-                            is_cache_miss,
-                            sql_hash,
-                            &stmt_name,
+                            conn, registers, sql_hash, &stmt_name,
                         );
                         return return_with_desync(
                             conn,
@@ -1041,7 +1033,7 @@ impl PooledConnection {
                             ),
                         );
                     }
-                    if is_cache_miss && let Some(sql) = conn.prepared_statements.get(&stmt_name) {
+                    if registers && let Some(sql) = conn.prepared_statements.get(&stmt_name) {
                         register_hot_statement_after_parse_success(
                             &pool, sql_hash, &stmt_name, sql,
                         );
@@ -1057,10 +1049,7 @@ impl PooledConnection {
                 other => {
                     if is_cache_miss && !flow.saw_parse_complete() {
                         rollback_cache_miss_statement_registration(
-                            conn,
-                            is_cache_miss,
-                            sql_hash,
-                            &stmt_name,
+                            conn, registers, sql_hash, &stmt_name,
                         );
                     }
                     return return_with_desync(
