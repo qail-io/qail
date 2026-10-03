@@ -637,103 +637,17 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     // ── 0b. PostgreSQL 18 temporal keys (pg_constraint.conperiod) ───────
-    // information_schema reports WITHOUT OVERLAPS keys as plain PRIMARY KEY /
-    // UNIQUE and PERIOD foreign keys as plain foreign keys; pulled that way
-    // they come back as equality constraints.
-    let conperiod_cmd = Qail::get("information_schema.columns")
-        .columns(["column_name"])
-        .filter("table_schema", Operator::Eq, "pg_catalog")
-        .filter("table_name", Operator::Eq, "pg_constraint")
-        .filter("column_name", Operator::Eq, "conperiod");
-    let has_conperiod = !driver
-        .fetch_all(&conperiod_cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to probe pg_constraint.conperiod: {}", e))?
-        .is_empty();
-    let mut temporal_keys: std::collections::HashMap<String, Vec<TemporalKey>> =
-        std::collections::HashMap::new();
-    // PK/UNIQUE names are index names, unique per schema.
-    let mut temporal_key_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut temporal_fks: std::collections::BTreeSet<(String, String)> =
-        std::collections::BTreeSet::new();
-    if has_conperiod {
-        let temporal_cmd = Qail::get("pg_catalog.pg_constraint")
-            .table_alias("con")
-            .join(
-                JoinKind::Inner,
-                "pg_catalog.pg_class src",
-                "src.oid",
-                "con.conrelid",
-            )
-            .columns(["con.conname", "src.relname", "con.contype", "con.conkey"])
-            .filter(
-                "con.connamespace",
-                Operator::Eq,
-                public_namespace_oid.clone(),
-            )
-            .filter("con.conperiod", Operator::Eq, true);
-        let temporal_rows = driver
-            .fetch_all(&temporal_cmd)
-            .await
-            .map_err(|e| anyhow!("Failed to query temporal constraints: {}", e))?;
-        for row in temporal_rows {
-            let constraint_name = row.text(0);
-            let table = row.text(1);
-            if !base_tables.contains(&table) {
-                continue;
-            }
-            match row.text(2).as_str() {
-                contype @ ("p" | "u") => {
-                    let attnums = parse_pg_attnum_array(&row.text(3), "pg_constraint.conkey")?;
-                    let mut columns = attnums
-                        .iter()
-                        .map(|attnum| {
-                            attnum_columns
-                                .get(&(table.clone(), *attnum))
-                                .cloned()
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "temporal key {} on {} names unknown column #{}",
-                                        constraint_name,
-                                        table,
-                                        attnum
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let period = columns.pop().ok_or_else(|| {
-                        anyhow!(
-                            "temporal key {} on {} has no columns",
-                            constraint_name,
-                            table
-                        )
-                    })?;
-                    temporal_key_names.insert(constraint_name.clone());
-                    temporal_keys.entry(table).or_default().push(TemporalKey {
-                        name: Some(constraint_name),
-                        primary: contype == "p",
-                        columns,
-                        period,
-                    });
-                }
-                "f" => {
-                    temporal_fks.insert((table, constraint_name));
-                }
-                other => {
-                    return Err(anyhow!(
-                        "temporal constraint {} on {} has unexpected type {:?}",
-                        constraint_name,
-                        table,
-                        other
-                    ));
-                }
-            }
-        }
-        for keys in temporal_keys.values_mut() {
-            keys.sort_by(|a, b| a.name.cmp(&b.name));
-        }
-    }
+    let IntrospectedTemporalConstraints {
+        keys: mut temporal_keys,
+        key_names: temporal_key_names,
+        foreign_keys: temporal_fks,
+    } = introspect_temporal_constraints(
+        &mut driver,
+        &public_namespace_oid,
+        &base_tables,
+        &attnum_columns,
+    )
+    .await?;
 
     // ── 1. Columns + Defaults (AST-native) ──────────────────────────────
     let columns_cmd = Qail::get("information_schema.columns")
@@ -1232,23 +1146,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
     }
 
-    // A PERIOD foreign key has at least one equality column plus the period,
-    // so it resolves as a named multi-column FK; anything else is unmodelled.
     for (table, constraint_name) in &temporal_fks {
-        let fk = table_multi_column_fks
-            .get_mut(table)
-            .and_then(|fks| {
-                fks.iter_mut()
-                    .find(|fk| fk.name.as_deref() == Some(constraint_name.as_str()))
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "temporal foreign key {} on {} could not be represented",
-                    constraint_name,
-                    table
-                )
-            })?;
-        fk.period = true;
+        mark_period_foreign_key(
+            table_multi_column_fks.get_mut(table).map(Vec::as_mut_slice),
+            table,
+            constraint_name,
+        )?;
     }
 
     // ── 6. RLS Status (AST-native) ──────────────────────────────────────
@@ -2641,6 +2544,144 @@ pub(crate) fn resolve_introspected_unique_constraint(
         )
         .unique(),
     ))
+}
+
+/// PostgreSQL 18 temporal constraints (`pg_constraint.conperiod`) in `public`.
+#[derive(Debug, Default)]
+pub(crate) struct IntrospectedTemporalConstraints {
+    /// `WITHOUT OVERLAPS` keys by table, sorted by name.
+    pub keys: std::collections::HashMap<String, Vec<TemporalKey>>,
+    /// Their names; PK/UNIQUE names are index names, unique per schema.
+    pub key_names: std::collections::HashSet<String>,
+    /// `(table, constraint)` of `PERIOD` foreign keys.
+    pub foreign_keys: std::collections::BTreeSet<(String, String)>,
+}
+
+/// Read temporal keys and `PERIOD` foreign keys for `tables`. Shared by pull
+/// and shadow/drift introspection: information_schema reports both as plain
+/// PRIMARY KEY / UNIQUE / FOREIGN KEY, so read that way they compare as
+/// equality constraints.
+pub(crate) async fn introspect_temporal_constraints(
+    driver: &mut PgDriver,
+    public_namespace_oid: &str,
+    tables: &std::collections::HashSet<String>,
+    attnum_columns: &std::collections::HashMap<(String, i32), String>,
+) -> Result<IntrospectedTemporalConstraints> {
+    let mut temporal = IntrospectedTemporalConstraints::default();
+    let conperiod_cmd = Qail::get("information_schema.columns")
+        .columns(["column_name"])
+        .filter("table_schema", Operator::Eq, "pg_catalog")
+        .filter("table_name", Operator::Eq, "pg_constraint")
+        .filter("column_name", Operator::Eq, "conperiod");
+    let has_conperiod = !driver
+        .fetch_all(&conperiod_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to probe pg_constraint.conperiod: {}", e))?
+        .is_empty();
+    if !has_conperiod {
+        return Ok(temporal);
+    }
+
+    let temporal_cmd = Qail::get("pg_catalog.pg_constraint")
+        .table_alias("con")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
+        )
+        .columns(["con.conname", "src.relname", "con.contype", "con.conkey"])
+        .filter(
+            "con.connamespace",
+            Operator::Eq,
+            public_namespace_oid.to_string(),
+        )
+        .filter("con.conperiod", Operator::Eq, true);
+    let temporal_rows = driver
+        .fetch_all(&temporal_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query temporal constraints: {}", e))?;
+    for row in temporal_rows {
+        let constraint_name = row.text(0);
+        let table = row.text(1);
+        if !tables.contains(&table) {
+            continue;
+        }
+        match row.text(2).as_str() {
+            contype @ ("p" | "u") => {
+                let attnums = parse_pg_attnum_array(&row.text(3), "pg_constraint.conkey")?;
+                let mut columns = attnums
+                    .iter()
+                    .map(|attnum| {
+                        attnum_columns
+                            .get(&(table.clone(), *attnum))
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "temporal key {} on {} names unknown column #{}",
+                                    constraint_name,
+                                    table,
+                                    attnum
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let period = columns.pop().ok_or_else(|| {
+                    anyhow!(
+                        "temporal key {} on {} has no columns",
+                        constraint_name,
+                        table
+                    )
+                })?;
+                temporal.key_names.insert(constraint_name.clone());
+                temporal.keys.entry(table).or_default().push(TemporalKey {
+                    name: Some(constraint_name),
+                    primary: contype == "p",
+                    columns,
+                    period,
+                });
+            }
+            "f" => {
+                temporal.foreign_keys.insert((table, constraint_name));
+            }
+            other => {
+                return Err(anyhow!(
+                    "temporal constraint {} on {} has unexpected type {:?}",
+                    constraint_name,
+                    table,
+                    other
+                ));
+            }
+        }
+    }
+    for keys in temporal.keys.values_mut() {
+        keys.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    Ok(temporal)
+}
+
+/// Flag the resolved FK `constraint_name` on `table` as `PERIOD`. A PERIOD FK
+/// has at least one equality column plus the period, so it resolves as a
+/// named multi-column FK; anything else is unmodelled and an error.
+pub(crate) fn mark_period_foreign_key(
+    table_fks: Option<&mut [MultiColumnForeignKey]>,
+    table: &str,
+    constraint_name: &str,
+) -> Result<()> {
+    let fk = table_fks
+        .and_then(|fks| {
+            fks.iter_mut()
+                .find(|fk| fk.name.as_deref() == Some(constraint_name))
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "temporal foreign key {} on {} could not be represented",
+                constraint_name,
+                table
+            )
+        })?;
+    fk.period = true;
+    Ok(())
 }
 
 pub(crate) fn resolve_introspected_foreign_key(
