@@ -191,18 +191,23 @@ pub fn migration_table_ddl() -> String {
 
 /// Stable checksum for a sequence of migration commands.
 ///
-/// Uses both transpiled SQL and serialized AST so checksums remain distinct even
+/// Uses both transpiled SQL and canonical text so checksums remain distinct even
 /// when preview SQL is lossy for a specific action shape.
 pub fn stable_cmds_checksum(cmds: &[Qail]) -> String {
     let mut material = String::new();
     for cmd in cmds {
         let sql = cmd.to_sql();
-        let ast = qail_core::wire::encode_cmd_text(cmd);
+        // Frozen material: `_qail_migrations` rows hold checksums of Display in
+        // QAIL-CMD/1 framing. `encode_cmd_text` now picks v2 for most DDL,
+        // which would report drift for every applied migration.
+        let text = cmd.to_string();
         material.push_str("SQL:");
         material.push_str(sql.trim());
         material.push('\n');
-        material.push_str("AST:");
-        material.push_str(&ast);
+        material.push_str("AST:QAIL-CMD/1\n");
+        material.push_str(&text.len().to_string());
+        material.push('\n');
+        material.push_str(&text);
         material.push('\n');
     }
     crate::time::md5_hex(&material)
@@ -471,6 +476,28 @@ mod tests {
         let a = stable_cmds_checksum(&[rename_a]);
         let b = stable_cmds_checksum(&[rename_b]);
         assert_ne!(a, b, "different renames must produce different checksums");
+    }
+
+    #[test]
+    fn stable_checksum_matches_checksums_stored_by_earlier_releases() {
+        use qail_core::ast::Constraint;
+        let make = Qail::make("users").columns_expr([
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "email".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Unique],
+            },
+        ]);
+        // md5 of the material 0366db8d hashed: SQL + QAIL-CMD/1 framed Display.
+        assert_eq!(
+            stable_cmds_checksum(&[make]),
+            "fb09a6e16b414a53c3b270c0af06f881"
+        );
     }
 
     #[test]
