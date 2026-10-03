@@ -318,6 +318,84 @@ fn inject_tenant_payload_from_source_query_overrides_target_tenant_column() {
     );
 }
 
+#[test]
+fn inject_tenant_payload_rejects_overriding_user_value() {
+    let mut cmd = qail_core::ast::Qail::add("orders")
+        .set_value("id", qail_core::ast::Value::Int(1))
+        .overriding_user_value();
+
+    let err = inject_tenant_payload(&mut cmd, "tenant_id", "tenant-1").unwrap_err();
+
+    assert!(
+        err.to_string().contains("OVERRIDING USER VALUE"),
+        "identity tenant columns discard the stamp under USER VALUE: {err}"
+    );
+}
+
+#[test]
+fn inject_tenant_payload_from_source_query_rejects_overriding_user_value() {
+    let mut cmd = qail_core::ast::Qail::add("orders")
+        .columns(["id", "tenant_id"])
+        .overriding_user_value();
+    cmd.source_query = Some(Box::new(
+        qail_core::ast::Qail::get("source_orders").columns(["id", "tenant_id"]),
+    ));
+
+    let err =
+        inject_tenant_payload_from_source_query(&mut cmd, "tenant_id", "tenant-1").unwrap_err();
+
+    assert!(
+        err.to_string().contains("OVERRIDING USER VALUE"),
+        "INSERT ... SELECT discards the stamp the same way: {err}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_rejects_insert_overriding_user_value() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::add("orders")
+        .set_value("total", qail_core::ast::Value::Int(42))
+        .overriding_user_value();
+
+    let err = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap_err();
+
+    assert!(err.to_string().contains("OVERRIDING USER VALUE"), "{err}");
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_keeps_stamp_under_overriding_system_value() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::add("orders")
+        .set_value("total", qail_core::ast::Value::Int(42))
+        .set_value(
+            "tenant_id",
+            qail_core::ast::Value::String("attacker".into()),
+        )
+        .overriding_system_value();
+
+    let plan = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    assert!(plan.is_some());
+    assert_eq!(
+        cmd.overriding,
+        Some(qail_core::ast::OverridingKind::SystemValue)
+    );
+    let payload = cmd
+        .cages
+        .iter()
+        .find(|cage| matches!(cage.kind, qail_core::ast::CageKind::Payload))
+        .expect("payload cage");
+    assert!(payload.conditions.iter().any(|condition| {
+        matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "tenant_id")
+            && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+    }));
+    assert!(!payload.conditions.iter().any(|condition| {
+        matches!(&condition.value, qail_core::ast::Value::String(value) if value == "attacker")
+    }));
+}
+
 #[tokio::test]
 async fn prepare_tenant_guarded_query_filters_insert_select_source_and_injects_target_tenant() {
     let state = build_tenant_guard_state().await;
