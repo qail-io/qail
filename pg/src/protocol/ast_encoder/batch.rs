@@ -6,7 +6,8 @@ use bytes::BytesMut;
 use qail_core::ast::{Action, Qail};
 
 use super::dml::{
-    encode_count, encode_delete, encode_export, encode_insert, encode_select, encode_update,
+    encode_count, encode_delete, encode_export, encode_insert, encode_select_statement,
+    encode_update,
 };
 
 use crate::protocol::EncodeError;
@@ -236,7 +237,7 @@ pub fn encode_batch_with_result_format(
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
         match cmd.action {
-            Action::Get => encode_select(cmd, &mut sql_buf, &mut params),
+            Action::Get => encode_select_statement(cmd, &mut sql_buf, &mut params),
             Action::Add => encode_insert(cmd, &mut sql_buf, &mut params),
             Action::Set => encode_update(cmd, &mut sql_buf, &mut params),
             Action::Del => encode_delete(cmd, &mut sql_buf, &mut params),
@@ -324,7 +325,7 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
         params.clear();
 
         match cmd.action {
-            Action::Get => encode_select(cmd, &mut total_buf, &mut params),
+            Action::Get => encode_select_statement(cmd, &mut total_buf, &mut params),
             Action::Add => encode_insert(cmd, &mut total_buf, &mut params),
             Action::Set => encode_update(cmd, &mut total_buf, &mut params),
             Action::Del => encode_delete(cmd, &mut total_buf, &mut params),

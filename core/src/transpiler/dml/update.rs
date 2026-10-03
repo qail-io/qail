@@ -1,6 +1,6 @@
 //! UPDATE SQL generation.
 
-use crate::ast::write_payload::{check_update_shape, simple_write_column, update_assignments};
+use crate::ast::write_payload::{check_update_shape, update_assignments, update_write_target};
 use crate::ast::*;
 use crate::transpiler::conditions::{ConditionToSql, output_expr_sql, returning_clause_sql};
 use crate::transpiler::dialect::Dialect;
@@ -8,25 +8,24 @@ use crate::transpiler::identifier::render_table_reference;
 
 /// Generate UPDATE SQL with SET, FROM, and WHERE clauses.
 pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
-    if let Err(error) = check_update_shape(cmd, simple_write_column, |message| message) {
+    if let Err(error) = check_update_shape(cmd, update_write_target, |message| message) {
         return crate::transpiler::dml::insert::shape_error_comment(&error);
     }
 
     let generator = dialect.generator();
-    let mut sql = if cmd.only_table {
-        String::from("UPDATE ONLY ")
+    let mut sql = super::cte::build_write_with_prefix(cmd, dialect);
+    sql.push_str(if cmd.only_table {
+        "UPDATE ONLY "
     } else {
-        String::from("UPDATE ")
-    };
+        "UPDATE "
+    });
     sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     let set_clauses: Vec<String> = update_assignments(cmd)
         .into_iter()
         .map(|(column, cond)| {
-            let col_sql = match column {
-                Expr::Named(name) => generator.quote_identifier(name),
-                _ => "/* ERROR: Invalid update column */".to_string(),
-            };
+            let col_sql = render_update_target(column, generator.as_ref())
+                .unwrap_or_else(|| "/* ERROR: Invalid update column */".to_string());
             format!("{} = {}", col_sql, cond.to_value_sql(generator.as_ref()))
         })
         .collect();
@@ -85,4 +84,59 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
     ));
 
     sql
+}
+
+/// SET target: `col`, `col[1]`, `col[idx_col]`, `col.field`, chained. PostgreSQL
+/// rejects table qualifiers and parentheses in this position.
+fn render_update_target(
+    expr: &Expr,
+    generator: &dyn crate::transpiler::SqlGenerator,
+) -> Option<String> {
+    match expr {
+        Expr::Named(name) => Some(generator.quote_identifier(name)),
+        Expr::Subscript {
+            expr,
+            index,
+            alias: None,
+        } => {
+            let index = match index.as_ref() {
+                Expr::Literal(Value::Int(n)) => n.to_string(),
+                Expr::Named(column) if column.split('.').all(is_target_atom) => {
+                    generator.quote_identifier(column)
+                }
+                _ => return None,
+            };
+            Some(format!(
+                "{}[{}]",
+                render_update_target_base(expr, generator)?,
+                index
+            ))
+        }
+        Expr::FieldAccess {
+            expr,
+            field,
+            alias: None,
+        } if is_target_atom(field) => Some(format!(
+            "{}.{}",
+            render_update_target_base(expr, generator)?,
+            generator.quote_identifier(field)
+        )),
+        _ => None,
+    }
+}
+
+fn render_update_target_base(
+    expr: &Expr,
+    generator: &dyn crate::transpiler::SqlGenerator,
+) -> Option<String> {
+    match expr {
+        // A dotted base would read as `column.field`, not `table.column`.
+        Expr::Named(name) if !is_target_atom(name) => None,
+        other => render_update_target(other, generator),
+    }
+}
+
+/// Same atom rule as the native encoder: letters, digits, underscore.
+fn is_target_atom(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 63 && name.chars().all(|c| c.is_alphanumeric() || c == '_')
 }

@@ -117,6 +117,71 @@ pub fn simple_write_column(field: &str, expr: &Expr) -> Result<String, String> {
     }
 }
 
+/// UPDATE SET target check: a column, optionally followed by `[integer or
+/// column]` subscripts and `.field` selections. Accepts exactly what the
+/// preview's target renderer can write and folds to the lowercased target
+/// text, as the native encoder's `validate_update_target` does, so `col[1]`
+/// and `col[2]` are distinct assignments.
+pub fn update_write_target(field: &str, expr: &Expr) -> Result<String, String> {
+    match expr {
+        Expr::Named(name) => Ok(name.to_ascii_lowercase()),
+        _ => update_target_selection(field, expr),
+    }
+}
+
+fn update_target_selection(field: &str, expr: &Expr) -> Result<String, String> {
+    let invalid = || {
+        format!(
+            "{field} must be a column with optional [integer or column] subscripts \
+             and .field selections"
+        )
+    };
+    match expr {
+        Expr::Subscript {
+            expr,
+            index,
+            alias: None,
+        } => {
+            let base = update_target_base(field, expr)?;
+            let index = match index.as_ref() {
+                Expr::Literal(crate::ast::Value::Int(n)) => n.to_string(),
+                Expr::Named(column) if column.split('.').all(is_update_target_atom) => {
+                    column.to_ascii_lowercase()
+                }
+                _ => return Err(invalid()),
+            };
+            Ok(format!("{base}[{index}]"))
+        }
+        Expr::FieldAccess {
+            expr,
+            field: name,
+            alias: None,
+        } if is_update_target_atom(name) => {
+            let base = update_target_base(field, expr)?;
+            Ok(format!("{base}.{}", name.to_ascii_lowercase()))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+/// A dotted base would read as `column.field`, not `table.column`.
+fn update_target_base(field: &str, expr: &Expr) -> Result<String, String> {
+    match expr {
+        Expr::Named(name) if is_update_target_atom(name) => Ok(name.to_ascii_lowercase()),
+        Expr::Named(_) => Err(format!(
+            "{field} must be a column with optional [integer or column] subscripts \
+             and .field selections"
+        )),
+        other => update_target_selection(field, other),
+    }
+}
+
+/// Letters, digits and underscore, at most 63 bytes: the rule the preview's
+/// target renderer and the native encoder apply to target parts.
+fn is_update_target_atom(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 63 && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
 fn check_unique_columns<E>(
     statement: &str,
     columns: Vec<String>,

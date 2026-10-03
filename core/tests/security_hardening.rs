@@ -985,7 +985,10 @@ fn update_set_rejects_non_named_column_expression() {
     let sql = cmd.to_sql();
 
     assert!(
-        sql.contains("/* ERROR: update.payload.column must be a simple column identifier */"),
+        sql.starts_with(
+            "/* ERROR: update.payload.column must be a column with optional \
+             [integer or column] subscripts and .field selections */"
+        ),
         "non-column UPDATE target must fail closed: {}",
         sql
     );

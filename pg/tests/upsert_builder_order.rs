@@ -55,6 +55,69 @@ fn command(mode: &str, id: i32, tenant: &str, status: &str) -> Qail {
     }
 }
 
+fn constraint_update(cmd: Qail) -> Qail {
+    cmd.on_conflict_constraint_update(
+        "qail_e1_builder_rows_pkey",
+        &[("status", Expr::Named("EXCLUDED.status".into()))],
+    )
+}
+
+/// `command` with an `ON CONFLICT ON CONSTRAINT` target instead of columns.
+fn constraint_command(mode: &str, tenant: &str) -> Qail {
+    let base = Qail::add(TABLE)
+        .set_value("id", 1)
+        .set_value("status", "changed");
+    let ctx = RlsContext::tenant(tenant);
+    match mode {
+        "scope-last" => constraint_update(base).with_rls(&ctx).unwrap(),
+        "scope-first" => constraint_update(base.with_rls(&ctx).unwrap()),
+        "replace-update" => constraint_update(constraint_update(base).with_rls(&ctx).unwrap()),
+        "nothing-then-update" => constraint_update(
+            base.on_conflict_constraint_nothing("qail_e1_builder_rows_pkey")
+                .with_rls(&ctx)
+                .unwrap(),
+        ),
+        "update-nothing-update" => constraint_update(
+            constraint_update(base)
+                .with_rls(&ctx)
+                .unwrap()
+                .on_conflict_constraint_nothing("qail_e1_builder_rows_pkey"),
+        ),
+        _ => panic!("unknown test mode"),
+    }
+}
+
+#[test]
+fn constraint_target_keeps_scope_in_every_builder_order() {
+    use qail_core::transpiler::ToSql;
+
+    register();
+    for mode in MODES {
+        let cmd = constraint_command(mode, "a'bound");
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert!(
+            sql.contains(" ON CONFLICT ON CONSTRAINT qail_e1_builder_rows_pkey DO UPDATE SET "),
+            "{mode}: {sql}"
+        );
+        assert!(
+            sql.ends_with("WHERE qail_e1_builder_rows.tenant_id = $4"),
+            "{mode}: {sql}"
+        );
+        assert_eq!(params.len(), 4, "{mode}");
+        assert_eq!(params[2], params[3], "{mode}");
+
+        let preview = cmd.to_sql();
+        let update_part = preview
+            .split(" DO UPDATE SET ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{mode}: {preview}"));
+        assert!(
+            update_part.contains(" WHERE ") && update_part.contains("tenant_id"),
+            "{mode}: {preview}"
+        );
+    }
+}
+
 #[test]
 fn native_scope_survives_every_conflict_builder_order() {
     register();

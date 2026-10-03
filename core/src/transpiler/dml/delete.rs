@@ -8,11 +8,12 @@ use crate::transpiler::identifier::render_table_reference;
 /// Generate DELETE FROM SQL with optional USING and WHERE clauses.
 pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
-    let mut sql = if cmd.only_table {
-        String::from("DELETE FROM ONLY ")
+    let mut sql = super::cte::build_write_with_prefix(cmd, dialect);
+    sql.push_str(if cmd.only_table {
+        "DELETE FROM ONLY "
     } else {
-        String::from("DELETE FROM ")
-    };
+        "DELETE FROM "
+    });
     sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     // USING clause (multi-table delete)

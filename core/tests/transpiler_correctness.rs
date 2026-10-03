@@ -813,3 +813,35 @@ fn select_with_lte_operator() {
     let sql = cmd.to_sql();
     assert!(sql.contains("<="), "LTE must produce <=: {}", sql);
 }
+
+#[test]
+fn targetless_do_nothing_has_no_empty_target() {
+    let sql = Qail::add("orders")
+        .set_value("id", 1)
+        .on_conflict_nothing::<&str>(&[])
+        .to_sql();
+    assert!(sql.contains(" ON CONFLICT DO NOTHING"), "{sql}");
+    assert!(!sql.contains("ON CONFLICT ()"), "{sql}");
+}
+
+#[test]
+fn on_conflict_without_constraint_field_decodes() {
+    let decoded: OnConflict =
+        serde_json::from_str(r#"{"columns":["id"],"action":"DoNothing"}"#).expect("decode");
+    assert_eq!(decoded.constraint, None);
+    assert_eq!(decoded.columns, vec!["id".to_string()]);
+}
+
+#[test]
+fn write_statement_with_parameterized_preview_keeps_prefix() {
+    let cmd = Qail::del("orders").delete_using(["chosen"]).with(
+        "chosen",
+        Qail::get("items").columns(["id"]).eq("status", ":status"),
+    );
+    let sql = cmd.to_sql_parameterized().sql;
+    assert!(
+        sql.starts_with("WITH chosen(id) AS (SELECT id FROM items"),
+        "{sql}"
+    );
+    assert!(sql.contains(") DELETE FROM orders USING chosen"), "{sql}");
+}

@@ -454,6 +454,9 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
         for col in &on_conflict.columns {
             ensure_str("qail.on_conflict.column", col)?;
         }
+        if let Some(constraint) = &on_conflict.constraint {
+            ensure_str("qail.on_conflict.constraint", constraint)?;
+        }
         if let Some(assignments) = on_conflict.action.update_assignments() {
             ensure_len(
                 "qail.on_conflict.assignments",

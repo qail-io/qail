@@ -587,6 +587,50 @@ impl Qail {
         }
     }
 
+    /// UPDATE assignment to a structured target: an array element or a
+    /// composite field of a column.
+    ///
+    /// The target is an [`Expr::Subscript`] / [`Expr::FieldAccess`] chain over
+    /// an unqualified [`Expr::Named`] column; subscripts take an integer
+    /// literal or a column. Use [`Qail::set_value`] for a whole column.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // UPDATE people SET names[1] = 'Ada' WHERE id = 7
+    /// Qail::set("people")
+    ///     .set_target(
+    ///         Expr::Subscript {
+    ///             expr: Box::new(Expr::Named("names".into())),
+    ///             index: Box::new(Expr::Literal(Value::Int(1))),
+    ///             alias: None,
+    ///         },
+    ///         "Ada",
+    ///     )
+    ///     .eq("id", 7)
+    /// ```
+    pub fn set_target(mut self, target: Expr, value: impl Into<Value>) -> Self {
+        let condition = Condition {
+            left: target,
+            op: Operator::Eq,
+            value: value.into(),
+            is_array_unnest: false,
+        };
+        if let Some(cage) = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Payload))
+        {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Payload,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
+        self
+    }
+
     /// Add ON CONFLICT DO UPDATE clause for UPSERT operations.
     /// Retains existing update predicates and scope applied by `with_rls()`.
     ///
@@ -612,6 +656,7 @@ impl Qail {
                 .iter()
                 .map(|c| c.as_ref().to_string())
                 .collect(),
+            constraint: None,
             action: ConflictAction::DoUpdate {
                 assignments: updates
                     .iter()
@@ -649,6 +694,59 @@ impl Qail {
                 .iter()
                 .map(|c| c.as_ref().to_string())
                 .collect(),
+            constraint: None,
+            action: ConflictAction::DoNothing,
+            where_conditions,
+        });
+        self
+    }
+
+    /// Add `ON CONFLICT ON CONSTRAINT <name> DO UPDATE SET ...`.
+    ///
+    /// Targets a named unique or exclusion constraint instead of inferring a
+    /// unique index from columns. Retains existing update predicates and the
+    /// scope applied by `with_rls()`, as `on_conflict_update()` does.
+    pub fn on_conflict_constraint_update<S>(
+        mut self,
+        constraint: impl Into<String>,
+        updates: &[(S, Expr)],
+    ) -> Self
+    where
+        S: AsRef<str>,
+    {
+        use super::{ConflictAction, OnConflict};
+
+        let where_conditions = self
+            .on_conflict
+            .take()
+            .map_or_else(Vec::new, |conflict| conflict.where_conditions);
+        self.on_conflict = Some(OnConflict {
+            columns: Vec::new(),
+            constraint: Some(constraint.into()),
+            action: ConflictAction::DoUpdate {
+                assignments: updates
+                    .iter()
+                    .map(|(col, expr)| (col.as_ref().to_string(), expr.clone()))
+                    .collect(),
+            },
+            where_conditions,
+        });
+        self.restore_conflict_update_scope();
+        self
+    }
+
+    /// Add `ON CONFLICT ON CONSTRAINT <name> DO NOTHING`.
+    /// Retains update predicates for a subsequent conflict update call.
+    pub fn on_conflict_constraint_nothing(mut self, constraint: impl Into<String>) -> Self {
+        use super::{ConflictAction, OnConflict};
+
+        let where_conditions = self
+            .on_conflict
+            .take()
+            .map_or_else(Vec::new, |conflict| conflict.where_conditions);
+        self.on_conflict = Some(OnConflict {
+            columns: Vec::new(),
+            constraint: Some(constraint.into()),
             action: ConflictAction::DoNothing,
             where_conditions,
         });

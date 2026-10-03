@@ -40,14 +40,14 @@ fn validate_ident_atom(field: &str, value: &str) -> Result<(), crate::protocol::
     if value.len() > MAX_IDENT_LEN {
         return Err(invalid_identifier(field, value, "identifier is too long"));
     }
-    if !value
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    // Unicode letters/digits are valid PostgreSQL identifier characters and
+    // escape_identifier leaves them unquoted. Quotes, spaces, dots, and other
+    // punctuation stay rejected: atoms carry no quoting of their own yet.
+    if !value.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(invalid_identifier(
             field,
             value,
-            "expected only ASCII letters, digits, and underscores",
+            "expected only letters, digits, and underscores",
         ));
     }
     Ok(())
@@ -278,6 +278,76 @@ fn validate_write_column_expr(
     Ok(name.to_ascii_lowercase())
 }
 
+/// UPDATE SET target: a column, optionally followed by `[index]` subscripts
+/// and `.field` selections. PostgreSQL forbids a table qualifier and
+/// parentheses here, so the read-side expression encoding does not apply.
+/// Returns the uniqueness key (the lowercased target text).
+fn validate_update_target(
+    field: &str,
+    expr: &Expr,
+) -> Result<String, crate::protocol::EncodeError> {
+    let target_error = || {
+        crate::protocol::EncodeError::InvalidAst(format!(
+            "{field} must be a column with optional [integer or column] subscripts \
+             and .field selections"
+        ))
+    };
+    match expr {
+        Expr::Named(name) => {
+            validate_ident_atom(field, name)?;
+            Ok(name.to_ascii_lowercase())
+        }
+        Expr::Subscript {
+            expr,
+            index,
+            alias: None,
+        } => {
+            let base = validate_update_target(field, expr)?;
+            let index = match index.as_ref() {
+                Expr::Literal(Value::Int(n)) => n.to_string(),
+                Expr::Named(column) => {
+                    validate_qualified_ident(&format!("{field}.index"), column, false)?;
+                    column.to_ascii_lowercase()
+                }
+                _ => return Err(target_error()),
+            };
+            Ok(format!("{base}[{index}]"))
+        }
+        Expr::FieldAccess {
+            expr,
+            field: name,
+            alias: None,
+        } => {
+            let base = validate_update_target(field, expr)?;
+            validate_ident_atom(&format!("{field}.field"), name)?;
+            Ok(format!("{base}.{}", name.to_ascii_lowercase()))
+        }
+        _ => Err(target_error()),
+    }
+}
+
+fn encode_update_target(expr: &Expr, buf: &mut BytesMut) {
+    match expr {
+        Expr::Subscript { expr, index, .. } => {
+            encode_update_target(expr, buf);
+            buf.extend_from_slice(b"[");
+            match index.as_ref() {
+                Expr::Literal(Value::Int(n)) => buf.extend_from_slice(n.to_string().as_bytes()),
+                Expr::Named(column) => push_identifier_ref(buf, column, false),
+                _ => {}
+            }
+            buf.extend_from_slice(b"]");
+        }
+        Expr::FieldAccess { expr, field, .. } => {
+            encode_update_target(expr, buf);
+            buf.extend_from_slice(b".");
+            push_identifier_ref(buf, field, false);
+        }
+        Expr::Named(name) => push_identifier_ref(buf, name, false),
+        _ => {}
+    }
+}
+
 fn validate_insert_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
     check_insert_shape(
         cmd,
@@ -289,9 +359,11 @@ fn validate_insert_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError>
 }
 
 fn validate_update_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    // Targets may carry `[index]` / `.field` selections (`validate_update_target`);
+    // a plain column folds exactly as `validate_write_column_expr` does.
     check_update_shape(
         cmd,
-        validate_write_column_expr,
+        validate_update_target,
         crate::protocol::EncodeError::InvalidAst,
     )
 }
@@ -330,6 +402,14 @@ fn validate_on_conflict_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeE
             )));
         }
     }
+    if let Some(constraint) = &on_conflict.constraint {
+        validate_ident_atom("on_conflict.constraint", constraint)?;
+        if !on_conflict.columns.is_empty() {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "ON CONFLICT target cannot combine columns with ON CONSTRAINT".to_string(),
+            ));
+        }
+    }
 
     if let ConflictAction::DoUpdate { assignments } = &on_conflict.action {
         cmd.validate_conflict_update_scope()
@@ -343,7 +423,7 @@ fn validate_on_conflict_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeE
                 "ON CONFLICT DO UPDATE is missing an applied scope guard".to_string(),
             ));
         }
-        if on_conflict.columns.is_empty() {
+        if on_conflict.columns.is_empty() && on_conflict.constraint.is_none() {
             return Err(crate::protocol::EncodeError::InvalidAst(
                 "ON CONFLICT DO UPDATE requires at least one conflict target".to_string(),
             ));
@@ -841,7 +921,41 @@ pub fn encode_select(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     validate_read_only_select_query(cmd)?;
-    encode_select_with_columns(cmd, &cmd.columns, buf, params)
+    encode_select_with_columns(cmd, &cmd.columns, buf, params, WithScope::Nested)
+}
+
+/// Encode a top-level SELECT statement.
+///
+/// Unlike [`encode_select`], which serves subquery slots, the statement's own
+/// WITH list may hold INSERT/UPDATE/DELETE bodies. Set operands and nested
+/// queries stay read-only.
+pub fn encode_select_statement(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let message = "read-only SELECT query slot requires get/with action";
+    if !matches!(cmd.action, Action::Get | Action::With) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{message}, got {}",
+            cmd.action
+        )));
+    }
+    for (_, set_query) in &cmd.set_ops {
+        validate_read_only_select_query_with_message(set_query, message)?;
+    }
+    if let Some(ref source_query) = cmd.source_query {
+        validate_read_only_select_query_with_message(source_query, message)?;
+    }
+    encode_select_with_columns(cmd, &cmd.columns, buf, params, WithScope::TopLevel)
+}
+
+/// Where a WITH list sits. PostgreSQL accepts data-modifying CTE bodies only
+/// in the WITH attached to the top-level statement (SQLSTATE 0A000 otherwise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WithScope {
+    TopLevel,
+    Nested,
 }
 
 fn validate_read_only_select_query(query: &Qail) -> Result<(), crate::protocol::EncodeError> {
@@ -892,7 +1006,7 @@ pub fn encode_count(
         filter: None,
         alias: None,
     }];
-    encode_select_with_columns(cmd, &count_columns, buf, params)
+    encode_select_with_columns(cmd, &count_columns, buf, params, WithScope::Nested)
 }
 
 fn encode_select_with_columns(
@@ -900,6 +1014,7 @@ fn encode_select_with_columns(
     columns: &[Expr],
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
+    with_scope: WithScope,
 ) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, columns)?;
     validate_select_shape(cmd)?;
@@ -911,7 +1026,7 @@ fn encode_select_with_columns(
     let select_start = buf.len();
 
     // CTE prefix
-    encode_cte_prefix(cmd, buf, params)?;
+    encode_cte_prefix_scoped(cmd, buf, params, with_scope)?;
 
     buf.extend_from_slice(b"SELECT ");
 
@@ -1295,6 +1410,15 @@ pub fn encode_cte_prefix(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), super::super::EncodeError> {
+    encode_cte_prefix_scoped(cmd, buf, params, WithScope::Nested)
+}
+
+fn encode_cte_prefix_scoped(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+    with_scope: WithScope,
+) -> Result<(), super::super::EncodeError> {
     if cmd.ctes.is_empty() {
         return Ok(());
     }
@@ -1310,7 +1434,7 @@ pub fn encode_cte_prefix(
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_single_cte(cte, buf, params)?;
+        encode_single_cte(cte, buf, params, with_scope)?;
     }
 
     buf.extend_from_slice(b" ");
@@ -1322,7 +1446,27 @@ fn encode_single_cte(
     cte: &CTEDef,
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
+    with_scope: WithScope,
 ) -> Result<(), super::super::EncodeError> {
+    let data_modifying = matches!(
+        cte.base_query.action,
+        Action::Add | Action::Set | Action::Del
+    );
+    if data_modifying {
+        if with_scope == WithScope::Nested {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "data-modifying CTE `{}` requires the WITH of the top-level statement",
+                cte.name
+            )));
+        }
+        if cte.recursive_query.is_some() {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "data-modifying CTE `{}` cannot have a recursive arm",
+                cte.name
+            )));
+        }
+    }
+
     push_identifier_ref(buf, &cte.name, false);
 
     // Optional column list
@@ -1338,6 +1482,17 @@ fn encode_single_cte(
     }
 
     buf.extend_from_slice(b" AS (");
+
+    if data_modifying {
+        // The body's own WITH, source query, and subqueries are nested slots.
+        match cte.base_query.action {
+            Action::Add => encode_insert_scoped(&cte.base_query, buf, params, WithScope::Nested)?,
+            Action::Set => encode_update_scoped(&cte.base_query, buf, params, WithScope::Nested)?,
+            _ => encode_delete_scoped(&cte.base_query, buf, params, WithScope::Nested)?,
+        }
+        buf.extend_from_slice(b")");
+        return Ok(());
+    }
 
     encode_recursive_cte_arm(&cte.base_query, buf, params)?;
 
@@ -1384,9 +1539,20 @@ pub fn encode_insert(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    encode_insert_scoped(cmd, buf, params, WithScope::TopLevel)
+}
+
+fn encode_insert_scoped(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+    with_scope: WithScope,
+) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, &cmd.columns)?;
     validate_insert_shape(cmd)?;
 
+    // WITH binds first: its placeholders precede every later clause.
+    encode_cte_prefix_scoped(cmd, buf, params, with_scope)?;
     buf.extend_from_slice(b"INSERT INTO ");
     push_table_ref(buf, &cmd.table);
 
@@ -1434,8 +1600,12 @@ pub fn encode_insert(
 
         buf.extend_from_slice(b" ON CONFLICT ");
 
-        // Conflict target columns
-        if !on_conflict.columns.is_empty() {
+        // Conflict target: named constraint, inferred columns, or none
+        if let Some(constraint) = &on_conflict.constraint {
+            buf.extend_from_slice(b"ON CONSTRAINT ");
+            push_identifier_ref(buf, constraint, false);
+            buf.extend_from_slice(b" ");
+        } else if !on_conflict.columns.is_empty() {
             buf.extend_from_slice(b"(");
             for (i, col) in on_conflict.columns.iter().enumerate() {
                 if i > 0 {
@@ -1508,9 +1678,19 @@ pub fn encode_update(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    encode_update_scoped(cmd, buf, params, WithScope::TopLevel)
+}
+
+fn encode_update_scoped(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+    with_scope: WithScope,
+) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, &cmd.columns)?;
     validate_update_shape(cmd)?;
 
+    encode_cte_prefix_scoped(cmd, buf, params, with_scope)?;
     buf.extend_from_slice(b"UPDATE ");
     if cmd.only_table {
         buf.extend_from_slice(b"ONLY ");
@@ -1520,12 +1700,13 @@ pub fn encode_update(
 
     // SET clause: explicit columns pair with positional values, else each
     // named payload condition assigns its own column (shared with the
-    // transpiler via qail_core::ast::write_payload).
+    // transpiler via qail_core::ast::write_payload). A target may be a
+    // `col[1]` / `col.field` chain, validated by validate_update_shape.
     for (i, (col, cond)) in update_assignments(cmd).into_iter().enumerate() {
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_expr(col, buf)?;
+        encode_update_target(col, buf);
         buf.extend_from_slice(b" = ");
         encode_value(&cond.value, buf, params)?;
     }
@@ -1558,8 +1739,18 @@ pub fn encode_delete(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    encode_delete_scoped(cmd, buf, params, WithScope::TopLevel)
+}
+
+fn encode_delete_scoped(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+    with_scope: WithScope,
+) -> Result<(), crate::protocol::EncodeError> {
     validate_dml_command(cmd, &cmd.columns)?;
 
+    encode_cte_prefix_scoped(cmd, buf, params, with_scope)?;
     buf.extend_from_slice(b"DELETE FROM ");
     if cmd.only_table {
         buf.extend_from_slice(b"ONLY ");
@@ -1808,9 +1999,76 @@ pub fn encode_export(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"COPY (");
-    encode_select_with_columns(cmd, &cmd.columns, buf, params)?;
+    encode_select_with_columns(cmd, &cmd.columns, buf, params, WithScope::Nested)?;
     buf.extend_from_slice(b") TO STDOUT");
     Ok(())
+}
+
+/// Reject any clause beyond action + table. TRUNCATE and LOCK act on the whole
+/// relation; a filter left on the AST would otherwise be dropped silently.
+fn validate_table_only_command(cmd: &Qail, verb: &str) -> Result<(), crate::protocol::EncodeError> {
+    let bare = Qail {
+        action: cmd.action,
+        table: cmd.table.clone(),
+        ..Default::default()
+    };
+    if *cmd != bare {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{verb} takes only a table; filters and other clauses would not apply"
+        )));
+    }
+    validate_qualified_ident("table", &cmd.table, false)
+}
+
+/// Encode `TRUNCATE TABLE <table>`.
+pub fn encode_truncate(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol::EncodeError> {
+    validate_table_only_command(cmd, "TRUNCATE")?;
+    buf.extend_from_slice(b"TRUNCATE TABLE ");
+    push_identifier_ref(buf, &cmd.table, false);
+    Ok(())
+}
+
+/// Encode `LOCK TABLE <table> IN ACCESS EXCLUSIVE MODE`, the only mode the
+/// AST models. PostgreSQL accepts LOCK only inside a transaction block.
+pub fn encode_lock_table(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    validate_table_only_command(cmd, "LOCK TABLE")?;
+    buf.extend_from_slice(b"LOCK TABLE ");
+    push_identifier_ref(buf, &cmd.table, false);
+    buf.extend_from_slice(b" IN ACCESS EXCLUSIVE MODE");
+    Ok(())
+}
+
+/// Encode `EXPLAIN [ANALYZE] SELECT ...` for `Action::Explain` and
+/// `Action::ExplainAnalyze`. The explained query stays read-only: EXPLAIN
+/// ANALYZE executes it, so data-modifying CTE bodies are rejected.
+pub fn encode_explain(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let prefix: &[u8] = match cmd.action {
+        Action::Explain => b"EXPLAIN ",
+        Action::ExplainAnalyze => b"EXPLAIN ANALYZE ",
+        other => return Err(crate::protocol::EncodeError::UnsupportedAction(other)),
+    };
+    let mut query = cmd.clone();
+    query.action = Action::Get;
+    buf.extend_from_slice(prefix);
+    encode_select(&query, buf, params)
+}
+
+/// `Action::Put` has no native encoding. Its preview upsert updates every
+/// payload column on conflict with no existing-row guard, so a scoped write
+/// could overwrite another scope's row.
+pub(crate) fn reject_put() -> crate::protocol::EncodeError {
+    crate::protocol::EncodeError::InvalidAst(
+        "Put has no native encoding (its upsert has no existing-row guard); \
+         use Qail::add(..).on_conflict_update(..)"
+            .to_string(),
+    )
 }
 
 fn encode_condition_group(

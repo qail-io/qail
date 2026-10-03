@@ -109,6 +109,17 @@ fn expr_named_eq(expr: &Expr, name: &str) -> bool {
     matches!(expr, Expr::Named(existing) if normalize_ident(existing) == normalize_ident(name))
 }
 
+/// Column under an UPDATE target such as `col[1]` or `col.field`: writing an
+/// element still mutates `col`.
+fn assignment_target_base(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Subscript { expr, .. } | Expr::FieldAccess { expr, .. } => {
+            assignment_target_base(expr)
+        }
+        other => other,
+    }
+}
+
 fn is_tenant_column_condition(cond: &Condition, tenant_col: &str) -> bool {
     expr_named_eq(&cond.left, tenant_col)
 }
@@ -373,6 +384,15 @@ impl Qail {
             owner_col.as_deref(),
             ctx,
         )?;
+
+        if matches!(self.action, Action::Truncate | Action::Lock)
+            && (tenant_col.is_some() || owner_col.is_some())
+        {
+            return Err(QailBuildError::RlsWholeTableActionDenied {
+                table: self.table,
+                action: self.action,
+            });
+        }
 
         // Nested relations FIRST, unconditionally. An unregistered outer
         // relation (a CTE alias, a wrapper view) can embed a registered
@@ -713,6 +733,8 @@ impl Qail {
                 | Action::Over
                 | Action::Gen
                 | Action::Export
+                | Action::Explain
+                | Action::ExplainAnalyze
                 | Action::Search
                 | Action::Scroll => {
                     let condition_col = scoped.primary_tenant_condition_col(tenant_col);
@@ -735,6 +757,8 @@ impl Qail {
             | Action::Over
             | Action::Gen
             | Action::Export
+            | Action::Explain
+            | Action::ExplainAnalyze
             | Action::Search
             | Action::Scroll => {
                 let condition_col = scoped.primary_tenant_condition_col(tenant_col);
@@ -765,6 +789,8 @@ impl Qail {
             | Action::Over
             | Action::Gen
             | Action::Export
+            | Action::Explain
+            | Action::ExplainAnalyze
             | Action::Search
             | Action::Scroll => {
                 let condition_col = self.primary_tenant_condition_col(owner_col);
@@ -1042,7 +1068,7 @@ impl Qail {
             .iter()
             .filter(|cage| matches!(cage.kind, CageKind::Payload))
             .flat_map(|cage| cage.conditions.iter())
-            .any(|cond| expr_named_eq(&cond.left, tenant_col));
+            .any(|cond| expr_named_eq(assignment_target_base(&cond.left), tenant_col));
 
         if assigns_tenant {
             return Err(QailBuildError::RlsTenantColumnMutationDenied {

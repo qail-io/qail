@@ -597,6 +597,9 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
         for col in &oc.columns {
             check_ident("on_conflict.column", col)?;
         }
+        if let Some(ref constraint) = oc.constraint {
+            check_ident("on_conflict.constraint", constraint)?;
+        }
         if let ConflictAction::DoUpdate { assignments } = &oc.action {
             for (col, expr) in assignments {
                 check_ident("on_conflict.assignment.column", col)?;

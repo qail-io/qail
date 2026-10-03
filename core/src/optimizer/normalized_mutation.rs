@@ -450,6 +450,7 @@ mod tests {
             }],
             on_conflict: Some(OnConflict {
                 columns: vec!["id".to_string()],
+                constraint: None,
                 action: ConflictAction::DoNothing,
                 where_conditions: Vec::new(),
             }),
