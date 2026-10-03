@@ -138,6 +138,24 @@ fn cache_key_includes_filter_values() {
 }
 
 #[test]
+fn cache_key_includes_fields_canonical_text_drops() {
+    let base = qail_core::ast::Qail::get("users").columns(["id", "role"]);
+    let mut distinct = base.clone();
+    distinct.distinct = true;
+    let mut union = base.clone();
+    union.set_ops.push((
+        qail_core::ast::SetOp::UnionAll,
+        Box::new(qail_core::ast::Qail::get("admins").columns(["id", "role"])),
+    ));
+    let variants = [base.clone(), distinct, union, base.distinct_on(["role"])];
+    for (i, lhs) in variants.iter().enumerate() {
+        for rhs in &variants[i + 1..] {
+            assert_ne!(exact_cache_key(lhs), exact_cache_key(rhs));
+        }
+    }
+}
+
+#[test]
 fn auth_scoped_cache_key_includes_role() {
     let cmd = qail_core::ast::Qail::get("orders");
     let mut operator = crate::auth::AuthContext {

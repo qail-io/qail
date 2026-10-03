@@ -7029,6 +7029,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn query_step_executes_the_exact_command_it_persisted() {
+        let executor = MockExecutor::new();
+        // Canonical text of these is `add rows` / `get orders ...` without the
+        // values, DISTINCT or FOR UPDATE.
+        let insert = qail_core::Qail::add("rows")
+            .set_value("id", 1)
+            .set_value("status", "a");
+        let mut locked = qail_core::Qail::get("orders")
+            .columns(["id"])
+            .where_eq("id", 1)
+            .for_update();
+        locked.distinct = true;
+
+        let steps = vec![
+            WorkflowStep::query(&insert, None),
+            WorkflowStep::query(&locked, Some("rows")),
+            WorkflowStep::transition("done"),
+        ];
+        let persisted: Vec<WorkflowStep> =
+            serde_json::from_str(&serde_json::to_string(&steps).unwrap()).unwrap();
+        let wf = WorkflowDefinition::new("exact_query")
+            .initial_state("start")
+            .transition("start", "done", persisted);
+
+        let mut ctx = WorkflowContext::new("wf-exact-query-001", "start");
+        let result = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect("exact payloads should execute");
+        assert_eq!(result, "done");
+
+        let queries = executor.queries.lock().unwrap();
+        let decoded: Vec<_> = queries
+            .iter()
+            .map(|wire| qail_core::wire::decode_cmd_text(wire).unwrap())
+            .collect();
+        assert_eq!(decoded, vec![insert, locked]);
+    }
+
     #[test]
     fn query_scope_wire_normalization_retains_pending_scope() {
         let mut cmd = qail_core::Qail::add("scope_transport").set_value("id", 1);

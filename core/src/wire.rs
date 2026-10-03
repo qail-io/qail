@@ -1,6 +1,6 @@
 //! QAIL wire codecs for command transport.
 //!
-//! - Text v1 carries canonical text; v2 retains applied scope as AST JSON.
+//! - Text v1 carries canonical text when it reparses exactly; v2 carries AST JSON.
 //! - Binary QWB2 carries unscoped ASTs; QWB3 retains applied scope.
 
 use crate::ast::Qail;
@@ -24,13 +24,13 @@ const MAX_AST_VECTOR_LEN: usize = 8_192;
 const MAX_AST_BINARY_VALUE_LEN: usize = 32 * 1024;
 
 /// Encode one command into versioned text wire format.
+///
+/// Uses v1 canonical text only when it decodes back to exactly `cmd`;
+/// every other command is carried as v2 AST JSON.
 pub fn encode_cmd_text(cmd: &Qail) -> String {
-    let ast = needs_ast_text(cmd);
-    let payload = encode_text_payload(cmd, ast);
-    let magic = if ast {
-        CMD_AST_TEXT_MAGIC
-    } else {
-        CMD_TEXT_MAGIC
+    let (magic, payload) = match exact_text_payload(cmd) {
+        Some(text) => (CMD_TEXT_MAGIC, text),
+        None => (CMD_AST_TEXT_MAGIC, ast_json_payload(cmd)),
     };
     let mut out = String::with_capacity(magic.len() + payload.len() + 32);
     out.push_str(magic);
@@ -74,20 +74,25 @@ pub fn decode_cmd_text(input: &str) -> Result<Qail, String> {
 }
 
 /// Encode multiple commands into versioned text wire format.
+///
+/// The batch is v1 only when every command's canonical text is exact;
+/// otherwise every command is carried as v2 AST JSON.
 pub fn encode_cmds_text(cmds: &[Qail]) -> String {
-    let ast = cmds.iter().any(needs_ast_text);
+    let exact: Option<Vec<String>> = cmds.iter().map(exact_text_payload).collect();
+    let (magic, payloads) = match exact {
+        Some(texts) => (CMDS_TEXT_MAGIC, texts),
+        None => (
+            CMDS_AST_TEXT_MAGIC,
+            cmds.iter().map(ast_json_payload).collect(),
+        ),
+    };
     let mut out = String::new();
-    out.push_str(if ast {
-        CMDS_AST_TEXT_MAGIC
-    } else {
-        CMDS_TEXT_MAGIC
-    });
+    out.push_str(magic);
     out.push('\n');
     out.push_str(&cmds.len().to_string());
     out.push('\n');
 
-    for cmd in cmds {
-        let payload = encode_text_payload(cmd, ast);
+    for payload in payloads {
         out.push_str(&payload.len().to_string());
         out.push('\n');
         out.push_str(&payload);
@@ -136,26 +141,22 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
     Ok(out)
 }
 
-fn needs_ast_text(cmd: &Qail) -> bool {
-    // Invalid/oversized ASTs must not fall back to lossy display text. The v2
-    // decoder will reject them using the same limits as binary transport.
-    !matches!(
-        validate_binary_ast_limits(cmd),
-        Ok(AstLimitState {
-            applied_scope: false,
-            conflict_clause: false,
-            ..
-        })
-    )
+/// Canonical text for v1, only when the v1 decoder rebuilds exactly `cmd`.
+///
+/// `Display` drops values, set operations, DISTINCT, HAVING, window frames,
+/// locks, conflict clauses and applied scope, and some output does not parse.
+fn exact_text_payload(cmd: &Qail) -> Option<String> {
+    // Invalid/oversized ASTs go to v2, whose decoder rejects them with the
+    // binary-transport limits instead of reparsing their text unchecked.
+    validate_binary_ast_limits(cmd).ok()?;
+    let text = cmd.to_string();
+    let decoded = crate::parse(&text).ok()?;
+    (decoded == *cmd).then_some(text)
 }
 
-fn encode_text_payload(cmd: &Qail, ast: bool) -> String {
-    if ast {
-        // Qail has no non-string map keys or fallible custom value serializers.
-        serde_json::to_string(cmd).expect("Qail fields are JSON-serializable")
-    } else {
-        cmd.to_string()
-    }
+fn ast_json_payload(cmd: &Qail) -> String {
+    // Qail has no non-string map keys or fallible custom value serializers.
+    serde_json::to_string(cmd).expect("Qail fields are JSON-serializable")
 }
 
 /// Encode an AST using QWB2, or QWB3 when any nested command has applied scope.
@@ -248,7 +249,6 @@ pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&[u8], String> {
 struct AstLimitState {
     nodes: usize,
     applied_scope: bool,
-    conflict_clause: bool,
 }
 
 impl AstLimitState {
@@ -295,7 +295,6 @@ fn validate_binary_ast_limits(cmd: &Qail) -> Result<AstLimitState, String> {
 
 fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> Result<(), String> {
     state.applied_scope |= !cmd.conflict_update_scope.is_empty();
-    state.conflict_clause |= cmd.on_conflict.is_some();
     use crate::ast::GroupByMode;
 
     ensure_depth(depth, "Qail")?;

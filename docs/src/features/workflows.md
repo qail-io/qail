@@ -59,7 +59,9 @@ let definition = WorkflowDefinition::new("booking_recovery")
 ```
 
 `WorkflowStep::query` persists QAIL wire text produced by
-`qail_core::wire::encode_cmd_text`; it is not a raw SQL payload.
+`qail_core::wire::encode_cmd_text`; it is not a raw SQL payload. Commands whose
+canonical text does not reparse exactly are persisted as `QAIL-CMD/2` AST JSON,
+so the step executes the command it was built from.
 
 ## Runtime Operations
 

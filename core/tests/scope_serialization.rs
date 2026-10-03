@@ -87,7 +87,9 @@ fn missing_malformed_and_unsupported_scope_versions_fail_closed() {
 
 #[test]
 fn unscoped_payloads_keep_their_existing_formats() {
-    let cmd = Qail::get("scope_transport").limit(2);
+    // Explicit columns: `get t` reparses with `columns: [Star]`, so a builder
+    // command without columns is not v1-exact.
+    let cmd = Qail::get("scope_transport").columns(["id"]).limit(2);
     let json = serde_json::to_value(&cmd).unwrap();
     assert!(json.get("action").is_some());
     assert!(json.get("qail_ast_version").is_none());
