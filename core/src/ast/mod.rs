@@ -23,8 +23,9 @@ pub use self::cmd::{
 };
 pub use self::conditions::Condition;
 pub use self::expr::{
-    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FunctionDef, IndexDef,
-    TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
+    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FunctionDef, FunctionOptions,
+    IdentityOptions, IndexDef, TableConstraint, TriggerDef, TriggerEvent, TriggerTiming,
+    WindowFrame,
 };
 pub use self::joins::Join;
 pub use self::operators::{

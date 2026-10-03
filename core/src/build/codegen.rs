@@ -10,7 +10,7 @@ use crate::migrate::types::ColumnType;
 use super::schema::Schema;
 
 fn qail_type_to_rust(col_type: &ColumnType) -> &'static str {
-    match col_type {
+    match &col_type.native_family() {
         ColumnType::Uuid => "uuid::Uuid",
         ColumnType::Text | ColumnType::Varchar(_) => "String",
         ColumnType::Int | ColumnType::Serial => "i32",

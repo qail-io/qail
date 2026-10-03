@@ -32,8 +32,10 @@ pub fn map_type(t: &str) -> &str {
         "timestamp" | "time" | "TIMESTAMP" => "TIMESTAMP",
         "timestamptz" | "TIMESTAMPTZ" => "TIMESTAMPTZ",
         "date" | "DATE" => "DATE",
-        "json" | "jsonb" | "JSON" | "JSONB" => "JSONB",
-        "varchar" | "VARCHAR" => "VARCHAR(255)",
+        // Uppercase JSON / VARCHAR are exact schema types (`ColumnType::to_pg_type`)
+        // and pass through like in the SQL preview; only DSL shorthands map.
+        "json" | "jsonb" | "JSONB" => "JSONB",
+        "varchar" => "VARCHAR(255)",
         _ => t,
     }
 }
@@ -797,6 +799,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol
             push_identifier(buf, name);
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
+            buf.extend_from_slice(column_collate_sql(constraints)?.as_bytes());
 
             // Default to NOT NULL unless Nullable
             if !constraints.contains(&Constraint::Nullable) {
@@ -819,6 +822,16 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol
                 }
                 if let Constraint::Generated(generation) = constraint {
                     match generation {
+                        ColumnGeneration::Identity {
+                            by_default,
+                            options,
+                        } => {
+                            let identity = qail_core::transpiler::ddl::identity_generation_sql(
+                                *by_default,
+                                options,
+                            );
+                            buf.extend_from_slice(identity.as_bytes());
+                        }
                         ColumnGeneration::Stored(expr) if expr == "identity" => {
                             buf.extend_from_slice(b" GENERATED ALWAYS AS IDENTITY");
                         }
@@ -902,6 +915,24 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) -> Result<(), crate::protocol
     Ok(())
 }
 
+/// Column `COLLATE` from the constraint list; more than one is rejected.
+fn column_collate_sql(constraints: &[Constraint]) -> Result<String, crate::protocol::EncodeError> {
+    let mut collations = constraints.iter().filter_map(|c| match c {
+        Constraint::Collate(name) => Some(name),
+        _ => None,
+    });
+    let Some(collation) = collations.next() else {
+        return Ok(String::new());
+    };
+    if collations.next().is_some() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "column has more than one collation".to_string(),
+        ));
+    }
+    qail_core::transpiler::ddl::collate_clause_sql(collation)
+        .map_err(crate::protocol::EncodeError::InvalidAst)
+}
+
 /// Encode CREATE INDEX statement.
 pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::EncodeError> {
     let Some(idx) = &cmd.index_def else {
@@ -955,6 +986,9 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
         }
         buf.extend_from_slice(b")");
     }
+    let storage_params = qail_core::transpiler::ddl::index_storage_params_sql(&idx.storage_params)
+        .map_err(crate::protocol::EncodeError::InvalidAst)?;
+    buf.extend_from_slice(storage_params.as_bytes());
     if let Some(where_clause) = &idx.where_clause {
         if where_clause.trim().is_empty()
             || where_clause.contains('\0')
@@ -1021,6 +1055,7 @@ pub fn encode_alter_add_column(
             push_identifier(buf, name);
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(data_type_to_sql(data_type).as_bytes());
+            buf.extend_from_slice(column_collate_sql(constraints)?.as_bytes());
 
             if !constraints.contains(&Constraint::Nullable) {
                 buf.extend_from_slice(b" NOT NULL");
@@ -1044,6 +1079,16 @@ pub fn encode_alter_add_column(
                 }
                 if let Constraint::Generated(generation) = constraint {
                     match generation {
+                        ColumnGeneration::Identity {
+                            by_default,
+                            options,
+                        } => {
+                            let identity = qail_core::transpiler::ddl::identity_generation_sql(
+                                *by_default,
+                                options,
+                            );
+                            buf.extend_from_slice(identity.as_bytes());
+                        }
                         ColumnGeneration::Stored(expr) if expr == "identity" => {
                             buf.extend_from_slice(b" GENERATED ALWAYS AS IDENTITY");
                         }
@@ -1774,6 +1819,9 @@ pub fn encode_create_function(
         buf.extend_from_slice(b" ");
         buf.extend_from_slice(volatility.as_bytes());
     }
+    let options = qail_core::transpiler::ddl::function_options_sql(&func.options)
+        .map_err(crate::protocol::EncodeError::InvalidAst)?;
+    buf.extend_from_slice(options.as_bytes());
     buf.extend_from_slice(b" AS ");
     buf.extend_from_slice(dollar_quote_block(&func.body).as_bytes());
     Ok(())
@@ -1846,6 +1894,13 @@ pub fn encode_create_trigger(
     } else {
         "FOR EACH STATEMENT"
     };
+    let referencing = qail_core::transpiler::ddl::trigger_referencing_sql(
+        trig.old_table.as_deref(),
+        trig.new_table.as_deref(),
+    )
+    .map_err(crate::protocol::EncodeError::InvalidAst)?;
+    let when = qail_core::transpiler::ddl::trigger_when_sql(trig.condition.as_deref())
+        .map_err(crate::protocol::EncodeError::InvalidAst)?;
 
     buf.extend_from_slice(b"CREATE TRIGGER ");
     push_identifier(buf, &trig.name);
@@ -1855,8 +1910,10 @@ pub fn encode_create_trigger(
     buf.extend_from_slice(events.as_bytes());
     buf.extend_from_slice(b" ON ");
     push_identifier(buf, &trig.table);
+    buf.extend_from_slice(referencing.as_bytes());
     buf.extend_from_slice(b" ");
     buf.extend_from_slice(for_each.as_bytes());
+    buf.extend_from_slice(when.as_bytes());
     buf.extend_from_slice(b" EXECUTE FUNCTION ");
     push_identifier(buf, &trig.execute_function);
     buf.extend_from_slice(b"()");
@@ -2002,6 +2059,35 @@ pub fn encode_create_sequence(
         }
     }
 
+    Ok(())
+}
+
+/// Encode ALTER SEQUENCE statement (same option grammar as CREATE SEQUENCE).
+pub fn encode_alter_sequence(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    if cmd.columns.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "ALTER SEQUENCE requires at least one option".to_string(),
+        ));
+    }
+    buf.extend_from_slice(b"ALTER SEQUENCE ");
+    push_identifier(buf, &cmd.table);
+    for col in &cmd.columns {
+        let Expr::Named(opt) = col else {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "sequence options must be named expressions".to_string(),
+            ));
+        };
+        let Some(option) = sequence_option_to_sql(opt) else {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "invalid sequence option: {opt:?}"
+            )));
+        };
+        buf.extend_from_slice(b" ");
+        buf.extend_from_slice(option.as_bytes());
+    }
     Ok(())
 }
 

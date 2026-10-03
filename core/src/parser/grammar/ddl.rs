@@ -316,6 +316,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                storage_params: vec![],
             }),
             table_constraints: vec![],
             set_ops: vec![],

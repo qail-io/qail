@@ -983,6 +983,27 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     let (single_unique_columns, unique_constraint_indexes, _unique_constraint_names) =
         introspect_unique_constraints(driver).await?;
     let primary_key_columns = introspect_primary_key_columns(driver).await?;
+    // Same type identity, generation kind, collation, and sequence reading as
+    // `qail pull`, so live comparisons see what the file can express.
+    let column_catalog =
+        crate::pull_catalog::fetch_column_catalog(driver, &public_namespace_oid).await?;
+    let sequence_catalog =
+        crate::pull_catalog::fetch_sequence_catalog(driver, &public_namespace_oid).await?;
+    let mut plain_serial_sequences = std::collections::HashMap::new();
+    let mut identity_options = std::collections::HashMap::new();
+    for seq in &sequence_catalog {
+        let Some((table, column)) = &seq.owner else {
+            continue;
+        };
+        if seq.identity {
+            identity_options.insert((table.clone(), column.clone()), seq.non_default_options());
+        } else if column_catalog
+            .get(&(table.clone(), column.clone()))
+            .is_some_and(|c| seq.is_plain_serial_for(&c.formatted_type))
+        {
+            plain_serial_sequences.insert(seq.name.clone(), (table.clone(), column.clone()));
+        }
+    }
 
     // 1. Query all tables
     let tables_cmd = Qail::get("information_schema.tables")
@@ -1042,29 +1063,42 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             let numeric_precision = row.get_string(10);
             let numeric_scale = row.get_string(11);
 
-            let has_nextval_default = raw_default
+            let catalog = column_catalog
+                .get(&(table_name.clone(), col_name.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let has_serial_default = raw_default
                 .as_deref()
-                .is_some_and(|d| d.trim_start().starts_with("nextval("));
+                .and_then(crate::pull_catalog::nextval_sequence_name)
+                .and_then(|seq| plain_serial_sequences.get(&seq))
+                .is_some_and(|(table, column)| table == table_name && *column == col_name);
             // Parse data type to ColumnType
-            let data_type = parse_column_type(
+            let mapped_type = parse_column_type(
                 &data_type_str,
                 udt_name.as_deref(),
                 char_max_len.as_deref(),
                 numeric_precision.as_deref(),
                 numeric_scale.as_deref(),
-                has_nextval_default,
+                has_serial_default,
             );
+            let data_type = if catalog.formatted_type.is_empty() {
+                mapped_type
+            } else {
+                crate::pull_catalog::exact_column_type(mapped_type, &catalog.formatted_type).0
+            };
             let generated = introspected_column_generation(
                 is_identity,
                 identity_generation.as_deref(),
                 is_generated.as_deref(),
                 generation_expression.as_deref(),
-            );
+                &catalog.attgenerated,
+            )
+            .map_err(|e| anyhow!("{}.{}: {}", table_name, col_name, e))?;
 
             // Strip defaults for SERIAL and IDENTITY columns (auto-generated)
             // nextval() for SERIAL, identity columns handle their own generation
             let default = match &raw_default {
-                Some(d) if d.trim_start().starts_with("nextval(") => None,
+                _ if has_serial_default => None,
                 _ if generated.is_some() => None, // Generated columns don't need explicit default
                 other => other.clone(),
             };
@@ -1072,6 +1106,14 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             let is_pk = primary_key_columns.contains(&(table_name.clone(), col_name.clone()));
 
             let is_unique = single_unique_columns.contains(&(table_name.clone(), col_name.clone()));
+            let column_identity_options = if is_identity {
+                identity_options
+                    .get(&(table_name.clone(), col_name.clone()))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Default::default()
+            };
 
             columns.push(Column {
                 name: col_name,
@@ -1083,7 +1125,9 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 foreign_key: None, // Will be filled below after FK query
                 check: None,
                 extra_checks: Vec::new(),
+                identity_options: column_identity_options,
                 generated,
+                collation: catalog.collation.clone(),
             });
         }
 
@@ -1144,6 +1188,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             .map(|index| index.name.clone())
             .collect();
     schema.indexes.extend(unique_constraint_indexes);
+    let index_storage_params =
+        crate::pull_catalog::fetch_index_storage_params(driver, &public_namespace_oid).await?;
 
     for row in &idx_rows {
         let idx_name = required_shadow_metadata_string(row, 0, "indexname")?;
@@ -1163,9 +1209,12 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             continue;
         }
 
-        schema
-            .indexes
-            .push(index_from_pg_indexdef(idx_name, table_name, indexdef));
+        let mut index = index_from_pg_indexdef(idx_name, table_name, indexdef);
+        index.storage_params = index_storage_params
+            .get(&index.name)
+            .cloned()
+            .unwrap_or_default();
+        schema.indexes.push(index);
     }
 
     let attnum_cmd = Qail::get("pg_catalog.pg_attribute")
@@ -1684,7 +1733,7 @@ async fn introspect_unique_constraints(
                 IntrospectedUniqueConstraint::Single { table, column } => {
                     unique_columns.insert((table, column));
                 }
-                IntrospectedUniqueConstraint::Multi(index) => unique_indexes.push(index),
+                IntrospectedUniqueConstraint::Multi(index) => unique_indexes.push(*index),
             }
         }
     }

@@ -155,12 +155,21 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     // explicit drop/rename hints -> extensions/types/sequences + table-default
     // functions -> tables/indexes -> views + remaining functions ->
     // triggers/policies/comments -> late hints.
+    let declared_tables = schema
+        .tables
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let (sequence_cmds, sequence_ownership_cmds) =
+        compile_sequences_strict(&schema.sequences, &declared_tables)?;
+
     cmds.extend(early_hint_cmds);
     cmds.extend(compile_extensions_strict(&schema.extensions)?);
     cmds.extend(compile_enums_strict(&schema.enums)?);
-    cmds.extend(compile_sequences_strict(&schema.sequences)?);
+    cmds.extend(sequence_cmds);
     cmds.extend(compile_functions_strict(&early_functions)?);
     cmds.extend(qail_core::migrate::schema::schema_to_commands(schema));
+    cmds.extend(sequence_ownership_cmds);
 
     cmds.extend(compile_views_strict(&schema.views)?);
     cmds.extend(compile_functions_strict(&late_functions)?);
@@ -364,7 +373,8 @@ fn function_used_by_table_columns(
             }
             if let Some(generated) = &col.generated {
                 let expr = match generated {
-                    qail_core::migrate::schema::Generated::AlwaysStored(expr) => expr.as_str(),
+                    qail_core::migrate::schema::Generated::AlwaysStored(expr)
+                    | qail_core::migrate::schema::Generated::AlwaysVirtual(expr) => expr.as_str(),
                     qail_core::migrate::schema::Generated::AlwaysIdentity
                     | qail_core::migrate::schema::Generated::ByDefaultIdentity => "",
                 };
@@ -542,8 +552,16 @@ fn compile_policies_strict(policies: &[RlsPolicy]) -> Result<Vec<Qail>> {
     Ok(cmds)
 }
 
-fn compile_sequences_strict(sequences: &[Sequence]) -> Result<Vec<Qail>> {
+/// CREATE SEQUENCE commands, plus ALTER SEQUENCE ... OWNED BY commands for
+/// owners created in the same migration. Those must run after CREATE TABLE:
+/// the owner table references the sequence in its nextval() default, so the
+/// sequence has to exist first and can only be attached afterwards.
+fn compile_sequences_strict(
+    sequences: &[Sequence],
+    declared_tables: &std::collections::BTreeSet<&str>,
+) -> Result<(Vec<Qail>, Vec<Qail>)> {
     let mut cmds = Vec::with_capacity(sequences.len());
+    let mut ownership_cmds = Vec::new();
     for seq in sequences {
         if !is_valid_ident_path(&seq.name) {
             bail!(
@@ -581,7 +599,20 @@ fn compile_sequences_strict(sequences: &[Sequence]) -> Result<Vec<Qail>> {
                     owned_by
                 );
             }
-            opts.push(Expr::Named(format!("OWNED BY {}", owned_by)));
+            let owner_table = owned_by
+                .rsplit_once('.')
+                .map(|(table, _)| table)
+                .unwrap_or_default();
+            if declared_tables.contains(owner_table) {
+                ownership_cmds.push(Qail {
+                    action: Action::AlterSequence,
+                    table: seq.name.clone(),
+                    columns: vec![Expr::Named(format!("OWNED BY {}", owned_by))],
+                    ..Default::default()
+                });
+            } else {
+                opts.push(Expr::Named(format!("OWNED BY {}", owned_by)));
+            }
         }
 
         cmds.push(Qail {
@@ -591,7 +622,7 @@ fn compile_sequences_strict(sequences: &[Sequence]) -> Result<Vec<Qail>> {
             ..Default::default()
         });
     }
-    Ok(cmds)
+    Ok((cmds, ownership_cmds))
 }
 
 fn compile_enums_strict(enums: &[EnumType]) -> Result<Vec<Qail>> {
@@ -693,6 +724,7 @@ fn compile_functions_strict(functions: &[SchemaFunctionDef]) -> Result<Vec<Qail>
                 body: func.body.clone(),
                 language: Some(func.language.clone()),
                 volatility: func.volatility.clone(),
+                options: func.options.clone(),
             }),
             ..Default::default()
         });
@@ -721,11 +753,17 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
                 trigger.execute_function
             );
         }
-        if trigger.condition.is_some() {
-            bail!(
-                "Strict AST migration compiler does not support trigger WHEN conditions yet (trigger '{}')",
-                trigger.name
-            );
+        for (label, table) in [("OLD", &trigger.old_table), ("NEW", &trigger.new_table)] {
+            if let Some(table) = table
+                && !is_valid_ident(table)
+            {
+                bail!(
+                    "Strict AST migration compiler rejects invalid trigger {} TABLE name '{}' on '{}'",
+                    label,
+                    table,
+                    trigger.name
+                );
+            }
         }
 
         let timing = parse_trigger_timing(&trigger.timing, &trigger.name)?;
@@ -752,6 +790,9 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
                 update_columns,
                 for_each_row: trigger.for_each_row,
                 execute_function: trigger.execute_function.clone(),
+                condition: trigger.condition.clone(),
+                old_table: trigger.old_table.clone(),
+                new_table: trigger.new_table.clone(),
             }),
             ..Default::default()
         });
@@ -1272,6 +1313,7 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                storage_params: vec![],
             }),
             ..Default::default()
         });

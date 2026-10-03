@@ -619,9 +619,43 @@ impl Schema {
                                 ));
                             }
                             break;
+                        } else if part.starts_with("generated_identity(")
+                            || part.starts_with("generated_by_default_identity(")
+                        {
+                            let option = if part.starts_with("generated_identity(") {
+                                "generated_identity"
+                            } else {
+                                "generated_by_default_identity"
+                            };
+                            if let Some(existing) = generated_option {
+                                return Err(format!(
+                                    "conflicting generated options '{}' and '{}' for column '{}' in table '{}'",
+                                    existing, option, col_name, table_name
+                                ));
+                            }
+                            generated_option = Some(option);
+                            // Identity options are integers/keywords only: skip to the `)`.
+                            while !parts[i].ends_with(')') {
+                                i += 1;
+                                if i >= parts.len() {
+                                    return Err(format!(
+                                        "unclosed {} options for column '{}' in table '{}'",
+                                        option, col_name, table_name
+                                    ));
+                                }
+                            }
+                        } else if part == "collate" {
+                            if i + 1 >= parts.len() {
+                                return Err(format!(
+                                    "collate requires a collation for column '{}' in table '{}'",
+                                    col_name, table_name
+                                ));
+                            }
+                            i += 1;
                         } else if part.starts_with("default=")
                             || part.starts_with("default:")
                             || part.starts_with("generated_stored(")
+                            || part.starts_with("generated_virtual(")
                             || part.starts_with("check(")
                         {
                             break;

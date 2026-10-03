@@ -257,6 +257,10 @@ fn validate_def_constraint(
         | Constraint::Generated(ColumnGeneration::Virtual(expr)) => {
             validate_sql_expr_fragment(&format!("{field}.generated"), expr)
         }
+        Constraint::Generated(ColumnGeneration::Identity { .. }) => Ok(()),
+        Constraint::Collate(name) => qail_core::transpiler::ddl::collate_clause_sql(name)
+            .map(|_| ())
+            .map_err(crate::protocol::EncodeError::InvalidAst),
         Constraint::Comment(value) => validate_comment_fragment(&format!("{field}.comment"), value),
     }
 }

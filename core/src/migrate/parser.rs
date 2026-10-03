@@ -408,62 +408,66 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
             "default" => {
                 return Err(format!("default requires a value for column '{}'", name));
             }
-            "generated_identity" => {
+            s if s == "generated_identity"
+                || s == "generated_by_default_identity"
+                || s.starts_with("generated_identity(")
+                || s.starts_with("generated_by_default_identity(") =>
+            {
                 if seen_generated {
                     return Err(format!("duplicate generated option for column '{}'", name));
                 }
                 seen_generated = true;
-                col.generated = Some(Generated::AlwaysIdentity);
+                let by_default = s.starts_with("generated_by_default_identity");
+                col.generated = Some(if by_default {
+                    Generated::ByDefaultIdentity
+                } else {
+                    Generated::AlwaysIdentity
+                });
+                if s.contains('(') {
+                    let keyword = if by_default {
+                        "generated_by_default_identity"
+                    } else {
+                        "generated_identity"
+                    };
+                    let inner = collect_paren_option(&parts, &mut i, keyword, &name)?;
+                    col.identity_options = parse_identity_options(&inner, &name)?;
+                }
             }
-            "generated_by_default_identity" => {
+            s if s.starts_with("generated_stored(") || s.starts_with("generated_virtual(") => {
                 if seen_generated {
                     return Err(format!("duplicate generated option for column '{}'", name));
                 }
                 seen_generated = true;
-                col.generated = Some(Generated::ByDefaultIdentity);
-            }
-            s if s.starts_with("generated_stored(") => {
-                if seen_generated {
-                    return Err(format!("duplicate generated option for column '{}'", name));
-                }
-                seen_generated = true;
-                let mut generated_str = s.to_string();
-                let mut quote = None;
-                let mut depth = paren_delta_ignoring_quotes(s, &mut quote);
-
-                while (depth > 0 || quote.is_some()) && i + 1 < parts.len() {
-                    i += 1;
-                    generated_str.push(' ');
-                    generated_str.push_str(parts[i]);
-                    depth += paren_delta_ignoring_quotes(parts[i], &mut quote);
-                }
-                if quote.is_some() {
-                    return Err(format!(
-                        "unterminated quote in generated_stored expression for column '{}'",
-                        name
-                    ));
-                }
-                if depth != 0 {
-                    return Err(format!(
-                        "unclosed generated_stored expression for column '{}'",
-                        name
-                    ));
-                }
-
-                let inner = generated_str
-                    .strip_prefix("generated_stored(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    .ok_or_else(|| {
-                        format!("invalid generated_stored expression for column '{}'", name)
-                    })?
-                    .trim();
+                let keyword = if s.starts_with("generated_stored(") {
+                    "generated_stored"
+                } else {
+                    "generated_virtual"
+                };
+                let inner = collect_paren_option(&parts, &mut i, keyword, &name)?;
                 if inner.is_empty() {
                     return Err(format!(
-                        "generated_stored expression is empty for column '{}'",
+                        "{keyword} expression is empty for column '{}'",
                         name
                     ));
                 }
-                col.generated = Some(Generated::AlwaysStored(inner.to_string()));
+                col.generated = Some(if keyword == "generated_stored" {
+                    Generated::AlwaysStored(inner)
+                } else {
+                    Generated::AlwaysVirtual(inner)
+                });
+            }
+            "collate" if i + 1 < parts.len() => {
+                if col.collation.is_some() {
+                    return Err(format!("duplicate collate option for column '{}'", name));
+                }
+                i += 1;
+                col.collation = Some(parse_collation_token(parts[i], &name)?);
+            }
+            "collate" => {
+                return Err(format!(
+                    "collate requires a collation for column '{}'",
+                    name
+                ));
             }
             "references" => {
                 let fk_str = if i + 1 < parts.len() {
@@ -588,6 +592,112 @@ fn paren_delta_ignoring_quotes(raw: &str, quote: &mut Option<char>) -> i32 {
     delta
 }
 
+/// Join `parts[*i..]` until the `keyword(...)` group is balanced; returns the
+/// trimmed text inside the parentheses and leaves `*i` on its last token.
+fn collect_paren_option(
+    parts: &[&str],
+    i: &mut usize,
+    keyword: &str,
+    column: &str,
+) -> Result<String, String> {
+    let first = parts[*i];
+    let mut text = first.to_string();
+    let mut quote = None;
+    let mut depth = paren_delta_ignoring_quotes(first, &mut quote);
+    while (depth > 0 || quote.is_some()) && *i + 1 < parts.len() {
+        *i += 1;
+        text.push(' ');
+        text.push_str(parts[*i]);
+        depth += paren_delta_ignoring_quotes(parts[*i], &mut quote);
+    }
+    if quote.is_some() {
+        return Err(format!(
+            "unterminated quote in {keyword} expression for column '{column}'"
+        ));
+    }
+    if depth != 0 {
+        return Err(format!(
+            "unclosed {keyword} expression for column '{column}'"
+        ));
+    }
+    let inner = text
+        .strip_prefix(keyword)
+        .and_then(|s| s.strip_prefix('('))
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| format!("invalid {keyword} expression for column '{column}'"))?;
+    Ok(inner.trim().to_string())
+}
+
+/// `start N increment N minvalue N maxvalue N cache N cycle` (any order, each once).
+fn parse_identity_options(raw: &str, column: &str) -> Result<crate::ast::IdentityOptions, String> {
+    let mut options = crate::ast::IdentityOptions::default();
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    let mut seen = HashSet::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let key = tokens[i];
+        if !seen.insert(key) {
+            return Err(format!(
+                "duplicate identity option '{key}' for column '{column}'"
+            ));
+        }
+        if key == "cycle" {
+            options.cycle = true;
+            i += 1;
+            continue;
+        }
+        let value = tokens
+            .get(i + 1)
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or_else(|| {
+                format!("identity option '{key}' requires an integer for column '{column}'")
+            })?;
+        match key {
+            "start" => options.start = Some(value),
+            "increment" => options.increment = Some(value),
+            "minvalue" => options.min_value = Some(value),
+            "maxvalue" => options.max_value = Some(value),
+            "cache" => options.cache = Some(value),
+            _ => {
+                return Err(format!(
+                    "unknown identity option '{key}' for column '{column}'"
+                ));
+            }
+        }
+        i += 2;
+    }
+    if options.is_empty() {
+        return Err(format!("empty identity options for column '{column}'"));
+    }
+    Ok(options)
+}
+
+/// `"C"` (doubled quotes escape) or a bare `name` / `schema.name`.
+fn parse_collation_token(token: &str, column: &str) -> Result<String, String> {
+    if let Some(inner) = token.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        let mut out = String::new();
+        let mut chars = inner.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '"' && chars.next() != Some('"') {
+                return Err(format!("invalid collation '{token}' for column '{column}'"));
+            }
+            out.push(ch);
+        }
+        if out.is_empty() {
+            return Err(format!("empty collation for column '{column}'"));
+        }
+        return Ok(out);
+    }
+    let valid = !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !valid {
+        return Err(format!("invalid collation '{token}' for column '{column}'"));
+    }
+    Ok(token.to_string())
+}
+
 fn parse_column_type_prefix(
     parts: &[&str],
     enum_types: &[EnumType],
@@ -705,6 +815,34 @@ fn parse_index(line: &str) -> Result<Index, String> {
         }
         index.include = include_cols;
         trailing = include_rest[include_end + 1..].trim();
+    }
+
+    if let Some(with_rest) = trailing.strip_prefix("with ") {
+        let with_rest = with_rest.trim_start();
+        if !with_rest.starts_with('(') {
+            return Err("index with clause requires a parameter list".to_string());
+        }
+        let with_end = find_matching_paren(with_rest, 0).ok_or("Missing ) in index with")?;
+        let params = split_top_level_csv(&with_rest[1..with_end])?;
+        if params.is_empty() {
+            return Err("index with parameters are required".to_string());
+        }
+        for param in &params {
+            let valid = param.split_once('=').is_some_and(|(key, value)| {
+                is_native_identifier(key.trim()) && !value.trim().is_empty()
+            });
+            if !valid {
+                return Err(format!("invalid index storage parameter '{}'", param));
+            }
+        }
+        index.storage_params = params
+            .iter()
+            .map(|param| {
+                let (key, value) = param.split_once('=').unwrap_or((param, ""));
+                format!("{}={}", key.trim(), value.trim())
+            })
+            .collect();
+        trailing = with_rest[with_end + 1..].trim();
     }
 
     if let Some(pred) = trailing.strip_prefix("where ") {
@@ -1582,7 +1720,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     let (body_start_idx, delimiter) = find_dollar_delimiter(after_args)
         .ok_or_else(|| "function body must be wrapped in a dollar-quoted block".to_string())?;
     let header = after_args[..body_start_idx].trim();
-    let (returns, language, volatility) = parse_function_header(header)?;
+    let (returns, language, volatility, options) = parse_function_header(header)?;
 
     let body = collect_dollar_body(
         &after_args[body_start_idx + delimiter.len()..],
@@ -1597,8 +1735,42 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     func.language = language;
     func.args = args;
     func.volatility = volatility;
+    func.options = options;
 
     Ok(func)
+}
+
+/// Function header option keywords that follow `language`/volatility.
+const FUNCTION_OPTION_KEYWORDS: &[&str] = &[
+    "strict",
+    "security_definer",
+    "leakproof",
+    "parallel",
+    "cost",
+    "rows",
+    "set",
+];
+
+/// Parse a qail double-quoted string starting at `raw[0]`; returns the
+/// unescaped value and the byte length consumed.
+fn parse_qail_quoted_prefix(raw: &str) -> Option<(String, usize)> {
+    let mut chars = raw.char_indices().peekable();
+    if chars.next()?.1 != '"' {
+        return None;
+    }
+    let mut value = String::new();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '"' {
+            if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                chars.next();
+                value.push('"');
+                continue;
+            }
+            return Some((value, idx + 1));
+        }
+        value.push(ch);
+    }
+    None
 }
 
 fn find_matching_paren(raw: &str, open_idx: usize) -> Option<usize> {
@@ -1743,7 +1915,9 @@ struct HeaderWord {
     depth: usize,
 }
 
-fn parse_function_header(header: &str) -> Result<(String, String, Option<String>), String> {
+type FunctionHeader = (String, String, Option<String>, crate::ast::FunctionOptions);
+
+fn parse_function_header(header: &str) -> Result<FunctionHeader, String> {
     let words = header_word_spans(header);
     let returns_matches: Vec<usize> = words
         .iter()
@@ -1787,12 +1961,23 @@ fn parse_function_header(header: &str) -> Result<(String, String, Option<String>
         return Err("function has duplicate volatility clauses".to_string());
     }
     let volatility_idx = volatility_matches.first().copied();
+    let option_idxs: Vec<usize> = words
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, word)| {
+            (word.depth == 0
+                && FUNCTION_OPTION_KEYWORDS
+                    .contains(&header[word.start..word.end].to_ascii_lowercase().as_str()))
+            .then_some(idx)
+        })
+        .collect();
 
     let returns_idx = returns_idx.ok_or_else(|| "function missing returns clause".to_string())?;
     let start = words[returns_idx].end;
     let end = [language_idx, volatility_idx]
         .into_iter()
         .flatten()
+        .chain(option_idxs.iter().copied())
         .filter(|next_idx| *next_idx > returns_idx)
         .min()
         .map(|next_idx| words[next_idx].start)
@@ -1832,6 +2017,65 @@ fn parse_function_header(header: &str) -> Result<(String, String, Option<String>
     if let Some(idx) = volatility_idx {
         covered[idx] = true;
     }
+
+    let mut options = crate::ast::FunctionOptions::default();
+    let mut seen_options = HashSet::new();
+    for &idx in &option_idxs {
+        if covered[idx] {
+            // A value word of an earlier option (e.g. `set "rows TO 5"`).
+            continue;
+        }
+        let keyword = header[words[idx].start..words[idx].end].to_ascii_lowercase();
+        if keyword != "set" && !seen_options.insert(keyword.clone()) {
+            return Err(format!("function has duplicate {keyword} clauses"));
+        }
+        covered[idx] = true;
+        let value_word = words.get(idx + 1);
+        let mut take_value = |label: &str| -> Result<String, String> {
+            let word = value_word.ok_or_else(|| format!("function {label} requires a value"))?;
+            covered[idx + 1] = true;
+            Ok(header[word.start..word.end].to_string())
+        };
+        match keyword.as_str() {
+            "strict" => options.strict = true,
+            "security_definer" => options.security_definer = true,
+            "leakproof" => options.leakproof = true,
+            "parallel" => {
+                let value = take_value("parallel")?.to_ascii_lowercase();
+                if !matches!(value.as_str(), "safe" | "restricted" | "unsafe") {
+                    return Err(format!("invalid function parallel mode '{value}'"));
+                }
+                options.parallel = Some(value);
+            }
+            "cost" | "rows" => {
+                let value = take_value(&keyword)?;
+                if !value.parse::<f64>().is_ok_and(|n| n.is_finite() && n > 0.0) {
+                    return Err(format!("invalid function {keyword} '{value}'"));
+                }
+                if keyword == "cost" {
+                    options.cost = Some(value);
+                } else {
+                    options.rows = Some(value);
+                }
+            }
+            _ => {
+                let word = value_word.ok_or("function set requires a quoted setting")?;
+                let (value, consumed) = parse_qail_quoted_prefix(&header[word.start..])
+                    .ok_or("function set requires a quoted setting")?;
+                let value_end = word.start + consumed;
+                for (other_idx, other) in words.iter().enumerate() {
+                    if other.start >= word.start && other.end <= value_end {
+                        covered[other_idx] = true;
+                    }
+                }
+                if value.trim().is_empty() {
+                    return Err("function set setting is empty".to_string());
+                }
+                options.config.push(value);
+            }
+        }
+    }
+
     for (idx, word) in words.iter().enumerate() {
         if !covered[idx] {
             return Err(format!(
@@ -1841,7 +2085,7 @@ fn parse_function_header(header: &str) -> Result<(String, String, Option<String>
         }
     }
 
-    Ok((returns.to_string(), language, volatility))
+    Ok((returns.to_string(), language, volatility, options))
 }
 
 fn header_word_spans(header: &str) -> Vec<HeaderWord> {
@@ -2007,7 +2251,56 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     }
 
     let exec_idx = exec_idx.ok_or("trigger missing 'execute' keyword")?;
-    let event_tokens = &parts[on_idx + 3..exec_idx];
+    let mut event_tokens = &parts[on_idx + 3..exec_idx];
+
+    // Clauses between the events and `execute`:
+    // `for_each_statement`, `old_table <name>`, `new_table <name>`.
+    let mut for_each_row = true;
+    let mut old_table = None;
+    let mut new_table = None;
+    if let Some(clause_start) = event_tokens.iter().position(|tok| {
+        matches!(
+            *tok,
+            "for_each_statement" | "for_each_row" | "old_table" | "new_table"
+        )
+    }) {
+        let clause_tokens = &event_tokens[clause_start..];
+        event_tokens = &event_tokens[..clause_start];
+        let mut seen_clauses = HashSet::new();
+        let mut j = 0;
+        while j < clause_tokens.len() {
+            let clause = clause_tokens[j];
+            let key = if clause.starts_with("for_each_") {
+                "for_each"
+            } else {
+                clause
+            };
+            if !seen_clauses.insert(key) {
+                return Err(format!("duplicate trigger clause '{}'", clause));
+            }
+            match clause {
+                "for_each_statement" => for_each_row = false,
+                "for_each_row" => for_each_row = true,
+                "old_table" | "new_table" => {
+                    let name = clause_tokens
+                        .get(j + 1)
+                        .ok_or_else(|| format!("trigger {clause} requires a name"))?;
+                    if !is_native_identifier(name) {
+                        return Err(format!("invalid trigger {clause} name '{}'", name));
+                    }
+                    if clause == "old_table" {
+                        old_table = Some(name.to_string());
+                    } else {
+                        new_table = Some(name.to_string());
+                    }
+                    j += 1;
+                }
+                other => return Err(format!("unknown trigger clause '{}'", other)),
+            }
+            j += 1;
+        }
+    }
+
     let mut chunks: Vec<Vec<&str>> = Vec::new();
     let mut current = Vec::new();
     for tok in event_tokens {
@@ -2077,14 +2370,33 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     if !is_native_table_ref(func_name) {
         return Err(format!("invalid trigger function '{}'", func_name));
     }
+    let mut condition = None;
     if parts.len() > exec_idx + 2 {
-        return Err("trailing content after trigger function".to_string());
+        if parts[exec_idx + 2] != "when" || parts.len() == exec_idx + 3 {
+            return Err("trailing content after trigger function".to_string());
+        }
+        // Take the raw text so whitespace inside literals survives.
+        let cond_token = parts[exec_idx + 3];
+        let offset = cond_token.as_ptr() as usize - rest.as_ptr() as usize;
+        let raw = rest[offset..].trim();
+        let close = find_matching_paren(raw, 0)
+            .filter(|close| raw.starts_with('(') && *close == raw.len() - 1)
+            .ok_or("trigger when condition must be wrapped in parentheses")?;
+        let inner = raw[1..close].trim();
+        if inner.is_empty() {
+            return Err("trigger when condition is empty".to_string());
+        }
+        condition = Some(inner.to_string());
     }
 
     let mut trigger = SchemaTriggerDef::new(name, *table, *func_name);
     trigger.timing = timing;
     trigger.events = events;
     trigger.update_columns = update_columns;
+    trigger.for_each_row = for_each_row;
+    trigger.old_table = old_table;
+    trigger.new_table = new_table;
+    trigger.condition = condition;
 
     Ok(trigger)
 }
@@ -2320,8 +2632,12 @@ fn is_column_constraint_keyword(token: &str) -> bool {
             | "initially_deferred"
             | "initially_immediate"
             | "check_name"
+            | "collate"
     ) || token.starts_with("check(")
         || token.starts_with("generated_stored(")
+        || token.starts_with("generated_virtual(")
+        || token.starts_with("generated_identity(")
+        || token.starts_with("generated_by_default_identity(")
 }
 
 /// Parse a QAIL check expression string into a CheckExpr.

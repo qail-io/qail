@@ -1157,6 +1157,8 @@ struct LiveColumnDefinition {
     numeric_precision: Option<i32>,
     numeric_scale: Option<i32>,
     datetime_precision: Option<i32>,
+    /// Interval field restriction, e.g. `DAY TO SECOND(3)`.
+    interval_type: Option<String>,
     nullable: bool,
 }
 
@@ -1175,6 +1177,7 @@ async fn live_column_definition(
             "numeric_precision",
             "numeric_scale",
             "datetime_precision",
+            "interval_type",
         ])
         .where_eq("table_schema", schema)
         .where_eq("table_name", table_name)
@@ -1202,6 +1205,7 @@ async fn live_column_definition(
         numeric_precision: row.get_i32(4),
         numeric_scale: row.get_i32(5),
         datetime_precision: row.get_i32(6),
+        interval_type: row.get_string(7),
         nullable: is_nullable.eq_ignore_ascii_case("YES"),
     }))
 }
@@ -1423,6 +1427,30 @@ fn type_modifiers_match(
             let expected_precision = modifiers.first().copied().unwrap_or(6);
             live.datetime_precision == Some(expected_precision)
         }
+        // `bit` without a length is bit(1); `bit varying` without one is unbounded.
+        "bit" => live.character_maximum_length == Some(modifiers.first().copied().unwrap_or(1)),
+        "bit varying" => live.character_maximum_length == modifiers.first().copied(),
+        "interval" => {
+            let expected_fields = expected
+                .trim()
+                .split('(')
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_uppercase();
+            let live_fields = live
+                .interval_type
+                .as_deref()
+                .and_then(|fields| fields.split('(').next())
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_uppercase();
+            let expected_precision = modifiers.first().copied().unwrap_or(6);
+            expected_fields == live_fields && live.datetime_precision == Some(expected_precision)
+        }
         _ => true,
     }
 }
@@ -1486,6 +1514,9 @@ fn normalize_column_type(raw: &str) -> String {
         "timestamp" => "timestamp without time zone",
         "timetz" => "time with time zone",
         "time" => "time without time zone",
+        "varbit" => "bit varying",
+        // `interval day to second` etc.: fields are checked with the modifiers.
+        other if other.starts_with("interval ") => "interval",
         other => other,
     }
     .to_string()
@@ -2502,8 +2533,36 @@ mod tests {
             numeric_precision,
             numeric_scale,
             datetime_precision,
+            interval_type: None,
             nullable: false,
         }
+    }
+
+    #[test]
+    fn column_type_matching_checks_bit_and_interval_modifiers() {
+        let bit_8 = live_column("bit", Some(8), None, None, None);
+        assert!(column_type_matches("BIT(8)", &bit_8));
+        assert!(!column_type_matches("BIT", &bit_8));
+        let varbit_16 = live_column("bit varying", Some(16), None, None, None);
+        assert!(column_type_matches("VARBIT(16)", &varbit_16));
+        assert!(!column_type_matches("VARBIT", &varbit_16));
+
+        let day_to_second_3 = LiveColumnDefinition {
+            interval_type: Some("DAY TO SECOND(3)".to_string()),
+            ..live_column("interval", None, None, None, Some(3))
+        };
+        assert!(column_type_matches(
+            "INTERVAL DAY TO SECOND(3)",
+            &day_to_second_3
+        ));
+        assert!(!column_type_matches("INTERVAL", &day_to_second_3));
+        assert!(!column_type_matches(
+            "INTERVAL DAY TO SECOND(6)",
+            &day_to_second_3
+        ));
+        let plain = live_column("interval", None, None, None, Some(6));
+        assert!(column_type_matches("INTERVAL", &plain));
+        assert!(!column_type_matches("INTERVAL YEAR", &plain));
     }
 
     #[test]

@@ -1366,4 +1366,72 @@ table idempotency_keys {
             "expected interval default preserved"
         );
     }
+
+    #[test]
+    fn test_strict_compile_attaches_sequence_owner_after_its_table() {
+        // The owner table's default needs the sequence, and OWNED BY needs the
+        // table: create the sequence first, attach ownership after CREATE TABLE.
+        let input = r#"
+sequence owner_seq { start 500 cache 5 owned_by owner_t.id }
+sequence external_seq { owned_by elsewhere.id }
+
+table owner_t {
+  id INT primary_key default nextval('owner_seq'::regclass)
+}
+"#;
+        let cmds = parse_qail_to_commands_strict(input).expect("owned sequence compiles");
+        let sql = commands_to_sql(&cmds);
+        let create_seq = sql
+            .find("CREATE SEQUENCE owner_seq")
+            .expect("create sequence");
+        let create_table = sql.find("CREATE TABLE owner_t").expect("create table");
+        let attach = sql
+            .find("ALTER SEQUENCE owner_seq OWNED BY owner_t.id")
+            .expect("ownership attached");
+        assert!(create_seq < create_table && create_table < attach, "{sql}");
+        assert!(
+            !sql.contains("CREATE SEQUENCE owner_seq START WITH 500 CACHE 5 OWNED BY"),
+            "{sql}"
+        );
+        // An owner outside this migration already exists: keep it inline.
+        assert!(
+            sql.contains("CREATE SEQUENCE external_seq OWNED BY elsewhere.id"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_strict_compile_keeps_pulled_trigger_and_function_properties() {
+        let input = r#"
+table trig_t {
+  id INT primary_key
+  val INT
+}
+
+function trg_fn() returns trigger language plpgsql security_definer set "search_path TO 'public'" $$
+BEGIN RETURN NULL; END
+$$
+
+trigger trig_when on trig_t before update of val execute trg_fn when (old.val IS DISTINCT FROM new.val)
+trigger trig_rows on trig_t after update for_each_statement old_table old_rows new_table new_rows execute trg_fn
+"#;
+        let cmds = parse_qail_to_commands_strict(input).expect("pulled triggers compile");
+        let sql = commands_to_sql(&cmds);
+        assert!(
+            sql.contains("SECURITY DEFINER SET search_path TO 'public' AS"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "FOR EACH ROW WHEN (old.val IS DISTINCT FROM new.val) EXECUTE FUNCTION trg_fn()"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT"
+            ),
+            "{sql}"
+        );
+    }
 }

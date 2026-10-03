@@ -37,6 +37,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: Some("active = true".to_string()),
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -56,6 +57,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -75,6 +77,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -94,6 +97,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -113,6 +117,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -132,6 +137,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -151,6 +157,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -170,6 +177,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: Some("active = true\0".to_string()),
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -189,6 +197,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec!["name".to_string(), "created_at".to_string()],
             concurrently: true,
             where_clause: Some("deleted_at IS NULL".to_string()),
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -208,6 +217,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec!["lower(name)".to_string()],
             concurrently: false,
             where_clause: None,
+            storage_params: vec![],
         }),
         ..Default::default()
     };
@@ -838,6 +848,7 @@ fn test_create_function_with_args_sql() {
             body: "BEGIN RETURN v + 1; END;".to_string(),
             language: Some("plpgsql".to_string()),
             volatility: None,
+            options: Default::default(),
         }),
         ..Default::default()
     };
@@ -859,6 +870,7 @@ fn test_function_definition_rejects_invalid_fragments() {
             body: "BEGIN RETURN; END;".to_string(),
             language: Some("plpgsql".to_string()),
             volatility: None,
+            options: Default::default(),
         }),
         ..Default::default()
     };
@@ -879,6 +891,7 @@ fn test_function_definition_rejects_invalid_fragments() {
             body: "BEGIN RETURN; END;".to_string(),
             language: Some("plpgsql".to_string()),
             volatility: None,
+            options: Default::default(),
         }),
         ..Default::default()
     };
@@ -899,6 +912,7 @@ fn test_function_definition_rejects_invalid_fragments() {
             body: "BEGIN RETURN; END;".to_string(),
             language: Some("plpgsql".to_string()),
             volatility: Some("stable; DROP TABLE users".to_string()),
+            options: Default::default(),
         }),
         ..Default::default()
     };
@@ -940,6 +954,9 @@ fn test_create_trigger_renders_update_of_columns() {
             update_columns: vec!["email".to_string(), "display-name".to_string()],
             for_each_row: true,
             execute_function: "touch_updated_at".to_string(),
+            condition: None,
+            old_table: None,
+            new_table: None,
         }),
         ..Default::default()
     };
@@ -971,6 +988,7 @@ fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
             body: "BEGIN RAISE NOTICE $$boom$$; END;".to_string(),
             language: Some("plpgsql".to_string()),
             volatility: None,
+            options: Default::default(),
         }),
         ..Default::default()
     };

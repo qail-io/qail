@@ -248,7 +248,7 @@ fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) ->
 /// Map ColumnType AST enum to Rust types (for codegen).
 /// This is the ONLY place where we map SQL types to Rust types.
 fn column_type_to_rust(col_type: &ColumnType) -> &'static str {
-    match col_type {
+    match &col_type.native_family() {
         ColumnType::Uuid => "uuid::Uuid",
         ColumnType::Text | ColumnType::Varchar(_) => "String",
         ColumnType::Int | ColumnType::BigInt | ColumnType::Serial | ColumnType::BigSerial => "i64",
