@@ -18,6 +18,7 @@
 //! ```
 
 use super::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
+use super::schema::TemporalKey;
 use super::schema::{
     CheckComparisonOp, CheckConstraint, CheckExpr, Column, Comment, Deferrable, EnumType,
     Extension, FkAction, Generated, Grant, Index, IndexMethod, MigrationHint,
@@ -265,6 +266,17 @@ where
         {
             let fk = parse_multi_column_fk(line)?;
             table.multi_column_fks.push(fk);
+            continue;
+        }
+
+        // Table-level PostgreSQL 18 temporal key
+        if line.starts_with("primary_key (")
+            || line.starts_with("primary_key(")
+            || line.starts_with("unique (")
+            || line.starts_with("unique(")
+        {
+            let key = parse_temporal_key(line)?;
+            table.temporal_keys.push(key);
             continue;
         }
 
@@ -1334,6 +1346,101 @@ fn parse_enum_value(raw: &str) -> Result<String, String> {
     Err(format!("unterminated quoted enum value '{}'", trimmed))
 }
 
+/// Strip a PostgreSQL 18 `period <col>` marker from the last column of a key
+/// list. A marker anywhere else is an error.
+fn strip_period_marker(columns: &mut [String]) -> Result<bool, String> {
+    let split = |col: &str| -> Option<String> {
+        let (keyword, rest) = col.split_once(char::is_whitespace)?;
+        keyword
+            .eq_ignore_ascii_case("period")
+            .then(|| rest.trim().to_string())
+    };
+    let last = columns.len().saturating_sub(1);
+    let mut period = false;
+    for (i, col) in columns.iter_mut().enumerate() {
+        if let Some(name) = split(col) {
+            if i != last {
+                return Err(format!(
+                    "`period` must mark the last key column, not '{name}'"
+                ));
+            }
+            *col = name;
+            period = true;
+        }
+    }
+    Ok(period)
+}
+
+/// Parse a table-level PostgreSQL 18 temporal key.
+/// Syntax: `primary_key (a, b, during without_overlaps) [constraint name]`
+/// or the same with `unique`.
+fn parse_temporal_key(line: &str) -> Result<TemporalKey, String> {
+    let (primary, rest) = if let Some(rest) = line.strip_prefix("primary_key") {
+        (true, rest)
+    } else if let Some(rest) = line.strip_prefix("unique") {
+        (false, rest)
+    } else {
+        return Err(format!("expected primary_key or unique key: '{}'", line));
+    };
+    let rest = rest.trim();
+    let inner_start = rest
+        .strip_prefix('(')
+        .ok_or_else(|| format!("table key missing '(': '{}'", line))?;
+    let close = inner_start
+        .find(')')
+        .ok_or_else(|| format!("table key missing ')': '{}'", line))?;
+    let mut columns: Vec<String> = inner_start[..close]
+        .split(',')
+        .map(|col| col.trim().to_string())
+        .collect();
+    let last = columns
+        .pop()
+        .ok_or_else(|| format!("table key has no columns: '{}'", line))?;
+    let period = last
+        .strip_suffix("without_overlaps")
+        .map(str::trim)
+        .filter(|col| !col.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "table-level key needs `<range_column> without_overlaps` last (only temporal keys are table-level): '{}'",
+                line
+            )
+        })?
+        .to_string();
+    if columns.is_empty() {
+        return Err(format!(
+            "temporal key needs at least one column before the period: '{}'",
+            line
+        ));
+    }
+    let mut seen = HashSet::new();
+    for col in columns.iter().chain(std::iter::once(&period)) {
+        if !is_native_identifier(col) {
+            return Err(format!("invalid temporal key column '{}'", col));
+        }
+        if !seen.insert(col.as_str()) {
+            return Err(format!("duplicate temporal key column '{}'", col));
+        }
+    }
+    let trailing = inner_start[close + 1..].trim();
+    let name = if trailing.is_empty() {
+        None
+    } else {
+        let name = trailing
+            .strip_prefix("constraint ")
+            .map(str::trim)
+            .filter(|name| is_native_identifier(name))
+            .ok_or_else(|| format!("unexpected text after temporal key: '{}'", trailing))?;
+        Some(name.to_string())
+    };
+    Ok(TemporalKey {
+        name,
+        primary,
+        columns,
+        period,
+    })
+}
+
 /// Parse a table-level multi-column foreign key.
 /// Syntax: `foreign_key (a, b) references other_table(x, y)`
 pub(crate) fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
@@ -1342,10 +1449,11 @@ pub(crate) fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey,
     // Extract local columns from (...)
     let local_start = rest.find('(').ok_or("foreign_key missing ( for columns")?;
     let local_end = rest.find(')').ok_or("foreign_key missing ) for columns")?;
-    let local_cols: Vec<String> = rest[local_start + 1..local_end]
+    let mut local_cols: Vec<String> = rest[local_start + 1..local_end]
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+    let local_period = strip_period_marker(&mut local_cols)?;
     if local_cols.is_empty() || local_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key local columns are required".to_string());
     }
@@ -1380,10 +1488,14 @@ pub(crate) fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey,
             ref_table
         ));
     }
-    let ref_cols: Vec<String> = ref_part[ref_paren_start + 1..ref_paren_end]
+    let mut ref_cols: Vec<String> = ref_part[ref_paren_start + 1..ref_paren_end]
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+    let ref_period = strip_period_marker(&mut ref_cols)?;
+    if local_period != ref_period {
+        return Err("foreign_key `period` must mark the last column on both sides".to_string());
+    }
     let trailing = ref_part[ref_paren_end + 1..].trim();
     if ref_cols.is_empty() || ref_cols.iter().any(|col| col.is_empty()) {
         return Err("foreign_key referenced columns are required".to_string());
@@ -1402,6 +1514,7 @@ pub(crate) fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey,
     }
 
     let mut fk = MultiColumnForeignKey::new(local_cols, ref_table, ref_cols);
+    fk.period = local_period;
     if !trailing.is_empty() {
         apply_multi_column_fk_options(&mut fk, trailing)?;
     }

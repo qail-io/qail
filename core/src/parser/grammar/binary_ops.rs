@@ -65,6 +65,10 @@ where
             if let Ok((after_op, _)) =
                 tag::<_, _, nom::error::Error<&str>>(*op_str).parse(remaining)
             {
+                // `-|-` is the range adjacency predicate, not subtraction.
+                if *op_str == "-" && after_op.starts_with("|-") {
+                    continue;
+                }
                 matched = Some((after_op, *op_enum));
                 break;
             }

@@ -90,6 +90,7 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
             })
             .collect();
         sql.push_str(" RETURNING ");
+        sql.push_str(&super::returning_aliases_sql(cmd, generator.as_ref()));
         sql.push_str(&cols.join(", "));
     }
 

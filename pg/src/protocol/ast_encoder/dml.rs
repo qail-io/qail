@@ -5,16 +5,16 @@
 use bytes::BytesMut;
 use qail_core::ast::{
     Action, CTEDef, CageKind, ColumnGeneration, Condition, ConflictAction, Constraint, Expr,
-    GroupByMode, JoinKind, LockMode, LogicalOp, Merge, MergeAction, MergeMatchKind, MergeSource,
-    Operator, OverridingKind, Qail, SampleMethod, SetOp, SortOrder, Value,
+    FromSource, GroupByMode, JoinKind, LockMode, LogicalOp, Merge, MergeAction, MergeMatchKind,
+    MergeSource, Operator, OverridingKind, Qail, SampleMethod, SetOp, SortOrder, Value,
 };
 use qail_core::transpiler::escape_identifier;
 use std::collections::HashSet;
 
 use super::helpers::write_usize;
 use super::values::{
-    encode_columns, encode_columns_with_params, encode_conditions, encode_expr,
-    encode_expr_with_params, encode_join_value, encode_operator, encode_value,
+    encode_call_args_with_params, encode_columns, encode_columns_with_params, encode_conditions,
+    encode_expr, encode_expr_with_params, encode_join_value, encode_operator, encode_value,
 };
 
 const MAX_IDENT_LEN: usize = 63;
@@ -598,14 +598,15 @@ pub(crate) fn validate_expr_ref(
         }
         Expr::FunctionCall { name, args, alias } => {
             validate_qualified_ident(&format!("{field}.function"), name, false)?;
-            for arg in args {
-                validate_expr_ref(&format!("{field}.arg"), arg)?;
-            }
+            validate_function_call_args(field, args)?;
             if let Some(alias) = alias {
                 validate_ident_atom(&format!("{field}.alias"), alias)?;
             }
             Ok(())
         }
+        Expr::FunctionArg { .. } => Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{field}: named/VARIADIC argument outside a function call"
+        ))),
         Expr::SpecialFunction { name, args, alias } => {
             validate_qualified_ident(&format!("{field}.special_function"), name, false)?;
             for (keyword, arg) in args {
@@ -791,6 +792,7 @@ fn validate_dml_command(
     if !cmd.table.is_empty() {
         validate_table_ref("table", &cmd.table)?;
     }
+    validate_from_source(cmd)?;
 
     if let Some((_, percent, _)) = cmd.sample
         && (!percent.is_finite() || !(0.0..=100.0).contains(&percent))
@@ -895,6 +897,7 @@ fn validate_dml_command(
             validate_expr_ref("returning", expr)?;
         }
     }
+    validate_returning_aliases(cmd)?;
 
     if let Some(on_conflict) = &cmd.on_conflict {
         for column in &on_conflict.columns {
@@ -950,6 +953,152 @@ fn validate_dml_command(
     }
 
     Ok(())
+}
+
+/// Call arguments: the only place `Expr::FunctionArg` may appear.
+fn validate_function_call_args(
+    field: &str,
+    args: &[Expr],
+) -> Result<(), crate::protocol::EncodeError> {
+    qail_core::ast::validate_function_args(args)
+        .map_err(|error| crate::protocol::EncodeError::InvalidAst(format!("{field}: {error}")))?;
+    for arg in args {
+        match arg {
+            Expr::FunctionArg { name, value, .. } => {
+                if let Some(name) = name {
+                    validate_ident_atom(&format!("{field}.arg_name"), name)?;
+                }
+                validate_expr_ref(&format!("{field}.arg"), value)?;
+            }
+            other => validate_expr_ref(&format!("{field}.arg"), other)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_from_source(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    let Some(source) = &cmd.from_source else {
+        return Ok(());
+    };
+    if let Some(error) = qail_core::transpiler::dml::select::from_source_error(cmd, source) {
+        return Err(crate::protocol::EncodeError::InvalidAst(error));
+    }
+    validate_ident_atom("from_source.alias", source.alias())?;
+    for column in source.column_alias_list() {
+        validate_ident_atom("from_source.column_alias", column)?;
+    }
+    match source {
+        FromSource::Subquery { query, .. } => {
+            validate_read_only_select_query_with_message(
+                query,
+                "FROM subquery requires a read-only get/with query",
+            )?;
+            validate_dml_command(query, &query.columns)?;
+        }
+        FromSource::Function { name, args, .. } => {
+            validate_qualified_ident("from_source.function", name, false)?;
+            validate_function_call_args("from_source", args)?;
+        }
+    }
+    Ok(())
+}
+
+/// `(subquery) AS alias (cols)` or `func(args) [WITH ORDINALITY] AS alias (cols)`,
+/// parameters numbered in text order with the rest of the statement.
+/// Callers run `validate_dml_command` (and so `validate_from_source`) first.
+fn encode_from_source(
+    source: &FromSource,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    match source {
+        FromSource::Subquery { query, .. } => {
+            buf.extend_from_slice(b"(");
+            encode_select(query, buf, params)?;
+            buf.extend_from_slice(b")");
+        }
+        FromSource::Function {
+            name,
+            args,
+            with_ordinality,
+            ..
+        } => {
+            buf.extend_from_slice(name.to_uppercase().as_bytes());
+            buf.extend_from_slice(b"(");
+            encode_call_args_with_params(args, buf, params)?;
+            buf.extend_from_slice(b")");
+            if *with_ordinality {
+                buf.extend_from_slice(b" WITH ORDINALITY");
+            }
+        }
+    }
+    buf.extend_from_slice(b" AS ");
+    push_identifier_ref(buf, source.alias(), false);
+    let columns = source.column_alias_list();
+    if !columns.is_empty() {
+        buf.extend_from_slice(b" (");
+        for (i, column) in columns.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            push_identifier_ref(buf, column, false);
+        }
+        buf.extend_from_slice(b")");
+    }
+    Ok(())
+}
+
+/// `RETURNING WITH (...)` needs a write action, a non-empty RETURNING list,
+/// and two distinct plain identifiers.
+fn validate_returning_aliases(cmd: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    let Some(aliases) = &cmd.returning_aliases else {
+        return Ok(());
+    };
+    let Some(parts) = aliases.sql_parts() else {
+        return Ok(());
+    };
+    if !matches!(
+        cmd.action,
+        Action::Add | Action::Set | Action::Del | Action::Merge | Action::Upsert | Action::Put
+    ) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "RETURNING WITH aliases require a write action, got {}",
+            cmd.action
+        )));
+    }
+    if cmd.returning.as_ref().is_none_or(|cols| cols.is_empty()) {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "RETURNING WITH aliases require a non-empty RETURNING list".to_string(),
+        ));
+    }
+    for (_, alias) in &parts {
+        validate_ident_atom("returning_aliases", alias)?;
+    }
+    if let [(_, before), (_, after)] = parts.as_slice()
+        && before.eq_ignore_ascii_case(after)
+    {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "RETURNING WITH aliases must differ".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `WITH (OLD AS x, NEW AS y) ` after `RETURNING `; nothing when unset.
+fn encode_returning_aliases(cmd: &Qail, buf: &mut BytesMut) {
+    let Some(parts) = cmd.returning_aliases.as_ref().and_then(|a| a.sql_parts()) else {
+        return;
+    };
+    buf.extend_from_slice(b"WITH (");
+    for (i, (keyword, alias)) in parts.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        buf.extend_from_slice(keyword.as_bytes());
+        buf.extend_from_slice(b" AS ");
+        push_identifier_ref(buf, alias, false);
+    }
+    buf.extend_from_slice(b") ");
 }
 
 /// Encode a SELECT statement directly to bytes.
@@ -1058,10 +1207,14 @@ fn encode_select_with_columns(
 
     // FROM
     buf.extend_from_slice(b" FROM ");
-    if cmd.only_table {
-        buf.extend_from_slice(b"ONLY ");
+    if let Some(source) = &cmd.from_source {
+        encode_from_source(source, buf, params)?;
+    } else {
+        if cmd.only_table {
+            buf.extend_from_slice(b"ONLY ");
+        }
+        push_table_ref(buf, &cmd.table);
     }
-    push_table_ref(buf, &cmd.table);
     append_table_sample_clause(cmd, buf);
 
     // JOINs
@@ -1120,7 +1273,13 @@ fn encode_select_with_columns(
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
                 buf.extend_from_slice(b" ");
+                if cond.op.is_jsonpath() {
+                    buf.extend_from_slice(b"CAST(");
+                }
                 encode_join_value(&cond.value, buf, params)?;
+                if cond.op.is_jsonpath() {
+                    buf.extend_from_slice(b" AS jsonpath)");
+                }
             }
         }
     }
@@ -1404,6 +1563,7 @@ fn try_encode_simple_select_fast(
             .iter()
             .any(|cage| matches!(cage.kind, CageKind::Sample(_)))
         || cmd.only_table
+        || cmd.from_source.is_some()
         || !matches!(cmd.group_by_mode, GroupByMode::Simple)
     {
         return Ok(false);
@@ -1653,6 +1813,7 @@ pub fn encode_insert(
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
+        encode_returning_aliases(cmd, buf);
         encode_columns(ret_cols, buf)?;
     }
 
@@ -1726,6 +1887,7 @@ pub fn encode_update(
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
+        encode_returning_aliases(cmd, buf);
         encode_columns(ret_cols, buf)?;
     }
 
@@ -1768,6 +1930,7 @@ pub fn encode_delete(
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
+        encode_returning_aliases(cmd, buf);
         encode_columns(ret_cols, buf)?;
     }
 
@@ -1823,6 +1986,7 @@ pub fn encode_merge(
         && !ret_cols.is_empty()
     {
         buf.extend_from_slice(b" RETURNING ");
+        encode_returning_aliases(cmd, buf);
         encode_columns(ret_cols, buf)?;
     }
 

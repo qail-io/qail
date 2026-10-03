@@ -126,6 +126,47 @@ pub fn encode_column_expr(
     encode_column_expr_inner(col, buf, None)
 }
 
+/// Call arguments, each `[VARIADIC ][name => ]value`. Callers validate the
+/// list with `validate_function_args` first (via `validate_expr_ref`).
+fn encode_call_args(
+    args: &[Expr],
+    buf: &mut BytesMut,
+    mut params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        match arg {
+            Expr::FunctionArg {
+                name,
+                variadic,
+                value,
+            } => {
+                if *variadic {
+                    buf.extend_from_slice(b"VARIADIC ");
+                }
+                if let Some(name) = name {
+                    push_identifier_ref(buf, name, false);
+                    buf.extend_from_slice(b" => ");
+                }
+                encode_column_expr_inner(value, buf, params.as_deref_mut())?;
+            }
+            other => encode_column_expr_inner(other, buf, params.as_deref_mut())?,
+        }
+    }
+    Ok(())
+}
+
+/// Encode already-validated call arguments sharing the caller's parameters.
+pub fn encode_call_args_with_params(
+    args: &[Expr],
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    encode_call_args(args, buf, Some(params))
+}
+
 /// Encode a single column expression with optional shared params.
 ///
 /// When `params` is `Some`, subqueries share the outer query's parameter
@@ -179,12 +220,7 @@ fn encode_column_expr_inner(
         Expr::FunctionCall { name, args, alias } => {
             buf.extend_from_slice(name.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
-            for (i, arg) in args.iter().enumerate() {
-                if i > 0 {
-                    buf.extend_from_slice(b", ");
-                }
-                encode_column_expr_inner(arg, buf, params.as_deref_mut())?;
-            }
+            encode_call_args(args, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
@@ -215,7 +251,13 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(op.to_string().as_bytes());
             buf.extend_from_slice(b" ");
+            if op.is_jsonpath() {
+                buf.extend_from_slice(b"CAST(");
+            }
             encode_column_expr_inner(right, buf, params.as_deref_mut())?;
+            if op.is_jsonpath() {
+                buf.extend_from_slice(b" AS jsonpath)");
+            }
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
@@ -238,7 +280,13 @@ fn encode_column_expr_inner(
                 encode_operator(&cond.op, buf);
                 if !matches!(cond.op, Operator::IsNull | Operator::IsNotNull) {
                     buf.extend_from_slice(b" ");
+                    if cond.op.is_jsonpath() {
+                        buf.extend_from_slice(b"CAST(");
+                    }
                     encode_case_condition_value(&cond.value, buf, params.as_deref_mut())?;
+                    if cond.op.is_jsonpath() {
+                        buf.extend_from_slice(b" AS jsonpath)");
+                    }
                 }
                 buf.extend_from_slice(b" THEN ");
                 encode_column_expr_inner(then_expr, buf, params.as_deref_mut())?;
@@ -497,6 +545,11 @@ fn encode_column_expr_inner(
                 push_identifier_ref(buf, a, false);
             }
         }
+        Expr::FunctionArg { .. } => {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "named/VARIADIC argument outside a function call".to_string(),
+            ));
+        }
         Expr::Def {
             name,
             data_type,
@@ -570,6 +623,15 @@ pub fn encode_operator(op: &Operator, buf: &mut BytesMut) {
         Operator::Contains => b"@>",
         Operator::ContainedBy => b"<@",
         Operator::Overlaps => b"&&",
+        Operator::Adjacent => b"-|-",
+        Operator::StrictlyLeft => b"<<",
+        Operator::StrictlyRight => b">>",
+        Operator::NotExtendsRight => b"&<",
+        Operator::NotExtendsLeft => b"&>",
+        Operator::SubnetOrEqual => b"<<=",
+        Operator::SupernetOrEqual => b">>=",
+        Operator::JsonPathExists => b"@?",
+        Operator::JsonPathMatch => b"@@",
         Operator::KeyExists => b"?",
         Operator::JsonExists => b"JSON_EXISTS",
         Operator::JsonQuery => b"JSON_QUERY",
@@ -711,6 +773,11 @@ fn encode_conditions_inline(
                         "BETWEEN condition requires exactly two array values".to_string(),
                     ));
                 }
+            }
+            Operator::JsonPathExists | Operator::JsonPathMatch => {
+                buf.extend_from_slice(b" CAST(");
+                encode_inline_value(&cond.value, buf)?;
+                buf.extend_from_slice(b" AS jsonpath)");
             }
             _ => {
                 buf.extend_from_slice(b" ");
@@ -1022,6 +1089,25 @@ pub fn encode_conditions(
             Operator::Contains => buf.extend_from_slice(b" @> "),
             Operator::ContainedBy => buf.extend_from_slice(b" <@ "),
             Operator::Overlaps => buf.extend_from_slice(b" && "),
+            Operator::Adjacent
+            | Operator::StrictlyLeft
+            | Operator::StrictlyRight
+            | Operator::NotExtendsRight
+            | Operator::NotExtendsLeft
+            | Operator::SubnetOrEqual
+            | Operator::SupernetOrEqual => {
+                buf.extend_from_slice(b" ");
+                encode_operator(&cond.op, buf);
+                buf.extend_from_slice(b" ");
+            }
+            Operator::JsonPathExists | Operator::JsonPathMatch => {
+                buf.extend_from_slice(b" ");
+                encode_operator(&cond.op, buf);
+                buf.extend_from_slice(b" CAST(");
+                encode_value(&cond.value, buf, params)?;
+                buf.extend_from_slice(b" AS jsonpath)");
+                continue;
+            }
             Operator::Fuzzy => {
                 buf.extend_from_slice(b" ILIKE '%' || ");
                 encode_value(&cond.value, buf, params)?;

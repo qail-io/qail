@@ -343,6 +343,12 @@ fn reject_unsupported_select_features(qail: &Qail) -> Result<(), NormalizeError>
     if qail.only_table {
         return Err(NormalizeError::UnsupportedFeature("ONLY"));
     }
+    if qail.from_source.is_some() {
+        return Err(NormalizeError::UnsupportedFeature("typed FROM source"));
+    }
+    if qail.returning_aliases.is_some() {
+        return Err(NormalizeError::UnsupportedFeature("RETURNING aliases"));
+    }
     if qail.vector.is_some()
         || qail.score_threshold.is_some()
         || qail.vector_name.is_some()
@@ -361,10 +367,11 @@ fn reject_unsupported_select_features(qail: &Qail) -> Result<(), NormalizeError>
 }
 
 fn condition_signature(condition: &Condition) -> String {
+    // Keyed by variant, not symbol: TextSearch and JsonPathMatch share `@@`.
     format!(
-        "{}|{}|{}|{}",
+        "{}|{:?}|{}|{}",
         expr_signature(&condition.left),
-        condition.op.sql_symbol(),
+        condition.op,
         value_signature(&condition.value),
         condition.is_array_unnest
     )

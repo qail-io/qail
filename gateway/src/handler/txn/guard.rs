@@ -80,7 +80,9 @@ fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
             reject_expr_subqueries(expr)?;
             reject_expr_subqueries(index)?;
         }
-        Expr::FieldAccess { expr, .. } => reject_expr_subqueries(expr)?,
+        Expr::FieldAccess { expr, .. } | Expr::FunctionArg { value: expr, .. } => {
+            reject_expr_subqueries(expr)?
+        }
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             reject_ddl_in_transaction(query)?;
         }
@@ -192,6 +194,17 @@ pub(super) fn reject_ddl_in_transaction(cmd: &Qail) -> Result<(), ApiError> {
     }
     if let Some(ref source_query) = cmd.source_query {
         reject_ddl_in_transaction(source_query)?;
+    }
+    match &cmd.from_source {
+        Some(qail_core::ast::FromSource::Subquery { query, .. }) => {
+            reject_ddl_in_transaction(query)?;
+        }
+        Some(qail_core::ast::FromSource::Function { args, .. }) => {
+            for arg in args {
+                reject_expr_subqueries(arg)?;
+            }
+        }
+        None => {}
     }
     for (_, set_query) in &cmd.set_ops {
         reject_ddl_in_transaction(set_query)?;

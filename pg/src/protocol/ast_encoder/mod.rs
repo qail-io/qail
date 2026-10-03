@@ -42,6 +42,18 @@ impl AstEncoder {
         Ok(())
     }
 
+    /// DDL and session encoders never read `from_source`; refuse it up front
+    /// instead of encoding the plain `table` silently.
+    #[inline]
+    fn reject_misplaced_from_source(cmd: &Qail) -> Result<(), EncodeError> {
+        if let Some(source) = &cmd.from_source
+            && let Some(error) = qail_core::transpiler::dml::select::from_source_error(cmd, source)
+        {
+            return Err(EncodeError::InvalidAst(error));
+        }
+        Ok(())
+    }
+
     /// Encode a Qail directly to Extended Query protocol bytes.
     /// Returns (wire_bytes, extracted_params_as_bytes)
     pub fn encode_cmd(cmd: &Qail) -> EncodeResult {
@@ -150,6 +162,7 @@ impl AstEncoder {
         // Clear buffers (but keep capacity!)
         sql_buf.clear();
         params.clear();
+        Self::reject_misplaced_from_source(cmd)?;
 
         match cmd.action {
             Action::Get | Action::With => {
@@ -237,6 +250,7 @@ impl AstEncoder {
     pub fn encode_cmd_sql(cmd: &Qail) -> EncodeSqlResult {
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
+        Self::reject_misplaced_from_source(cmd)?;
 
         match cmd.action {
             Action::Get | Action::With => {

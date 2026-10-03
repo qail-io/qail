@@ -32,3 +32,6 @@ pub use self::operators::{
     OverridingKind, SampleMethod, SetOp, SortOrder,
 };
 pub use self::values::Value;
+// PostgreSQL 18 RETURNING aliases, typed FROM sources, temporal keys.
+pub use self::cmd::{FromSource, ReturningAliases};
+pub use self::expr::validate_function_args;

@@ -47,6 +47,11 @@ impl Formatter {
     }
 
     fn visit_cmd(&mut self, cmd: &Qail) -> Result {
+        // The DSL has no syntax for these; printing `get <alias>` would read a
+        // table instead of the typed source on the way back.
+        if cmd.from_source.is_some() || cmd.returning_aliases.is_some() {
+            return Err(std::fmt::Error);
+        }
         for cte in &cmd.ctes {
             write!(self.buffer, "with {} = ", cte.name)?;
             self.indent_level += 1;
@@ -467,6 +472,19 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
+            Expr::FunctionArg {
+                name,
+                variadic,
+                value,
+            } => {
+                if *variadic {
+                    write!(self.buffer, "variadic ")?;
+                }
+                if let Some(name) = name {
+                    write!(self.buffer, "{} => ", name)?;
+                }
+                self.format_column(value)?;
+            }
             Expr::Collate {
                 expr,
                 collation,
@@ -561,6 +579,11 @@ impl Formatter {
                 Operator::IsNotNull => write!(self.buffer, " is not null")?,
                 Operator::Contains => write!(self.buffer, " @> ")?,
                 Operator::KeyExists => write!(self.buffer, " ? ")?,
+                // The DSL reads bare `@@` as text search.
+                Operator::JsonPathMatch => write!(self.buffer, " jsonpath_match ")?,
+                op if op.is_range_or_network() || op == Operator::JsonPathExists => {
+                    write!(self.buffer, " {} ", op.sql_symbol())?
+                }
                 _ => write!(self.buffer, " {:?} ", cond.op)?,
             }
 

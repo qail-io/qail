@@ -234,6 +234,30 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
     state.bump("Qail")?;
 
     ensure_str("qail.table", &cmd.table)?;
+    if let Some(source) = &cmd.from_source {
+        ensure_str("qail.from_source.alias", source.alias())?;
+        let columns = source.column_alias_list();
+        ensure_len(
+            "qail.from_source.column_aliases",
+            columns.len(),
+            MAX_AST_COLLECTION_LEN,
+        )?;
+        for column in columns {
+            ensure_str("qail.from_source.column_alias", column)?;
+        }
+        match source {
+            crate::ast::FromSource::Subquery { query, .. } => {
+                validate_qail_limits(query, depth + 1, state)?;
+            }
+            crate::ast::FromSource::Function { name, args, .. } => {
+                ensure_str("qail.from_source.function", name)?;
+                ensure_len("qail.from_source.args", args.len(), MAX_AST_COLLECTION_LEN)?;
+                for arg in args {
+                    validate_expr_limits(arg, depth + 1, state)?;
+                }
+            }
+        }
+    }
     ensure_len("qail.columns", cmd.columns.len(), MAX_AST_COLLECTION_LEN)?;
     for expr in &cmd.columns {
         validate_expr_limits(expr, depth + 1, state)?;
@@ -271,11 +295,31 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                     ensure_str("qail.table_constraint.column", col)?;
                 }
             }
+            crate::ast::TableConstraint::TemporalKey {
+                name,
+                columns,
+                period,
+                ..
+            } => {
+                if let Some(name) = name {
+                    ensure_str("qail.table_constraint.name", name)?;
+                }
+                ensure_len(
+                    "qail.table_constraint.columns",
+                    columns.len(),
+                    MAX_AST_COLLECTION_LEN,
+                )?;
+                for col in columns {
+                    ensure_str("qail.table_constraint.column", col)?;
+                }
+                ensure_str("qail.table_constraint.period", period)?;
+            }
             crate::ast::TableConstraint::ForeignKey {
                 name,
                 columns,
                 ref_table,
                 ref_columns,
+                period: _,
                 on_delete,
                 on_update,
                 deferrable,
@@ -366,6 +410,11 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
         ensure_len("qail.returning", returning.len(), MAX_AST_COLLECTION_LEN)?;
         for expr in returning {
             validate_expr_limits(expr, depth + 1, state)?;
+        }
+    }
+    if let Some(aliases) = &cmd.returning_aliases {
+        for alias in [&aliases.before, &aliases.after].into_iter().flatten() {
+            ensure_str("qail.returning_aliases", alias)?;
         }
     }
 
@@ -783,6 +832,12 @@ fn validate_expr_limits(
             if let Some(alias) = alias {
                 ensure_str("expr.subscript.alias", alias)?;
             }
+        }
+        Expr::FunctionArg { name, value, .. } => {
+            if let Some(name) = name {
+                ensure_str("expr.function_arg.name", name)?;
+            }
+            validate_expr_limits(value, depth + 1, state)?;
         }
         Expr::Collate {
             expr,

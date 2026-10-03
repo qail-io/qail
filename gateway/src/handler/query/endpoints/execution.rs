@@ -323,6 +323,24 @@ mod tests {
     }
 
     #[test]
+    fn cache_tables_include_from_subquery_body_not_alias() {
+        let cmd = Qail::get("o").from_source(qail_core::ast::FromSource::subquery(
+            Qail::get("orders").columns(["id"]),
+            "o",
+        ));
+
+        assert_eq!(cache_tables_for_qail(&cmd), vec!["orders"]);
+        assert_eq!(query_complexity(&cmd).0, 1, "the FROM subquery adds depth");
+        assert!(command_is_cacheable_query(&cmd));
+
+        let writing = Qail::get("o").from_source(qail_core::ast::FromSource::subquery(
+            Qail::del("orders"),
+            "o",
+        ));
+        assert!(!command_is_read_only_for_release(&writing));
+    }
+
+    #[test]
     fn cache_tables_include_set_op_dependencies() {
         let mut cmd = Qail::get("orders");
         cmd.set_ops

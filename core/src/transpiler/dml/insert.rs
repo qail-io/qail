@@ -73,6 +73,7 @@ pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
                 .map(|e| render_sql_expr(e, generator.as_ref()))
                 .collect();
             sql.push_str(" RETURNING ");
+            sql.push_str(&super::returning_aliases_sql(cmd, generator.as_ref()));
             sql.push_str(&col_strs.join(", "));
         }
     }
@@ -150,24 +151,23 @@ fn render_sql_expr(expr: &Expr, generator: &dyn SqlGenerator) -> String {
         } => match op {
             BinaryOp::IsNull => format!("({} IS NULL)", render_sql_expr(left, generator)),
             BinaryOp::IsNotNull => format!("({} IS NOT NULL)", render_sql_expr(left, generator)),
-            _ => format!(
-                "({} {} {})",
-                render_sql_expr(left, generator),
-                op,
-                render_sql_expr(right, generator)
+            _ => op.infix_sql(
+                &render_sql_expr(left, generator),
+                &render_sql_expr(right, generator),
             ),
         },
         Expr::FunctionCall { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
             };
-            let args = args
-                .iter()
-                .map(|arg| render_sql_expr(arg, generator))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{function}({args})")
+            match crate::transpiler::render_function_args(args, generator, |arg| {
+                render_sql_expr(arg, generator)
+            }) {
+                Ok(args) => format!("{function}({args})"),
+                Err(error) => error,
+            }
         }
+        Expr::FunctionArg { .. } => crate::transpiler::MISPLACED_FUNCTION_ARG_SQL.to_string(),
         Expr::Cast {
             expr, target_type, ..
         } => {

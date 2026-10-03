@@ -206,20 +206,21 @@ fn render_window_expr(expr: &Expr, generator: &dyn SqlGenerator, cmd: &Qail) -> 
             match op {
                 BinaryOp::IsNull => format!("({left_sql} IS NULL)"),
                 BinaryOp::IsNotNull => format!("({left_sql} IS NOT NULL)"),
-                _ => format!("({left_sql} {op} {right_sql})"),
+                _ => op.infix_sql(&left_sql, &right_sql),
             }
         }
         Expr::FunctionCall { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
             };
-            let args = args
-                .iter()
-                .map(|arg| render_window_expr(arg, generator, cmd))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{function}({args})")
+            match crate::transpiler::render_function_args(args, generator, |arg| {
+                render_window_expr(arg, generator, cmd)
+            }) {
+                Ok(args) => format!("{function}({args})"),
+                Err(error) => error,
+            }
         }
+        Expr::FunctionArg { .. } => crate::transpiler::MISPLACED_FUNCTION_ARG_SQL.to_string(),
         Expr::Cast {
             expr, target_type, ..
         } => {

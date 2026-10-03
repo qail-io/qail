@@ -539,6 +539,7 @@ mod tests {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );
@@ -600,6 +601,7 @@ mod tests {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );
@@ -644,6 +646,7 @@ mod tests {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );
@@ -1095,6 +1098,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );

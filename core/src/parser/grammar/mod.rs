@@ -294,6 +294,8 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             having: having.unwrap_or_default(),
             group_by_mode: GroupByMode::default(),
             returning: None,
+            returning_aliases: None,
+            from_source: None,
             ctes,
             on_conflict,
             merge: None,

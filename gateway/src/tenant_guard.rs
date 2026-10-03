@@ -17,7 +17,7 @@
 //! - **Performance**: O(n) scan per response, no allocations beyond the counter.
 
 use qail_core::ast::{
-    Action, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, MergeAction,
+    Action, Cage, CageKind, Condition, Expr, FromSource, Join, JoinKind, LogicalOp, MergeAction,
     MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
 use serde_json::Value as JsonValue;
@@ -757,7 +757,9 @@ fn prepare_expr_subquery_guards(
             prepare_expr_subquery_guards(state, auth, expr, plan)?;
             prepare_expr_subquery_guards(state, auth, index, plan)?;
         }
-        Expr::FieldAccess { expr, .. } => prepare_expr_subquery_guards(state, auth, expr, plan)?,
+        Expr::FieldAccess { expr, .. } | Expr::FunctionArg { value: expr, .. } => {
+            prepare_expr_subquery_guards(state, auth, expr, plan)?
+        }
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             if let Some(subquery_plan) = prepare_tenant_guarded_query_inner(
                 state,
@@ -990,6 +992,27 @@ fn prepare_tenant_guarded_query_inner(
         if let Some(source_plan) = source_plan {
             merge_tenant_guard_plan(&mut plan, source_plan);
         }
+    }
+
+    // FROM (subquery) AS alias: the inner query reads the tenant tables, so it
+    // gets the tenant filter the way an embedded subquery does.
+    match &mut cmd.from_source {
+        Some(FromSource::Subquery { query, .. }) => {
+            if let Some(source_plan) = prepare_tenant_guarded_query_inner(
+                state,
+                auth,
+                query,
+                TenantGuardMode::InsertSource,
+            )? {
+                merge_tenant_guard_plan(&mut plan, source_plan);
+            }
+        }
+        Some(FromSource::Function { args, .. }) => {
+            for arg in args {
+                prepare_expr_subquery_guards(state, auth, arg, &mut plan)?;
+            }
+        }
+        None => {}
     }
 
     let mut merge_source_condition = None;

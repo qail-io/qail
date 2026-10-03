@@ -486,6 +486,7 @@ table trips {
                     columns,
                     ref_table,
                     ref_columns,
+                    period: false,
                     on_delete,
                     on_update,
                     deferrable,
