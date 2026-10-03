@@ -212,7 +212,7 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
         let (input, _) = multispace0(input)?;
 
         // For IS NULL / IS NOT NULL, no value needed
-        let (input, value) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
+        let (input, value) = if op.is_postfix() {
             (input, Value::Null)
         } else if matches!(op, Operator::In | Operator::NotIn) {
             let (input, _) = multispace0(input)?;
@@ -233,7 +233,7 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
             } else {
                 parse_value(input)?
             }
-        } else if matches!(op, Operator::Between | Operator::NotBetween) {
+        } else if op.is_range() {
             let (input, min_val) = parse_value(input)?;
             let (input, _) = multispace1(input)?;
             let (input, _) = tag_no_case("and").parse(input)?;

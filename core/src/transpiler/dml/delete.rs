@@ -1,7 +1,7 @@
 //! DELETE SQL generation.
 
 use crate::ast::*;
-use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::conditions::{ConditionToSql, output_expr_sql, returning_clause_sql};
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::render_table_reference;
 
@@ -56,6 +56,12 @@ pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
         sql.push_str(" WHERE ");
         sql.push_str(&where_groups.join(" AND "));
     }
+
+    sql.push_str(&returning_clause_sql(
+        cmd.returning.as_ref(),
+        generator.as_ref(),
+        |expr| output_expr_sql(expr, generator.as_ref()),
+    ));
 
     sql
 }

@@ -5,7 +5,7 @@ use crate::ast::write_payload::{
 };
 use crate::ast::*;
 use crate::transpiler::SqlGenerator;
-use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::conditions::{ConditionToSql, output_expr_sql, returning_clause_sql};
 use crate::transpiler::dialect::Dialect;
 
 /// Shape errors echo column names. A name holding `*/` or `/*` would end or
@@ -76,18 +76,11 @@ pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
         ));
     }
 
-    match &cmd.returning {
-        None => sql.push_str(" RETURNING *"), // Default: return all
-        Some(cols) if cols.is_empty() => {}   // Explicitly no RETURNING
-        Some(cols) => {
-            let col_strs: Vec<String> = cols
-                .iter()
-                .map(|e| render_sql_expr(e, generator.as_ref()))
-                .collect();
-            sql.push_str(" RETURNING ");
-            sql.push_str(&col_strs.join(", "));
-        }
-    }
+    sql.push_str(&returning_clause_sql(
+        cmd.returning.as_ref(),
+        generator.as_ref(),
+        |expr| output_expr_sql(expr, generator.as_ref()),
+    ));
 
     sql
 }
@@ -160,8 +153,7 @@ fn render_sql_expr(expr: &Expr, generator: &dyn SqlGenerator) -> String {
         Expr::Binary {
             left, op, right, ..
         } => match op {
-            BinaryOp::IsNull => format!("({} IS NULL)", render_sql_expr(left, generator)),
-            BinaryOp::IsNotNull => format!("({} IS NOT NULL)", render_sql_expr(left, generator)),
+            op if op.is_postfix() => format!("({} {})", render_sql_expr(left, generator), op),
             _ => format!(
                 "({} {} {})",
                 render_sql_expr(left, generator),

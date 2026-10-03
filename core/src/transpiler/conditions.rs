@@ -235,8 +235,7 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             let left = condition_left_sql(left, generator, context);
             let right = condition_left_sql(right, generator, context);
             match op {
-                BinaryOp::IsNull => format!("({left} IS NULL)"),
-                BinaryOp::IsNotNull => format!("({left} IS NOT NULL)"),
+                op if op.is_postfix() => format!("({left} {op})"),
                 _ => format!("({left} {op} {right})"),
             }
         }
@@ -323,6 +322,72 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             }
         }
         _ => "/* ERROR: Invalid condition expression */".to_string(),
+    }
+}
+
+/// RETURNING for INSERT, UPDATE, DELETE and MERGE previews, matching the
+/// native encoder: `None` and an empty list render nothing, `[Star]` is `*`,
+/// output aliases are kept. `render` writes an expression without its alias.
+pub(crate) fn returning_clause_sql(
+    returning: Option<&Vec<Expr>>,
+    generator: &dyn SqlGenerator,
+    render: impl Fn(&Expr) -> String,
+) -> String {
+    let Some(exprs) = returning.filter(|exprs| !exprs.is_empty()) else {
+        return String::new();
+    };
+    let items = exprs
+        .iter()
+        .map(|expr| match expr {
+            Expr::Star => "*".to_string(),
+            Expr::Aliased { name, alias } => format!(
+                "{} AS {}",
+                render(&Expr::Named(name.clone())),
+                generator.quote_identifier(alias)
+            ),
+            _ => match output_alias(expr) {
+                Some(alias) => format!("{} AS {}", render(expr), generator.quote_identifier(alias)),
+                None => render(expr),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" RETURNING {items}")
+}
+
+/// Render an output expression without its alias (RETURNING items).
+pub(crate) fn output_expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
+    match expr {
+        Expr::Named(name) if name == "*" => "*".to_string(),
+        Expr::Named(name) => generator.quote_identifier(name),
+        _ => condition_left_sql(expr, generator, None),
+    }
+}
+
+fn output_alias(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Aliased { alias, .. } => Some(alias),
+        Expr::Window { name, .. } if !name.is_empty() => Some(name),
+        Expr::Aggregate { alias, .. }
+        | Expr::Cast { alias, .. }
+        | Expr::Case { alias, .. }
+        | Expr::JsonAccess { alias, .. }
+        | Expr::FunctionCall { alias, .. }
+        | Expr::SpecialFunction { alias, .. }
+        | Expr::Binary { alias, .. }
+        | Expr::ArrayConstructor { alias, .. }
+        | Expr::RowConstructor { alias, .. }
+        | Expr::Subscript { alias, .. }
+        | Expr::Collate { alias, .. }
+        | Expr::FieldAccess { alias, .. }
+        | Expr::Subquery { alias, .. }
+        | Expr::Exists { alias, .. } => alias.as_deref(),
+        Expr::Star
+        | Expr::Named(_)
+        | Expr::Window { .. }
+        | Expr::Def { .. }
+        | Expr::Mod { .. }
+        | Expr::Literal(_) => None,
     }
 }
 
@@ -663,6 +728,17 @@ fn invalid_between_condition_sql() -> String {
     "FALSE /* ERROR: BETWEEN condition requires exactly two array values */".to_string()
 }
 
+fn invalid_array_membership_sql(op: Operator) -> String {
+    if op == Operator::ArrayElemContainedInText {
+        "FALSE /* ERROR: ArrayElemContainedInText requires is_array_unnest */".to_string()
+    } else {
+        format!(
+            "FALSE /* ERROR: is_array_unnest supports comparisons, Fuzzy and \
+             ArrayElemContainedInText, got {op:?} */"
+        )
+    }
+}
+
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
@@ -700,7 +776,7 @@ impl ConditionToSql for Condition {
                 Operator::ArrayElemContainedInText => {
                     format!("LOWER({}) LIKE '%' || LOWER(_el) || '%'", value_sql())
                 }
-                _ => format!("_el = {}", value_sql()),
+                _ => return invalid_array_membership_sql(self.op),
             };
             return format!(
                 "EXISTS (SELECT 1 FROM unnest({}) _el WHERE {})",
@@ -732,8 +808,8 @@ impl ConditionToSql for Condition {
             Operator::In | Operator::NotIn => {
                 in_condition_sql(&col, self.op, &self.value, generator, context)
             }
-            Operator::IsNull => format!("{} IS NULL", col),
-            Operator::IsNotNull => format!("{} IS NOT NULL", col),
+            op if op.is_postfix() => format!("{} {}", col, op.sql_symbol()),
+            Operator::ArrayElemContainedInText => invalid_array_membership_sql(self.op),
             Operator::Contains => generator.json_contains(&col, &value_sql()),
             Operator::KeyExists => generator.json_key_exists(&col, &value_sql()),
             // Postgres 17+ SQL/JSON standard functions
@@ -749,27 +825,15 @@ impl ConditionToSql for Condition {
                 let path = json_path_arg(self, generator);
                 format!("{} IS NOT NULL", generator.json_value(&col, &path))
             }
-            Operator::Between => {
+            op if op.is_range() => {
                 // Value is Array with 2 elements [min, max]
                 if let Value::Array(vals) = &self.value
                     && vals.len() == 2
                 {
                     return format!(
-                        "{} BETWEEN {} AND {}",
+                        "{} {} {} AND {}",
                         col,
-                        condition_value_sql_with_context(&vals[0], generator, context),
-                        condition_value_sql_with_context(&vals[1], generator, context)
-                    );
-                }
-                invalid_between_condition_sql()
-            }
-            Operator::NotBetween => {
-                if let Value::Array(vals) = &self.value
-                    && vals.len() == 2
-                {
-                    return format!(
-                        "{} NOT BETWEEN {} AND {}",
-                        col,
+                        op.sql_symbol(),
                         condition_value_sql_with_context(&vals[0], generator, context),
                         condition_value_sql_with_context(&vals[1], generator, context)
                     );
@@ -843,7 +907,7 @@ impl ConditionToSql for Condition {
                     "LOWER({}) LIKE '%' || LOWER(_el) || '%'",
                     value_placeholder(&self.value, params)
                 ),
-                _ => format!("_el = {}", value_placeholder(&self.value, params)),
+                _ => return invalid_array_membership_sql(self.op),
             };
 
             return format!(
@@ -879,8 +943,8 @@ impl ConditionToSql for Condition {
                     value_placeholder(&self.value, params)
                 )
             }
-            Operator::IsNull => format!("{} IS NULL", col),
-            Operator::IsNotNull => format!("{} IS NOT NULL", col),
+            op if op.is_postfix() => format!("{} {}", col, op.sql_symbol()),
+            Operator::ArrayElemContainedInText => invalid_array_membership_sql(self.op),
             Operator::In | Operator::NotIn => match &self.value {
                 Value::Array(values) if !values.is_empty() => {
                     let value = value_placeholder(&self.value, params);
@@ -924,23 +988,13 @@ impl ConditionToSql for Condition {
                 let path = value_placeholder(&self.value, params);
                 format!("{} IS NOT NULL", generator.json_value(&col, &path))
             }
-            Operator::Between => {
+            op if op.is_range() => {
                 if let Value::Array(vals) = &self.value
                     && vals.len() == 2
                 {
                     let low = value_placeholder(&vals[0], params);
                     let high = value_placeholder(&vals[1], params);
-                    return format!("{} BETWEEN {} AND {}", col, low, high);
-                }
-                invalid_between_condition_sql()
-            }
-            Operator::NotBetween => {
-                if let Value::Array(vals) = &self.value
-                    && vals.len() == 2
-                {
-                    let low = value_placeholder(&vals[0], params);
-                    let high = value_placeholder(&vals[1], params);
-                    return format!("{} NOT BETWEEN {} AND {}", col, low, high);
+                    return format!("{} {} {} AND {}", col, op.sql_symbol(), low, high);
                 }
                 invalid_between_condition_sql()
             }

@@ -439,6 +439,9 @@ impl AstEncoder {
 }
 
 #[cfg(test)]
+mod predicate_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -473,15 +476,15 @@ mod tests {
             "{sql}"
         );
 
-        // Pattern operators carry wrapping semantics the join form does not
-        // implement — they must be rejected, never silently mis-rendered.
+        // Operators the element form does not implement must be rejected,
+        // never silently rendered as `_el = value`.
         let bad = Qail::get("odyssey_connections")
             .columns(["odyssey_connections.id"])
             .inner_join_conds(
                 "odyssey_legs ol",
                 vec![Condition {
                     left: col("odyssey_connections.leg_ids"),
-                    op: Operator::Fuzzy,
+                    op: Operator::Like,
                     value: Value::Column("ol.id".to_string()),
                     is_array_unnest: true,
                 }],
@@ -2301,7 +2304,7 @@ mod tests {
         };
 
         let mut buf = bytes::BytesMut::with_capacity(128);
-        let err = super::values::encode_columns(&[expr], &mut buf)
+        let err = super::values::encode_columns_with_params(&[expr], &mut buf, None)
             .expect_err("direct column list encoder must validate nested cast targets");
 
         assert!(

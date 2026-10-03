@@ -17,8 +17,8 @@ use std::collections::HashSet;
 
 use super::helpers::write_usize;
 use super::values::{
-    encode_columns, encode_columns_with_params, encode_conditions, encode_expr,
-    encode_expr_with_params, encode_join_value, encode_operator, encode_value,
+    OperandMode, encode_columns_with_params, encode_condition, encode_conditions, encode_expr,
+    encode_expr_with_params, encode_ref_expr, encode_value,
 };
 
 const MAX_IDENT_LEN: usize = 63;
@@ -577,12 +577,23 @@ fn validate_condition(
     field: &str,
     condition: &Condition,
 ) -> Result<(), crate::protocol::EncodeError> {
-    if condition.op == Operator::TextSearch {
-        validate_text_search_columns(&format!("{field}.left"), &condition.left)?;
-    } else {
-        validate_expr_ref(&format!("{field}.left"), &condition.left)?;
-    }
+    validate_condition_left(field, condition)?;
     validate_value_ref(&format!("{field}.value"), &condition.value)
+}
+
+/// The left side as `encode_condition` reads it: a column list for text
+/// search, ignored for EXISTS (the parser leaves it empty), else an expression.
+fn validate_condition_left(
+    field: &str,
+    condition: &Condition,
+) -> Result<(), crate::protocol::EncodeError> {
+    match condition.op {
+        Operator::TextSearch => {
+            validate_text_search_columns(&format!("{field}.left"), &condition.left)
+        }
+        Operator::Exists | Operator::NotExists => Ok(()),
+        _ => validate_expr_ref(&format!("{field}.left"), &condition.left),
+    }
 }
 
 pub(crate) fn validate_text_search_columns(
@@ -620,15 +631,6 @@ pub(crate) fn validate_text_search_columns(
     Ok(())
 }
 
-fn validate_join_condition(
-    field: &str,
-    condition: &Condition,
-) -> Result<(), crate::protocol::EncodeError> {
-    // Only Value::Column names a column; a Value::String is always a literal.
-    validate_expr_ref(&format!("{field}.left"), &condition.left)?;
-    validate_value_ref(&format!("{field}.value"), &condition.value)
-}
-
 fn validate_conditions(
     field: &str,
     conditions: &[Condition],
@@ -646,11 +648,7 @@ fn validate_cage_conditions(
 ) -> Result<(), crate::protocol::EncodeError> {
     for condition in conditions {
         if !(skip_placeholders && is_positional_placeholder(&condition.left)) {
-            if condition.op == Operator::TextSearch {
-                validate_text_search_columns(&format!("{field}.left"), &condition.left)?;
-            } else {
-                validate_expr_ref(&format!("{field}.left"), &condition.left)?;
-            }
+            validate_condition_left(field, condition)?;
         }
         validate_value_ref(&format!("{field}.value"), &condition.value)?;
     }
@@ -713,9 +711,8 @@ fn validate_dml_command(
     for join in &cmd.joins {
         validate_table_ref("join.table", &join.table)?;
         if let Some(conditions) = &join.on {
-            for condition in conditions {
-                validate_join_condition("join.on", condition)?;
-            }
+            // Only Value::Column names a column; a Value::String is always a literal.
+            validate_conditions("join.on", conditions)?;
         }
     }
 
@@ -925,7 +922,7 @@ fn encode_select_with_columns(
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            encode_expr(expr, buf)?;
+            encode_ref_expr(expr, buf, Some(params))?;
         }
         buf.extend_from_slice(b") ");
     } else if cmd.distinct {
@@ -965,41 +962,7 @@ fn encode_select_with_columns(
                 if i > 0 {
                     buf.extend_from_slice(b" AND ");
                 }
-                if cond.is_array_unnest {
-                    // Array membership expands to EXISTS/unnest exactly as in
-                    // WHERE (encode_conditions): rendering `left op value`
-                    // verbatim would emit e.g. `uuid[] = uuid` — invalid SQL
-                    // that only fails at runtime (42883). Join ON supports the
-                    // plain comparators; pattern operators (Fuzzy, …) carry
-                    // wrapping semantics that belong in WHERE.
-                    if !matches!(
-                        cond.op,
-                        Operator::Eq
-                            | Operator::Ne
-                            | Operator::Gt
-                            | Operator::Gte
-                            | Operator::Lt
-                            | Operator::Lte
-                    ) {
-                        return Err(crate::protocol::EncodeError::InvalidAst(format!(
-                            "join.on: is_array_unnest supports only comparison operators, got {:?}",
-                            cond.op
-                        )));
-                    }
-                    buf.extend_from_slice(b"EXISTS (SELECT 1 FROM unnest(");
-                    encode_expr(&cond.left, buf)?;
-                    buf.extend_from_slice(b") _el WHERE _el ");
-                    encode_operator(&cond.op, buf);
-                    buf.extend_from_slice(b" ");
-                    encode_join_value(&cond.value, buf, params)?;
-                    buf.extend_from_slice(b")");
-                    continue;
-                }
-                encode_expr(&cond.left, buf)?;
-                buf.extend_from_slice(b" ");
-                encode_operator(&cond.op, buf);
-                buf.extend_from_slice(b" ");
-                encode_join_value(&cond.value, buf, params)?;
+                encode_condition(cond, buf, OperandMode::Join(params))?;
             }
         }
     }
@@ -1007,7 +970,7 @@ fn encode_select_with_columns(
     // WHERE (supports AND + OR filter cages)
     encode_where(cmd, buf, params)?;
 
-    encode_group_by(cmd, columns, buf)?;
+    encode_group_by(cmd, columns, buf, params)?;
 
     // HAVING binds follow WHERE binds: the clause follows WHERE in the text.
     if !cmd.having.is_empty() {
@@ -1037,7 +1000,7 @@ fn encode_select_with_columns(
                     buf.extend_from_slice(b", ");
                 }
                 first = false;
-                encode_expr(&cond.left, buf)?;
+                encode_ref_expr(&cond.left, buf, Some(params))?;
                 append_sort_order(*order, buf);
             }
         }
@@ -1088,6 +1051,7 @@ fn encode_group_by(
     cmd: &Qail,
     columns: &[Expr],
     buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     let clause = cmd
         .group_by_clause(columns)
@@ -1126,7 +1090,8 @@ fn encode_group_by(
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_expr(key, buf)?;
+        // GROUP BY binds sit between WHERE and HAVING binds, as in the text.
+        encode_ref_expr(key, buf, Some(params))?;
     }
     if !prefix.is_empty() {
         buf.extend_from_slice(b")");
@@ -1494,7 +1459,7 @@ pub fn encode_insert(
                     }
                     push_identifier_ref(buf, col, false);
                     buf.extend_from_slice(b" = ");
-                    encode_expr(expr, buf)?;
+                    encode_ref_expr(expr, buf, Some(params))?;
                 }
                 encode_where(cmd, buf, params)?;
                 if !on_conflict.where_conditions.is_empty() {
@@ -1511,12 +1476,23 @@ pub fn encode_insert(
         }
     }
 
-    // RETURNING clause
-    if let Some(ref ret_cols) = cmd.returning {
-        buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf)?;
-    }
+    encode_returning(cmd, buf, params)
+}
 
+/// RETURNING contract shared by INSERT, UPDATE, DELETE and MERGE (and the
+/// transpiler): `None` and `Some(empty)` emit no clause; `[Expr::Star]` is
+/// `RETURNING *`. Output expressions share the statement's `$N` numbering.
+fn encode_returning(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    if let Some(ret_cols) = &cmd.returning
+        && !ret_cols.is_empty()
+    {
+        buf.extend_from_slice(b" RETURNING ");
+        encode_columns_with_params(ret_cols, buf, Some(params))?;
+    }
     Ok(())
 }
 
@@ -1567,13 +1543,7 @@ pub fn encode_update(
     // WHERE (supports AND + OR filter cages)
     encode_where(cmd, buf, params)?;
 
-    // RETURNING clause
-    if let Some(ref ret_cols) = cmd.returning {
-        buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf)?;
-    }
-
-    Ok(())
+    encode_returning(cmd, buf, params)
 }
 
 /// Encode a DELETE statement.
@@ -1609,13 +1579,7 @@ pub fn encode_delete(
     // WHERE (supports AND + OR filter cages)
     encode_where(cmd, buf, params)?;
 
-    // RETURNING clause
-    if let Some(ref ret_cols) = cmd.returning {
-        buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf)?;
-    }
-
-    Ok(())
+    encode_returning(cmd, buf, params)
 }
 
 /// Encode a PostgreSQL MERGE statement.
@@ -1663,14 +1627,7 @@ pub fn encode_merge(
         encode_merge_action(&clause.action, buf, params)?;
     }
 
-    if let Some(ref ret_cols) = cmd.returning
-        && !ret_cols.is_empty()
-    {
-        buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf)?;
-    }
-
-    Ok(())
+    encode_returning(cmd, buf, params)
 }
 
 fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeError> {

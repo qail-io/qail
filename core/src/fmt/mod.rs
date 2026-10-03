@@ -585,12 +585,34 @@ impl Formatter {
                 Operator::IsNotNull => write!(self.buffer, " is not null")?,
                 Operator::Contains => write!(self.buffer, " @> ")?,
                 Operator::KeyExists => write!(self.buffer, " ? ")?,
+                Operator::IsDistinctFrom
+                | Operator::IsNotDistinctFrom
+                | Operator::BetweenSymmetric
+                | Operator::NotBetweenSymmetric => {
+                    write!(
+                        self.buffer,
+                        " {} ",
+                        cond.op.sql_symbol().to_ascii_lowercase()
+                    )?;
+                }
+                op if op.is_postfix() => {
+                    write!(self.buffer, " {}", op.sql_symbol().to_ascii_lowercase())?
+                }
                 _ => write!(self.buffer, " {:?} ", cond.op)?,
             }
 
-            // Some operators like IsNull don't need a value printed
-            if !matches!(cond.op, Operator::IsNull | Operator::IsNotNull) {
-                self.format_value(&cond.value)?;
+            // Postfix tests (IS NULL, IS TRUE, ...) have no value; ranges
+            // print `low and high`, the form the parser reads back.
+            if cond.op.is_postfix() {
+                continue;
+            }
+            match (&cond.value, cond.op.is_range()) {
+                (Value::Array(bounds), true) if bounds.len() == 2 => {
+                    self.format_value(&bounds[0])?;
+                    write!(self.buffer, " and ")?;
+                    self.format_value(&bounds[1])?;
+                }
+                (value, _) => self.format_value(value)?,
             }
         }
         Ok(())

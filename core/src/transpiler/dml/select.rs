@@ -812,8 +812,7 @@ fn render_expr_for_orderby(
             let left_sql = render_expr_for_orderby(left, generator, cmd);
             let right_sql = render_expr_for_orderby(right, generator, cmd);
             match op {
-                BinaryOp::IsNull => format!("({} IS NULL)", left_sql),
-                BinaryOp::IsNotNull => format!("({} IS NOT NULL)", left_sql),
+                op if op.is_postfix() => format!("({} {})", left_sql, op),
                 _ => format!("({} {} {})", left_sql, op, right_sql),
             }
         }

@@ -346,6 +346,26 @@ pub enum Operator {
     /// `LOWER(text) LIKE '%' || LOWER(array_element) || '%'` over `unnest(array_column)`.
     /// Used for "does input text contain any keyword token?" matching.
     ArrayElemContainedInText,
+    /// `IS DISTINCT FROM` — null-safe `<>`: `NULL IS DISTINCT FROM NULL` is false.
+    IsDistinctFrom,
+    /// `IS NOT DISTINCT FROM` — null-safe `=`: `NULL IS NOT DISTINCT FROM NULL` is true.
+    IsNotDistinctFrom,
+    /// `IS TRUE` (false for NULL).
+    IsTrue,
+    /// `IS NOT TRUE` (true for NULL).
+    IsNotTrue,
+    /// `IS FALSE` (false for NULL).
+    IsFalse,
+    /// `IS NOT FALSE` (true for NULL).
+    IsNotFalse,
+    /// `IS UNKNOWN` (boolean IS NULL).
+    IsUnknown,
+    /// `IS NOT UNKNOWN`.
+    IsNotUnknown,
+    /// `BETWEEN SYMMETRIC low AND high` — bounds may come in either order.
+    BetweenSymmetric,
+    /// `NOT BETWEEN SYMMETRIC low AND high`.
+    NotBetweenSymmetric,
 }
 
 impl Operator {
@@ -388,14 +408,48 @@ impl Operator {
             Operator::JsonPath => "#>",
             Operator::JsonPathText => "#>>",
             Operator::ArrayElemContainedInText => "CONTAINS_ANY_TOKEN",
+            Operator::IsDistinctFrom => "IS DISTINCT FROM",
+            Operator::IsNotDistinctFrom => "IS NOT DISTINCT FROM",
+            Operator::IsTrue => "IS TRUE",
+            Operator::IsNotTrue => "IS NOT TRUE",
+            Operator::IsFalse => "IS FALSE",
+            Operator::IsNotFalse => "IS NOT FALSE",
+            Operator::IsUnknown => "IS UNKNOWN",
+            Operator::IsNotUnknown => "IS NOT UNKNOWN",
+            Operator::BetweenSymmetric => "BETWEEN SYMMETRIC",
+            Operator::NotBetweenSymmetric => "NOT BETWEEN SYMMETRIC",
         }
     }
 
-    /// IS NULL, IS NOT NULL, EXISTS, NOT EXISTS don't need values.
+    /// Postfix predicates (IS NULL, IS TRUE, ...), EXISTS and NOT EXISTS don't need values.
     pub fn needs_value(&self) -> bool {
-        !matches!(
+        !(self.is_postfix() || matches!(self, Operator::Exists | Operator::NotExists))
+    }
+
+    /// Unary postfix predicates: `left IS NULL`, `left IS TRUE`, ... — the
+    /// condition value is a placeholder and is never rendered or bound.
+    pub fn is_postfix(&self) -> bool {
+        matches!(
             self,
-            Operator::IsNull | Operator::IsNotNull | Operator::Exists | Operator::NotExists
+            Operator::IsNull
+                | Operator::IsNotNull
+                | Operator::IsTrue
+                | Operator::IsNotTrue
+                | Operator::IsFalse
+                | Operator::IsNotFalse
+                | Operator::IsUnknown
+                | Operator::IsNotUnknown
+        )
+    }
+
+    /// Range predicates whose value is a two-element `[low, high]` array.
+    pub fn is_range(&self) -> bool {
+        matches!(
+            self,
+            Operator::Between
+                | Operator::NotBetween
+                | Operator::BetweenSymmetric
+                | Operator::NotBetweenSymmetric
         )
     }
 
@@ -413,6 +467,8 @@ impl Operator {
                 | Operator::NotLike
                 | Operator::ILike
                 | Operator::NotILike
+                | Operator::IsDistinctFrom
+                | Operator::IsNotDistinctFrom
         )
     }
 }

@@ -291,9 +291,9 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
     let (input, op) = parse_operator(input)?;
     let (input, _) = multispace0(input)?;
 
-    let (input, value) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
+    let (input, value) = if op.is_postfix() {
         (input, Value::Null)
-    } else if matches!(op, Operator::Between | Operator::NotBetween) {
+    } else if op.is_range() {
         let (input, min_val) = parse_value(input)?;
         let (input, _) = multispace1(input)?;
         let (input, _) = tag_no_case("and").parse(input)?;
