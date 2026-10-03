@@ -123,6 +123,98 @@ fn victim_rows() -> Vec<Vec<String>> {
     vec![vec!["2".to_string(), "second".to_string()]]
 }
 
+#[derive(Clone, Copy, Debug)]
+enum HandlePath {
+    Rows,
+    BinaryRows,
+    Count,
+    Reuse,
+    VisitRows,
+    VisitBytes,
+    VisitFirst,
+    VisitFour,
+}
+
+const HANDLE_PATHS: [HandlePath; 8] = [
+    HandlePath::Rows,
+    HandlePath::BinaryRows,
+    HandlePath::Count,
+    HandlePath::Reuse,
+    HandlePath::VisitRows,
+    HandlePath::VisitBytes,
+    HandlePath::VisitFirst,
+    HandlePath::VisitFour,
+];
+
+async fn execute_handle_path(
+    conn: &mut PgConnection,
+    stmt: &PreparedStatement,
+    params: &[Option<Vec<u8>>],
+    path: HandlePath,
+    callbacks: &mut usize,
+) -> PgResult<()> {
+    match path {
+        HandlePath::Rows => conn.query_prepared_single(stmt, params).await.map(|_| ()),
+        HandlePath::BinaryRows => conn
+            .query_prepared_single_with_result_format(stmt, params, PgEncoder::FORMAT_BINARY)
+            .await
+            .map(|_| ()),
+        HandlePath::Count => conn.query_prepared_single_count(stmt, params).await,
+        HandlePath::Reuse => conn
+            .query_prepared_single_reuse_with_result_format(stmt, params, PgEncoder::FORMAT_TEXT)
+            .await
+            .map(|_| ()),
+        HandlePath::VisitRows => conn
+            .query_prepared_single_reuse_visit_rows_with_result_format(
+                stmt,
+                params,
+                PgEncoder::FORMAT_TEXT,
+                |_| {
+                    *callbacks += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .map(|_| ()),
+        HandlePath::VisitBytes => conn
+            .query_prepared_single_reuse_visit_bytes_rows_with_result_format(
+                stmt,
+                params,
+                PgEncoder::FORMAT_TEXT,
+                |_| {
+                    *callbacks += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .map(|_| ()),
+        HandlePath::VisitFirst => conn
+            .query_prepared_single_reuse_visit_first_column_bytes_with_result_format(
+                stmt,
+                params,
+                PgEncoder::FORMAT_TEXT,
+                |_| {
+                    *callbacks += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .map(|_| ()),
+        HandlePath::VisitFour => conn
+            .query_prepared_single_reuse_visit_first_four_columns_bytes_with_result_format(
+                stmt,
+                params,
+                PgEncoder::FORMAT_TEXT,
+                |_| {
+                    *callbacks += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .map(|_| ()),
+    }
+}
+
 // ── Offline: wire trace against an in-process peer ─────────────────────
 
 #[cfg(unix)]
@@ -244,6 +336,128 @@ mod offline {
             b'B' => cstr_at(&frame.1, 1),
             other => panic!("frame {} has no statement name", other as char),
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_handle_identity_rejects_mismatches_before_writing() {
+        let mut accepted = Vec::new();
+        for record in [None, Some("SELECT 2")] {
+            for path in HANDLE_PATHS {
+                let (mut driver, peer) = peer_driver();
+                let stmt = PreparedStatement::from_sql("SELECT 1");
+                if let Some(record) = record {
+                    driver
+                        .connection
+                        .prepared_statements
+                        .insert(stmt.name.clone(), record.into());
+                }
+                push(&mut driver, b'2', &[]);
+                push(&mut driver, b'C', b"SELECT 0\0");
+                push(&mut driver, b'Z', b"I");
+                let buffered = driver.connection.buffer.clone();
+                driver.connection.write_buf.extend_from_slice(b"pending");
+                let pending = driver.connection.write_buf.clone();
+                let mut callbacks = 0;
+                let result =
+                    execute_handle_path(&mut driver.connection, &stmt, &[], path, &mut callbacks)
+                        .await;
+                let frames = written_frames(&peer);
+                if result.is_ok() {
+                    accepted.push(format!("{path:?}, record={record:?}, frames={frames:?}"));
+                    continue;
+                }
+                assert!(
+                    matches!(result, Err(super::super::PgError::Query(ref message)) if message.contains("Statement not prepared")),
+                    "{path:?}: {result:?}"
+                );
+                assert!(frames.is_empty(), "{path:?} wrote frames: {frames:?}");
+                assert_eq!(driver.connection.buffer, buffered);
+                assert_eq!(driver.connection.write_buf, pending);
+                assert_eq!(callbacks, 0);
+                assert!(!driver.connection.is_io_desynced());
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "unverified handles executed: {accepted:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_handle_identity_valid_paths_keep_one_execution_exchange() {
+        for path in HANDLE_PATHS {
+            let (mut driver, peer) = peer_driver();
+            let stmt = PreparedStatement::from_sql("SELECT 1");
+            driver
+                .connection
+                .prepared_statements
+                .insert(stmt.name.clone(), "SELECT 1".into());
+            push(&mut driver, b'2', &[]);
+            push(&mut driver, b'C', b"SELECT 0\0");
+            push(&mut driver, b'Z', b"I");
+            execute_handle_path(&mut driver.connection, &stmt, &[], path, &mut 0)
+                .await
+                .unwrap();
+            let frames = written_frames(&peer);
+            assert_eq!(
+                frames.iter().map(|f| f.0).collect::<Vec<_>>(),
+                b"BES",
+                "{path:?}"
+            );
+            assert_eq!(frame_stmt_name(&frames[0]), stmt.name());
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_handle_identity_ast_recovery_binds_the_reprepared_name() {
+        let (mut driver, peer) = peer_driver();
+        let sql = "SELECT 1";
+        let root = raw_stmt_name(sql);
+        let mut stmt = PreparedStatement::from_sql(sql);
+        stmt.name = format!("{root}_1");
+        driver
+            .connection
+            .prepared_statements
+            .insert(root.clone(), "SELECT 2".into());
+        driver
+            .connection
+            .prepared_statements
+            .insert(stmt.name.clone(), "SELECT 3".into());
+        let prepared = super::super::prepared::PreparedAstQuery {
+            stmt,
+            params: Vec::new(),
+            sql: sql.into(),
+            sql_hash: sql_bytes_hash(sql.as_bytes()),
+        };
+        driver.connection.column_info_cache.insert(
+            prepared.sql_hash,
+            std::sync::Arc::new(super::super::ColumnInfo::from_fields(&[])),
+        );
+        push(&mut driver, b'1', &[]);
+        push(&mut driver, b'Z', b"I");
+        push_hit_reply(&mut driver);
+        let result = driver.fetch_all_prepared_ast(&prepared).await;
+        let frames = written_frames(&peer);
+        assert_eq!(
+            frames.iter().map(|f| f.0).collect::<Vec<_>>(),
+            b"PSBES",
+            "{frames:?}"
+        );
+        assert_eq!(frame_stmt_name(&frames[0]), format!("{root}_2"));
+        assert_eq!(frame_stmt_name(&frames[2]), frame_stmt_name(&frames[0]));
+        assert_eq!(text_cells(&result.unwrap()), owner_rows());
+        assert!(
+            !driver
+                .connection
+                .column_info_cache
+                .contains_key(&prepared.sql_hash)
+        );
+
+        push_hit_reply(&mut driver);
+        driver.fetch_all_prepared_ast(&prepared).await.unwrap();
+        let frames = written_frames(&peer);
+        assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), b"BES");
+        assert_eq!(frame_stmt_name(&frames[0]), format!("{root}_2"));
     }
 
     #[tokio::test]
@@ -662,6 +876,239 @@ async fn stmt_identity_live_prepare_and_handles_forged_collision() -> PgResult<(
         .pipeline_execute_prepared_rows(&stmt, std::slice::from_ref(&params))
         .await?;
     assert_eq!(raw_cells(&batches[0]), victim_rows());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires QAIL_TEST_DB_URL"]
+async fn prepared_handle_identity_live_rejects_reused_name_without_writes() -> PgResult<()> {
+    let mut driver = PgDriver::connect_url(&database_url()).await?;
+    let table = temp_table(&mut driver.connection).await?;
+    let sql = format!("SELECT id, label, id, label FROM {table} WHERE id = $1");
+    let stmt = driver.connection.prepare(&sql).await?;
+    let replacement =
+        format!("UPDATE {table} SET label = 'wrong' WHERE id = $1 RETURNING id, label, id, label");
+    driver
+        .connection
+        .execute_simple(&format!("DEALLOCATE {}", stmt.name()))
+        .await?;
+    driver.connection.prepared_statements.remove(stmt.name());
+    parse_on_server(&mut driver.connection, stmt.name(), &replacement).await;
+
+    let mut accepted = Vec::new();
+    for recorded in [false, true] {
+        for path in HANDLE_PATHS {
+            if recorded {
+                driver
+                    .connection
+                    .prepared_statements
+                    .insert(stmt.name.clone(), replacement.clone());
+            } else {
+                driver.connection.prepared_statements.remove(stmt.name());
+            }
+            let mut callbacks = 0;
+            let result = execute_handle_path(
+                &mut driver.connection,
+                &stmt,
+                &[Some(b"2".to_vec())],
+                path,
+                &mut callbacks,
+            )
+            .await;
+            println!(
+                "{path:?}, recorded={recorded}: rejected={}",
+                result.is_err()
+            );
+            if result.is_ok() {
+                accepted.push(format!("{path:?}, recorded={recorded}"));
+            } else {
+                assert!(
+                    matches!(result, Err(super::PgError::Query(ref message)) if message.contains("Statement not prepared")),
+                    "{result:?}"
+                );
+                assert_eq!(callbacks, 0);
+            }
+        }
+    }
+    let rows = driver
+        .simple_query(&format!("SELECT label FROM {table} WHERE id = 2"))
+        .await?;
+    println!(
+        "fixture after reused-name attempts: {:?}",
+        text_cells(&rows)
+    );
+    assert!(
+        accepted.is_empty(),
+        "unverified handles executed: {accepted:?}"
+    );
+    assert_eq!(text_cells(&rows), owner_rows());
+    let active = driver.connection.prepare(&sql).await?;
+    assert_ne!(active.name(), stmt.name());
+    for path in HANDLE_PATHS {
+        let mut callbacks = 0;
+        execute_handle_path(
+            &mut driver.connection,
+            &active,
+            &[Some(b"2".to_vec())],
+            path,
+            &mut callbacks,
+        )
+        .await?;
+        if matches!(
+            path,
+            HandlePath::VisitRows
+                | HandlePath::VisitBytes
+                | HandlePath::VisitFirst
+                | HandlePath::VisitFour
+        ) {
+            assert_eq!(callbacks, 1);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires QAIL_TEST_DB_URL"]
+async fn prepared_handle_identity_live_ast_recovers_disambiguated_name() -> PgResult<()> {
+    let mut driver = PgDriver::connect_url(&database_url()).await?;
+    let table = temp_table(&mut driver.connection).await?;
+    let cmd = Qail::get(&table).columns(["label", "label"]).eq("id", 2);
+    let sql = encoded_sql(&cmd);
+    let root = raw_stmt_name(&sql);
+    let occupied = encoded_sql(&owner_cmd(&table));
+    parse_on_server(&mut driver.connection, &root, &occupied).await;
+    driver
+        .connection
+        .prepared_statements
+        .insert(root.clone(), occupied.clone());
+    let prepared = driver.prepare_ast_query(&cmd).await?;
+    assert_eq!(prepared.statement_name(), format!("{root}_1"));
+    let expected = vec![vec!["second".to_string(), "second".to_string()]];
+    assert_eq!(
+        text_cells(&driver.fetch_all_prepared_ast(&prepared).await?),
+        expected
+    );
+
+    driver
+        .connection
+        .execute_simple(&format!("DEALLOCATE {}", prepared.statement_name()))
+        .await?;
+    driver
+        .connection
+        .prepared_statements
+        .remove(prepared.statement_name());
+    driver.connection.stmt_cache.remove(&prepared.sql_hash);
+    parse_on_server(&mut driver.connection, prepared.statement_name(), &occupied).await;
+    driver
+        .connection
+        .prepared_statements
+        .insert(prepared.statement_name().to_string(), occupied);
+    for format in [super::ResultFormat::Text, super::ResultFormat::Binary] {
+        let rows = driver
+            .fetch_all_prepared_ast_with_format(&prepared, format)
+            .await?;
+        println!("AST after name reuse: {:?}", text_cells(&rows));
+        assert_eq!(text_cells(&rows), expected);
+    }
+
+    driver.connection.execute_simple("DEALLOCATE ALL").await?;
+    let rows = driver.fetch_all_prepared_ast(&prepared).await?;
+    println!("AST after server deallocation: {:?}", text_cells(&rows));
+    assert_eq!(text_cells(&rows), expected);
+    driver.connection.clear_prepared_statement_state();
+    assert_eq!(
+        text_cells(&driver.fetch_all_prepared_ast(&prepared).await?),
+        expected
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires QAIL_TEST_DB_URL"]
+async fn prepared_handle_identity_live_eviction_and_transaction_boundaries() -> PgResult<()> {
+    let mut driver = PgDriver::connect_url(&database_url()).await?;
+    let table = temp_table(&mut driver.connection).await?;
+    let sql = format!("SELECT id, label, id, label FROM {table} WHERE id = $1");
+    let stmt = driver.connection.prepare(&sql).await?;
+    driver
+        .connection
+        .stmt_cache
+        .put(sql_bytes_hash(sql.as_bytes()), stmt.name().to_string());
+    for value in 0..PgConnection::MAX_PREPARED_PER_CONN {
+        driver
+            .connection
+            .prepare(&format!("SELECT {value}"))
+            .await?;
+    }
+    assert!(!driver.connection.records_prepared_statement(&stmt));
+    driver.connection.execute_simple("BEGIN").await?;
+    for path in HANDLE_PATHS {
+        let mut callbacks = 0;
+        let err = execute_handle_path(
+            &mut driver.connection,
+            &stmt,
+            &[Some(b"2".to_vec())],
+            path,
+            &mut callbacks,
+        )
+        .await
+        .expect_err("evicted handle must fail locally");
+        assert!(matches!(err, super::PgError::Query(_)), "{err}");
+        assert_eq!(callbacks, 0);
+    }
+    assert_eq!(
+        text_cells(
+            &driver
+                .simple_query(&format!("SELECT label FROM {table} WHERE id = 2"))
+                .await?
+        ),
+        owner_rows()
+    );
+    driver.connection.execute_simple("COMMIT").await?;
+    let stmt = driver.connection.prepare(&sql).await?;
+    driver
+        .connection
+        .query_prepared_single(&stmt, &[Some(b"2".to_vec())])
+        .await?;
+
+    let cmd = Qail::get(&table).columns(["label", "label"]).eq("id", 2);
+    let prepared = driver.prepare_ast_query(&cmd).await?;
+    for value in 1000..1000 + PgConnection::MAX_PREPARED_PER_CONN {
+        driver
+            .connection
+            .prepare(&format!("SELECT {value}"))
+            .await?;
+    }
+    assert!(!driver.connection.records_prepared_statement(&prepared.stmt));
+    driver.connection.execute_simple("BEGIN").await?;
+    let expected = vec![vec!["second".to_string(), "second".to_string()]];
+    assert_eq!(
+        text_cells(&driver.fetch_all_prepared_ast(&prepared).await?),
+        expected
+    );
+    driver.connection.execute_simple("COMMIT").await?;
+    println!("capacity eviction recovered; local rejection preserved transaction");
+
+    driver.connection.execute_simple("BEGIN").await?;
+    driver
+        .connection
+        .execute_simple(&format!(
+            "UPDATE {table} SET label = 'pending' WHERE id = 2"
+        ))
+        .await?;
+    driver.connection.execute_simple("DEALLOCATE ALL").await?;
+    let err = driver
+        .fetch_all_prepared_ast(&prepared)
+        .await
+        .map(|_| ())
+        .expect_err("server error in a transaction requires caller rollback");
+    assert_eq!(err.sqlstate(), Some("25P02"), "{err}");
+    driver.connection.execute_simple("ROLLBACK").await?;
+    assert_eq!(
+        text_cells(&driver.fetch_all_prepared_ast(&prepared).await?),
+        expected
+    );
+    println!("server error stayed aborted until rollback; TEMP update rolled back");
     Ok(())
 }
 

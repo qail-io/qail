@@ -2,9 +2,10 @@
 //! fetch_one, execute, and query_ast.
 
 use super::core::PgDriver;
-use super::prepared::PreparedAstQuery;
+use super::prepared::{PreparedAstQuery, PreparedStatement};
 use super::types::*;
 use qail_core::ast::Qail;
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::{
     collections::hash_map::DefaultHasher,
@@ -28,17 +29,18 @@ fn encoded_sql_str(sql_buf: &[u8]) -> PgResult<&str> {
         .map_err(|e| PgError::Encode(format!("encoded SQL is not UTF-8: {}", e)))
 }
 
-async fn reprepare_prepared_ast_query(
+async fn prepare_ast_statement(
     conn: &mut super::PgConnection,
     prepared: &PreparedAstQuery,
-) -> PgResult<()> {
-    conn.clear_prepared_statement_state();
+) -> PgResult<PreparedStatement> {
     let stmt = conn.prepare(&prepared.sql).await?;
     conn.stmt_cache
         .put(prepared.sql_hash, stmt.name().to_string());
+    // No Describe ran; metadata under this key may describe other SQL.
+    conn.column_info_cache.remove(&prepared.sql_hash);
     conn.prepared_statements
         .insert(stmt.name().to_string(), prepared.sql.clone());
-    Ok(())
+    Ok(stmt)
 }
 
 impl PgDriver {
@@ -70,7 +72,8 @@ impl PgDriver {
     ///
     /// This is the lowest-overhead path for repeating the **exact same** AST
     /// command (same SQL text and same bind values). It avoids per-call AST
-    /// encoding and statement-cache hash/lookup in `fetch_all_cached`.
+    /// encoding and SQL hashing. Execution checks the connection's SQL record
+    /// before binding and reparses when the handle no longer matches.
     pub async fn prepare_ast_query(&mut self, cmd: &Qail) -> PgResult<PreparedAstQuery> {
         use crate::protocol::AstEncoder;
 
@@ -118,13 +121,17 @@ impl PgDriver {
         result_format: ResultFormat,
     ) -> PgResult<Vec<PgRow>> {
         let mut retried = false;
+        let mut stmt = Cow::Borrowed(&prepared.stmt);
 
         loop {
+            if !self.connection.records_prepared_statement(&stmt) {
+                stmt = Cow::Owned(prepare_ast_statement(&mut self.connection, prepared).await?);
+            }
             self.connection.stmt_cache.touch_key(prepared.sql_hash);
             self.connection.write_buf.clear();
             if let Err(e) = crate::protocol::PgEncoder::encode_bind_to_with_result_format(
                 &mut self.connection.write_buf,
-                prepared.stmt.name(),
+                stmt.name(),
                 &prepared.params,
                 result_format.as_wire_code(),
             ) {
@@ -136,7 +143,7 @@ impl PgDriver {
             if let Err(err) = self.connection.flush_write_buf().await {
                 if !retried && err.is_prepared_statement_retryable() {
                     retried = true;
-                    reprepare_prepared_ast_query(&mut self.connection, prepared).await?;
+                    self.connection.clear_prepared_statement_state();
                     continue;
                 }
                 return Err(err);
@@ -174,8 +181,7 @@ impl PgDriver {
                         if let Some(err) = error {
                             if !retried && err.is_prepared_statement_retryable() {
                                 retried = true;
-                                reprepare_prepared_ast_query(&mut self.connection, prepared)
-                                    .await?;
+                                self.connection.clear_prepared_statement_state();
                                 break;
                             }
                             return Err(err);

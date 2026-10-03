@@ -57,12 +57,27 @@ fn prepared_bind_execute_sync_wire_len(
 }
 
 #[inline]
+fn validate_prepared_single_handle(
+    conn: &PgConnection,
+    stmt: &super::PreparedStatement,
+) -> PgResult<()> {
+    if conn.records_prepared_statement(stmt) {
+        Ok(())
+    } else {
+        Err(PgError::Query(
+            "Statement not prepared. Call prepare() first.".to_string(),
+        ))
+    }
+}
+
+#[inline]
 fn reserve_prepared_single_write_buf(
     conn: &mut PgConnection,
     stmt: &super::PreparedStatement,
     params: &[Option<Vec<u8>>],
     result_format: i16,
 ) -> PgResult<()> {
+    validate_prepared_single_handle(conn, stmt)?;
     conn.write_buf.clear();
     let needed = prepared_bind_execute_sync_wire_len(&stmt.name, params, result_format)?;
     conn.write_buf.reserve(needed);
@@ -1047,11 +1062,10 @@ impl PgConnection {
         }
     }
 
-    /// ZERO-HASH sequential query using pre-computed PreparedStatement.
-    /// This is the FASTEST sequential path because it skips:
-    /// - SQL generation from AST (done once outside loop)
-    /// - Hash computation for statement name (pre-computed in PreparedStatement)
-    /// - HashMap lookup for is_new check (statement already prepared)
+    /// Sequential query using a precomputed statement name and SQL.
+    /// Checks the connection's SQL record before writing. Missing or mismatched
+    /// handles fail locally; call `prepare()` again after eviction or reset.
+    /// Skips per-call AST generation and statement-name hashing.
     /// # Example
     /// ```ignore
     /// let stmt = conn.prepare("SELECT * FROM users WHERE id = $1").await?;
@@ -1080,6 +1094,7 @@ impl PgConnection {
         stmt: &super::PreparedStatement,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<()> {
+        validate_prepared_single_handle(self, stmt)?;
         self.write_buf.clear();
         PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
             .map_err(|e| PgError::Encode(e.to_string()))?;
@@ -1137,10 +1152,10 @@ impl PgConnection {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        validate_prepared_single_handle(self, stmt)?;
         let needed = prepared_bind_execute_sync_wire_len(&stmt.name, params, result_format)?;
         let mut buf = BytesMut::with_capacity(needed);
 
-        // ZERO HASH, ZERO LOOKUP - just encode and send!
         PgEncoder::encode_bind_to_with_result_format(&mut buf, &stmt.name, params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut buf);
@@ -1980,6 +1995,9 @@ mod tests {
         let (mut conn, _peer) = test_conn_with_peer();
         push_backend_frame(&mut conn, b'D', &0i16.to_be_bytes());
         let stmt = super::super::PreparedStatement::from_sql("SELECT 1");
+
+        conn.prepared_statements
+            .insert(stmt.name().to_string(), "SELECT 1".to_string());
 
         let err = conn
             .query_prepared_single_count(&stmt, &[])
