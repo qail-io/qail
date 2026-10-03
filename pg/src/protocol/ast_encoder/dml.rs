@@ -473,6 +473,17 @@ fn validate_on_conflict_shape(cmd: &Qail) -> Result<(), crate::protocol::EncodeE
     }
 
     if let ConflictAction::DoUpdate { assignments } = &on_conflict.action {
+        cmd.validate_conflict_update_scope()
+            .map_err(|error| crate::protocol::EncodeError::InvalidAst(error.to_string()))?;
+        if cmd
+            .conflict_update_scope
+            .iter()
+            .any(|condition| !on_conflict.where_conditions.contains(condition))
+        {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "ON CONFLICT DO UPDATE is missing an applied scope guard".to_string(),
+            ));
+        }
         if on_conflict.columns.is_empty() {
             return Err(crate::protocol::EncodeError::InvalidAst(
                 "ON CONFLICT DO UPDATE requires at least one conflict target".to_string(),
@@ -905,6 +916,10 @@ fn validate_dml_command(
                 validate_qualified_ident("on_conflict.assignment.column", column, false)?;
                 validate_expr_ref("on_conflict.assignment.expr", expr)?;
             }
+            validate_conditions(
+                "on_conflict.where_conditions",
+                &on_conflict.where_conditions,
+            )?;
         }
     }
 
@@ -1646,6 +1661,16 @@ pub fn encode_insert(
                     encode_expr(expr, buf)?;
                 }
                 encode_where(cmd, buf, params)?;
+                if !on_conflict.where_conditions.is_empty() {
+                    // Conflict guards (including injected tenant scope) must also
+                    // restrict the existing row when command filters are present.
+                    let has_filters = cmd
+                        .cages
+                        .iter()
+                        .any(|cage| cage.kind == CageKind::Filter && !cage.conditions.is_empty());
+                    buf.extend_from_slice(if has_filters { b" AND " } else { b" WHERE " });
+                    encode_conditions(&on_conflict.where_conditions, buf, params)?;
+                }
             }
         }
     }

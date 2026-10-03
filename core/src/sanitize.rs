@@ -580,6 +580,10 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
     }
 
     // ── ON CONFLICT ──────────────────────────────────────────────────
+    for condition in &cmd.conflict_update_scope {
+        check_expr("conflict_update_scope.left", &condition.left)?;
+        check_value("conflict_update_scope.value", &condition.value)?;
+    }
     if let Some(ref oc) = cmd.on_conflict {
         for col in &oc.columns {
             check_ident("on_conflict.column", col)?;
@@ -712,6 +716,18 @@ mod tests {
     fn valid_simple_query_passes() {
         let cmd = Qail::get("users").columns(["id", "name"]);
         assert!(validate_ast(&cmd).is_ok());
+    }
+
+    #[test]
+    fn pending_conflict_scope_is_sanitized() {
+        for condition in [
+            crate::ast::builders::eq("bad;identifier", "tenant-a"),
+            crate::ast::builders::eq("rows.tenant_id", Value::Column("bad;column".into())),
+        ] {
+            let mut cmd = Qail::add("rows").set_value("id", 1);
+            cmd.conflict_update_scope.push(condition);
+            assert!(validate_ast(&cmd).is_err());
+        }
     }
 
     #[test]

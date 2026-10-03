@@ -1,16 +1,19 @@
 //! QAIL wire codecs for command transport.
 //!
-//! - Text codecs (`QAIL-CMD/1`, `QAIL-CMDS/1`) round-trip through canonical text.
-//! - Binary codec (`QWB2`) transports framed AST bytes directly.
+//! - Text v1 carries canonical text; v2 retains applied scope as AST JSON.
+//! - Binary QWB2 carries unscoped ASTs; QWB3 retains applied scope.
 
 use crate::ast::Qail;
 
 const CMD_TEXT_MAGIC: &str = "QAIL-CMD/1";
 const CMDS_TEXT_MAGIC: &str = "QAIL-CMDS/1";
+const CMD_AST_TEXT_MAGIC: &str = "QAIL-CMD/2";
+const CMDS_AST_TEXT_MAGIC: &str = "QAIL-CMDS/2";
 const CMD_BIN_MAGIC: [u8; 4] = *b"QWB2";
+const CMD_SCOPED_BIN_MAGIC: [u8; 4] = *b"QWB3";
 const CMD_BIN_LEGACY_MAGIC: [u8; 4] = *b"QWB1";
 
-/// Maximum allowed QWB2 payload size (bytes).
+/// Maximum allowed binary AST payload size (bytes).
 pub const MAX_CMD_BINARY_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_AST_DEPTH: usize = 64;
 const MAX_AST_NODES: usize = 16_384;
@@ -22,9 +25,15 @@ const MAX_AST_BINARY_VALUE_LEN: usize = 32 * 1024;
 
 /// Encode one command into versioned text wire format.
 pub fn encode_cmd_text(cmd: &Qail) -> String {
-    let payload = cmd.to_string();
-    let mut out = String::with_capacity(CMD_TEXT_MAGIC.len() + payload.len() + 32);
-    out.push_str(CMD_TEXT_MAGIC);
+    let ast = needs_ast_text(cmd);
+    let payload = encode_text_payload(cmd, ast);
+    let magic = if ast {
+        CMD_AST_TEXT_MAGIC
+    } else {
+        CMD_TEXT_MAGIC
+    };
+    let mut out = String::with_capacity(magic.len() + payload.len() + 32);
+    out.push_str(magic);
     out.push('\n');
     out.push_str(&payload.len().to_string());
     out.push('\n');
@@ -43,7 +52,10 @@ pub fn decode_cmd_text(input: &str) -> Result<Qail, String> {
         return crate::parse(input).map_err(|e| e.to_string());
     };
 
-    if magic != CMD_TEXT_MAGIC {
+    if magic != CMD_TEXT_MAGIC && magic != CMD_AST_TEXT_MAGIC {
+        if magic.starts_with("QAIL-CMD/") {
+            return Err(format!("unsupported command wire version: {magic}"));
+        }
         return crate::parse(input).map_err(|e| e.to_string());
     }
 
@@ -54,19 +66,28 @@ pub fn decode_cmd_text(input: &str) -> Result<Qail, String> {
         return Err("trailing bytes after command payload".to_string());
     }
 
-    crate::parse(payload).map_err(|e| e.to_string())
+    if magic == CMD_AST_TEXT_MAGIC {
+        decode_ast_json(payload.as_bytes())
+    } else {
+        crate::parse(payload).map_err(|e| e.to_string())
+    }
 }
 
 /// Encode multiple commands into versioned text wire format.
 pub fn encode_cmds_text(cmds: &[Qail]) -> String {
+    let ast = cmds.iter().any(needs_ast_text);
     let mut out = String::new();
-    out.push_str(CMDS_TEXT_MAGIC);
+    out.push_str(if ast {
+        CMDS_AST_TEXT_MAGIC
+    } else {
+        CMDS_TEXT_MAGIC
+    });
     out.push('\n');
     out.push_str(&cmds.len().to_string());
     out.push('\n');
 
     for cmd in cmds {
-        let payload = cmd.to_string();
+        let payload = encode_text_payload(cmd, ast);
         out.push_str(&payload.len().to_string());
         out.push('\n');
         out.push_str(&payload);
@@ -81,7 +102,7 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
     let mut idx = 0usize;
 
     let magic = read_line(bytes, &mut idx)?;
-    if magic != CMDS_TEXT_MAGIC {
+    if magic != CMDS_TEXT_MAGIC && magic != CMDS_AST_TEXT_MAGIC {
         return Err(format!(
             "invalid wire magic: expected {CMDS_TEXT_MAGIC}, got {magic}"
         ));
@@ -100,7 +121,11 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
         let len_line = read_line(bytes, &mut idx)?;
         let payload_len = parse_usize("payload length", len_line)?;
         let payload = read_exact_utf8(bytes, &mut idx, payload_len)?;
-        let cmd = crate::parse(payload).map_err(|e| e.to_string())?;
+        let cmd = if magic == CMDS_AST_TEXT_MAGIC {
+            decode_ast_json(payload.as_bytes())?
+        } else {
+            crate::parse(payload).map_err(|e| e.to_string())?
+        };
         out.push(cmd);
     }
 
@@ -111,9 +136,31 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
     Ok(out)
 }
 
-/// Encode one command into compact binary wire format (QWB2 AST binary).
+fn needs_ast_text(cmd: &Qail) -> bool {
+    // Invalid/oversized ASTs must not fall back to lossy display text. The v2
+    // decoder will reject them using the same limits as binary transport.
+    !matches!(
+        validate_binary_ast_limits(cmd),
+        Ok(AstLimitState {
+            applied_scope: false,
+            conflict_clause: false,
+            ..
+        })
+    )
+}
+
+fn encode_text_payload(cmd: &Qail, ast: bool) -> String {
+    if ast {
+        // Qail has no non-string map keys or fallible custom value serializers.
+        serde_json::to_string(cmd).expect("Qail fields are JSON-serializable")
+    } else {
+        cmd.to_string()
+    }
+}
+
+/// Encode an AST using QWB2, or QWB3 when any nested command has applied scope.
 pub fn encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
-    validate_binary_ast_limits(cmd)?;
+    let scoped = validate_binary_ast_limits(cmd)?.applied_scope;
     crate::sanitize::validate_ast(cmd).map_err(|e| e.to_string())?;
 
     let payload = serde_json::to_vec(cmd).map_err(|e| format!("binary AST encode failed: {e}"))?;
@@ -128,17 +175,33 @@ pub fn encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
     let payload_len = u32::try_from(payload.len())
         .map_err(|_| format!("binary AST payload exceeds u32 length: {}", payload.len()))?;
     let mut out = Vec::with_capacity(8 + payload.len());
-    out.extend_from_slice(&CMD_BIN_MAGIC);
+    out.extend_from_slice(if scoped {
+        &CMD_SCOPED_BIN_MAGIC
+    } else {
+        &CMD_BIN_MAGIC
+    });
     out.extend_from_slice(&payload_len.to_be_bytes());
     out.extend_from_slice(&payload);
     Ok(out)
 }
 
-/// Decode one command from strict QWB2 AST-binary wire format.
+/// Decode one command from strict QWB2/QWB3 AST-binary wire format.
 ///
 /// This path rejects legacy QWB1/raw-text payloads.
 pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
     let payload = decode_cmd_binary_payload(input)?;
+    let cmd = decode_ast_json(payload)?;
+    let scoped = validate_binary_ast_limits(&cmd)?.applied_scope;
+    if scoped != (input[..4] == CMD_SCOPED_BIN_MAGIC) {
+        return Err("applied scope requires QWB3 framing; unscoped AST requires QWB2".to_string());
+    }
+    Ok(cmd)
+}
+
+fn decode_ast_json(payload: &[u8]) -> Result<Qail, String> {
+    if payload.len() > MAX_CMD_BINARY_PAYLOAD_BYTES {
+        return Err("AST payload exceeds transport size limit".to_string());
+    }
     let mut deserializer = serde_json::Deserializer::from_slice(payload);
     let cmd = serde::Deserialize::deserialize(&mut deserializer)
         .map_err(|e| format!("binary AST decode failed: {e}"))?;
@@ -150,14 +213,14 @@ pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
     Ok(cmd)
 }
 
-/// Decode and validate strict QWB2-framed payload bytes.
+/// Decode and validate strict QWB2/QWB3-framed payload bytes.
 ///
 /// This validates framing and payload-size limits only.
 pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&[u8], String> {
     if input.len() < 8 {
         return Err("invalid wire header".to_string());
     }
-    if input[0..4] != CMD_BIN_MAGIC {
+    if input[0..4] != CMD_BIN_MAGIC && input[0..4] != CMD_SCOPED_BIN_MAGIC {
         if input[0..4] == CMD_BIN_LEGACY_MAGIC {
             return Err(
                 "legacy QWB1 text payload is not supported on parse-free binary path".to_string(),
@@ -184,6 +247,8 @@ pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&[u8], String> {
 #[derive(Default)]
 struct AstLimitState {
     nodes: usize,
+    applied_scope: bool,
+    conflict_clause: bool,
 }
 
 impl AstLimitState {
@@ -222,12 +287,15 @@ fn ensure_str(kind: &str, value: &str) -> Result<(), String> {
     ensure_len(kind, value.len(), MAX_AST_STRING_LEN)
 }
 
-fn validate_binary_ast_limits(cmd: &Qail) -> Result<(), String> {
+fn validate_binary_ast_limits(cmd: &Qail) -> Result<AstLimitState, String> {
     let mut state = AstLimitState::default();
-    validate_qail_limits(cmd, 0, &mut state)
+    validate_qail_limits(cmd, 0, &mut state)?;
+    Ok(state)
 }
 
 fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> Result<(), String> {
+    state.applied_scope |= !cmd.conflict_update_scope.is_empty();
+    state.conflict_clause |= cmd.on_conflict.is_some();
     use crate::ast::GroupByMode;
 
     ensure_depth(depth, "Qail")?;
@@ -367,6 +435,15 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
         for expr in returning {
             validate_expr_limits(expr, depth + 1, state)?;
         }
+    }
+
+    ensure_len(
+        "qail.conflict_update_scope",
+        cmd.conflict_update_scope.len(),
+        MAX_AST_COLLECTION_LEN,
+    )?;
+    for condition in &cmd.conflict_update_scope {
+        validate_condition_limits(condition, depth + 1, state)?;
     }
 
     if let Some(on_conflict) = &cmd.on_conflict {
@@ -985,6 +1062,26 @@ mod tests {
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         out.extend_from_slice(&payload);
         out
+    }
+
+    #[test]
+    fn conflict_update_scope_obeys_wire_limits() {
+        let mut cmd = Qail::add("scope_probe");
+        cmd.conflict_update_scope = vec![
+            crate::ast::builders::eq("scope_probe.tenant_id", "t-1");
+            MAX_AST_COLLECTION_LEN + 1
+        ];
+        assert!(encode_cmd_binary(&cmd).is_err());
+        assert!(decode_cmd_binary(&encode_cmd_binary_unchecked_for_test(&cmd)).is_err());
+    }
+
+    #[test]
+    fn pending_conflict_scope_is_sanitized_on_encode_and_decode() {
+        let mut cmd = Qail::add("scope_probe").set_value("id", 1);
+        cmd.conflict_update_scope
+            .push(crate::ast::builders::eq("bad;identifier", "t-1"));
+        assert!(encode_cmd_binary(&cmd).is_err());
+        assert!(decode_cmd_binary(&encode_cmd_binary_unchecked_for_test(&cmd)).is_err());
     }
 
     #[test]

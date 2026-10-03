@@ -24,6 +24,7 @@ use crate::runtime::{
 use crate::step::{WorkflowBranchCondition, WorkflowStep};
 
 const WORKFLOW_QUERY_WIRE_MAGIC: &str = "QAIL-CMD/1\n";
+const WORKFLOW_QUERY_AST_WIRE_MAGIC: &str = "QAIL-CMD/2\n";
 
 /// A single legacy query payload detected in a workflow definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct LegacyQueryPayloadIssue {
 /// Return legacy query payload issues found in a workflow definition.
 ///
 /// A query payload is considered legacy when `cmd_json` does not start with
-/// QAIL wire text magic (`QAIL-CMD/1\n`).
+/// a supported QAIL wire text magic (`QAIL-CMD/1\n` or `QAIL-CMD/2\n`).
 ///
 /// This helper is intended for cutover audits before loading persisted workflows
 /// into runtime execution.
@@ -164,6 +165,7 @@ fn summarize_payload_preview(cmd_json: &str) -> String {
 
 fn is_current_workflow_query_wire(cmd_json: &str) -> bool {
     cmd_json.starts_with(WORKFLOW_QUERY_WIRE_MAGIC)
+        || cmd_json.starts_with(WORKFLOW_QUERY_AST_WIRE_MAGIC)
 }
 
 /// Errors that can occur during workflow execution.
@@ -1981,14 +1983,14 @@ fn normalize_query_wire_for_execution(cmd_json: &str) -> Result<String, Workflow
     if !is_current_workflow_query_wire(cmd_json) {
         return Err(WorkflowError::QueryFailed(
             "Legacy workflow query payload detected: cmd_json must use QAIL wire text \
-             (QAIL-CMD/1). Migrate persisted workflow rows to wire text or purge/restart pending workflows."
+             (QAIL-CMD/1 or QAIL-CMD/2). Migrate persisted workflow rows to wire text or purge/restart pending workflows."
                 .to_string(),
         ));
     }
 
     let cmd = qail_core::wire::decode_cmd_text(cmd_json).map_err(|e| {
         WorkflowError::QueryFailed(format!(
-            "Invalid workflow query wire payload (expected QAIL-CMD/1): {}",
+            "Invalid workflow query wire payload (expected QAIL-CMD/1 or QAIL-CMD/2): {}",
             e
         ))
     })?;
@@ -7025,6 +7027,22 @@ mod tests {
             queries[0], wire,
             "executor should receive canonical wire payload"
         );
+    }
+
+    #[test]
+    fn query_scope_wire_normalization_retains_pending_scope() {
+        let mut cmd = qail_core::Qail::add("scope_transport").set_value("id", 1);
+        cmd.conflict_update_scope.push(qail_core::ast::builders::eq(
+            "scope_transport.tenant_id",
+            "a",
+        ));
+        let wire = qail_core::wire::encode_cmd_text(&cmd);
+        assert!(wire.starts_with("QAIL-CMD/2\n"));
+        assert!(is_current_workflow_query_wire(&wire));
+        let normalized = normalize_query_wire_for_execution(&wire).unwrap();
+        assert_eq!(qail_core::wire::decode_cmd_text(&normalized).unwrap(), cmd);
+        assert!(normalize_query_wire_for_execution("QAIL-CMD/2\n2\n{}").is_err());
+        assert!(normalize_query_wire_for_execution("QAIL-CMD/3\n0\n").is_err());
     }
 
     #[tokio::test]

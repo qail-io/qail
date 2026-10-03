@@ -61,6 +61,7 @@ io-uring = { version = "0.7", optional = true }
 workspace = true
 
 [dev-dependencies]
+serde_json = "1.0"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.23", features = ["v4"] }
 chrono = { version = "0.4" }

@@ -500,7 +500,7 @@ async fn export_handler_enforces_allow_list_before_db_acquire() {
 }
 
 #[tokio::test]
-async fn binary_handler_accepts_qwb2_then_enforces_binary_allow_list_gate() {
+async fn binary_handler_accepts_qwb2_and_qwb3_then_enforces_binary_allow_list_gate() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
@@ -513,24 +513,30 @@ async fn binary_handler_accepts_qwb2_then_enforces_binary_allow_list_gate() {
         .route("/qail/binary", post(execute_query_binary))
         .with_state(Arc::clone(&state));
 
-    let payload = qail_core::wire::encode_cmd_binary(&qail_core::ast::Qail::get("users").limit(1))
-        .expect("binary encode");
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/qail/binary")
-                .header("content-type", "application/octet-stream")
-                .body(Body::from(payload))
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should execute");
+    let mut scoped = qail_core::Qail::add("users").set_value("id", 1);
+    scoped
+        .conflict_update_scope
+        .push(qail_core::ast::builders::eq("users.tenant_id", "a"));
+    for cmd in [qail_core::Qail::get("users").limit(1), scoped] {
+        let payload = qail_core::wire::encode_cmd_binary(&cmd).expect("binary encode");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/qail/binary")
+                    .header("content-type", "application/octet-stream")
+                    .body(Body::from(payload))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should execute");
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    assert_eq!(parse_error_code(&body), "BINARY_REQUIRES_ALLOW_LIST");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        assert_eq!(parse_error_code(&body), "BINARY_REQUIRES_ALLOW_LIST");
+    }
 }
 
 #[tokio::test]
