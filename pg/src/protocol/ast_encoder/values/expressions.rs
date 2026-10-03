@@ -4,8 +4,8 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value,
-    WindowFrame,
+    CageKind, Condition, Constraint, Expr, FrameBound, JsonPathSegment, ModKind, Operator,
+    SortOrder, Value, WindowFrame,
 };
 use qail_core::transpiler::escape_identifier;
 
@@ -287,26 +287,17 @@ fn encode_column_expr_inner(
             // Wrap in parentheses to avoid operator precedence issues with || (concat)
             buf.extend_from_slice(b"(");
             push_identifier_ref(buf, column, false);
-            for (key, as_text) in path_segments {
-                // Check if key is an integer (array index)
-                let is_integer = key.parse::<i64>().is_ok();
-
-                if *as_text {
-                    if is_integer {
-                        buf.extend_from_slice(b"->>");
-                        buf.extend_from_slice(key.as_bytes());
-                    } else {
-                        buf.extend_from_slice(b"->>'");
+            for (segment, as_text) in path_segments {
+                buf.extend_from_slice(if *as_text { b"->>" } else { b"->" });
+                match segment {
+                    JsonPathSegment::Key(key) => {
+                        buf.extend_from_slice(b"'");
                         encode_json_path_segment(key, buf)?;
                         buf.extend_from_slice(b"'");
                     }
-                } else if is_integer {
-                    buf.extend_from_slice(b"->");
-                    buf.extend_from_slice(key.as_bytes());
-                } else {
-                    buf.extend_from_slice(b"->'");
-                    encode_json_path_segment(key, buf)?;
-                    buf.extend_from_slice(b"'");
+                    JsonPathSegment::Index(index) => {
+                        buf.extend_from_slice(index.to_string().as_bytes());
+                    }
                 }
             }
             buf.extend_from_slice(b")");
@@ -319,6 +310,7 @@ fn encode_column_expr_inner(
             name,
             func,
             params: window_params,
+            filter,
             partition,
             order,
             frame,
@@ -331,7 +323,20 @@ fn encode_column_expr_inner(
                 }
                 encode_column_expr_inner(p, buf, params.as_deref_mut())?;
             }
-            buf.extend_from_slice(b") OVER (");
+            buf.extend_from_slice(b")");
+            // Aggregate FILTER (WHERE ...) goes between the call and OVER.
+            if let Some(conditions) = filter
+                && !conditions.is_empty()
+            {
+                buf.extend_from_slice(b" FILTER (WHERE ");
+                if let Some(params) = params.as_deref_mut() {
+                    encode_conditions(conditions, buf, params)?;
+                } else {
+                    encode_conditions_inline(conditions, buf)?;
+                }
+                buf.extend_from_slice(b")");
+            }
+            buf.extend_from_slice(b" OVER (");
             if !partition.is_empty() {
                 buf.extend_from_slice(b"PARTITION BY ");
                 for (i, col) in partition.iter().enumerate() {
@@ -833,6 +838,9 @@ pub fn encode_expr_with_params(
 }
 
 /// Encode JOIN ON value - AST-native, no allocations for column references.
+///
+/// Only `Value::Column` emits an identifier; a `Value::String` binds as a
+/// parameter even when it contains a dot (`'red.blue'`, `'$.a'`).
 pub fn encode_join_value(
     value: &Value,
     buf: &mut BytesMut,
@@ -840,7 +848,6 @@ pub fn encode_join_value(
 ) -> Result<(), crate::protocol::EncodeError> {
     match value {
         Value::Column(col) => push_identifier_ref(buf, col, false),
-        Value::String(s) if s.contains('.') => push_identifier_ref(buf, s, false),
         Value::Null => buf.extend_from_slice(b"NULL"),
         Value::Bool(b) => buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" }),
         Value::Int(n) => {
@@ -1250,7 +1257,18 @@ pub fn encode_value(
             write_param_placeholder(buf, params.len());
         }
         Value::Bytes(bytes) => {
-            params.push(Some(bytes.clone()));
+            // AST Binds declare every parameter as text (format count 0), so
+            // raw bytes would be parsed as bytea input: data `\x4142` would
+            // store as `AB` and NUL/non-UTF-8 bytes are rejected. Send the
+            // bytea hex input form instead.
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut hex_buf = Vec::with_capacity(2 + bytes.len() * 2);
+            hex_buf.extend_from_slice(b"\\x");
+            for byte in bytes {
+                hex_buf.push(HEX[usize::from(byte >> 4)]);
+                hex_buf.push(HEX[usize::from(byte & 0x0f)]);
+            }
+            params.push(Some(hex_buf));
             write_param_placeholder(buf, params.len());
         }
         Value::Expr(expr) => {

@@ -1256,7 +1256,7 @@ mod tests {
         let mut cmd = Qail::get("events");
         cmd.columns.push(Expr::JsonAccess {
             column: "payload".to_string(),
-            path_segments: vec![("x') IS NOT NULL OR TRUE --".to_string(), true)],
+            path_segments: vec![("x') IS NOT NULL OR TRUE --".into(), true)],
             alias: None,
         });
 
@@ -1280,7 +1280,7 @@ mod tests {
         let mut cmd = Qail::get("events");
         cmd.columns.push(Expr::JsonAccess {
             column: "payload".to_string(),
-            path_segments: vec![("bad\0path".to_string(), true)],
+            path_segments: vec![("bad\0path".into(), true)],
             alias: None,
         });
 
@@ -2661,7 +2661,7 @@ mod tests {
                 left: Expr::Cast {
                     expr: Box::new(Expr::JsonAccess {
                         column: "u.profile".to_string(),
-                        path_segments: vec![("external_id".to_string(), true)],
+                        path_segments: vec![("external_id".into(), true)],
                         alias: None,
                     }),
                     target_type: "integer".to_string(),
@@ -2676,7 +2676,7 @@ mod tests {
                     Condition {
                         left: Expr::JsonAccess {
                             column: "s.profile".to_string(),
-                            path_segments: vec![("tier".to_string(), true)],
+                            path_segments: vec![("tier".into(), true)],
                             alias: None,
                         },
                         op: Operator::Eq,
@@ -2720,7 +2720,7 @@ mod tests {
                         "tier",
                         Expr::JsonAccess {
                             column: "s.profile".to_string(),
-                            path_segments: vec![("tier".to_string(), true)],
+                            path_segments: vec![("tier".into(), true)],
                             alias: None,
                         },
                     ),
@@ -2732,7 +2732,7 @@ mod tests {
                                     left: Expr::Cast {
                                         expr: Box::new(Expr::JsonAccess {
                                             column: "s.profile".to_string(),
-                                            path_segments: vec![("active".to_string(), true)],
+                                            path_segments: vec![("active".into(), true)],
                                             alias: None,
                                         }),
                                         target_type: "integer".to_string(),
@@ -2786,7 +2786,7 @@ mod tests {
                     },
                     Expr::JsonAccess {
                         column: "s.profile".to_string(),
-                        path_segments: vec![("tier".to_string(), true)],
+                        path_segments: vec![("tier".into(), true)],
                         alias: None,
                     },
                     Expr::Literal(Value::String("new".to_string())),

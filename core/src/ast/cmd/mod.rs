@@ -294,8 +294,11 @@ impl Default for Qail {
 mod advanced;
 mod constructors;
 mod cte;
+mod grouping;
 mod merge;
 mod query;
+
+pub use grouping::GroupByClause;
 mod rls;
 mod serialization;
 mod vector;

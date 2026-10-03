@@ -115,7 +115,7 @@ pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
     };
 
     // Collect path segments for chained JSON access
-    let mut path_segments: Vec<(String, bool)> = Vec::new();
+    let mut path_segments: Vec<(JsonPathSegment, bool)> = Vec::new();
 
     loop {
         let (remaining, json_op) = opt(alt((tag("->>"), tag("->")))).parse(input)?;
@@ -124,9 +124,11 @@ pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
             let (remaining, _) = multispace0(remaining)?;
             let (remaining, key_val) = parse_value(remaining)?;
 
+            // A quoted operand is an object key even when it looks numeric.
             let path = match key_val {
-                Value::String(s) => s,
-                _ => key_val.to_string(),
+                Value::String(s) => JsonPathSegment::Key(s),
+                Value::Int(n) => JsonPathSegment::Index(n),
+                other => JsonPathSegment::from_path_text(&other.to_string()),
             };
 
             path_segments.push((path, op == "->>"));

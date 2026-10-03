@@ -1,5 +1,6 @@
 //! UPDATE SQL generation.
 
+use crate::ast::write_payload::{check_update_shape, simple_write_column, update_assignments};
 use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
@@ -7,6 +8,10 @@ use crate::transpiler::identifier::render_table_reference;
 
 /// Generate UPDATE SQL with SET, FROM, and WHERE clauses.
 pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
+    if let Err(error) = check_update_shape(cmd, simple_write_column, |message| message) {
+        return crate::transpiler::dml::insert::shape_error_comment(&error);
+    }
+
     let generator = dialect.generator();
     let mut sql = if cmd.only_table {
         String::from("UPDATE ONLY ")
@@ -15,25 +20,20 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
     };
     sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
-    let mut set_clauses: Vec<String> = Vec::new();
+    let set_clauses: Vec<String> = update_assignments(cmd)
+        .into_iter()
+        .map(|(column, cond)| {
+            let col_sql = match column {
+                Expr::Named(name) => generator.quote_identifier(name),
+                _ => "/* ERROR: Invalid update column */".to_string(),
+            };
+            format!("{} = {}", col_sql, cond.to_value_sql(generator.as_ref()))
+        })
+        .collect();
     let mut where_groups: Vec<String> = Vec::new();
 
     for cage in &cmd.cages {
         match cage.kind {
-            // V2 syntax: Payload cage contains SET values
-            CageKind::Payload => {
-                for cond in &cage.conditions {
-                    let col_sql = match &cond.left {
-                        Expr::Named(name) => generator.quote_identifier(name),
-                        _ => "/* ERROR: Invalid update column */".to_string(),
-                    };
-                    set_clauses.push(format!(
-                        "{} = {}",
-                        col_sql,
-                        cond.to_value_sql(generator.as_ref())
-                    ));
-                }
-            }
             CageKind::Filter if !cage.conditions.is_empty() => {
                 let joiner = match cage.logical_op {
                     LogicalOp::And => " AND ",
@@ -171,21 +171,13 @@ fn render_qualified_identifier(
 
 fn render_json_access(
     column: &str,
-    path_segments: &[(String, bool)],
+    path_segments: &[(JsonPathSegment, bool)],
     generator: &dyn crate::transpiler::SqlGenerator,
 ) -> String {
     let mut sql = generator.quote_identifier(column);
-    for (path, as_text) in path_segments {
+    for (segment, as_text) in path_segments {
         let op = if *as_text { "->>" } else { "->" };
-        if path.parse::<i64>().is_ok() {
-            sql.push_str(&format!("{}{}", op, path));
-        } else {
-            sql.push_str(&format!(
-                "{}'{}'",
-                op,
-                crate::transpiler::escape_sql_string_literal(path)
-            ));
-        }
+        sql.push_str(&format!("{}{}", op, segment));
     }
     sql
 }

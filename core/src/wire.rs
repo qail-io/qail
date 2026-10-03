@@ -740,6 +740,7 @@ fn validate_expr_limits(
             name,
             func,
             params,
+            filter,
             partition,
             order,
             frame,
@@ -749,6 +750,12 @@ fn validate_expr_limits(
             ensure_len("expr.window.params", params.len(), MAX_AST_COLLECTION_LEN)?;
             for param in params {
                 validate_expr_limits(param, depth + 1, state)?;
+            }
+            if let Some(filters) = filter {
+                ensure_len("expr.window.filter", filters.len(), MAX_AST_COLLECTION_LEN)?;
+                for cond in filters {
+                    validate_condition_limits(cond, depth + 1, state)?;
+                }
             }
             ensure_len(
                 "expr.window.partition",
@@ -797,7 +804,9 @@ fn validate_expr_limits(
                 MAX_AST_COLLECTION_LEN,
             )?;
             for (segment, _) in path_segments {
-                ensure_str("expr.json_access.segment", segment)?;
+                if let Some(key) = segment.as_key() {
+                    ensure_str("expr.json_access.segment", key)?;
+                }
             }
             if let Some(alias) = alias {
                 ensure_str("expr.json_access.alias", alias)?;
@@ -1081,6 +1090,28 @@ mod tests {
             .push(crate::ast::builders::eq("bad;identifier", "t-1"));
         assert!(encode_cmd_binary(&cmd).is_err());
         assert!(decode_cmd_binary(&encode_cmd_binary_unchecked_for_test(&cmd)).is_err());
+    }
+
+    #[test]
+    fn window_filter_survives_both_codecs_and_stays_optional_in_json() {
+        let cmd = crate::parser::parse(
+            "get orders fields sum(amount) filter (where active = true) over (partition by region) as paid",
+        )
+        .expect("parse");
+
+        let via_text = decode_cmd_text(&encode_cmd_text(&cmd)).expect("text decode");
+        assert_eq!(via_text, cmd);
+        let via_binary =
+            decode_cmd_binary(&encode_cmd_binary(&cmd).expect("binary encode")).expect("decode");
+        assert_eq!(via_binary, cmd);
+
+        // Payloads written before Window carried a filter must still decode.
+        let unfiltered =
+            crate::parser::parse("get orders fields sum(amount) over () as total").expect("parse");
+        let json = serde_json::to_string(&unfiltered).expect("json");
+        assert!(!json.contains("\"filter\""), "{json}");
+        let decoded: Qail = serde_json::from_str(&json).expect("decode without filter key");
+        assert_eq!(decoded, unfiltered);
     }
 
     #[test]

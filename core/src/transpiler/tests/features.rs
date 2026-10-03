@@ -1420,7 +1420,7 @@ fn test_merge_postgres_renders_complex_action_expressions() {
             left: Expr::Cast {
                 expr: Box::new(Expr::JsonAccess {
                     column: "u.profile".to_string(),
-                    path_segments: vec![("external_id".to_string(), true)],
+                    path_segments: vec![("external_id".into(), true)],
                     alias: None,
                 }),
                 target_type: "integer".to_string(),
@@ -1435,7 +1435,7 @@ fn test_merge_postgres_renders_complex_action_expressions() {
                 Condition {
                     left: Expr::JsonAccess {
                         column: "s.profile".to_string(),
-                        path_segments: vec![("tier".to_string(), true)],
+                        path_segments: vec![("tier".into(), true)],
                         alias: None,
                     },
                     op: Operator::Eq,
@@ -1479,7 +1479,7 @@ fn test_merge_postgres_renders_complex_action_expressions() {
                     "tier",
                     Expr::JsonAccess {
                         column: "s.profile".to_string(),
-                        path_segments: vec![("tier".to_string(), true)],
+                        path_segments: vec![("tier".into(), true)],
                         alias: None,
                     },
                 ),
@@ -1491,7 +1491,7 @@ fn test_merge_postgres_renders_complex_action_expressions() {
                                 left: Expr::Cast {
                                     expr: Box::new(Expr::JsonAccess {
                                         column: "s.profile".to_string(),
-                                        path_segments: vec![("active".to_string(), true)],
+                                        path_segments: vec![("active".into(), true)],
                                         alias: None,
                                     }),
                                     target_type: "integer".to_string(),
@@ -1545,7 +1545,7 @@ fn test_merge_postgres_renders_complex_action_expressions() {
                 },
                 Expr::JsonAccess {
                     column: "s.profile".to_string(),
-                    path_segments: vec![("tier".to_string(), true)],
+                    path_segments: vec![("tier".into(), true)],
                     alias: None,
                 },
                 Expr::Literal(Value::String("new".to_string())),
@@ -1605,7 +1605,7 @@ fn test_merge_postgres_inline_source_alias_json_refs_prefer_alias() {
             vec![Condition {
                 left: Expr::JsonAccess {
                     column: "staging.orders.payload".to_string(),
-                    path_segments: vec![("tier".to_string(), true)],
+                    path_segments: vec![("tier".into(), true)],
                     alias: None,
                 },
                 op: Operator::Eq,
@@ -1616,7 +1616,7 @@ fn test_merge_postgres_inline_source_alias_json_refs_prefer_alias() {
                 "status",
                 Expr::JsonAccess {
                     column: "staging.orders.payload".to_string(),
-                    path_segments: vec![("status".to_string(), true)],
+                    path_segments: vec![("status".into(), true)],
                     alias: None,
                 },
             )],
@@ -2076,14 +2076,14 @@ fn test_json_access_escapes_path_segments_in_select_renderers() {
     let hostile_path = "x') IS NOT NULL OR TRUE --".to_string();
     let json_expr = Expr::JsonAccess {
         column: "payload".to_string(),
-        path_segments: vec![(hostile_path.clone(), true)],
+        path_segments: vec![(hostile_path.clone().into(), true)],
         alias: Some("payload_value".to_string()),
     };
 
     let mut cmd = Qail::get("events").order_by_expr(
         Expr::JsonAccess {
             column: "payload".to_string(),
-            path_segments: vec![(hostile_path, true)],
+            path_segments: vec![(hostile_path.into(), true)],
             alias: None,
         },
         SortOrder::Asc,
@@ -2616,6 +2616,145 @@ fn test_group_by_cube() {
     assert!(sql.contains("GROUP BY CUBE("));
 }
 
+// ============= Explicit grouping keys, grouping modes, HAVING =============
+
+fn lower_name() -> Expr {
+    Expr::FunctionCall {
+        name: "lower".to_string(),
+        args: vec![Expr::Named("name".to_string())],
+        alias: None,
+    }
+}
+
+fn count_star() -> Expr {
+    Expr::Aggregate {
+        col: "*".to_string(),
+        func: AggregateFunc::Count,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }
+}
+
+#[test]
+fn explicit_group_by_expr_is_rendered() {
+    let cmd = Qail::get("orders")
+        .column_expr(lower_name())
+        .group_by_expr([lower_name()]);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT LOWER(name) FROM orders GROUP BY LOWER(name)"
+    );
+}
+
+#[test]
+fn explicit_group_by_replaces_projection_inference() {
+    let cmd = Qail::get("orders")
+        .columns(["department"])
+        .column_expr(count_star())
+        .group_by(["department", "region"]);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT department, COUNT(*) FROM orders GROUP BY department, region"
+    );
+}
+
+#[test]
+fn every_group_by_cage_contributes_keys() {
+    let cmd = Qail::get("orders")
+        .columns(["department"])
+        .column_expr(count_star())
+        .group_by(["department"])
+        .group_by(["region"]);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT department, COUNT(*) FROM orders GROUP BY department, region"
+    );
+}
+
+#[test]
+fn rollup_applies_to_explicit_group_by_keys() {
+    let mut cmd = Qail::get("orders")
+        .column_expr(lower_name())
+        .column_expr(count_star())
+        .group_by_expr([lower_name()]);
+    cmd.group_by_mode = GroupByMode::Rollup;
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT LOWER(name), COUNT(*) FROM orders GROUP BY ROLLUP(LOWER(name))"
+    );
+}
+
+#[test]
+fn grouping_mode_without_projected_aggregate_is_rendered() {
+    let mut rollup = Qail::get("orders").columns(["department", "region"]);
+    rollup.group_by_mode = GroupByMode::Rollup;
+    assert_eq!(
+        rollup.to_sql(),
+        "SELECT department, region FROM orders GROUP BY ROLLUP(department, region)"
+    );
+
+    let mut cube = Qail::get("orders").columns(["department"]);
+    cube.group_by_mode = GroupByMode::Cube;
+    assert_eq!(
+        cube.to_sql(),
+        "SELECT department FROM orders GROUP BY CUBE(department)"
+    );
+
+    let mut sets = Qail::get("orders").columns(["department"]);
+    sets.group_by_mode = GroupByMode::GroupingSets(vec![vec!["department".to_string()], vec![]]);
+    assert_eq!(
+        sets.to_sql(),
+        "SELECT department FROM orders GROUP BY GROUPING SETS ((department), ())"
+    );
+}
+
+#[test]
+fn grouping_mode_without_keys_is_an_explicit_error() {
+    let mut cmd = Qail::get("orders").column_expr(count_star());
+    cmd.group_by_mode = GroupByMode::Rollup;
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT COUNT(*) FROM orders GROUP BY /* ERROR: ROLLUP requires at least one grouping key */"
+    );
+}
+
+#[test]
+fn grouping_sets_with_explicit_keys_is_an_explicit_error() {
+    let mut cmd = Qail::get("orders")
+        .columns(["department"])
+        .group_by(["department"]);
+    cmd.group_by_mode = GroupByMode::GroupingSets(vec![vec!["department".to_string()]]);
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT department FROM orders GROUP BY /* ERROR: GROUPING SETS cannot be combined with explicit GROUP BY keys */"
+    );
+}
+
+#[test]
+fn having_renders_dedicated_aggregate_left_operand() {
+    let cmd = Qail::get("orders")
+        .columns(["department"])
+        .column_expr(count_star())
+        .having_cond(Condition {
+            left: count_star(),
+            op: Operator::Gt,
+            value: Value::Int(5),
+            is_array_unnest: false,
+        });
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT department, COUNT(*) FROM orders GROUP BY department HAVING COUNT(*) > 5"
+    );
+}
+
 // ============= AGGREGATE FILTER =============
 
 #[test]
@@ -3026,6 +3165,7 @@ fn test_schema_qualified_alias_window_partition_order_prefer_alias() {
             name: "rn".to_string(),
             func: "row_number".to_string(),
             params: vec![],
+            filter: None,
             partition: vec!["public.orders.customer_id".to_string()],
             order: vec![Cage {
                 kind: CageKind::Sort(SortOrder::Desc),

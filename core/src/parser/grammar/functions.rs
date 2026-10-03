@@ -21,6 +21,7 @@ use nom::{
 
 /// Parse function call or aggregate: name(arg1, arg2)
 pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
+    let call_start = input;
     // Identifier followed by (
     let (input, name) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
@@ -41,6 +42,11 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
 
     let (input, _) = multispace0(input)?;
     if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("over").parse(input) {
+        // PostgreSQL has no DISTINCT for window functions, and Expr::Window
+        // has no slot for it: reject instead of returning duplicates.
+        if distinct {
+            return Err(unkept_aggregate_modifier(call_start));
+        }
         let (remaining, _) = multispace0(remaining)?;
         let (remaining, _) = char('(').parse(remaining)?;
         let (remaining, _) = multispace0(remaining)?;
@@ -78,6 +84,7 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
                 name: alias_str,
                 func: name.to_string(),
                 params: args, // Pass Expr args directly for native AST
+                filter: filter_clause,
                 partition,
                 order,
                 frame,
@@ -96,6 +103,10 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     let name_lower = name.to_lowercase();
     match name_lower.as_str() {
         "count" | "sum" | "avg" | "min" | "max" => {
+            // Expr::Aggregate keeps one column; a second argument would be dropped.
+            if args.len() > 1 {
+                return Err(unkept_aggregate_modifier(call_start));
+            }
             // For aggregates, convert first arg to string representation
             let col = args
                 .first()
@@ -120,6 +131,32 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
                 },
             ))
         }
+        _ if distinct || filter_clause.is_some() => {
+            // Expr::FunctionCall has no DISTINCT/FILTER slot. Calls that fit
+            // Expr::Aggregate (one plain column) keep them there; anything
+            // else is rejected rather than run without its modifiers.
+            let func = match name_lower.as_str() {
+                "array_agg" => AggregateFunc::ArrayAgg,
+                "json_agg" => AggregateFunc::JsonAgg,
+                "jsonb_agg" => AggregateFunc::JsonbAgg,
+                "bool_and" => AggregateFunc::BoolAnd,
+                "bool_or" => AggregateFunc::BoolOr,
+                _ => return Err(unkept_aggregate_modifier(call_start)),
+            };
+            let [Expr::Named(col)] = args.as_slice() else {
+                return Err(unkept_aggregate_modifier(call_start));
+            };
+            Ok((
+                input,
+                Expr::Aggregate {
+                    col: col.clone(),
+                    func,
+                    distinct,
+                    filter: filter_clause,
+                    alias,
+                },
+            ))
+        }
         _ => Ok((
             input,
             Expr::FunctionCall {
@@ -129,6 +166,15 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
             },
         )),
     }
+}
+
+/// Hard parse failure for a call whose DISTINCT, FILTER or arguments no AST
+/// node can keep; `Failure` stops `alt` from re-reading it another way.
+fn unkept_aggregate_modifier(call_start: &str) -> nom::Err<nom::error::Error<&str>> {
+    nom::Err::Failure(nom::error::Error::new(
+        call_start,
+        nom::error::ErrorKind::Verify,
+    ))
 }
 
 /// Parse a single function argument (supports expressions or star)

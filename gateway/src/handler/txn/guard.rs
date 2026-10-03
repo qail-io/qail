@@ -33,9 +33,17 @@ fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
             reject_expr_subqueries(expr)?;
         }
-        Expr::Window { params, order, .. } => {
+        Expr::Window {
+            params,
+            filter,
+            order,
+            ..
+        } => {
             for expr in params {
                 reject_expr_subqueries(expr)?;
+            }
+            for condition in filter.iter().flatten() {
+                reject_condition_subqueries(condition)?;
             }
             for cage in order {
                 for condition in &cage.conditions {

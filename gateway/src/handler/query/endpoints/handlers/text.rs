@@ -6,7 +6,9 @@ fn build_export_tenant_violation_check(
     tenant_column: &str,
     tenant_id: &str,
 ) -> qail_core::ast::Qail {
-    use qail_core::ast::{AggregateFunc, CageKind, Expr, Operator, Value as QailValue};
+    use qail_core::ast::{
+        AggregateFunc, CageKind, Expr, GroupByMode, Operator, Value as QailValue,
+    };
 
     let mut guard_cmd = cmd.clone();
     guard_cmd.action = Action::Get;
@@ -20,6 +22,9 @@ fn build_export_tenant_violation_check(
     guard_cmd.distinct = false;
     guard_cmd.distinct_on.clear();
     guard_cmd.having.clear();
+    // Only the first row is read: ROLLUP/CUBE/GROUPING SETS would split the
+    // count into groups and hide violations outside the first one.
+    guard_cmd.group_by_mode = GroupByMode::Simple;
     guard_cmd.set_ops.clear();
     guard_cmd.fetch = None;
     guard_cmd
@@ -275,8 +280,31 @@ pub async fn execute_query_export(
 
 #[cfg(test)]
 mod tests {
-    use super::export_violation_count;
+    use super::{build_export_tenant_violation_check, export_violation_count};
     use serde_json::json;
+
+    #[test]
+    fn export_guard_counts_every_row_in_one_group() {
+        use qail_core::ast::{Action, GroupByMode, Operator, Qail};
+
+        let mut export = Qail::get("orders")
+            .columns(["department"])
+            .group_by(["department"])
+            .having_cond(qail_core::ast::builders::gt("department", "a"));
+        export.action = Action::Export;
+        export.group_by_mode =
+            GroupByMode::GroupingSets(vec![vec!["department".to_string()], vec![]]);
+        let export = export.filter("status", Operator::Eq, "paid");
+
+        let guard = build_export_tenant_violation_check(&export, "tenant_id", "t1");
+        let (sql, params) = qail_pg::protocol::AstEncoder::encode_cmd_sql(&guard).unwrap();
+
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) AS violation_count FROM orders WHERE status = $1 AND tenant_id != $2"
+        );
+        assert_eq!(params, vec![Some(b"paid".to_vec()), Some(b"t1".to_vec())]);
+    }
 
     #[test]
     fn export_violation_count_accepts_numeric_and_string_counts() {

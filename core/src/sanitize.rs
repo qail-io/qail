@@ -311,9 +311,11 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             ..
         } => {
             check_ident(field, column)?;
-            for (key, _) in path_segments {
+            for (segment, _) in path_segments {
                 // Integer indices are fine; string keys must be safe identifiers
-                if key.parse::<i64>().is_err() && !is_safe_identifier(key) {
+                if let Some(key) = segment.as_key()
+                    && !is_safe_identifier(key)
+                {
                     return Err(SanitizeError {
                         field: format!("{field}.json_path"),
                         value: key.chars().take(40).collect(),
@@ -346,6 +348,7 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             func,
             partition,
             params,
+            filter,
             order,
             ..
         } => {
@@ -358,6 +361,12 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             for p in params {
                 check_expr(&format!("{field}.window_param"), p)?;
+            }
+            if let Some(conditions) = filter {
+                for cond in conditions {
+                    check_expr(&format!("{field}.window_filter"), &cond.left)?;
+                    check_value(&format!("{field}.window_filter"), &cond.value)?;
+                }
             }
             for cage in order {
                 for cond in &cage.conditions {
@@ -1016,6 +1025,30 @@ mod tests {
     }
 
     #[test]
+    fn window_filter_value_expression_injection_rejected() {
+        use crate::ast::{Condition, Operator, Value};
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::Window {
+            name: "total".to_string(),
+            func: "sum".to_string(),
+            params: vec![Expr::Named("amount".to_string())],
+            filter: Some(vec![Condition {
+                left: Expr::Named("direction".to_string()),
+                op: Operator::Eq,
+                value: Value::Expr(Box::new(Expr::Named("bad;DROP".to_string()))),
+                is_array_unnest: false,
+            }]),
+            partition: vec![],
+            order: vec![],
+            frame: None,
+        });
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "columns[0].window_filter");
+    }
+
+    #[test]
     fn count_star_aggregate_passes_sanitizer() {
         use crate::ast::AggregateFunc;
 
@@ -1042,7 +1075,7 @@ mod tests {
                     left: Expr::Cast {
                         expr: Box::new(Expr::JsonAccess {
                             column: "profile".to_string(),
-                            path_segments: vec![("active".to_string(), true)],
+                            path_segments: vec![("active".into(), true)],
                             alias: None,
                         }),
                         target_type: "integer".to_string(),

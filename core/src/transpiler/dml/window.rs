@@ -1,10 +1,11 @@
 //! Window Function SQL generation.
 
+use super::select::aggregate_filter_sql;
 use crate::ast::*;
+use crate::transpiler::SqlGenerator;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::render_table_reference;
-use crate::transpiler::{SqlGenerator, escape_sql_string_literal};
 
 /// Generate Window Function SQL (Pillar 8).
 pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
@@ -19,6 +20,7 @@ pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
                 name,
                 func,
                 params,
+                filter,
                 partition,
                 order,
                 frame,
@@ -108,9 +110,10 @@ pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
                 over_clause.push(')');
 
                 format!(
-                    "{}({}) {} AS {}",
+                    "{}({}){} {} AS {}",
                     function,
                     params_str,
+                    aggregate_filter_sql(filter, generator.as_ref(), cmd),
                     over_clause,
                     generator.quote_identifier(name)
                 )
@@ -339,17 +342,13 @@ fn render_qualified_identifier(value: &str, generator: &dyn SqlGenerator) -> Str
 
 fn render_json_access(
     column: &str,
-    path_segments: &[(String, bool)],
+    path_segments: &[(JsonPathSegment, bool)],
     generator: &dyn SqlGenerator,
 ) -> String {
     let mut sql = generator.quote_identifier(column);
-    for (path, as_text) in path_segments {
+    for (segment, as_text) in path_segments {
         let op = if *as_text { "->>" } else { "->" };
-        if path.parse::<i64>().is_ok() {
-            sql.push_str(&format!("{}{}", op, path));
-        } else {
-            sql.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
-        }
+        sql.push_str(&format!("{}{}", op, segment));
     }
     sql
 }

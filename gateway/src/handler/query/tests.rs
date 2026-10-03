@@ -416,6 +416,30 @@ fn shared_read_only_gate_blocks_expression_subquery_mutation() {
     assert!(!qail_command_is_read_only(&cmd));
 }
 
+#[test]
+fn read_only_gates_walk_window_filter_subqueries() {
+    use qail_core::ast::{Condition, Expr, Operator, Qail, Value};
+
+    let mut cmd = Qail::get("safe");
+    cmd.columns.push(Expr::Window {
+        name: "total".to_string(),
+        func: "sum".to_string(),
+        params: vec![Expr::Named("amount".to_string())],
+        filter: Some(vec![Condition {
+            left: Expr::Named("id".to_string()),
+            op: Operator::In,
+            value: Value::Subquery(Box::new(Qail::add("evil"))),
+            is_array_unnest: false,
+        }]),
+        partition: vec![],
+        order: vec![],
+        frame: None,
+    });
+
+    assert!(!qail_command_is_read_only(&cmd));
+    assert!(reject_non_read_action(&cmd, "test").is_err());
+}
+
 #[tokio::test]
 async fn export_handler_rejects_empty_query() {
     let _serial = crate::metrics::txn_test_serial_guard().await;

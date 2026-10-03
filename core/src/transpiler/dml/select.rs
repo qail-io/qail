@@ -8,7 +8,7 @@ use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::{
     render_table_reference, table_reference_base, table_reference_sql_qualifier,
 };
-use crate::transpiler::traits::{SqlGenerator, escape_sql_string_literal};
+use crate::transpiler::traits::SqlGenerator;
 
 /// Generate SELECT SQL from a QAIL command, including CTEs, joins, filtering, grouping, and ordering.
 pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
@@ -319,6 +319,7 @@ fn build_select_inner(
                         name,
                         func,
                         params,
+                        filter,
                         partition,
                         order,
                         frame,
@@ -417,9 +418,10 @@ fn build_select_inner(
 
                         over_clause.push(')');
                         format!(
-                            "{}({}) {} AS {}",
+                            "{}({}){} {} AS {}",
                             function,
                             params_str,
+                            aggregate_filter_sql(filter, generator.as_ref(), cmd),
                             over_clause,
                             generator.quote_identifier(name)
                         )
@@ -515,36 +517,6 @@ fn build_select_inner(
         }
     }
 
-    // Prepare for GROUP BY check
-    let has_aggregates = columns.iter().any(|c| matches!(c, Expr::Aggregate { .. }));
-    let mut non_aggregated_cols = Vec::new();
-    if has_aggregates {
-        for col in columns {
-            match col {
-                Expr::Named(name) => {
-                    non_aggregated_cols.push(render_named_reference(name, generator.as_ref(), cmd));
-                }
-                Expr::Aliased { name, .. } => {
-                    // Use the base column name for GROUP BY (before AS alias)
-                    non_aggregated_cols.push(render_named_reference(name, generator.as_ref(), cmd));
-                }
-                Expr::JsonAccess {
-                    column,
-                    path_segments,
-                    ..
-                } => {
-                    // Include JSON access expression in GROUP BY
-                    non_aggregated_cols.push(render_json_access(
-                        column,
-                        path_segments,
-                        generator.as_ref(),
-                    ));
-                }
-                _ => {} // Aggregates and other expressions not added to GROUP BY
-            }
-        }
-    }
-
     // Process cages
     let mut where_groups: Vec<String> = Vec::new();
     let mut order_by_clauses: Vec<String> = Vec::new();
@@ -603,7 +575,7 @@ fn build_select_inner(
                 // Will be processed separately after ORDER BY for QUALIFY clause
             }
             CageKind::Partition => {
-                // Handled in window function OVER clause
+                // GROUP BY keys, rendered by build_group_by_clause
             }
         }
     }
@@ -614,22 +586,7 @@ fn build_select_inner(
         sql.push_str(&where_groups.join(" AND "));
     }
 
-    // GROUP BY (with ROLLUP/CUBE support)
-    if !non_aggregated_cols.is_empty() {
-        sql.push_str(" GROUP BY ");
-        match cmd.group_by_mode {
-            GroupByMode::Simple => sql.push_str(&non_aggregated_cols.join(", ")),
-            GroupByMode::Rollup => {
-                sql.push_str(&format!("ROLLUP({})", non_aggregated_cols.join(", ")))
-            }
-            GroupByMode::Cube => sql.push_str(&format!("CUBE({})", non_aggregated_cols.join(", "))),
-            GroupByMode::GroupingSets(ref sets) => {
-                let sets_str: Vec<String> =
-                    sets.iter().map(|s| format!("({})", s.join(", "))).collect();
-                sql.push_str(&format!("GROUPING SETS ({})", sets_str.join(", ")));
-            }
-        }
-    }
+    sql.push_str(&build_group_by_clause(cmd, columns, generator.as_ref()));
 
     // HAVING (filter on aggregates)
     if !cmd.having.is_empty() {
@@ -727,6 +684,37 @@ fn set_operand_has_branch_clauses(cmd: &Qail) -> bool {
 fn wrap_set_operand_sql(sql: String, dialect: Dialect) -> String {
     match dialect {
         Dialect::Postgres => format!("({sql})"),
+    }
+}
+
+/// ` GROUP BY ...` from [`Qail::group_by_clause`], or an empty string.
+fn build_group_by_clause(
+    cmd: &Qail,
+    columns: &[Expr],
+    generator: &dyn crate::transpiler::SqlGenerator,
+) -> String {
+    let render_keys = |keys: &[std::borrow::Cow<'_, Expr>]| {
+        keys.iter()
+            .map(|key| match key.as_ref() {
+                Expr::Named(name) => render_named_reference(name, generator, cmd),
+                other => render_expr_for_orderby(other, generator, cmd),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    match cmd.group_by_clause(columns) {
+        Ok(None) => String::new(),
+        Ok(Some(GroupByClause::Keys(keys))) => format!(" GROUP BY {}", render_keys(&keys)),
+        Ok(Some(GroupByClause::Rollup(keys))) => {
+            format!(" GROUP BY ROLLUP({})", render_keys(&keys))
+        }
+        Ok(Some(GroupByClause::Cube(keys))) => format!(" GROUP BY CUBE({})", render_keys(&keys)),
+        Ok(Some(GroupByClause::GroupingSets(sets))) => {
+            let sets: Vec<String> = sets.iter().map(|s| format!("({})", s.join(", "))).collect();
+            format!(" GROUP BY GROUPING SETS ({})", sets.join(", "))
+        }
+        Err(message) => format!(" GROUP BY /* ERROR: {message} */"),
     }
 }
 
@@ -1073,19 +1061,33 @@ fn render_qualified_identifier(value: &str, generator: &dyn SqlGenerator) -> Str
 
 fn render_json_access(
     column: &str,
-    path_segments: &[(String, bool)],
+    path_segments: &[(JsonPathSegment, bool)],
     generator: &dyn SqlGenerator,
 ) -> String {
     let mut result = generator.quote_identifier(column);
-    for (path, as_text) in path_segments {
+    for (segment, as_text) in path_segments {
         let op = if *as_text { "->>" } else { "->" };
-        if path.parse::<i64>().is_ok() {
-            result.push_str(&format!("{}{}", op, path));
-        } else {
-            result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
-        }
+        result.push_str(&format!("{}{}", op, segment));
     }
     result
+}
+
+/// ` FILTER (WHERE ...)` for an aggregate call, or "" when there is none.
+pub(super) fn aggregate_filter_sql(
+    filter: &Option<Vec<Condition>>,
+    generator: &dyn SqlGenerator,
+    cmd: &Qail,
+) -> String {
+    match filter {
+        Some(conditions) if !conditions.is_empty() => {
+            let filter_parts: Vec<String> = conditions
+                .iter()
+                .map(|c| c.to_sql(generator, Some(cmd)))
+                .collect();
+            format!(" FILTER (WHERE {})", filter_parts.join(" AND "))
+        }
+        _ => String::new(),
+    }
 }
 
 /// Convert FrameBound to SQL string for window functions

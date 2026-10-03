@@ -510,12 +510,16 @@ impl AccessPolicy {
             }
             Expr::Window {
                 params,
+                filter,
                 partition,
                 order,
                 ..
             } => {
                 for param in params {
                     self.check_expr_column_refs(table, rule, target_refs, param, context)?;
+                }
+                for condition in filter.iter().flatten() {
+                    self.check_condition_column_refs(table, rule, target_refs, condition, context)?;
                 }
                 for column in partition {
                     check_named_read_column(table, rule, target_refs, column, context)?;
@@ -740,12 +744,16 @@ impl AccessPolicy {
             }
             Expr::Window {
                 params,
+                filter,
                 partition,
                 order,
                 ..
             } => {
                 for param in params {
                     self.check_outer_expr_column_refs(table, rule, target_refs, param)?;
+                }
+                for condition in filter.iter().flatten() {
+                    self.check_outer_condition_column_refs(table, rule, target_refs, condition)?;
                 }
                 for column in partition {
                     check_qualified_read_column(table, rule, target_refs, column)?;
@@ -981,9 +989,17 @@ impl AccessPolicy {
                 }
                 Ok(())
             }
-            Expr::Window { params, order, .. } => {
+            Expr::Window {
+                params,
+                filter,
+                order,
+                ..
+            } => {
                 for param in params {
                     self.check_expr(ctx, param)?;
+                }
+                for condition in filter.iter().flatten() {
+                    self.check_condition(ctx, condition)?;
                 }
                 for cage in order {
                     for condition in &cage.conditions {

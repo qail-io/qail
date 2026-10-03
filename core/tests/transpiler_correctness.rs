@@ -255,6 +255,38 @@ fn insert_with_returning() {
     assert!(sql.contains("id"), "Must contain 'id' column: {}", sql);
 }
 
+#[test]
+fn insert_named_payload_lists_its_columns() {
+    let cmd = Qail::add("orders")
+        .set_value("status", "paid")
+        .returning(["id"]);
+    assert_eq!(
+        cmd.to_sql(),
+        "INSERT INTO orders (status) VALUES ('paid') RETURNING id"
+    );
+}
+
+#[test]
+fn insert_values_come_from_the_payload_cage() {
+    let cmd = Qail::add("orders")
+        .columns(["status"])
+        .filter("id", Operator::Eq, 99)
+        .set_value("status", "paid")
+        .returning(["id"]);
+    assert_eq!(
+        cmd.to_sql(),
+        "INSERT INTO orders (status) VALUES ('paid') RETURNING id"
+    );
+}
+
+#[test]
+fn update_positional_values_pair_with_explicit_columns() {
+    let cmd = Qail::set("orders")
+        .columns(["status"])
+        .values([Value::String("paid".to_string())]);
+    assert_eq!(cmd.to_sql(), "UPDATE orders SET status = 'paid'");
+}
+
 // ============================================================================
 // UPDATE
 // ============================================================================

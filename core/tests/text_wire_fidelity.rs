@@ -13,6 +13,7 @@ fn window(func: &str, frame: Option<WindowFrame>) -> Expr {
         name: "w".to_string(),
         func: func.to_string(),
         params: vec![col("amount")],
+        filter: None,
         partition: vec!["tenant_id".to_string()],
         order: vec![Cage {
             kind: CageKind::Sort(SortOrder::Desc),
@@ -21,6 +22,14 @@ fn window(func: &str, frame: Option<WindowFrame>) -> Expr {
         }],
         frame,
     }
+}
+
+fn filtered_window() -> Expr {
+    let mut expr = window("sum", None);
+    if let Expr::Window { filter, .. } = &mut expr {
+        *filter = Some(vec![eq("active", true)]);
+    }
+    expr
 }
 
 fn union_of(mut lhs: Qail, op: SetOp, rhs: Qail) -> Qail {
@@ -103,6 +112,10 @@ fn corpus() -> Vec<(&'static str, Qail)> {
         (
             "window without frame",
             Qail::get("orders").column_expr(window("row_number", None)),
+        ),
+        (
+            "window with aggregate filter",
+            Qail::get("orders").column_expr(filtered_window()),
         ),
         (
             "window rows frame",
