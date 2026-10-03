@@ -8,13 +8,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// A prepared statement handle with pre-computed statement name.
-/// This eliminates per-query hash computation and HashMap lookup.
+/// This avoids per-query SQL hashing. Typed execution checks the connection's
+/// recorded SQL before binding; an evicted handle must be prepared again.
 /// Create once, execute many times.
 /// # Example
 /// ```ignore
 /// // Prepare once (compute hash + register with PostgreSQL)
 /// let stmt = conn.prepare("SELECT id, name FROM users WHERE id = $1").await?;
-/// // Execute many times (no hash, no lookup!)
+/// // Execute many times without hashing the SQL again.
 /// for id in 1..1000 {
 ///     conn.execute_prepared(&stmt, &[Some(id.to_string().into_bytes())]).await?;
 /// }
@@ -23,8 +24,8 @@ use std::sync::Arc;
 pub struct PreparedStatement {
     /// Pre-computed statement name (e.g., "s1234567890abcdef")
     pub(crate) name: String,
-    /// SQL the handle stands for. The name is a 64-bit hash, so pipeline
-    /// paths compare this with the connection's record before binding.
+    /// SQL the handle stands for. The name is a 64-bit hash, so typed
+    /// execution compares this with the connection's record before binding.
     pub(crate) sql: Arc<[u8]>,
 }
 
@@ -55,7 +56,8 @@ pub struct PreparedAstQuery {
 }
 
 impl PreparedAstQuery {
-    /// Prepared statement name (server-side identity).
+    /// Statement name assigned when this handle was prepared.
+    /// Execution may recover under a different name after eviction or collision.
     #[inline]
     pub fn statement_name(&self) -> &str {
         self.stmt.name()
@@ -71,6 +73,8 @@ impl PreparedAstQuery {
 impl PreparedStatement {
     /// Create a new prepared statement handle from SQL bytes.
     /// This hashes the SQL bytes directly without String allocation.
+    /// It does not register SQL with a connection; call `PgConnection::prepare()`
+    /// before typed execution.
     #[inline]
     pub fn from_sql_bytes(sql_bytes: &[u8]) -> Self {
         let name = sql_bytes_to_stmt_name(sql_bytes);
@@ -81,6 +85,8 @@ impl PreparedStatement {
     }
 
     /// Create from SQL string (convenience method).
+    /// This does not register SQL with a connection; use `PgConnection::prepare()`
+    /// to obtain a handle ready for typed execution.
     #[inline]
     pub fn from_sql(sql: &str) -> Self {
         Self::from_sql_bytes(sql.as_bytes())
