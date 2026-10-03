@@ -230,6 +230,9 @@ fn main() {
                 distinct: false,
                 filter: None,
                 alias: None,
+                args: vec![],
+                order_by: vec![],
+                within_group: vec![],
             }];
             q
         }),
@@ -241,6 +244,9 @@ fn main() {
                 distinct: false,
                 filter: None,
                 alias: None,
+                args: vec![],
+                order_by: vec![],
+                within_group: vec![],
             }];
             q
         }),
@@ -252,6 +258,9 @@ fn main() {
                 distinct: true,
                 filter: None,
                 alias: None,
+                args: vec![],
+                order_by: vec![],
+                within_group: vec![],
             }];
             q
         }),

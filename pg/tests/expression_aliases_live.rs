@@ -43,6 +43,9 @@ async fn grouped_aliases_execute_in_preview_cached_and_uncached_paths() -> PgRes
         distinct: false,
         filter: None,
         alias: Some("row_count".into()),
+        args: Vec::new(),
+        order_by: Vec::new(),
+        within_group: Vec::new(),
     };
     for mode in [GroupByMode::Simple, GroupByMode::Rollup, GroupByMode::Cube] {
         let mut expected = vec![(Some("a".to_string()), 2)];

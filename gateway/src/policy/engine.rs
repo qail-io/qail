@@ -912,8 +912,16 @@ impl PolicyEngine {
                     context,
                 )
             }
-            Expr::Aggregate { col, filter, .. } => {
-                if col != "*" {
+            Expr::Aggregate {
+                col,
+                filter,
+                args,
+                order_by,
+                within_group,
+                ..
+            } => {
+                // `col` is empty when the arguments live in `args`.
+                if col != "*" && !col.is_empty() {
                     Self::enforce_named_write_expr_ref_for_policies(
                         policies,
                         target_refs,
@@ -922,8 +930,28 @@ impl PolicyEngine {
                         context,
                     )?;
                 }
+                for arg in args {
+                    Self::enforce_expr_write_refs_for_policies(
+                        arg,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
                 if let Some(conditions) = filter {
                     for condition in conditions {
+                        Self::enforce_condition_write_expr_refs_for_policies(
+                            condition,
+                            policies,
+                            target_refs,
+                            operation,
+                            context,
+                        )?;
+                    }
+                }
+                for cage in order_by.iter().chain(within_group) {
+                    for condition in &cage.conditions {
                         Self::enforce_condition_write_expr_refs_for_policies(
                             condition,
                             policies,
@@ -1710,11 +1738,22 @@ impl PolicyEngine {
     ) -> Result<(), GatewayError> {
         match expr {
             Expr::Aggregate {
-                filter: Some(filter),
+                filter,
+                args,
+                order_by,
+                within_group,
                 ..
             } => {
-                for condition in filter {
+                for expr in args {
+                    self.apply_expr_subquery_policies(auth, expr)?;
+                }
+                for condition in filter.iter_mut().flatten() {
                     self.apply_condition_subquery_policies(auth, condition)?;
+                }
+                for cage in order_by.iter_mut().chain(within_group.iter_mut()) {
+                    for condition in &mut cage.conditions {
+                        self.apply_condition_subquery_policies(auth, condition)?;
+                    }
                 }
             }
             Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
@@ -1790,7 +1829,6 @@ impl PolicyEngine {
             Expr::Star
             | Expr::Named(_)
             | Expr::Aliased { .. }
-            | Expr::Aggregate { filter: None, .. }
             | Expr::Def { .. }
             | Expr::JsonAccess { .. } => {}
         }

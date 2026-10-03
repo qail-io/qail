@@ -1101,6 +1101,9 @@ fn select_aggregate_filter_uses_structured_condition_renderer() {
                 is_array_unnest: false,
             }]),
             alias: Some("total".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         }],
         ..Default::default()
     };

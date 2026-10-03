@@ -1,6 +1,7 @@
 //! SQL Transpiler for QAIL AST.
 //!
 
+pub(crate) mod aggregate;
 /// Condition-to-SQL conversion.
 pub mod conditions;
 /// DDL statement transpilation (CREATE TABLE, ALTER TABLE, etc.).
@@ -98,6 +99,9 @@ impl ToSql for Qail {
                     distinct: false,
                     filter: None,
                     alias: None,
+                    args: Vec::new(),
+                    order_by: Vec::new(),
+                    within_group: Vec::new(),
                 }];
                 dml::select::build_select_with_columns(self, dialect, &count_columns)
             }

@@ -701,9 +701,19 @@ fn validate_expr_limits(
             ensure_str("expr.aliased.alias", alias)?;
         }
         Expr::Aggregate {
-            col, filter, alias, ..
+            col,
+            filter,
+            alias,
+            args,
+            order_by,
+            within_group,
+            ..
         } => {
             ensure_str("expr.aggregate.col", col)?;
+            ensure_len("expr.aggregate.args", args.len(), MAX_AST_COLLECTION_LEN)?;
+            for arg in args {
+                validate_expr_limits(arg, depth + 1, state)?;
+            }
             if let Some(filters) = filter {
                 ensure_len(
                     "expr.aggregate.filter",
@@ -713,6 +723,19 @@ fn validate_expr_limits(
                 for cond in filters {
                     validate_condition_limits(cond, depth + 1, state)?;
                 }
+            }
+            ensure_len(
+                "expr.aggregate.order_by",
+                order_by.len(),
+                MAX_AST_COLLECTION_LEN,
+            )?;
+            ensure_len(
+                "expr.aggregate.within_group",
+                within_group.len(),
+                MAX_AST_COLLECTION_LEN,
+            )?;
+            for cage in order_by.iter().chain(within_group) {
+                validate_cage_limits(cage, depth + 1, state)?;
             }
             if let Some(alias) = alias {
                 ensure_str("expr.aggregate.alias", alias)?;

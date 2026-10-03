@@ -346,14 +346,10 @@ fn test_v2_rejects_aggregate_modifiers_it_cannot_keep() {
         // PostgreSQL has no DISTINCT for window functions.
         "get orders fields count(distinct status) over ()",
         "get orders fields array_agg(distinct status) over ()",
-        // No AST node keeps a second argument next to DISTINCT/FILTER.
-        "get orders fields string_agg(distinct status, ',')",
-        "get orders fields string_agg(status, ',') filter (where active = true)",
+        // Argument counts the aggregate does not take.
         "get orders fields array_agg(distinct status, region)",
         "get orders fields count(distinct status, region)",
         "get orders fields max(amount, fee)",
-        // Only a plain column reference fits the aggregate column slot.
-        "get orders fields array_agg(distinct lower(status))",
         // Functions outside the aggregate set have no node for the modifiers.
         "get orders fields bit_or(flags) filter (where active = true)",
         "get orders fields coalesce(distinct status)",
@@ -362,6 +358,37 @@ fn test_v2_rejects_aggregate_modifiers_it_cannot_keep() {
             parse(query).is_err(),
             "aggregate modifiers would be dropped: {query}"
         );
+    }
+}
+
+#[test]
+fn test_v2_keeps_aggregate_modifiers_on_argument_lists() {
+    use crate::transpiler::ToSql;
+
+    // Expression arguments and STRING_AGG's delimiter now have a slot, so
+    // DISTINCT and FILTER are kept rather than refused.
+    for (query, modifier) in [
+        (
+            "get orders fields string_agg(distinct status, ',')",
+            "DISTINCT",
+        ),
+        (
+            "get orders fields string_agg(status, ',') filter (where active = true)",
+            "FILTER (WHERE",
+        ),
+        // The formatter writes function names upper-case.
+        (
+            "get orders fields array_agg(distinct LOWER(status))",
+            "DISTINCT",
+        ),
+    ] {
+        let cmd = parse(query).unwrap_or_else(|err| panic!("{query}: {err}"));
+        let rendered = cmd.to_string();
+        let reparsed = parse(&rendered)
+            .unwrap_or_else(|err| panic!("{query} rendered as {rendered:?}: {err}"));
+        assert_eq!(reparsed, cmd, "{query} rendered as {rendered:?}");
+        let sql = cmd.to_sql();
+        assert!(sql.contains(modifier), "{query} lost {modifier}: {sql}");
     }
 }
 

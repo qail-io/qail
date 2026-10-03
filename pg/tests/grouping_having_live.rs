@@ -38,6 +38,9 @@ fn count_star() -> Expr {
         distinct: false,
         filter: None,
         alias: None,
+        args: Vec::new(),
+        order_by: Vec::new(),
+        within_group: Vec::new(),
     }
 }
 

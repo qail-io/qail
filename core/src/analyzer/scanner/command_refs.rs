@@ -305,9 +305,21 @@ fn collect_expr_subquery_references(
     refs: &mut Vec<CodeReference>,
 ) {
     match expr {
-        Expr::Aggregate { filter, .. } => {
+        Expr::Aggregate {
+            filter,
+            args,
+            order_by,
+            within_group,
+            ..
+        } => {
+            for arg in args {
+                collect_expr_subquery_references(path, line, arg, cte_aliases, refs);
+            }
             if let Some(conditions) = filter {
                 collect_conditions_subquery_references(path, line, conditions, cte_aliases, refs);
+            }
+            for cage in order_by.iter().chain(within_group) {
+                collect_cage_subquery_references(path, line, cage, cte_aliases, refs);
             }
         }
         Expr::Cast { expr, .. }
@@ -561,12 +573,23 @@ fn collect_expr_columns(
     match expr {
         Expr::Star => push_column_ref("*", scope, cols, seen),
         Expr::Named(name) | Expr::Aliased { name, .. } => push_column_ref(name, scope, cols, seen),
-        Expr::Aggregate { col, filter, .. } => {
+        Expr::Aggregate {
+            col,
+            filter,
+            args,
+            order_by,
+            within_group,
+            ..
+        } => {
             if is_column_like_aggregate_arg(col) {
                 push_column_ref(col, scope, cols, seen);
             }
+            collect_exprs_columns(args, scope, cols, seen);
             if let Some(conditions) = filter {
                 collect_conditions_columns(conditions, scope, cols, seen);
+            }
+            for cage in order_by.iter().chain(within_group) {
+                collect_cage_columns(cage, scope, cols, seen);
             }
         }
         Expr::JsonAccess { column, .. } => push_column_ref(column, scope, cols, seen),
@@ -1025,6 +1048,9 @@ mod tests {
                     distinct: false,
                     filter: None,
                     alias: Some("total".to_string()),
+                    args: vec![],
+                    order_by: vec![],
+                    within_group: vec![],
                 },
                 Expr::Aggregate {
                     col: "1".to_string(),
@@ -1032,6 +1058,9 @@ mod tests {
                     distinct: false,
                     filter: None,
                     alias: Some("total_one".to_string()),
+                    args: vec![],
+                    order_by: vec![],
+                    within_group: vec![],
                 },
             ],
             ..Default::default()

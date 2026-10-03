@@ -23,6 +23,21 @@ fn array_agg_distinct_reaches_both_paths() {
 }
 
 #[test]
+fn string_agg_distinct_keeps_its_delimiter_in_both_paths() {
+    let (transpiled, native, params) =
+        both_paths("get orders fields string_agg(distinct status, ',')");
+    assert_eq!(
+        transpiled,
+        "SELECT STRING_AGG(DISTINCT status, ',') FROM orders"
+    );
+    assert_eq!(
+        native,
+        "SELECT STRING_AGG(DISTINCT status, ',') FROM orders"
+    );
+    assert!(params.is_empty(), "{params:?}");
+}
+
+#[test]
 fn jsonb_agg_filter_binds_its_value() {
     let (transpiled, native, params) =
         both_paths("get orders fields jsonb_agg(payload) filter (where active = true)");
@@ -110,7 +125,7 @@ fn window_filter_identifiers_are_validated_natively() {
 fn modifiers_without_a_node_are_rejected_before_encoding() {
     for query in [
         "get orders fields count(distinct status) over ()",
-        "get orders fields string_agg(distinct status, ',')",
+        "get orders fields array_agg(distinct status, region)",
         "get orders fields bit_or(flags) filter (where active = true)",
     ] {
         assert!(

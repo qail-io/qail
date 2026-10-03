@@ -728,3 +728,29 @@ async fn binary_handler_rejects_legacy_postcard_like_payload() {
         "error message should indicate wire decode failure"
     );
 }
+
+#[test]
+fn read_only_gate_walks_aggregate_arguments_and_sort_keys() {
+    use qail_core::ast::builders::{aggregate, col};
+    use qail_core::ast::{AggregateFunc, Expr, Qail, SortOrder};
+
+    let mutation = || Expr::Subquery {
+        query: Box::new(Qail::add("evil")),
+        alias: None,
+    };
+
+    let in_arg =
+        Qail::get("safe").column_expr(aggregate(AggregateFunc::Sum, [mutation()]).alias("total"));
+    assert!(!qail_command_is_read_only(&in_arg));
+
+    let in_order = Qail::get("safe").column_expr(
+        aggregate(AggregateFunc::ArrayAgg, [col("id")])
+            .order_by(mutation(), SortOrder::Asc)
+            .alias("ids"),
+    );
+    assert!(!qail_command_is_read_only(&in_order));
+
+    let plain = Qail::get("safe")
+        .column_expr(aggregate(AggregateFunc::Sum, [col("amount")]).alias("total"));
+    assert!(qail_command_is_read_only(&plain));
+}

@@ -22,6 +22,9 @@ fn count_star() -> Expr {
         distinct: false,
         filter: None,
         alias: Some("row_count".into()),
+        args: Vec::new(),
+        order_by: Vec::new(),
+        within_group: Vec::new(),
     }
 }
 

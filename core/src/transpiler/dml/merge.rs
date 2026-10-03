@@ -380,31 +380,12 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String
             render_named_expr(name, generator, context),
             render_identifier_or_error(alias, generator)
         ),
-        Expr::Aggregate {
-            col,
-            func,
-            distinct,
-            filter,
-            ..
-        } => {
-            let mut sql = if *distinct {
-                format!(
-                    "{}(DISTINCT {})",
-                    func,
-                    render_named_expr(col, generator, context)
-                )
-            } else {
-                format!("{}({})", func, render_named_expr(col, generator, context))
-            };
-            if let Some(conditions) = filter
-                && !conditions.is_empty()
-            {
-                sql.push_str(" FILTER (WHERE ");
-                sql.push_str(&conditions_sql(conditions, generator, context));
-                sql.push(')');
-            }
-            sql
-        }
+        Expr::Aggregate { .. } => crate::transpiler::aggregate::aggregate_call_sql(
+            expr,
+            &|col| render_named_expr(col, generator, context),
+            &|arg| expr_sql(arg, generator, context),
+            &|conditions| conditions_sql(conditions, generator, context),
+        ),
         Expr::Literal(value) => value_sql(value, generator, context),
         Expr::Case {
             when_clauses,

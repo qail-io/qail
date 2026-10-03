@@ -33,6 +33,17 @@ type EncodeSqlResult = Result<(String, Vec<Option<Vec<u8>>>), EncodeError>;
 /// AST-native encoder that skips SQL string generation.
 pub struct AstEncoder;
 
+/// `Action::JsonTable` stores its path in a filter cage and its columns as
+/// `name=path` strings; there is no typed table source to bind, scope or
+/// policy-check, so only the transpiler renders it.
+fn reject_json_table() -> EncodeError {
+    EncodeError::InvalidAst(
+        "JSON_TABLE has no native encoding (to_sql preview only); \
+         run it as raw SQL through execute_simple/simple_query"
+            .to_string(),
+    )
+}
+
 impl AstEncoder {
     #[inline]
     fn reject_sql_nul(sql_buf: &BytesMut) -> Result<(), EncodeError> {
@@ -233,6 +244,7 @@ impl AstEncoder {
             Action::Savepoint => ddl::encode_savepoint(cmd, sql_buf),
             Action::ReleaseSavepoint => ddl::encode_release_savepoint(cmd, sql_buf),
             Action::RollbackToSavepoint => ddl::encode_rollback_to_savepoint(cmd, sql_buf),
+            Action::JsonTable => return Err(reject_json_table()),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
         Self::reject_sql_nul(sql_buf)?;
@@ -330,6 +342,7 @@ impl AstEncoder {
             Action::Savepoint => ddl::encode_savepoint(cmd, &mut sql_buf),
             Action::ReleaseSavepoint => ddl::encode_release_savepoint(cmd, &mut sql_buf),
             Action::RollbackToSavepoint => ddl::encode_rollback_to_savepoint(cmd, &mut sql_buf),
+            Action::JsonTable => return Err(reject_json_table()),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
 
@@ -1408,6 +1421,9 @@ mod tests {
                 is_array_unnest: false,
             }]),
             alias: Some("outbound_count".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         });
 
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
@@ -1439,6 +1455,9 @@ mod tests {
                 is_array_unnest: false,
             }]),
             alias: Some("deleted_count".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         });
 
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();

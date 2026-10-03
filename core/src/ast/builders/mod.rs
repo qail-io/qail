@@ -50,8 +50,8 @@ pub use columns::{col, param, star};
 
 // Aggregates
 pub use aggregates::{
-    AggregateBuilder, array_agg, avg, bool_and, bool_or, count, count_distinct, count_filter,
-    json_agg, jsonb_agg, max, min, sum,
+    AggregateBuilder, aggregate, array_agg, avg, bool_and, bool_or, count, count_distinct,
+    count_filter, json_agg, jsonb_agg, max, min, mode, percentile_cont, percentile_disc, sum,
 };
 
 // JSON

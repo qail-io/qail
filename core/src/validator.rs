@@ -274,7 +274,8 @@ impl Validator {
         match expr {
             Expr::Named(name) => Some(name.clone()),
             Expr::Aliased { name, .. } => Some(name.clone()),
-            Expr::Aggregate { col, .. } => Some(col.clone()),
+            // Empty when the arguments are expressions in `args`.
+            Expr::Aggregate { col, .. } if !col.is_empty() => Some(col.clone()),
             Expr::Cast { expr, .. } => Self::extract_column_name(expr),
             Expr::JsonAccess { column, .. } => Some(column.clone()),
             _ => None,

@@ -200,37 +200,21 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             ..
         } => render_json_access(column, path_segments, generator),
         Expr::Literal(value) => condition_value_sql_with_context(value, generator, context),
-        Expr::Aggregate {
-            col,
-            func,
-            distinct,
-            filter,
-            ..
-        } => {
-            let col = if col == "*" {
-                "*".to_string()
-            } else if let Some(cmd) = context {
-                resolve_col_syntax(col, cmd, generator)
-            } else {
-                generator.quote_identifier(col)
-            };
-            let mut sql = if *distinct {
-                format!("{func}(DISTINCT {col})")
-            } else {
-                format!("{func}({col})")
-            };
-            if let Some(conditions) = filter
-                && !conditions.is_empty()
-            {
-                let filter = conditions
+        Expr::Aggregate { .. } => crate::transpiler::aggregate::aggregate_call_sql(
+            expr,
+            &|col| match context {
+                Some(cmd) => resolve_col_syntax(col, cmd, generator),
+                None => generator.quote_identifier(col),
+            },
+            &|arg| condition_left_sql(arg, generator, context),
+            &|conditions| {
+                conditions
                     .iter()
                     .map(|condition| condition.to_sql(generator, context))
                     .collect::<Vec<_>>()
-                    .join(" AND ");
-                sql.push_str(&format!(" FILTER (WHERE {filter})"));
-            }
-            sql
-        }
+                    .join(" AND ")
+            },
+        ),
         Expr::Case {
             when_clauses,
             else_value,

@@ -700,11 +700,22 @@ fn prepare_expr_subquery_guards(
 ) -> Result<(), TenantProjectionError> {
     match expr {
         Expr::Aggregate {
-            filter: Some(filter),
+            filter,
+            args,
+            order_by,
+            within_group,
             ..
         } => {
-            for condition in filter {
+            for expr in args {
+                prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+            for condition in filter.iter_mut().flatten() {
                 prepare_condition_subquery_guards(state, auth, condition, plan)?;
+            }
+            for cage in order_by.iter_mut().chain(within_group.iter_mut()) {
+                for condition in &mut cage.conditions {
+                    prepare_condition_subquery_guards(state, auth, condition, plan)?;
+                }
             }
         }
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
@@ -787,7 +798,6 @@ fn prepare_expr_subquery_guards(
         Expr::Star
         | Expr::Named(_)
         | Expr::Aliased { .. }
-        | Expr::Aggregate { filter: None, .. }
         | Expr::Def { .. }
         | Expr::JsonAccess { .. } => {}
     }

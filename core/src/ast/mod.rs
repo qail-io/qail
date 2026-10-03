@@ -1,3 +1,5 @@
+/// Aggregate call shape: arguments, local ORDER BY, WITHIN GROUP.
+pub mod aggregate;
 /// Condition builders for WHERE clauses.
 pub mod builders;
 /// Constraint cages (filter, sort, limit, etc.).
@@ -17,6 +19,9 @@ pub mod values;
 /// INSERT/UPDATE payload rules shared by the transpiler and native encoder.
 pub mod write_payload;
 
+pub use self::aggregate::{
+    aggregate_sort_cage, aggregate_sort_key, check_aggregate_shape, sort_order_sql,
+};
 pub use self::cages::{Cage, CageKind};
 pub use self::cmd::Qail;
 pub use self::cmd::{

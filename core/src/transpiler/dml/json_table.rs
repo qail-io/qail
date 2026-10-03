@@ -1,4 +1,7 @@
 //! JSON_TABLE SQL generation.
+//!
+//! Preview only: `qail_pg`'s native encoder rejects `Action::JsonTable`, so
+//! SQL rendered here is not what the driver executes.
 
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;

@@ -49,7 +49,9 @@ pub enum Action {
     DropCol,
     /// ALTER TABLE … RENAME COLUMN.
     RenameCol,
-    /// JSONB_TO_RECORDSET.
+    /// JSON_TABLE. SQL preview only: `to_sql` renders it, the native
+    /// PostgreSQL encoder rejects it (no typed table source to bind,
+    /// RLS-scope or policy-check). Execute it as raw SQL.
     JsonTable,
     /// COPY … TO STDOUT.
     Export,
@@ -498,6 +500,12 @@ pub enum AggregateFunc {
     BoolAnd,
     /// BOOL_OR.
     BoolOr,
+    /// PERCENTILE_CONT (ordered-set: needs WITHIN GROUP).
+    PercentileCont,
+    /// PERCENTILE_DISC (ordered-set: needs WITHIN GROUP).
+    PercentileDisc,
+    /// MODE (ordered-set: needs WITHIN GROUP).
+    Mode,
 }
 
 impl std::fmt::Display for AggregateFunc {
@@ -514,6 +522,9 @@ impl std::fmt::Display for AggregateFunc {
             AggregateFunc::JsonbAgg => write!(f, "JSONB_AGG"),
             AggregateFunc::BoolAnd => write!(f, "BOOL_AND"),
             AggregateFunc::BoolOr => write!(f, "BOOL_OR"),
+            AggregateFunc::PercentileCont => write!(f, "PERCENTILE_CONT"),
+            AggregateFunc::PercentileDisc => write!(f, "PERCENTILE_DISC"),
+            AggregateFunc::Mode => write!(f, "MODE"),
         }
     }
 }

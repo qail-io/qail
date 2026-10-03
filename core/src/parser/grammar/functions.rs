@@ -35,7 +35,16 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
         separated_list0((multispace0, char(','), multispace0), parse_function_arg).parse(input)?;
 
     let (input, _) = multispace0(input)?;
+    // Aggregate-local ORDER BY: array_agg(x order by y)
+    let (input, order_by) = opt(parse_aggregate_order_by).parse(input)?;
+    let order_by = order_by.unwrap_or_default();
+    let (input, _) = multispace0(input)?;
     let (input, _) = char(')').parse(input)?;
+    let (input, _) = multispace0(input)?;
+
+    // Ordered-set aggregates: percentile_cont(0.5) within group (order by x)
+    let (input, within_group) = opt(parse_within_group).parse(input)?;
+    let within_group = within_group.unwrap_or_default();
     let (input, _) = multispace0(input)?;
 
     let (input, filter_clause) = opt(parse_filter_clause).parse(input)?;
@@ -45,6 +54,11 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
         // PostgreSQL has no DISTINCT for window functions, and Expr::Window
         // has no slot for it: reject instead of returning duplicates.
         if distinct {
+            return Err(unkept_aggregate_modifier(call_start));
+        }
+        // Expr::Window has no aggregate ORDER BY / WITHIN GROUP slot either
+        // (PostgreSQL rejects both on window calls).
+        if !order_by.is_empty() || !within_group.is_empty() {
             return Err(unkept_aggregate_modifier(call_start));
         }
         let (remaining, _) = multispace0(remaining)?;
@@ -101,71 +115,52 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     let alias = alias.map(|s| s.to_string());
 
     let name_lower = name.to_lowercase();
-    match name_lower.as_str() {
-        "count" | "sum" | "avg" | "min" | "max" => {
-            // Expr::Aggregate keeps one column; a second argument would be dropped.
-            if args.len() > 1 {
-                return Err(unkept_aggregate_modifier(call_start));
-            }
-            // For aggregates, convert first arg to string representation
-            let col = args
-                .first()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "*".to_string());
-            let func = match name_lower.as_str() {
-                "count" => AggregateFunc::Count,
-                "sum" => AggregateFunc::Sum,
-                "avg" => AggregateFunc::Avg,
-                "min" => AggregateFunc::Min,
-                "max" => AggregateFunc::Max,
-                _ => AggregateFunc::Count, // unreachable
-            };
-            Ok((
-                input,
-                Expr::Aggregate {
-                    col,
-                    func,
-                    distinct,
-                    filter: filter_clause,
-                    alias,
-                },
-            ))
-        }
-        _ if distinct || filter_clause.is_some() => {
-            // Expr::FunctionCall has no DISTINCT/FILTER slot. Calls that fit
-            // Expr::Aggregate (one plain column) keep them there; anything
-            // else is rejected rather than run without its modifiers.
-            let func = match name_lower.as_str() {
-                "array_agg" => AggregateFunc::ArrayAgg,
-                "json_agg" => AggregateFunc::JsonAgg,
-                "jsonb_agg" => AggregateFunc::JsonbAgg,
-                "bool_and" => AggregateFunc::BoolAnd,
-                "bool_or" => AggregateFunc::BoolOr,
-                _ => return Err(unkept_aggregate_modifier(call_start)),
-            };
-            let [Expr::Named(col)] = args.as_slice() else {
-                return Err(unkept_aggregate_modifier(call_start));
-            };
-            Ok((
-                input,
-                Expr::Aggregate {
-                    col: col.clone(),
-                    func,
-                    distinct,
-                    filter: filter_clause,
-                    alias,
-                },
-            ))
-        }
-        _ => Ok((
+    let always_aggregate = matches!(name_lower.as_str(), "count" | "sum" | "avg" | "min" | "max");
+    let has_modifier =
+        distinct || filter_clause.is_some() || !order_by.is_empty() || !within_group.is_empty();
+    if !always_aggregate && !has_modifier {
+        return Ok((
             input,
             Expr::FunctionCall {
                 name: name.to_string(),
                 args,
                 alias,
             },
-        )),
+        ));
     }
+
+    // Expr::FunctionCall has no DISTINCT/FILTER/ORDER BY/WITHIN GROUP slot:
+    // a modifier on a function Expr::Aggregate does not model is rejected
+    // rather than run without it.
+    let Some(func) = AggregateFunc::from_sql_name(&name_lower) else {
+        return Err(unkept_aggregate_modifier(call_start));
+    };
+
+    // One plain column (or `*`) stays in `col`, the shape callers and
+    // policies already read; any other argument list goes to `args`.
+    let (col, args) = match args.as_slice() {
+        [] if always_aggregate => ("*".to_string(), Vec::new()),
+        [Expr::Star] => ("*".to_string(), Vec::new()),
+        [Expr::Named(column)] => (column.clone(), Vec::new()),
+        _ => (String::new(), args),
+    };
+    if check_aggregate_shape(func, &col, distinct, &args, &order_by, &within_group).is_err() {
+        return Err(unkept_aggregate_modifier(call_start));
+    }
+
+    Ok((
+        input,
+        Expr::Aggregate {
+            col,
+            func,
+            distinct,
+            filter: filter_clause,
+            alias,
+            args,
+            order_by,
+            within_group,
+        },
+    ))
 }
 
 /// Hard parse failure for a call whose DISTINCT, FILTER or arguments no AST
@@ -175,6 +170,65 @@ fn unkept_aggregate_modifier(call_start: &str) -> nom::Err<nom::error::Error<&st
         call_start,
         nom::error::ErrorKind::Verify,
     ))
+}
+
+/// Aggregate-local `order by key [asc|desc] [nulls first|last], ...`.
+fn parse_aggregate_order_by(input: &str) -> IResult<&str, Vec<Cage>> {
+    let (input, _) = tag_no_case("order").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("by").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    separated_list1(
+        (multispace0, char(','), multispace0),
+        parse_aggregate_sort_item,
+    )
+    .parse(input)
+}
+
+/// `within group (order by ...)` of an ordered-set aggregate.
+fn parse_within_group(input: &str) -> IResult<&str, Vec<Cage>> {
+    let (input, _) = tag_no_case("within").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("group").parse(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(').parse(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, keys) = parse_aggregate_order_by(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')').parse(input)?;
+    Ok((input, keys))
+}
+
+fn parse_aggregate_sort_item(input: &str) -> IResult<&str, Cage> {
+    use nom::combinator::value;
+
+    let (input, key) = parse_expression(input)?;
+    let (input, direction) = opt(preceded(
+        multispace1,
+        alt((
+            value(false, tag_no_case("desc")),
+            value(true, tag_no_case("asc")),
+        )),
+    ))
+    .parse(input)?;
+    let (input, nulls) = opt(preceded(
+        (multispace1, tag_no_case("nulls"), multispace1),
+        alt((
+            value(true, tag_no_case("first")),
+            value(false, tag_no_case("last")),
+        )),
+    ))
+    .parse(input)?;
+    let ascending = direction.unwrap_or(true);
+    let order = match (ascending, nulls) {
+        (true, None) => SortOrder::Asc,
+        (false, None) => SortOrder::Desc,
+        (true, Some(true)) => SortOrder::AscNullsFirst,
+        (true, Some(false)) => SortOrder::AscNullsLast,
+        (false, Some(true)) => SortOrder::DescNullsFirst,
+        (false, Some(false)) => SortOrder::DescNullsLast,
+    };
+    Ok((input, aggregate_sort_cage(key, order)))
 }
 
 /// Parse a single function argument (supports expressions or star)

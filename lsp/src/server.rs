@@ -743,7 +743,26 @@ fn collect_columns_from_expr(expr: &Expr, push: &mut dyn FnMut(&str)) {
     match expr {
         Expr::Named(name) => push(name),
         Expr::Aliased { name, .. } => push(name),
-        Expr::Aggregate { col, .. } => push(col),
+        Expr::Aggregate {
+            col,
+            args,
+            order_by,
+            within_group,
+            ..
+        } => {
+            // `col` is empty when the arguments live in `args`.
+            if !col.is_empty() {
+                push(col);
+            }
+            for arg in args {
+                collect_columns_from_expr(arg, push);
+            }
+            for cage in order_by.iter().chain(within_group) {
+                for cond in &cage.conditions {
+                    collect_columns_from_condition(cond, push);
+                }
+            }
+        }
         Expr::Cast { expr, .. } => collect_columns_from_expr(expr, push),
         Expr::JsonAccess { column, .. } => push(column),
         Expr::FunctionCall { args, .. } => {

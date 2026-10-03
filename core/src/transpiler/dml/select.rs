@@ -204,37 +204,9 @@ fn build_select_inner(
                             }
                         }
                     }
-                    Expr::Aggregate {
-                        col,
-                        func,
-                        distinct,
-                        filter,
-                        alias,
-                    } => {
+                    Expr::Aggregate { alias, .. } => {
                         // Render aggregate function: COUNT(*), COUNT(DISTINCT col), SUM(col), etc.
-                        let col_expr = if col == "*" {
-                            "*".to_string()
-                        } else {
-                            render_named_reference(col, generator.as_ref(), cmd)
-                        };
-                        let mut expr = if *distinct {
-                            format!("{}(DISTINCT {})", func, col_expr)
-                        } else {
-                            format!("{}({})", func, col_expr)
-                        };
-
-                        if let Some(conditions) = filter
-                            && !conditions.is_empty()
-                        {
-                            let filter_parts: Vec<String> = conditions
-                                .iter()
-                                .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
-                                .collect();
-                            expr.push_str(&format!(
-                                " FILTER (WHERE {})",
-                                filter_parts.join(" AND ")
-                            ));
-                        }
+                        let expr = render_aggregate(c, generator.as_ref(), cmd);
 
                         if let Some(a) = alias {
                             format!("{} AS {}", expr, generator.quote_identifier(a))
@@ -747,6 +719,26 @@ fn append_fetch_clause(sql: &mut String, fetch: Option<(u64, bool)>) {
 
 /// Render an expression for ORDER BY (and potentially other contexts).
 /// Handles CASE, Binary, FunctionCall, SpecialFunction, and Named expressions.
+/// An `Expr::Aggregate` call without its alias.
+fn render_aggregate(
+    expr: &Expr,
+    generator: &dyn crate::transpiler::SqlGenerator,
+    cmd: &Qail,
+) -> String {
+    crate::transpiler::aggregate::aggregate_call_sql(
+        expr,
+        &|col| render_named_reference(col, generator, cmd),
+        &|arg| render_expr_for_orderby(arg, generator, cmd),
+        &|conditions| {
+            conditions
+                .iter()
+                .map(|condition| condition.to_sql(generator, Some(cmd)))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        },
+    )
+}
+
 fn render_expr_for_orderby(
     expr: &Expr,
     generator: &dyn crate::transpiler::SqlGenerator,
@@ -772,35 +764,7 @@ fn render_expr_for_orderby(
         }
         Expr::Aliased { name, .. } => render_named_reference(name, generator, cmd),
         Expr::Literal(value) => render_value_for_expression(value, generator, cmd),
-        Expr::Aggregate {
-            col,
-            func,
-            distinct,
-            filter,
-            ..
-        } => {
-            let col_expr = if col == "*" {
-                "*".to_string()
-            } else {
-                render_named_reference(col, generator, cmd)
-            };
-            let mut expr = if *distinct {
-                format!("{}(DISTINCT {})", func, col_expr)
-            } else {
-                format!("{}({})", func, col_expr)
-            };
-            if let Some(conditions) = filter
-                && !conditions.is_empty()
-            {
-                let filter_parts = conditions
-                    .iter()
-                    .map(|condition| condition.to_sql(generator, Some(cmd)))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
-                expr.push_str(&format!(" FILTER (WHERE {filter_parts})"));
-            }
-            expr
-        }
+        Expr::Aggregate { .. } => render_aggregate(expr, generator, cmd),
         Expr::Case {
             when_clauses,
             else_value,

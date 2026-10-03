@@ -255,18 +255,34 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             check_ident(&format!("{field}.alias"), alias)
         }
         Expr::Aggregate {
-            col, alias, filter, ..
+            col,
+            alias,
+            filter,
+            args,
+            order_by,
+            within_group,
+            ..
         } => {
-            if col != "*" {
+            // `col` is empty when the arguments live in `args` (or MODE() has none).
+            if col != "*" && !col.is_empty() {
                 check_ident(field, col)?;
             }
             if let Some(a) = alias {
                 check_ident(&format!("{field}.alias"), a)?;
             }
+            for arg in args {
+                check_expr(&format!("{field}.arg"), arg)?;
+            }
             if let Some(conditions) = filter {
                 for cond in conditions {
                     check_expr(&format!("{field}.filter"), &cond.left)?;
                     check_value(&format!("{field}.filter"), &cond.value)?;
+                }
+            }
+            for cage in order_by.iter().chain(within_group) {
+                for cond in &cage.conditions {
+                    check_expr(&format!("{field}.aggregate_order"), &cond.left)?;
+                    check_value(&format!("{field}.aggregate_order"), &cond.value)?;
                 }
             }
             Ok(())
@@ -1057,6 +1073,9 @@ mod tests {
                 is_array_unnest: false,
             }]),
             alias: None,
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         });
 
         let err = validate_ast(&cmd).unwrap_err();
@@ -1098,6 +1117,9 @@ mod tests {
             distinct: false,
             filter: None,
             alias: Some("total".to_string()),
+            args: vec![],
+            order_by: vec![],
+            within_group: vec![],
         });
 
         assert!(validate_ast(&cmd).is_ok());
