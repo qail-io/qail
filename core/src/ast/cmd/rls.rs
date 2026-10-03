@@ -34,7 +34,7 @@
 
 use crate::ast::{
     Action, Cage, CageKind, Condition, ConflictAction, Expr, JoinKind, LogicalOp, MergeAction,
-    MergeMatchKind, MergeSource, Operator, Qail, Value,
+    MergeMatchKind, MergeSource, Operator, OverridingKind, Qail, Value,
 };
 use crate::error::{QailBuildError, QailBuildResult};
 use crate::rls::RlsContext;
@@ -731,7 +731,8 @@ impl Qail {
             | Expr::Aliased { .. }
             | Expr::Aggregate { filter: None, .. }
             | Expr::Def { .. }
-            | Expr::JsonAccess { .. } => {}
+            | Expr::JsonAccess { .. }
+            | Expr::Default => {}
         }
 
         Ok(())
@@ -1107,7 +1108,7 @@ impl Qail {
             return Ok(None);
         };
         match &merge.source {
-            MergeSource::Table { name, alias } => {
+            MergeSource::Table { name, alias, .. } => {
                 let (source_table, inline_alias) = split_table_reference(name);
                 let Some(source_tenant_col) = tenant_column_for(source_table)? else {
                     return Ok(None);
@@ -1237,9 +1238,34 @@ impl Qail {
         };
 
         for clause in &mut merge.clauses {
-            let MergeAction::Insert { columns, values } = &mut clause.action else {
+            let MergeAction::Insert {
+                columns,
+                values,
+                overriding,
+                default_values,
+            } = &mut clause.action
+            else {
                 continue;
             };
+
+            if *overriding == Some(OverridingKind::UserValue) {
+                return Err(QailBuildError::RlsMergeOverridingUserValueDenied {
+                    table: self.table.clone(),
+                    tenant_column: tenant_col.to_string(),
+                });
+            }
+
+            if *default_values {
+                // `DEFAULT VALUES` and `(tenant) VALUES (stamp)` produce the same
+                // row apart from the stamp. A malformed arm (columns or values
+                // present) stays as is so both emitters reject it.
+                if columns.is_empty() && values.is_empty() {
+                    *default_values = false;
+                    columns.push(tenant_col.to_string());
+                    values.push(tenant_expr.clone());
+                }
+                continue;
+            }
 
             if columns.is_empty() {
                 return Err(QailBuildError::RlsInsertRequiresExplicitColumns {
@@ -2921,6 +2947,144 @@ mod tests {
             2,
             "conflicting set_coalesce must be preserved: {}",
             cmd.to_sql()
+        );
+    }
+
+    fn merge_insert_shape_base(target: &str, source: &str) -> Qail {
+        seal_tenant_table(target, "tenant_id");
+        seal_tenant_table(source, "tenant_id");
+        Qail::merge_into(target)
+            .target_alias("t")
+            .using_table_as(source, "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+    }
+
+    #[test]
+    fn merge_insert_default_values_is_stamped_with_tenant() {
+        let query = merge_insert_shape_base("_rls_merge_dv_target", "_rls_merge_dv_source")
+            .when_not_matched_insert_default_values()
+            .with_rls(&RlsContext::tenant("tenant-dv"))
+            .expect("DEFAULT VALUES arm should be stamped");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.ends_with(
+                "WHEN NOT MATCHED BY TARGET AND s.tenant_id = 'tenant-dv' \
+                 THEN INSERT (tenant_id) VALUES ('tenant-dv')"
+            ),
+            "DEFAULT VALUES must become an explicit tenant stamp: {sql}"
+        );
+        assert!(!sql.contains("DEFAULT VALUES"), "{sql}");
+    }
+
+    #[test]
+    fn merge_insert_default_values_global_stamps_null_tenant() {
+        let query = merge_insert_shape_base("_rls_merge_dv_g_target", "_rls_merge_dv_g_source")
+            .when_not_matched_insert_default_values()
+            .with_rls(&RlsContext::global())
+            .expect("global DEFAULT VALUES arm should be stamped");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.ends_with("THEN INSERT (tenant_id) VALUES (NULL)"),
+            "global DEFAULT VALUES must stamp NULL tenant: {sql}"
+        );
+    }
+
+    #[test]
+    fn merge_insert_overriding_system_value_is_stamped_with_tenant() {
+        let query = merge_insert_shape_base("_rls_merge_osv_target", "_rls_merge_osv_source")
+            .when_not_matched_insert_overriding(
+                crate::ast::OverridingKind::SystemValue,
+                &["id", "tenant_id"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Literal(Value::String("forged".to_string())),
+                ],
+            )
+            .with_rls(&RlsContext::tenant("tenant-osv"))
+            .expect("OVERRIDING SYSTEM VALUE arm should be stamped");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.ends_with(
+                "THEN INSERT (id, tenant_id) OVERRIDING SYSTEM VALUE VALUES (s.id, 'tenant-osv')"
+            ),
+            "OVERRIDING SYSTEM VALUE must keep the tenant stamp: {sql}"
+        );
+        assert!(!sql.contains("forged"), "{sql}");
+    }
+
+    #[test]
+    fn merge_insert_overriding_user_value_fails_closed() {
+        let err = merge_insert_shape_base("_rls_merge_ouv_target", "_rls_merge_ouv_source")
+            .when_not_matched_insert_overriding(
+                crate::ast::OverridingKind::UserValue,
+                &["id"],
+                &[Expr::Named("s.id".to_string())],
+            )
+            .with_rls(&RlsContext::tenant("tenant-ouv"))
+            .expect_err("OVERRIDING USER VALUE must fail closed");
+
+        assert_eq!(
+            err,
+            QailBuildError::RlsMergeOverridingUserValueDenied {
+                table: "_rls_merge_ouv_target".to_string(),
+                tenant_column: "tenant_id".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_insert_default_in_tenant_position_is_stamped() {
+        let query = merge_insert_shape_base("_rls_merge_dt_target", "_rls_merge_dt_source")
+            .when_not_matched_insert(
+                &["id", "tenant_id"],
+                &[Expr::Named("s.id".to_string()), Expr::Default],
+            )
+            .with_rls(&RlsContext::tenant("tenant-dt"))
+            .expect("DEFAULT tenant value should be replaced");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.ends_with("THEN INSERT (id, tenant_id) VALUES (s.id, 'tenant-dt')"),
+            "a DEFAULT tenant value must be replaced by the stamp: {sql}"
+        );
+    }
+
+    #[test]
+    fn merge_update_tenant_to_default_fails_closed() {
+        let err = merge_insert_shape_base("_rls_merge_ud_target", "_rls_merge_ud_source")
+            .when_matched_update(&[("tenant_id", Expr::Default)])
+            .with_rls(&RlsContext::tenant("tenant-ud"))
+            .expect_err("tenant column reset must fail closed");
+
+        assert!(
+            matches!(err, QailBuildError::RlsTenantColumnMutationDenied { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn merge_malformed_default_values_arm_is_not_repaired() {
+        let mut query = merge_insert_shape_base("_rls_merge_bad_target", "_rls_merge_bad_source")
+            .when_not_matched_insert_default_values();
+        if let Some(MergeAction::Insert { columns, .. }) = query
+            .merge
+            .as_mut()
+            .and_then(|merge| merge.clauses.first_mut())
+            .map(|clause| &mut clause.action)
+        {
+            columns.push("id".to_string());
+        }
+
+        let sql = query
+            .with_rls(&RlsContext::tenant("tenant-bad"))
+            .expect("scoping leaves the malformed arm for the emitters")
+            .to_sql();
+        assert!(
+            sql.starts_with("/* ERROR: MERGE INSERT DEFAULT VALUES cannot have columns"),
+            "{sql}"
         );
     }
 }

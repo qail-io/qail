@@ -89,7 +89,8 @@ fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
         | Expr::Aliased { .. }
         | Expr::Aggregate { filter: None, .. }
         | Expr::Def { .. }
-        | Expr::JsonAccess { .. } => {}
+        | Expr::JsonAccess { .. }
+        | Expr::Default => {}
     }
     Ok(())
 }

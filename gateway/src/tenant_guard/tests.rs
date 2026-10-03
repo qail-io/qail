@@ -386,7 +386,7 @@ async fn prepare_tenant_guarded_query_scopes_merge_target_source_and_insert_valu
                 matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "s.tenant_id")
                     && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
             })
-            && matches!(&clause.action, qail_core::ast::MergeAction::Insert { columns, values }
+            && matches!(&clause.action, qail_core::ast::MergeAction::Insert { columns, values, .. }
                 if columns.iter().any(|column| column == "tenant_id")
                     && values.iter().any(|expr| {
                         matches!(expr, qail_core::ast::Expr::Literal(qail_core::ast::Value::String(value)) if value == "tenant-1")
@@ -428,7 +428,7 @@ async fn prepare_tenant_guarded_query_filters_merge_query_source() {
             })
     }));
     assert!(merge.clauses.iter().any(|clause| {
-        matches!(&clause.action, qail_core::ast::MergeAction::Insert { columns, values }
+        matches!(&clause.action, qail_core::ast::MergeAction::Insert { columns, values, .. }
             if columns.iter().any(|column| column == "tenant_id")
                 && values.iter().any(|expr| {
                     matches!(expr, qail_core::ast::Expr::Literal(qail_core::ast::Value::String(value)) if value == "tenant-1")
@@ -521,6 +521,88 @@ async fn prepare_tenant_guarded_query_rejects_merge_tenant_column_update() {
         err.to_string()
             .contains("cannot update tenant guard column"),
         "MERGE must not be able to overwrite tenant guard column"
+    );
+}
+
+fn merge_orders_from_source() -> qail_core::ast::Qail {
+    qail_core::ast::Qail::merge_into("orders")
+        .using_table_as("source_orders", "s")
+        .merge_on_column("orders.id", qail_core::ast::Operator::Eq, "s.id")
+}
+
+fn only_insert_arm(cmd: &qail_core::ast::Qail) -> &qail_core::ast::MergeAction {
+    let merge = cmd.merge.as_ref().expect("merge spec");
+    assert_eq!(merge.clauses.len(), 1);
+    &merge.clauses[0].action
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_stamps_merge_insert_default_values() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = merge_orders_from_source().when_not_matched_insert_default_values();
+
+    prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        only_insert_arm(&cmd),
+        &qail_core::ast::MergeAction::Insert {
+            columns: vec!["tenant_id".to_string()],
+            values: vec![qail_core::ast::Expr::Literal(
+                qail_core::ast::Value::String("tenant-1".to_string())
+            )],
+            overriding: None,
+            default_values: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_stamps_merge_insert_overriding_system_value() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = merge_orders_from_source().when_not_matched_insert_overriding(
+        qail_core::ast::OverridingKind::SystemValue,
+        &["id", "tenant_id"],
+        &[
+            qail_core::ast::Expr::Named("s.id".to_string()),
+            qail_core::ast::Expr::Default,
+        ],
+    );
+
+    prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        only_insert_arm(&cmd),
+        &qail_core::ast::MergeAction::Insert {
+            columns: vec!["id".to_string(), "tenant_id".to_string()],
+            values: vec![
+                qail_core::ast::Expr::Named("s.id".to_string()),
+                qail_core::ast::Expr::Literal(qail_core::ast::Value::String(
+                    "tenant-1".to_string()
+                )),
+            ],
+            overriding: Some(qail_core::ast::OverridingKind::SystemValue),
+            default_values: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn prepare_tenant_guarded_query_rejects_merge_insert_overriding_user_value() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = merge_orders_from_source().when_not_matched_insert_overriding(
+        qail_core::ast::OverridingKind::UserValue,
+        &["id"],
+        &[qail_core::ast::Expr::Named("s.id".to_string())],
+    );
+
+    let err = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string().contains("cannot use OVERRIDING USER VALUE"),
+        "{err}"
     );
 }
 

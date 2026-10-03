@@ -1277,6 +1277,8 @@ fn test_merge_postgres_rejects_invalid_action_shape() {
     merge.clauses[0].action = MergeAction::Insert {
         columns: vec!["id".to_string()],
         values: vec![Expr::Named("staging_users.id".to_string())],
+        overriding: None,
+        default_values: false,
     };
 
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);

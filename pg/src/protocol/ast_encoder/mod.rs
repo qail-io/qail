@@ -19,6 +19,8 @@ mod ddl;
 pub(crate) mod dml; // pub(crate) for internal use in driver
 pub use crate::protocol::EncodeError;
 mod helpers;
+#[cfg(test)]
+mod merge_shape_tests;
 mod values;
 
 use bytes::BytesMut;
@@ -2546,6 +2548,8 @@ mod tests {
                 action: MergeAction::Insert {
                     columns: vec!["id".to_string()],
                     values: vec![Expr::Named("staging_users.id".to_string())],
+                    overriding: None,
+                    default_values: false,
                 },
             });
 

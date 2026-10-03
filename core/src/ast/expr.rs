@@ -243,6 +243,9 @@ pub enum Expr {
         /// Optional alias.
         alias: Option<String>,
     },
+    /// `DEFAULT`: the column default, as a whole MERGE UPDATE assignment value
+    /// or MERGE INSERT value. Every other position rejects it.
+    Default,
 }
 
 impl std::fmt::Display for Expr {
@@ -496,6 +499,7 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
+            Expr::Default => write!(f, "DEFAULT"),
         }
     }
 }

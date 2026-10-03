@@ -186,7 +186,7 @@ impl Qail {
         self
     }
 
-    /// SELECT FROM ONLY (exclude child tables).
+    /// ONLY on the SELECT/UPDATE/DELETE/MERGE target (exclude child tables).
     pub fn only(mut self) -> Self {
         self.only_table = true;
         self

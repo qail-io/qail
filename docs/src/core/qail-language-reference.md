@@ -178,7 +178,7 @@ Grouped by construct, extracted from the grammar productions.
 | Ordering / paging | `order`, `by`, `asc`, `desc`, `limit`, `offset` |
 | Insert | `values`, `from`, `conflict`, `update`, `nothing` |
 | Update | `values` |
-| Merge | `using`, `on`, `when`, `matched`, `not`, `by`, `source`, `target`, `then`, `update`, `insert`, `delete`, `do`, `nothing` |
+| Merge | `only`, `using`, `on`, `when`, `matched`, `not`, `by`, `source`, `target`, `then`, `update`, `insert`, `overriding`, `system`, `user`, `value`, `default`, `values`, `delete`, `do`, `nothing` |
 | CTEs | `with`, `recursive`, `as` |
 | Transactions | `begin`, `commit`, `rollback` |
 | Session | `session`, `set`, `show`, `reset` |
@@ -385,9 +385,11 @@ target columns. Omitting it produces invalid SQL (see §6).
 
 ### 4.9 `merge` — MERGE INTO
 
-`merge <target> [as alias] using <source> [as alias] on <cond>` followed by one or more
+`merge [only] <target> [as alias] using [only] <source> [as alias] on <cond>` followed by one or more
 `when [not] matched [by source|target] [and <cond>] then <action>` arms. Actions are
-`update set ...`, `insert (...) values (...)`, `delete`, and `do nothing`.
+`update set ...`, `insert [(...)] [overriding system|user value] values (...)`,
+`insert default values`, `delete`, and `do nothing`. A bare `default` as a whole `update set`
+or `insert values` item is the column default, not a column named `default`.
 
 ```qail
 merge users as u using staging_users as s on u.id = s.id when matched and u.name != s.name then update set name = s.name, email = s.email when not matched then insert (id, name, email) values (s.id, s.name, s.email)
@@ -404,6 +406,19 @@ merge users using staging_users on users.id = staging_users.id when not matched 
 ```sql
 MERGE INTO users USING staging_users ON users.id = staging_users.id WHEN NOT MATCHED BY SOURCE THEN DELETE
 ```
+
+Inheritance selection, column defaults, and INSERT overrides:
+
+```qail
+merge only users as u using staging_users as s on u.id = s.id when matched then update set name = default when not matched then insert (id, name) overriding system value values (s.id, s.name)
+```
+```sql
+MERGE INTO ONLY users AS u USING staging_users AS s ON u.id = s.id WHEN MATCHED THEN UPDATE SET name = DEFAULT WHEN NOT MATCHED BY TARGET THEN INSERT (id, name) OVERRIDING SYSTEM VALUE VALUES (s.id, s.name)
+```
+
+On a tenant-registered target, `with_rls` rewrites `insert default values` to
+`insert (tenant_col) values (<tenant>)` and rejects `overriding user value`, which PostgreSQL
+would let discard the tenant value on an identity column.
 
 ### 4.10 `export`
 

@@ -678,6 +678,34 @@ pub(crate) fn validate_expr_ref(
             }
             Ok(())
         }
+        Expr::Default => Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{field}: {DEFAULT_POSITION_ERROR}"
+        ))),
+    }
+}
+
+pub(crate) const DEFAULT_POSITION_ERROR: &str =
+    "DEFAULT is only valid as a whole MERGE assignment or INSERT value";
+
+/// Validate a whole MERGE UPDATE assignment value or INSERT value, the only places `DEFAULT` is valid.
+fn validate_write_value_ref(field: &str, expr: &Expr) -> Result<(), crate::protocol::EncodeError> {
+    match expr {
+        Expr::Default => Ok(()),
+        expr => validate_expr_ref(field, expr),
+    }
+}
+
+fn encode_write_value(
+    expr: &Expr,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    match expr {
+        Expr::Default => {
+            buf.extend_from_slice(b"DEFAULT");
+            Ok(())
+        }
+        expr => encode_expr_with_params(expr, buf, params),
     }
 }
 
@@ -913,7 +941,7 @@ fn validate_dml_command(
             validate_ident_atom("merge.target_alias", alias)?;
         }
         match &merge.source {
-            MergeSource::Table { name, alias } => {
+            MergeSource::Table { name, alias, .. } => {
                 validate_table_ref("merge.source.table", name)?;
                 if let Some(alias) = alias {
                     validate_ident_atom("merge.source.alias", alias)?;
@@ -933,15 +961,17 @@ fn validate_dml_command(
                 MergeAction::Update { assignments } => {
                     for (column, expr) in assignments {
                         validate_qualified_ident("merge.update.column", column, false)?;
-                        validate_expr_ref("merge.update.expr", expr)?;
+                        validate_write_value_ref("merge.update.expr", expr)?;
                     }
                 }
-                MergeAction::Insert { columns, values } => {
+                MergeAction::Insert {
+                    columns, values, ..
+                } => {
                     for column in columns {
                         validate_qualified_ident("merge.insert.column", column, false)?;
                     }
                     for value in values {
-                        validate_expr_ref("merge.insert.value", value)?;
+                        validate_write_value_ref("merge.insert.value", value)?;
                     }
                 }
                 MergeAction::Delete | MergeAction::DoNothing => {}
@@ -1788,10 +1818,25 @@ pub fn encode_merge(
         .ok_or(crate::protocol::EncodeError::InvalidAst(
             "MERGE requires merge specification".to_string(),
         ))?;
+    // Command-level INSERT flags have no single arm to apply to.
+    if cmd.default_values {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "MERGE ignores command DEFAULT VALUES; use when_not_matched_insert_default_values"
+                .to_string(),
+        ));
+    }
+    if cmd.overriding.is_some() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "MERGE ignores command OVERRIDING; use when_not_matched_insert_overriding".to_string(),
+        ));
+    }
     validate_merge_shape(merge)?;
 
     encode_cte_prefix(cmd, buf, params)?;
     buf.extend_from_slice(b"MERGE INTO ");
+    if cmd.only_table {
+        buf.extend_from_slice(b"ONLY ");
+    }
     push_table_ref(buf, &cmd.table);
     if let Some(alias) = &merge.target_alias {
         buf.extend_from_slice(b" AS ");
@@ -1881,7 +1926,33 @@ fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeErro
                     "UPDATE",
                 )?;
             }
-            (_, MergeAction::Insert { columns, values }) => {
+            (
+                _,
+                MergeAction::Insert {
+                    columns,
+                    values,
+                    overriding,
+                    default_values: true,
+                },
+            ) if !columns.is_empty() || !values.is_empty() || overriding.is_some() => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "MERGE INSERT DEFAULT VALUES cannot have columns, values, or OVERRIDING"
+                        .to_string(),
+                ));
+            }
+            (
+                _,
+                MergeAction::Insert {
+                    default_values: true,
+                    ..
+                },
+            ) => {}
+            (
+                _,
+                MergeAction::Insert {
+                    columns, values, ..
+                },
+            ) => {
                 if values.is_empty() {
                     return Err(crate::protocol::EncodeError::InvalidAst(
                         "MERGE INSERT requires at least one value".to_string(),
@@ -1930,7 +2001,10 @@ fn encode_merge_source(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     match source {
-        MergeSource::Table { name, alias } => {
+        MergeSource::Table { name, alias, only } => {
+            if *only {
+                buf.extend_from_slice(b"ONLY ");
+            }
             push_table_ref(buf, name);
             if let Some(alias) = alias {
                 buf.extend_from_slice(b" AS ");
@@ -1964,10 +2038,19 @@ fn encode_merge_action(
                 }
                 push_identifier_ref(buf, col, false);
                 buf.extend_from_slice(b" = ");
-                encode_expr_with_params(expr, buf, params)?;
+                encode_write_value(expr, buf, params)?;
             }
         }
-        MergeAction::Insert { columns, values } => {
+        MergeAction::Insert {
+            default_values: true,
+            ..
+        } => buf.extend_from_slice(b"INSERT DEFAULT VALUES"),
+        MergeAction::Insert {
+            columns,
+            values,
+            overriding,
+            ..
+        } => {
             buf.extend_from_slice(b"INSERT");
             if !columns.is_empty() {
                 buf.extend_from_slice(b" (");
@@ -1979,12 +2062,19 @@ fn encode_merge_action(
                 }
                 buf.extend_from_slice(b")");
             }
+            match overriding {
+                Some(OverridingKind::SystemValue) => {
+                    buf.extend_from_slice(b" OVERRIDING SYSTEM VALUE")
+                }
+                Some(OverridingKind::UserValue) => buf.extend_from_slice(b" OVERRIDING USER VALUE"),
+                None => {}
+            }
             buf.extend_from_slice(b" VALUES (");
             for (i, value) in values.iter().enumerate() {
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_expr_with_params(value, buf, params)?;
+                encode_write_value(value, buf, params)?;
             }
             buf.extend_from_slice(b")");
         }

@@ -540,6 +540,11 @@ fn encode_column_expr_inner(
                 encode_column_expr_inner(col, buf, params)?;
             }
         },
+        Expr::Default => {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                super::super::dml::DEFAULT_POSITION_ERROR.to_string(),
+            ));
+        }
     }
     Ok(())
 }

@@ -202,13 +202,20 @@ impl Formatter {
             return Ok(());
         };
 
-        write!(self.buffer, "merge {}", cmd.table)?;
+        write!(self.buffer, "merge ")?;
+        if cmd.only_table {
+            write!(self.buffer, "only ")?;
+        }
+        write!(self.buffer, "{}", cmd.table)?;
         if let Some(alias) = &merge.target_alias {
             write!(self.buffer, " as {}", alias)?;
         }
         write!(self.buffer, " using ")?;
         match &merge.source {
-            MergeSource::Table { name, alias } => {
+            MergeSource::Table { name, alias, only } => {
+                if *only {
+                    write!(self.buffer, "only ")?;
+                }
                 write!(self.buffer, "{}", name)?;
                 if let Some(alias) = alias {
                     write!(self.buffer, " as {}", alias)?;
@@ -255,10 +262,28 @@ impl Formatter {
                     write!(self.buffer, "{} = {}", col, expr)?;
                 }
             }
-            MergeAction::Insert { columns, values } => {
+            MergeAction::Insert {
+                columns,
+                values,
+                overriding,
+                default_values,
+            } => {
                 write!(self.buffer, "insert")?;
                 if !columns.is_empty() {
                     write!(self.buffer, " ({})", columns.join(", "))?;
+                }
+                match overriding {
+                    Some(crate::ast::OverridingKind::SystemValue) => {
+                        write!(self.buffer, " overriding system value")?
+                    }
+                    Some(crate::ast::OverridingKind::UserValue) => {
+                        write!(self.buffer, " overriding user value")?
+                    }
+                    None => {}
+                }
+                if *default_values {
+                    write!(self.buffer, " default values")?;
+                    return Ok(());
                 }
                 write!(self.buffer, " values (")?;
                 for (i, value) in values.iter().enumerate() {
@@ -509,6 +534,7 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
+            Expr::Default => write!(self.buffer, "default")?,
         }
         Ok(())
     }

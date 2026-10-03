@@ -57,13 +57,13 @@ pub struct Qail {
     pub skip_locked: bool,
     /// FETCH FIRST n ROWS [ONLY|WITH TIES].
     pub fetch: Option<(u64, bool)>,
-    /// INSERT with DEFAULT VALUES.
+    /// INSERT with DEFAULT VALUES. MERGE rejects it; set it on the INSERT arm.
     pub default_values: bool,
-    /// OVERRIDING clause for generated columns.
+    /// OVERRIDING clause for generated columns. MERGE rejects it; set it on the INSERT arm.
     pub overriding: Option<OverridingKind>,
     /// TABLESAMPLE method, percentage, and optional seed.
     pub sample: Option<(SampleMethod, f64, Option<u64>)>,
-    /// SELECT FROM ONLY (exclude inheritance).
+    /// ONLY on the SELECT/UPDATE/DELETE/MERGE target (exclude inheritance).
     pub only_table: bool,
     // Vector database fields (Qdrant)
     /// Search vector for similarity queries.
@@ -165,6 +165,9 @@ pub enum MergeSource {
         name: String,
         /// Optional source alias.
         alias: Option<String>,
+        /// `USING ONLY name`: exclude inheritance children.
+        #[serde(default)]
+        only: bool,
     },
     /// Subquery source.
     Query {
@@ -205,12 +208,18 @@ pub enum MergeAction {
         /// Column = expression assignments.
         assignments: Vec<(String, Expr)>,
     },
-    /// `INSERT (...) VALUES (...)`.
+    /// `INSERT [(...)] [OVERRIDING ... VALUE] VALUES (...)` or `INSERT DEFAULT VALUES`.
     Insert {
         /// Optional target columns.
         columns: Vec<String>,
         /// Insert value expressions.
         values: Vec<Expr>,
+        /// `OVERRIDING { SYSTEM | USER } VALUE`; not allowed with `default_values`.
+        #[serde(default)]
+        overriding: Option<OverridingKind>,
+        /// `INSERT DEFAULT VALUES`; requires empty `columns` and `values`.
+        #[serde(default)]
+        default_values: bool,
     },
     /// `DELETE`.
     Delete,

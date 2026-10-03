@@ -1,7 +1,8 @@
 //! PostgreSQL MERGE SQL generation.
 
 use crate::ast::{
-    Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
+    Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator,
+    OverridingKind, Qail, Value,
 };
 use crate::transpiler::conditions::{
     ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax, validate_read_only_subquery,
@@ -27,6 +28,9 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
     if merge.clauses.is_empty() {
         return "/* ERROR: MERGE requires at least one WHEN clause */".to_string();
     }
+    if let Some(error) = validate_merge_command_flags(cmd) {
+        return format!("/* ERROR: {} */", error);
+    }
     if let Some(error) = validate_merge_shape(merge) {
         return format!("/* ERROR: {} */", error);
     }
@@ -36,6 +40,9 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
     let mut sql = String::new();
     push_cte_prefix(&mut sql, cmd, dialect);
     sql.push_str("MERGE INTO ");
+    if cmd.only_table {
+        sql.push_str("ONLY ");
+    }
     sql.push_str(&generator.quote_identifier(&cmd.table));
     if let Some(alias) = &merge.target_alias {
         sql.push_str(" AS ");
@@ -120,7 +127,7 @@ fn merge_reference_context(cmd: &Qail, merge: &Merge) -> Qail {
     }
 
     match &merge.source {
-        MergeSource::Table { name, alias } => {
+        MergeSource::Table { name, alias, .. } => {
             let source_ref = if let Some(alias) = alias {
                 format!("{} {}", name, alias)
             } else {
@@ -144,12 +151,16 @@ fn merge_source_sql(
     generator: &dyn SqlGenerator,
 ) -> String {
     match source {
-        MergeSource::Table { name, alias } => {
-            let mut sql = if alias.is_some() {
-                generator.quote_identifier(name)
+        MergeSource::Table { name, alias, only } => {
+            let mut sql = String::new();
+            if *only {
+                sql.push_str("ONLY ");
+            }
+            if alias.is_some() {
+                sql.push_str(&generator.quote_identifier(name));
             } else {
-                render_table_reference(name, generator)
-            };
+                sql.push_str(&render_table_reference(name, generator));
+            }
             if let Some(alias) = alias {
                 sql.push_str(" AS ");
                 sql.push_str(&generator.quote_identifier(alias));
@@ -341,14 +352,22 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator, context:
                     format!(
                         "{} = {}",
                         generator.quote_identifier(col),
-                        expr_sql(expr, generator, context)
+                        write_value_sql(expr, generator, context)
                     )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("UPDATE SET {}", assignments)
         }
-        MergeAction::Insert { columns, values } => {
+        MergeAction::Insert {
+            columns,
+            values,
+            overriding,
+            default_values,
+        } => {
+            if *default_values {
+                return "INSERT DEFAULT VALUES".to_string();
+            }
             let mut sql = String::from("INSERT");
             if !columns.is_empty() {
                 let cols = columns
@@ -360,9 +379,14 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator, context:
                 sql.push_str(&cols);
                 sql.push(')');
             }
+            match overriding {
+                Some(OverridingKind::SystemValue) => sql.push_str(" OVERRIDING SYSTEM VALUE"),
+                Some(OverridingKind::UserValue) => sql.push_str(" OVERRIDING USER VALUE"),
+                None => {}
+            }
             let values = values
                 .iter()
-                .map(|expr| expr_sql(expr, generator, context))
+                .map(|expr| write_value_sql(expr, generator, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             sql.push_str(" VALUES (");
@@ -372,6 +396,14 @@ fn merge_action_sql(action: &MergeAction, generator: &dyn SqlGenerator, context:
         }
         MergeAction::Delete => "DELETE".to_string(),
         MergeAction::DoNothing => "DO NOTHING".to_string(),
+    }
+}
+
+/// A whole UPDATE assignment value or INSERT value, the only places `DEFAULT` is valid.
+fn write_value_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String {
+    match expr {
+        Expr::Default => "DEFAULT".to_string(),
+        expr => expr_sql(expr, generator, context),
     }
 }
 
@@ -548,6 +580,10 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String
         }
         Expr::Def { .. } | Expr::Mod { .. } | Expr::Window { .. } => {
             "/* ERROR: Invalid MERGE expression */".to_string()
+        }
+        Expr::Default => {
+            "/* ERROR: DEFAULT is only valid as a whole MERGE assignment or INSERT value */"
+                .to_string()
         }
     }
 }
@@ -763,7 +799,33 @@ fn validate_merge_shape(merge: &Merge) -> Option<String> {
                     return Some(error);
                 }
             }
-            (_, MergeAction::Insert { columns, values }) => {
+            (
+                _,
+                MergeAction::Insert {
+                    columns,
+                    values,
+                    overriding,
+                    default_values: true,
+                },
+            ) if !columns.is_empty() || !values.is_empty() || overriding.is_some() => {
+                return Some(
+                    "MERGE INSERT DEFAULT VALUES cannot have columns, values, or OVERRIDING"
+                        .to_string(),
+                );
+            }
+            (
+                _,
+                MergeAction::Insert {
+                    default_values: true,
+                    ..
+                },
+            ) => {}
+            (
+                _,
+                MergeAction::Insert {
+                    columns, values, ..
+                },
+            ) => {
                 if values.is_empty() {
                     return Some("MERGE INSERT requires at least one value".to_string());
                 }
@@ -780,6 +842,22 @@ fn validate_merge_shape(merge: &Merge) -> Option<String> {
         }
     }
 
+    None
+}
+
+/// Command-level INSERT flags have no single arm to apply to; they belong on the INSERT arm.
+fn validate_merge_command_flags(cmd: &Qail) -> Option<String> {
+    if cmd.default_values {
+        return Some(
+            "MERGE ignores command DEFAULT VALUES; use when_not_matched_insert_default_values"
+                .to_string(),
+        );
+    }
+    if cmd.overriding.is_some() {
+        return Some(
+            "MERGE ignores command OVERRIDING; use when_not_matched_insert_overriding".to_string(),
+        );
+    }
     None
 }
 

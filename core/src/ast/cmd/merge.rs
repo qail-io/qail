@@ -1,8 +1,8 @@
 //! Builder methods for PostgreSQL MERGE.
 
 use crate::ast::{
-    Condition, Expr, Merge, MergeAction, MergeClause, MergeMatchKind, MergeSource, Operator, Qail,
-    Value,
+    Condition, Expr, Merge, MergeAction, MergeClause, MergeMatchKind, MergeSource, Operator,
+    OverridingKind, Qail, Value,
 };
 
 impl Qail {
@@ -17,6 +17,7 @@ impl Qail {
         self.ensure_merge().source = MergeSource::Table {
             name: table.into(),
             alias: None,
+            only: false,
         };
         self
     }
@@ -26,6 +27,21 @@ impl Qail {
         self.ensure_merge().source = MergeSource::Table {
             name: table.into(),
             alias: Some(alias.into()),
+            only: false,
+        };
+        self
+    }
+
+    /// Set an aliased `MERGE USING ONLY` table source (exclude child tables).
+    pub fn using_only_table_as(
+        mut self,
+        table: impl Into<String>,
+        alias: impl Into<String>,
+    ) -> Self {
+        self.ensure_merge().source = MergeSource::Table {
+            name: table.into(),
+            alias: Some(alias.into()),
+            only: true,
         };
         self
     }
@@ -124,6 +140,46 @@ impl Qail {
             MergeAction::Insert {
                 columns: columns.iter().map(|col| col.as_ref().to_string()).collect(),
                 values: values.to_vec(),
+                overriding: None,
+                default_values: false,
+            },
+        );
+        self
+    }
+
+    /// Add `WHEN NOT MATCHED [BY TARGET] THEN INSERT (...) OVERRIDING ... VALUE VALUES (...)`.
+    pub fn when_not_matched_insert_overriding<S>(
+        mut self,
+        overriding: OverridingKind,
+        columns: &[S],
+        values: &[Expr],
+    ) -> Self
+    where
+        S: AsRef<str>,
+    {
+        self.push_merge_clause(
+            MergeMatchKind::NotMatchedByTarget,
+            Vec::new(),
+            MergeAction::Insert {
+                columns: columns.iter().map(|col| col.as_ref().to_string()).collect(),
+                values: values.to_vec(),
+                overriding: Some(overriding),
+                default_values: false,
+            },
+        );
+        self
+    }
+
+    /// Add `WHEN NOT MATCHED [BY TARGET] THEN INSERT DEFAULT VALUES`.
+    pub fn when_not_matched_insert_default_values(mut self) -> Self {
+        self.push_merge_clause(
+            MergeMatchKind::NotMatchedByTarget,
+            Vec::new(),
+            MergeAction::Insert {
+                columns: Vec::new(),
+                values: Vec::new(),
+                overriding: None,
+                default_values: true,
             },
         );
         self
@@ -145,6 +201,8 @@ impl Qail {
             MergeAction::Insert {
                 columns: columns.iter().map(|col| col.as_ref().to_string()).collect(),
                 values: values.to_vec(),
+                overriding: None,
+                default_values: false,
             },
         );
         self
@@ -217,6 +275,7 @@ impl Qail {
             source: MergeSource::Table {
                 name: String::new(),
                 alias: None,
+                only: false,
             },
             on: Vec::new(),
             clauses: Vec::new(),

@@ -148,7 +148,7 @@ fn collect_related_table_references(
         );
     }
     if let Some(merge) = &cmd.merge
-        && let crate::ast::MergeSource::Table { name, alias } = &merge.source
+        && let crate::ast::MergeSource::Table { name, alias, .. } = &merge.source
         && !is_cte_alias(name, cte_aliases)
     {
         push_scoped_reference(
@@ -375,7 +375,8 @@ fn collect_expr_subquery_references(
         | Expr::Named(_)
         | Expr::Aliased { .. }
         | Expr::JsonAccess { .. }
-        | Expr::Def { .. } => {}
+        | Expr::Def { .. }
+        | Expr::Default => {}
     }
 }
 
@@ -481,7 +482,9 @@ fn collect_reference_columns_for_scope(cmd: &crate::Qail, scope: ColumnScope<'_>
                         collect_expr_columns(expr, scope, &mut cols, &mut seen);
                     }
                 }
-                MergeAction::Insert { columns, values } => {
+                MergeAction::Insert {
+                    columns, values, ..
+                } => {
                     for column in columns {
                         push_column_ref(column, scope, &mut cols, &mut seen);
                     }
@@ -603,7 +606,7 @@ fn collect_expr_columns(
                 collect_cage_columns(cage, scope, cols, seen);
             }
         }
-        Expr::Def { .. } | Expr::Subquery { .. } | Expr::Exists { .. } => {}
+        Expr::Def { .. } | Expr::Subquery { .. } | Expr::Exists { .. } | Expr::Default => {}
     }
 }
 
