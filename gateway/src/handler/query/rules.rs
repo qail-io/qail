@@ -283,7 +283,9 @@ pub(crate) fn qail_command_is_read_only(cmd: &qail_core::ast::Qail) -> bool {
         cmd.action,
         Action::Get | Action::Cnt | Action::JsonTable | Action::With | Action::Export
     );
+    // Row locks write xmax on the tuple; PostgreSQL refuses them in READ ONLY transactions.
     action_is_read_only
+        && !qail_command_takes_row_locks(cmd)
         && cmd.columns.iter().all(expr_is_read_only)
         && cmd.distinct_on.iter().all(expr_is_read_only)
         && cmd
@@ -348,6 +350,37 @@ pub(crate) fn qail_command_is_read_only(cmd: &qail_core::ast::Qail) -> bool {
             .all(|(_, set_query)| qail_command_is_read_only(set_query))
 }
 
+/// `FOR UPDATE` / `FOR SHARE` (and `SKIP LOCKED` / `NOWAIT` variants) anywhere
+/// in the tree. Such a query writes no rows but must reach the server: a cache
+/// hit would return rows without taking (or waiting for) the lock.
+pub(crate) fn qail_command_takes_row_locks(cmd: &qail_core::ast::Qail) -> bool {
+    cmd.lock_mode.is_some()
+        || cmd.skip_locked
+        || cmd.ctes.iter().any(|cte| {
+            qail_command_takes_row_locks(&cte.base_query)
+                || cte
+                    .recursive_query
+                    .as_deref()
+                    .is_some_and(qail_command_takes_row_locks)
+        })
+        || cmd
+            .source_query
+            .as_deref()
+            .is_some_and(qail_command_takes_row_locks)
+        || cmd
+            .set_ops
+            .iter()
+            .any(|(_, set_query)| qail_command_takes_row_locks(set_query))
+        || validate_embedded_subqueries(cmd, &mut |query| {
+            if qail_command_takes_row_locks(query) {
+                Err(ApiError::internal("row lock in subquery"))
+            } else {
+                Ok(())
+            }
+        })
+        .is_err()
+}
+
 pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
     if !public_query_action_allowed(cmd.action) {
         return Err(ApiError::with_code(
@@ -384,6 +417,17 @@ pub(crate) fn reject_non_read_action(
         return Err(ApiError::with_code(
             "ACTION_DENIED",
             format!("Action {:?} is not allowed on {}", cmd.action, surface),
+        ));
+    }
+    // A live query re-runs every tick; an accepted FOR UPDATE would re-lock
+    // the rows each time and block writers.
+    if qail_command_takes_row_locks(cmd) {
+        return Err(ApiError::with_code(
+            "ACTION_DENIED",
+            format!(
+                "Row-locking clauses (FOR UPDATE / FOR SHARE) are not allowed on {}",
+                surface
+            ),
         ));
     }
 
