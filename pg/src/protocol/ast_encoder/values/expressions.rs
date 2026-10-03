@@ -151,6 +151,47 @@ fn encode_projection_expr(
     Ok(())
 }
 
+/// Call arguments, each `[VARIADIC ][name => ]value`. Callers validate the
+/// list with `validate_function_args` first (via `validate_expr_ref`).
+fn encode_call_args(
+    args: &[Expr],
+    buf: &mut BytesMut,
+    mut params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        match arg {
+            Expr::FunctionArg {
+                name,
+                variadic,
+                value,
+            } => {
+                if *variadic {
+                    buf.extend_from_slice(b"VARIADIC ");
+                }
+                if let Some(name) = name {
+                    push_identifier_ref(buf, name, false);
+                    buf.extend_from_slice(b" => ");
+                }
+                encode_column_expr_inner(value, buf, params.as_deref_mut())?;
+            }
+            other => encode_column_expr_inner(other, buf, params.as_deref_mut())?,
+        }
+    }
+    Ok(())
+}
+
+/// Encode already-validated call arguments sharing the caller's parameters.
+pub fn encode_call_args_with_params(
+    args: &[Expr],
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    encode_call_args(args, buf, Some(params))
+}
+
 /// Encode an operand expression with optional shared params, without output aliases.
 ///
 /// When `params` is `Some`, subqueries share the outer query's parameter
@@ -228,12 +269,7 @@ fn encode_column_expr_inner(
         Expr::FunctionCall { name, args, .. } => {
             buf.extend_from_slice(name.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
-            for (i, arg) in args.iter().enumerate() {
-                if i > 0 {
-                    buf.extend_from_slice(b", ");
-                }
-                encode_column_expr_inner(arg, buf, params.as_deref_mut())?;
-            }
+            encode_call_args(args, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b")");
         }
         Expr::Cast {
@@ -253,7 +289,14 @@ fn encode_column_expr_inner(
             // IS NULL / IS TRUE / ... carry a placeholder right operand.
             if !op.is_postfix() {
                 buf.extend_from_slice(b" ");
+                // An untyped `@@` operand would resolve to text search.
+                if op.is_jsonpath() {
+                    buf.extend_from_slice(b"CAST(");
+                }
                 encode_column_expr_inner(right, buf, params.as_deref_mut())?;
+                if op.is_jsonpath() {
+                    buf.extend_from_slice(b" AS jsonpath)");
+                }
             }
             buf.extend_from_slice(b")");
         }
@@ -499,6 +542,11 @@ fn encode_column_expr_inner(
                 }
             }
             buf.extend_from_slice(b")");
+        }
+        Expr::FunctionArg { .. } => {
+            return Err(crate::protocol::EncodeError::InvalidAst(
+                "named/VARIADIC argument outside a function call".to_string(),
+            ));
         }
         Expr::Def {
             name,
@@ -761,6 +809,13 @@ pub(crate) fn encode_condition(
             buf.extend_from_slice(b" '%' || ");
             mode.operand(&cond.value, buf)?;
             buf.extend_from_slice(b" || '%'");
+        }
+        // An untyped `@@` operand would resolve to text search on a text
+        // left side; every context casts the path operand.
+        Operator::JsonPathExists | Operator::JsonPathMatch => {
+            buf.extend_from_slice(b" CAST(");
+            mode.operand(&cond.value, buf)?;
+            buf.extend_from_slice(b" AS jsonpath)");
         }
         _ => {
             buf.extend_from_slice(b" ");

@@ -15,12 +15,12 @@ use qail_pg::driver::PgDriver;
 
 use crate::introspection::{
     IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
-    IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspected_column_generation,
-    is_simple_index_column, is_trivial_not_null_check, is_unique_index_definition,
-    parse_check_expr, parse_index_parts, parse_pg_constraint_fk_action,
-    resolve_introspected_foreign_key, resolve_introspected_unique_constraint,
-    resolve_qualified_introspected_foreign_key, sort_introspected_key_columns,
-    sort_qualified_introspected_key_columns,
+    IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspect_temporal_constraints,
+    introspected_column_generation, is_simple_index_column, is_trivial_not_null_check,
+    is_unique_index_definition, mark_period_foreign_key, parse_check_expr, parse_index_parts,
+    parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
+    resolve_introspected_unique_constraint, resolve_qualified_introspected_foreign_key,
+    sort_introspected_key_columns, sort_qualified_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -539,6 +539,7 @@ mod tests {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );
@@ -600,6 +601,7 @@ mod tests {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );
@@ -644,6 +646,7 @@ mod tests {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: vec![],
                 owner_column: None,
             },
         );
@@ -905,6 +908,92 @@ mod tests {
             })
         }));
     }
+
+    /// Creates and drops two uniquely named tables in `public`; needs
+    /// PostgreSQL 18 (`pg_constraint.conperiod`) and `btree_gist`.
+    #[tokio::test]
+    #[ignore = "Requires PostgreSQL 18 at QAIL_TEST_DB_URL"]
+    async fn live_shadow_introspection_reads_temporal_keys() {
+        let url = std::env::var("QAIL_TEST_DB_URL").unwrap_or_else(|_| {
+            "postgres://qail_lab:qail_lab@127.0.0.1:55432/qail_engine_lab".to_string()
+        });
+        let mut driver = PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let parent = format!("temporal_parent_{suffix}");
+        let child = format!("temporal_child_{suffix}");
+        driver
+            .execute_simple("CREATE EXTENSION IF NOT EXISTS btree_gist")
+            .await
+            .expect("btree_gist");
+        driver
+            .execute_simple(&format!(
+                "CREATE TABLE {parent} (room_id INT NOT NULL, during TSTZRANGE NOT NULL, \
+                 CONSTRAINT {parent}_pkey PRIMARY KEY (room_id, during WITHOUT OVERLAPS)); \
+                 CREATE TABLE {child} (room_id INT NOT NULL, crew_id INT NOT NULL, during TSTZRANGE NOT NULL, \
+                 CONSTRAINT {child}_crew_key UNIQUE (crew_id, during WITHOUT OVERLAPS), \
+                 CONSTRAINT {child}_fk FOREIGN KEY (room_id, PERIOD during) \
+                 REFERENCES {parent} (room_id, PERIOD during))"
+            ))
+            .await
+            .expect("create temporal tables");
+
+        let introspected = introspect_schema(&mut driver).await;
+        driver
+            .execute_simple(&format!("DROP TABLE {child}, {parent}"))
+            .await
+            .expect("drop temporal tables");
+        let mut live = introspected.expect("introspect live schema");
+        live.tables
+            .retain(|name, _| name == &parent || name == &child);
+        live.indexes
+            .retain(|index| index.table == parent || index.table == child);
+
+        let parent_table = &live.tables[&parent];
+        assert!(
+            parent_table
+                .columns
+                .iter()
+                .all(|column| !column.primary_key),
+            "WITHOUT OVERLAPS key leaked into column primary_key flags"
+        );
+        assert_eq!(
+            parent_table.temporal_keys,
+            vec![qail_core::migrate::TemporalKey {
+                name: Some(format!("{parent}_pkey")),
+                primary: true,
+                columns: vec!["room_id".to_string()],
+                period: "during".to_string(),
+            }]
+        );
+        assert!(
+            live.indexes.is_empty(),
+            "temporal UNIQUE leaked as a unique index: {:?}",
+            live.indexes
+        );
+        let child_table = &live.tables[&child];
+        assert_eq!(child_table.temporal_keys.len(), 1);
+        assert!(!child_table.temporal_keys[0].primary);
+        assert_eq!(child_table.multi_column_fks.len(), 1);
+        assert!(child_table.multi_column_fks[0].period, "PERIOD dropped");
+
+        let expected = qail_core::migrate::parse_qail(&format!(
+            "table {parent} {{\n  room_id INT not_null\n  during TSTZRANGE not_null\n  \
+             primary_key (room_id, during without_overlaps) constraint {parent}_pkey\n}}\n\
+             table {child} {{\n  room_id INT not_null\n  crew_id INT not_null\n  during TSTZRANGE not_null\n  \
+             unique (crew_id, during without_overlaps) constraint {child}_crew_key\n  \
+             foreign_key (room_id, period during) references {parent}(room_id, period during) constraint {child}_fk\n}}\n"
+        ))
+        .expect("parse expected schema");
+        let drift = qail_core::migrate::diff_schemas_checked(&live, &expected)
+            .expect("live temporal schema diffs against its own text");
+        assert!(drift.is_empty(), "false drift: {drift:?}");
+    }
 }
 
 fn shadow_receipt_lookup_cmd() -> Qail {
@@ -980,10 +1069,6 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .transpose()?
         .ok_or_else(|| anyhow!("Public schema not found in pg_namespace"))?;
 
-    let (single_unique_columns, unique_constraint_indexes, _unique_constraint_names) =
-        introspect_unique_constraints(driver).await?;
-    let primary_key_columns = introspect_primary_key_columns(driver).await?;
-
     // 1. Query all tables
     let tables_cmd = Qail::get("information_schema.tables")
         .column("table_name")
@@ -1000,6 +1085,49 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .filter_map(|r| r.get_string(0))
         .filter(|t| !t.starts_with("_qail")) // Skip internal tables
         .collect();
+    let table_name_set: std::collections::HashSet<String> = table_names.iter().cloned().collect();
+
+    let attnum_cmd = Qail::get("pg_catalog.pg_attribute")
+        .table_alias("a")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class c",
+            "c.oid",
+            "a.attrelid",
+        )
+        .columns(["c.relname", "a.attnum", "a.attname"])
+        .filter(
+            "c.relnamespace",
+            qail_core::ast::Operator::Eq,
+            public_namespace_oid.clone(),
+        )
+        .filter("a.attnum", qail_core::ast::Operator::Gt, 0)
+        .filter("a.attisdropped", qail_core::ast::Operator::Eq, false);
+    let attnum_rows = driver
+        .fetch_all(&attnum_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query attribute ordinals: {}", e))?;
+    let mut attnum_columns = std::collections::HashMap::<(String, i32), String>::new();
+    for row in attnum_rows {
+        let table = required_shadow_metadata_string(&row, 0, "attrel table")?;
+        let attnum = required_shadow_metadata_i32(&row, 1, "attnum")?;
+        let column = required_shadow_metadata_string(&row, 2, "attname")?;
+        attnum_columns.insert((table, attnum), column);
+    }
+
+    // Same catalog read as pull: WITHOUT OVERLAPS keys are table-level
+    // temporal keys, not column primary_key/unique flags or unique indexes.
+    let mut temporal = introspect_temporal_constraints(
+        driver,
+        &public_namespace_oid,
+        &table_name_set,
+        &attnum_columns,
+    )
+    .await?;
+
+    let (single_unique_columns, unique_constraint_indexes, _unique_constraint_names) =
+        introspect_unique_constraints(driver, &temporal.key_names).await?;
+    let primary_key_columns = introspect_primary_key_columns(driver, &temporal.key_names).await?;
 
     // 2. For each table, query columns
     for table_name in &table_names {
@@ -1095,6 +1223,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 multi_column_fks: vec![],
                 enable_rls: false,
                 force_rls: false,
+                temporal_keys: temporal.keys.remove(table_name).unwrap_or_default(),
                 owner_column: None,
             },
         );
@@ -1110,7 +1239,6 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
 
-    let table_name_set: std::collections::HashSet<String> = table_names.iter().cloned().collect();
     let idx_class_cmd = Qail::get("pg_catalog.pg_class")
         .columns(["oid", "relname"])
         .filter("relkind", Operator::Eq, "i")
@@ -1166,34 +1294,6 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         schema
             .indexes
             .push(index_from_pg_indexdef(idx_name, table_name, indexdef));
-    }
-
-    let attnum_cmd = Qail::get("pg_catalog.pg_attribute")
-        .table_alias("a")
-        .join(
-            JoinKind::Inner,
-            "pg_catalog.pg_class c",
-            "c.oid",
-            "a.attrelid",
-        )
-        .columns(["c.relname", "a.attnum", "a.attname"])
-        .filter(
-            "c.relnamespace",
-            qail_core::ast::Operator::Eq,
-            public_namespace_oid.clone(),
-        )
-        .filter("a.attnum", qail_core::ast::Operator::Gt, 0)
-        .filter("a.attisdropped", qail_core::ast::Operator::Eq, false);
-    let attnum_rows = driver
-        .fetch_all(&attnum_cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query attribute ordinals: {}", e))?;
-    let mut attnum_columns = std::collections::HashMap::<(String, i32), String>::new();
-    for row in attnum_rows {
-        let table = required_shadow_metadata_string(&row, 0, "attrel table")?;
-        let attnum = required_shadow_metadata_i32(&row, 1, "attnum")?;
-        let column = required_shadow_metadata_string(&row, 2, "attname")?;
-        attnum_columns.insert((table, attnum), column);
     }
 
     // 4. Query CHECK constraints. PostgreSQL stores CHECKs as table
@@ -1495,6 +1595,17 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         }
     }
 
+    for (table, constraint_name) in &temporal.foreign_keys {
+        mark_period_foreign_key(
+            schema
+                .tables
+                .get_mut(table)
+                .map(|table| table.multi_column_fks.as_mut_slice()),
+            table,
+            constraint_name,
+        )?;
+    }
+
     // 5. Query RLS status from pg_class
     let rls_cmd = public_rls_status_cmd(public_namespace_oid);
 
@@ -1520,6 +1631,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
 
 async fn introspect_primary_key_columns(
     driver: &mut PgDriver,
+    temporal_key_names: &std::collections::HashSet<String>,
 ) -> Result<std::collections::HashSet<(String, String)>> {
     use qail_core::ast::Operator;
 
@@ -1536,13 +1648,11 @@ async fn introspect_primary_key_columns(
     let mut pk_constraints = std::collections::HashSet::new();
     for row in &pk_rows {
         let table = required_shadow_metadata_string(row, 0, "table_name")?;
-        if table.starts_with("_qail") {
+        let constraint = required_shadow_metadata_string(row, 1, "constraint_name")?;
+        if table.starts_with("_qail") || temporal_key_names.contains(&constraint) {
             continue;
         }
-        pk_constraints.insert((
-            table,
-            required_shadow_metadata_string(row, 1, "constraint_name")?,
-        ));
+        pk_constraints.insert((table, constraint));
     }
 
     if pk_constraints.is_empty() {
@@ -1619,6 +1729,7 @@ fn constraint_index_names_from_metadata(
 
 async fn introspect_unique_constraints(
     driver: &mut PgDriver,
+    temporal_key_names: &std::collections::HashSet<String>,
 ) -> Result<(
     std::collections::HashSet<(String, String)>,
     Vec<Index>,
@@ -1671,7 +1782,7 @@ async fn introspect_unique_constraints(
     for row in unique_rows {
         let constraint_name = required_shadow_metadata_string(&row, 0, "constraint_name")?;
         let table_name = required_shadow_metadata_string(&row, 1, "table_name")?;
-        if table_name.starts_with("_qail") {
+        if table_name.starts_with("_qail") || temporal_key_names.contains(&constraint_name) {
             continue;
         }
         unique_constraint_names.insert(constraint_name.clone());

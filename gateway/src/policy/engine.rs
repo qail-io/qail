@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, fs};
 
 use qail_core::ast::{
-    Action, Cage, CageKind, Condition, ConflictAction, Expr, GroupByMode, Join, JoinKind,
-    LogicalOp, MergeAction, MergeSource, Operator, Qail, Value,
+    Action, Cage, CageKind, Condition, ConflictAction, Expr, FromSource, GroupByMode, Join,
+    JoinKind, LogicalOp, MergeAction, MergeSource, Operator, Qail, Value,
 };
 
 use crate::auth::AuthContext;
@@ -966,7 +966,8 @@ impl PolicyEngine {
             Expr::Cast { expr, .. }
             | Expr::Mod { col: expr, .. }
             | Expr::FieldAccess { expr, .. }
-            | Expr::Collate { expr, .. } => Self::enforce_expr_write_refs_for_policies(
+            | Expr::Collate { expr, .. }
+            | Expr::FunctionArg { value: expr, .. } => Self::enforce_expr_write_refs_for_policies(
                 expr,
                 policies,
                 target_refs,
@@ -1826,7 +1827,9 @@ impl PolicyEngine {
                     self.apply_expr_subquery_policies(auth, bound)?;
                 }
             }
-            Expr::FieldAccess { expr, .. } => self.apply_expr_subquery_policies(auth, expr)?,
+            Expr::FieldAccess { expr, .. } | Expr::FunctionArg { value: expr, .. } => {
+                self.apply_expr_subquery_policies(auth, expr)?
+            }
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
                 self.apply_policies_inner(auth, query)?;
             }
@@ -1922,6 +1925,17 @@ impl PolicyEngine {
         }
         if let Some(ref mut source_query) = cmd.source_query {
             self.apply_policies_inner(auth, source_query)?;
+        }
+        match &mut cmd.from_source {
+            Some(FromSource::Subquery { query, .. }) => {
+                self.apply_policies_inner(auth, query)?;
+            }
+            Some(FromSource::Function { args, .. }) => {
+                for arg in args {
+                    self.apply_expr_subquery_policies(auth, arg)?;
+                }
+            }
+            None => {}
         }
 
         self.apply_embedded_subquery_policies(auth, cmd)?;
@@ -2493,10 +2507,12 @@ impl PolicyEngine {
 }
 
 fn command_reads_cte_alias(cmd: &Qail) -> bool {
+    // A typed FROM source's alias is a derived relation; its inner query
+    // already went through apply_policies_inner.
     matches!(
         cmd.action,
         Action::Get | Action::Cnt | Action::Export | Action::With
-    ) && cmd.ctes.iter().any(|cte| cte.name == cmd.table)
+    ) && (cmd.ctes.iter().any(|cte| cte.name == cmd.table) || cmd.from_source.is_some())
 }
 
 /// One piece of an expanded channel pattern.

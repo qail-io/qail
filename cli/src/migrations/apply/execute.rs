@@ -1301,15 +1301,52 @@ async fn verify_table_constraints(
                     ));
                 }
             }
+            TableConstraint::TemporalKey {
+                name,
+                primary,
+                columns,
+                period,
+            } => {
+                let kind = if *primary { "PRIMARY KEY" } else { "UNIQUE" };
+                let mut key_columns = columns.clone();
+                key_columns.push(period.clone());
+                if !table_has_key_constraint(pg, &cmd.table, kind, &key_columns).await?
+                    || !table_has_temporal_constraint(pg, &cmd.table, name.as_deref(), kind).await?
+                {
+                    failures.push(format!(
+                        "expected table '{}' to have {} ({}, {} WITHOUT OVERLAPS)",
+                        cmd.table,
+                        kind,
+                        columns.join(", "),
+                        period
+                    ));
+                }
+            }
             TableConstraint::ForeignKey {
                 name,
                 columns,
                 ref_table,
                 ref_columns,
+                period,
                 on_delete,
                 on_update,
                 deferrable,
             } => {
+                if *period
+                    && !table_has_temporal_constraint(
+                        pg,
+                        &cmd.table,
+                        name.as_deref(),
+                        "FOREIGN KEY",
+                    )
+                    .await?
+                {
+                    failures.push(format!(
+                        "expected table '{}' to have a PERIOD foreign key ({})",
+                        cmd.table,
+                        columns.join(", ")
+                    ));
+                }
                 let expected = ExpectedForeignKeyConstraint {
                     name: name.as_deref(),
                     columns,
@@ -1600,6 +1637,48 @@ async fn table_has_key_constraint(
         let live_columns = columns.into_iter().map(|(_, col)| col).collect::<Vec<_>>();
         constraint_columns_match(&live_columns, expected_columns)
     }))
+}
+
+/// Whether the table has a `pg_constraint.conperiod` (PostgreSQL 18) key or
+/// foreign key of `constraint_type`, by name when one is given.
+async fn table_has_temporal_constraint(
+    pg: &mut qail_pg::PgDriver,
+    table: &str,
+    name: Option<&str>,
+    constraint_type: &str,
+) -> Result<bool> {
+    let contype = match constraint_type {
+        "PRIMARY KEY" => "p",
+        "UNIQUE" => "u",
+        "FOREIGN KEY" => "f",
+        other => bail!("unsupported temporal constraint type {other}"),
+    };
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("pg_catalog.pg_constraint con")
+        .columns(["con.conname", "con.conperiod"])
+        .join_conds(
+            JoinKind::Inner,
+            "pg_catalog.pg_class rel",
+            vec![join_column_eq("rel.oid", "con.conrelid")],
+        )
+        .join_conds(
+            JoinKind::Inner,
+            "pg_catalog.pg_namespace nsp",
+            vec![join_column_eq("nsp.oid", "rel.relnamespace")],
+        )
+        .where_eq("nsp.nspname", schema)
+        .where_eq("rel.relname", table_name)
+        .where_eq("con.contype", contype)
+        .where_eq("con.conperiod", true);
+    let cmd = match name {
+        Some(name) => cmd.where_eq("con.conname", name),
+        None => cmd,
+    };
+    let rows = pg
+        .fetch_all(&cmd)
+        .await
+        .with_context(|| format!("Failed temporal constraint check for '{}'", table))?;
+    Ok(!rows.is_empty())
 }
 
 #[derive(Debug)]
@@ -3498,6 +3577,7 @@ mod tests {
                 columns: vec!["route_id".to_string(), "schedule_id".to_string()],
                 ref_table: parent.clone(),
                 ref_columns: vec!["route_id".to_string(), "schedule_id".to_string()],
+                period: false,
                 on_delete: Some("CASCADE".to_string()),
                 on_update: Some("RESTRICT".to_string()),
                 deferrable: Some("DEFERRABLE INITIALLY DEFERRED".to_string()),

@@ -371,6 +371,26 @@ fn fk_deferrable_option_to_sql(deferrable: &str) -> Option<&'static str> {
     }
 }
 
+/// FK column list; with `period` the last column is written `PERIOD col`.
+fn fk_column_list(
+    columns: &[String],
+    period: bool,
+    generator: &dyn SqlGenerator,
+) -> Result<String, String> {
+    if !period {
+        return Ok(quoted_column_list(columns, generator));
+    }
+    let Some((last, leading)) = columns.split_last() else {
+        return Err("/* ERROR: PERIOD foreign key needs a period column */".to_string());
+    };
+    let mut parts: Vec<String> = leading
+        .iter()
+        .map(|column| generator.quote_identifier(column))
+        .collect();
+    parts.push(format!("PERIOD {}", generator.quote_identifier(last)));
+    Ok(parts.join(", "))
+}
+
 fn table_constraint_to_sql(
     constraint: &TableConstraint,
     generator: &dyn SqlGenerator,
@@ -383,11 +403,37 @@ fn table_constraint_to_sql(
             "PRIMARY KEY ({})",
             quoted_column_list(cols, generator)
         )),
+        TableConstraint::TemporalKey {
+            name,
+            primary,
+            columns,
+            period,
+        } => {
+            let mut sql = String::new();
+            if let Some(name) = name {
+                sql.push_str("CONSTRAINT ");
+                sql.push_str(&generator.quote_identifier(name));
+                sql.push(' ');
+            }
+            sql.push_str(if *primary {
+                "PRIMARY KEY ("
+            } else {
+                "UNIQUE ("
+            });
+            for column in columns {
+                sql.push_str(&generator.quote_identifier(column));
+                sql.push_str(", ");
+            }
+            sql.push_str(&generator.quote_identifier(period));
+            sql.push_str(" WITHOUT OVERLAPS)");
+            Ok(sql)
+        }
         TableConstraint::ForeignKey {
             name,
             columns,
             ref_table,
             ref_columns,
+            period,
             on_delete,
             on_update,
             deferrable,
@@ -399,11 +445,11 @@ fn table_constraint_to_sql(
                 sql.push(' ');
             }
             sql.push_str("FOREIGN KEY (");
-            sql.push_str(&quoted_column_list(columns, generator));
+            sql.push_str(&fk_column_list(columns, *period, generator)?);
             sql.push_str(") REFERENCES ");
             sql.push_str(&generator.quote_identifier(ref_table));
             sql.push('(');
-            sql.push_str(&quoted_column_list(ref_columns, generator));
+            sql.push_str(&fk_column_list(ref_columns, *period, generator)?);
             sql.push(')');
             if let Some(action) = on_delete {
                 let Some(action) = fk_action_option_to_sql(action) else {

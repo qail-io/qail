@@ -434,6 +434,28 @@ impl Qail {
         self
     }
 
+    /// Read from a typed FROM item instead of a table; `table` becomes the
+    /// source alias, which scoping, policies and qualifiers key on.
+    pub fn from_source(mut self, source: crate::ast::FromSource) -> Self {
+        self.table = source.alias().to_string();
+        self.from_source = Some(source);
+        self
+    }
+
+    /// `RETURNING WITH (OLD AS before, NEW AS after)` (PostgreSQL 18).
+    ///
+    /// Renames the row aliases that RETURNING expressions qualify columns
+    /// with, e.g. `.returning(["o.status", "n.status"])` after
+    /// `.returning_aliases(Some("o"), Some("n"))`. Both `None` clears it.
+    pub fn returning_aliases(mut self, before: Option<&str>, after: Option<&str>) -> Self {
+        let aliases = crate::ast::ReturningAliases {
+            before: before.map(str::to_string),
+            after: after.map(str::to_string),
+        };
+        self.returning_aliases = aliases.sql_parts().is_some().then_some(aliases);
+        self
+    }
+
     /// Add payload values (INSERT positional).
     pub fn values<I, V>(mut self, vals: I) -> Self
     where

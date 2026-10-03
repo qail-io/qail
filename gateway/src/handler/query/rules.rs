@@ -109,7 +109,9 @@ fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Q
                 for_each_expr_subquery(bound, visit);
             }
         }
-        Expr::FieldAccess { expr, .. } => for_each_expr_subquery(expr, visit),
+        Expr::FieldAccess { expr, .. } | Expr::FunctionArg { value: expr, .. } => {
+            for_each_expr_subquery(expr, visit)
+        }
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => visit(query),
         Expr::Star
         | Expr::Named(_)
@@ -216,6 +218,9 @@ where
             validate_expr_subqueries(expr, validate)?;
         }
     }
+    for expr in from_source_args(cmd) {
+        validate_expr_subqueries(expr, validate)?;
+    }
     if let Some(merge) = &cmd.merge {
         if let MergeSource::Query { query, .. } = &merge.source {
             validate(query)?;
@@ -318,7 +323,9 @@ fn expr_is_read_only(expr: &Expr) -> bool {
                     .flatten()
                     .all(|bound| expr_is_read_only(bound))
         }
-        Expr::FieldAccess { expr, .. } => expr_is_read_only(expr),
+        Expr::FieldAccess { expr, .. } | Expr::FunctionArg { value: expr, .. } => {
+            expr_is_read_only(expr)
+        }
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             qail_command_is_read_only(query)
         }
@@ -395,10 +402,28 @@ pub(crate) fn qail_command_is_read_only(cmd: &qail_core::ast::Qail) -> bool {
             .source_query
             .as_deref()
             .is_none_or(qail_command_is_read_only)
+        && from_source_query(cmd).is_none_or(qail_command_is_read_only)
+        && from_source_args(cmd).iter().all(expr_is_read_only)
         && cmd
             .set_ops
             .iter()
             .all(|(_, set_query)| qail_command_is_read_only(set_query))
+}
+
+/// The derived-table query of `FROM (subquery) AS alias`, if any.
+fn from_source_query(cmd: &qail_core::ast::Qail) -> Option<&qail_core::ast::Qail> {
+    match &cmd.from_source {
+        Some(qail_core::ast::FromSource::Subquery { query, .. }) => Some(query),
+        _ => None,
+    }
+}
+
+/// Arguments of `FROM func(args) AS alias`, if any.
+fn from_source_args(cmd: &qail_core::ast::Qail) -> &[Expr] {
+    match &cmd.from_source {
+        Some(qail_core::ast::FromSource::Function { args, .. }) => args,
+        _ => &[],
+    }
 }
 
 pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
@@ -423,6 +448,9 @@ pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), 
     }
     if let Some(ref source_query) = cmd.source_query {
         reject_dangerous_action(source_query)?;
+    }
+    if let Some(query) = from_source_query(cmd) {
+        reject_dangerous_action(query)?;
     }
     validate_embedded_subqueries(cmd, &mut |query| reject_dangerous_action(query))?;
 
@@ -451,6 +479,9 @@ pub(crate) fn reject_non_read_action(
     }
     if let Some(ref source_query) = cmd.source_query {
         reject_non_read_action(source_query, surface)?;
+    }
+    if let Some(query) = from_source_query(cmd) {
+        reject_non_read_action(query, surface)?;
     }
     validate_embedded_subqueries(cmd, &mut |query| reject_non_read_action(query, surface))?;
 
@@ -547,6 +578,13 @@ pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usi
             add_complexity(&mut nested_complexity, expression_subquery_complexity(expr));
         }
     }
+    if let Some(query) = from_source_query(cmd) {
+        let child = query_complexity(query);
+        add_complexity(&mut nested_complexity, (1 + child.0, child.1, child.2));
+    }
+    for expr in from_source_args(cmd) {
+        add_complexity(&mut nested_complexity, expression_subquery_complexity(expr));
+    }
     if let Some(merge) = &cmd.merge {
         if let MergeSource::Query { query, .. } = &merge.source {
             let child = query_complexity(query);
@@ -642,7 +680,8 @@ pub(crate) fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
     fn collect(cmd: &qail_core::ast::Qail, tables: &mut Vec<String>) {
         let cte_names: Vec<&str> = cmd.ctes.iter().map(|cte| cte.name.as_str()).collect();
         let base_table = qail_table_name(&cmd.table);
-        if !cte_names.iter().any(|name| *name == base_table) {
+        // A typed FROM source's `table` is its alias; its query is collected below.
+        if !cte_names.iter().any(|name| *name == base_table) && cmd.from_source.is_none() {
             push_table(tables, &cmd.table);
         }
 
@@ -655,6 +694,13 @@ pub(crate) fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
 
         if let Some(ref source_query) = cmd.source_query {
             collect(source_query, tables);
+        }
+
+        if let Some(query) = from_source_query(cmd) {
+            collect(query, tables);
+        }
+        for expr in from_source_args(cmd) {
+            for_each_expr_subquery(expr, &mut |query| collect(query, tables));
         }
 
         for (_, set_query) in &cmd.set_ops {

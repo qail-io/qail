@@ -149,6 +149,45 @@ fn test_apply_policies_recurses_into_cte_body() {
 }
 
 #[test]
+fn test_apply_policies_recurses_into_from_subquery_body() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_read".to_string(),
+        table: "orders".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_from".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("o")
+        .from_source(qail_core::ast::FromSource::subquery(
+            Qail::get("orders").columns(["id", "total"]),
+            "o",
+        ))
+        .columns(["id"]);
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    let Some(qail_core::ast::FromSource::Subquery { query, .. }) = &cmd.from_source else {
+        panic!("FROM subquery kept");
+    };
+    assert_eq!(query.cages.len(), 1);
+    let condition = &query.cages[0].conditions[0];
+    assert_eq!(condition.left, Expr::Named("tenant_id".to_string()));
+    assert_eq!(condition.value, Value::String("tenant-1".to_string()));
+    // The derived alias itself carries no policy predicate.
+    assert!(cmd.cages.is_empty());
+}
+
+#[test]
 fn test_apply_policies_recurses_into_expression_subquery_body() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {

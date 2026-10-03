@@ -242,6 +242,29 @@ fn check_fk_deferrable(field: &str, value: &str) -> Result<(), SanitizeError> {
     }
 }
 
+/// Function-call arguments, the one place `Expr::FunctionArg` is allowed.
+fn check_function_args(field: &str, args: &[Expr]) -> Result<(), SanitizeError> {
+    if let Err(reason) = crate::ast::validate_function_args(args) {
+        return Err(SanitizeError {
+            field: format!("{field}.arg"),
+            value: String::new(),
+            reason,
+        });
+    }
+    for arg in args {
+        match arg {
+            Expr::FunctionArg { name, value, .. } => {
+                if let Some(name) = name {
+                    check_ident(&format!("{field}.arg_name"), name)?;
+                }
+                check_expr(&format!("{field}.arg"), value)?;
+            }
+            other => check_expr(&format!("{field}.arg"), other)?,
+        }
+    }
+    Ok(())
+}
+
 /// Validate an `Expr` node for unsafe patterns.
 ///
 /// - `Expr::Named` must be a safe identifier.
@@ -292,11 +315,13 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             if let Some(a) = alias {
                 check_ident(&format!("{field}.alias"), a)?;
             }
-            for arg in args {
-                check_expr(&format!("{field}.arg"), arg)?;
-            }
-            Ok(())
+            check_function_args(field, args)
         }
+        Expr::FunctionArg { .. } => Err(SanitizeError {
+            field: field.to_string(),
+            value: expr.to_string(),
+            reason: "named/VARIADIC argument outside a function call".to_string(),
+        }),
         Expr::Cast {
             expr,
             target_type,
@@ -534,6 +559,28 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
         }
     }
 
+    // ── Typed FROM source ────────────────────────────────────────────
+    if let Some(source) = &cmd.from_source {
+        if let Some(error) = crate::transpiler::dml::select::from_source_error(cmd, source) {
+            return Err(SanitizeError {
+                field: "from_source".to_string(),
+                value: source.alias().to_string(),
+                reason: error,
+            });
+        }
+        check_ident("from_source.alias", source.alias())?;
+        for column in source.column_alias_list() {
+            check_ident("from_source.column_alias", column)?;
+        }
+        match source {
+            crate::ast::FromSource::Subquery { query, .. } => validate_ast(query)?,
+            crate::ast::FromSource::Function { name, args, .. } => {
+                check_ident("from_source.function", name)?;
+                check_function_args("from_source", args)?;
+            }
+        }
+    }
+
     // ── Columns ──────────────────────────────────────────────────────
     for (i, col) in cmd.columns.iter().enumerate() {
         check_expr(&format!("columns[{i}]"), col)?;
@@ -547,11 +594,26 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                     check_ident(&format!("table_constraints[{i}].column"), col)?;
                 }
             }
+            TableConstraint::TemporalKey {
+                name,
+                columns,
+                period,
+                ..
+            } => {
+                if let Some(name) = name {
+                    check_ident(&format!("table_constraints[{i}].name"), name)?;
+                }
+                for col in columns {
+                    check_ident(&format!("table_constraints[{i}].column"), col)?;
+                }
+                check_ident(&format!("table_constraints[{i}].period"), period)?;
+            }
             TableConstraint::ForeignKey {
                 name,
                 columns,
                 ref_table,
                 ref_columns,
+                period: _,
                 on_delete,
                 on_update,
                 deferrable,
@@ -637,6 +699,11 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
     if let Some(ref cols) = cmd.returning {
         for col in cols {
             check_expr("returning", col)?;
+        }
+    }
+    if let Some(aliases) = &cmd.returning_aliases {
+        for alias in [&aliases.before, &aliases.after].into_iter().flatten() {
+            check_ident("returning_aliases", alias)?;
         }
     }
 

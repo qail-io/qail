@@ -799,6 +799,7 @@ fn collect_columns_from_expr(expr: &Expr, push: &mut dyn FnMut(&str)) {
             }
         }
         Expr::Collate { expr, .. } => collect_columns_from_expr(expr, push),
+        Expr::FunctionArg { value, .. } => collect_columns_from_expr(value, push),
         _ => {}
     }
 }

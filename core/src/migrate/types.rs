@@ -297,6 +297,10 @@ impl std::str::FromStr for ColumnType {
             "cidr" => Ok(Self::Cidr),
             "inet" => Ok(Self::Inet),
             "macaddr" => Ok(Self::MacAddr),
+            // Built-in range and multirange types (period columns of temporal keys).
+            "int4range" | "int8range" | "numrange" | "tsrange" | "tstzrange" | "daterange"
+            | "int4multirange" | "int8multirange" | "nummultirange" | "tsmultirange"
+            | "tstzmultirange" | "datemultirange" => Ok(Self::Range(lower.to_uppercase())),
             _ => Err(()),
         }
     }

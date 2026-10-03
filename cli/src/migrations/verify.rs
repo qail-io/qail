@@ -121,6 +121,40 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
                 fk
             ));
         }
+
+        // Temporal keys carry no column flags; without these lines a missing
+        // WITHOUT OVERLAPS key or PERIOD would fingerprint the same. Names are
+        // left out: an unnamed key gets a server-chosen name.
+        let mut temporal_lines: Vec<String> = table
+            .temporal_keys
+            .iter()
+            .map(|key| {
+                format!(
+                    "K|{}|pk={}|cols={}|period={}",
+                    table.name,
+                    key.primary,
+                    key.columns.join(","),
+                    key.period
+                )
+            })
+            .chain(
+                table
+                    .multi_column_fks
+                    .iter()
+                    .filter(|fk| fk.period)
+                    .map(|fk| {
+                        format!(
+                            "P|{}|cols={}|ref={}({})",
+                            table.name,
+                            fk.columns.join(","),
+                            fk.ref_table,
+                            fk.ref_columns.join(",")
+                        )
+                    }),
+            )
+            .collect();
+        temporal_lines.sort();
+        lines.extend(temporal_lines);
     }
 
     let mut indexes = schema.indexes.clone();
@@ -475,6 +509,51 @@ mod tests {
         col.generated = Some(Generated::ByDefaultIdentity);
 
         assert!(!effective_nullable(&col));
+    }
+
+    #[test]
+    fn schema_fingerprint_sees_temporal_keys_and_period_fks() {
+        let temporal = qail_core::migrate::parse_qail(
+            "table bookings {\n  room_id INT not_null\n  during TSTZRANGE not_null\n  primary_key (room_id, during without_overlaps)\n}\n\
+             table cleanings {\n  room_id INT not_null\n  during TSTZRANGE not_null\n  foreign_key (room_id, period during) references bookings(room_id, period during)\n}\n",
+        )
+        .expect("temporal schema");
+        let mut named = temporal.clone();
+        named
+            .tables
+            .get_mut("bookings")
+            .expect("bookings")
+            .temporal_keys[0]
+            .name = Some("bookings_pkey".to_string());
+        assert_eq!(
+            schema_fingerprint_lines(&temporal),
+            schema_fingerprint_lines(&named),
+            "a server-chosen key name is not drift"
+        );
+
+        let mut without_overlaps = temporal.clone();
+        without_overlaps
+            .tables
+            .get_mut("bookings")
+            .expect("bookings")
+            .temporal_keys
+            .clear();
+        assert_ne!(
+            schema_fingerprint_lines(&temporal),
+            schema_fingerprint_lines(&without_overlaps)
+        );
+
+        let mut without_period = temporal.clone();
+        without_period
+            .tables
+            .get_mut("cleanings")
+            .expect("cleanings")
+            .multi_column_fks[0]
+            .period = false;
+        assert_ne!(
+            schema_fingerprint_lines(&temporal),
+            schema_fingerprint_lines(&without_period)
+        );
     }
 
     #[test]

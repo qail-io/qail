@@ -88,7 +88,7 @@ pub fn build_merge(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     sql.push_str(&crate::transpiler::conditions::returning_clause_sql(
-        cmd.returning.as_ref(),
+        cmd,
         generator.as_ref(),
         |expr| expr_sql(expr, generator.as_ref(), &reference_context),
     ));
@@ -238,11 +238,9 @@ fn condition_sql(condition: &Condition, generator: &dyn SqlGenerator, context: &
             }
             _ => invalid_exists_condition_sql(),
         },
-        _ => format!(
-            "{left} {} {}",
-            condition.op.sql_symbol(),
-            value_sql(&condition.value, generator, context)
-        ),
+        _ => condition
+            .op
+            .infix_sql(&left, &value_sql(&condition.value, generator, context)),
     }
 }
 
@@ -442,24 +440,23 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String
             left, op, right, ..
         } => match op {
             op if op.is_postfix() => format!("({} {})", expr_sql(left, generator, context), op),
-            _ => format!(
-                "({} {} {})",
-                expr_sql(left, generator, context),
-                op,
-                expr_sql(right, generator, context)
+            _ => op.infix_sql(
+                &expr_sql(left, generator, context),
+                &expr_sql(right, generator, context),
             ),
         },
         Expr::FunctionCall { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
             };
-            let args = args
-                .iter()
-                .map(|arg| expr_sql(arg, generator, context))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{function}({args})")
+            match crate::transpiler::render_function_args(args, generator, |arg| {
+                expr_sql(arg, generator, context)
+            }) {
+                Ok(args) => format!("{function}({args})"),
+                Err(error) => error,
+            }
         }
+        Expr::FunctionArg { .. } => crate::transpiler::MISPLACED_FUNCTION_ARG_SQL.to_string(),
         Expr::SpecialFunction { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();

@@ -251,6 +251,21 @@ fn existing_column_unique_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     changes
 }
 
+/// Tables present on both sides whose temporal keys differ; `diff_schemas`
+/// only creates them with a table.
+fn existing_table_temporal_key_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes: Vec<String> = new
+        .tables
+        .iter()
+        .filter_map(|(name, new_table)| {
+            let old_table = old.tables.get(name)?;
+            (old_table.temporal_keys != new_table.temporal_keys).then(|| name.clone())
+        })
+        .collect();
+    changes.sort();
+    changes
+}
+
 fn existing_column_primary_key_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -1045,6 +1060,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
         ));
     }
 
+    let temporal_diffs = existing_table_temporal_key_diffs(old, new);
+    if !temporal_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot add, drop, or change temporal (WITHOUT OVERLAPS) keys on existing tables: {}. \
+             Use an explicit migration.",
+            temporal_diffs.join(", ")
+        ));
+    }
+
     let index_diffs = same_name_index_definition_diffs(old, new);
     if !index_diffs.is_empty() {
         return Err(format!(
@@ -1364,6 +1388,11 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
             action: Action::Make,
             table: name.clone(),
             columns,
+            table_constraints: table
+                .temporal_keys
+                .iter()
+                .map(super::schema::TemporalKey::to_table_constraint)
+                .collect(),
             ..Default::default()
         });
 

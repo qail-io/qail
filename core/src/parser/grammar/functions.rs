@@ -31,8 +31,24 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     let (input, has_distinct) = opt((tag_no_case("distinct"), multispace1)).parse(input)?;
     let distinct = has_distinct.is_some();
 
+    let args_start = input;
     let (input, args) =
-        separated_list0((multispace0, char(','), multispace0), parse_function_arg).parse(input)?;
+        separated_list0((multispace0, char(','), multispace0), parse_call_arg).parse(input)?;
+    let has_call_syntax = args
+        .iter()
+        .any(|arg| matches!(arg, Expr::FunctionArg { .. }));
+    if has_call_syntax
+        && (validate_function_args(&args).is_err()
+            || matches!(
+                name.to_ascii_lowercase().as_str(),
+                "count" | "sum" | "avg" | "min" | "max"
+            ))
+    {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            args_start,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     let (input, _) = multispace0(input)?;
     // Aggregate-local ORDER BY: array_agg(x order by y)
@@ -234,6 +250,29 @@ fn parse_aggregate_sort_item(input: &str) -> IResult<&str, Cage> {
 /// Parse a single function argument (supports expressions or star)
 pub fn parse_function_arg(input: &str) -> IResult<&str, Expr> {
     alt((map(tag("*"), |_| Expr::Star), parse_expression)).parse(input)
+}
+
+/// Call argument with optional `variadic` and `name =>` (or `name :=`)
+/// prefixes; a plain argument stays a bare expression.
+fn parse_call_arg(input: &str) -> IResult<&str, Expr> {
+    let (input, variadic) = opt((tag_no_case("variadic"), multispace1)).parse(input)?;
+    let (input, name) = opt(nom::sequence::terminated(
+        parse_identifier,
+        (multispace0, alt((tag("=>"), tag(":="))), multispace0),
+    ))
+    .parse(input)?;
+    let (input, value) = parse_function_arg(input)?;
+    if variadic.is_none() && name.is_none() {
+        return Ok((input, value));
+    }
+    Ok((
+        input,
+        Expr::FunctionArg {
+            name: name.map(str::to_string),
+            variadic: variadic.is_some(),
+            value: Box::new(value),
+        },
+    ))
 }
 
 /// Parse FILTER (WHERE condition) clause for aggregates

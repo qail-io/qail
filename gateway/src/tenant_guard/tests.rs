@@ -506,6 +506,30 @@ async fn prepare_tenant_guarded_query_filters_expression_subquery() {
 }
 
 #[tokio::test]
+async fn prepare_tenant_guarded_query_filters_from_subquery() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let inner = qail_core::ast::Qail::get("source_orders").columns(["id", "total"]);
+    let mut cmd = qail_core::ast::Qail::get("o")
+        .from_source(qail_core::ast::FromSource::subquery(inner, "o"))
+        .columns(["id"]);
+
+    let plan = prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+    assert!(plan.is_some(), "the FROM subquery reads a tenant table");
+
+    let Some(qail_core::ast::FromSource::Subquery { query, .. }) = &cmd.from_source else {
+        panic!("FROM subquery kept");
+    };
+    assert!(query.cages.iter().any(|cage| {
+        matches!(cage.kind, qail_core::ast::CageKind::Filter)
+            && cage.conditions.iter().any(|condition| {
+                matches!(&condition.left, qail_core::ast::Expr::Named(name) if name == "tenant_id")
+                    && matches!(&condition.value, qail_core::ast::Value::String(value) if value == "tenant-1")
+            })
+    }));
+}
+
+#[tokio::test]
 async fn prepare_tenant_guarded_query_filters_condition_value_subquery() {
     let state = build_tenant_guard_state().await;
     let auth = tenant_auth();

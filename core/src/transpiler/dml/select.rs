@@ -174,9 +174,10 @@ fn build_select_inner(
                             let Some(function) = render_function_name(name) else {
                                 return "/* ERROR: Invalid function name */".to_string();
                             };
-                            let args_sql: Vec<String> = args
-                                .iter()
-                                .map(|a| {
+                            let args_sql = crate::transpiler::render_function_args(
+                                args,
+                                generator.as_ref(),
+                                |a| {
                                     let arg_str = a.to_string();
                                     if arg_str.starts_with('{') && arg_str.ends_with('}') {
                                         // Raw SQL block: {content} -> content
@@ -194,9 +195,13 @@ fn build_select_inner(
                                             }
                                         }
                                     }
-                                })
-                                .collect();
-                            let expr = format!("{}({})", function, args_sql.join(", "));
+                                },
+                            );
+                            let args_sql = match args_sql {
+                                Ok(args_sql) => args_sql,
+                                Err(error) => return error,
+                            };
+                            let expr = format!("{}({})", function, args_sql);
                             if let Some(a) = alias {
                                 format!("{} AS {}", expr, generator.quote_identifier(a))
                             } else {
@@ -271,6 +276,9 @@ fn build_select_inner(
                     ),
                     Expr::Literal(value) => {
                         render_value_for_expression(value, generator.as_ref(), cmd)
+                    }
+                    Expr::FunctionArg { .. } => {
+                        crate::transpiler::MISPLACED_FUNCTION_ARG_SQL.to_string()
                     }
                     Expr::Subquery { query, alias } => append_alias(
                         format!("({})", read_only_subquery_sql(query)),
@@ -398,12 +406,16 @@ fn build_select_inner(
     }
 
     // FROM (with optional ONLY for inheritance control)
-    if cmd.only_table {
+    if let Some(source) = &cmd.from_source {
+        sql.push_str(" FROM ");
+        sql.push_str(&render_from_source(cmd, source, generator.as_ref()));
+    } else if cmd.only_table {
         sql.push_str(" FROM ONLY ");
+        sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
     } else {
         sql.push_str(" FROM ");
+        sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
     }
-    sql.push_str(&render_table_reference(&cmd.table, generator.as_ref()));
 
     // TABLESAMPLE
     let sample = cmd.sample.or_else(|| {
@@ -794,19 +806,21 @@ fn render_expr_for_orderby(
             let right_sql = render_expr_for_orderby(right, generator, cmd);
             match op {
                 op if op.is_postfix() => format!("({} {})", left_sql, op),
-                _ => format!("({} {} {})", left_sql, op, right_sql),
+                _ => op.infix_sql(&left_sql, &right_sql),
             }
         }
         Expr::FunctionCall { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
             };
-            let args_sql: Vec<String> = args
-                .iter()
-                .map(|a| render_expr_for_orderby(a, generator, cmd))
-                .collect();
-            format!("{}({})", function, args_sql.join(", "))
+            match crate::transpiler::render_function_args(args, generator, |a| {
+                render_expr_for_orderby(a, generator, cmd)
+            }) {
+                Ok(args) => format!("{function}({args})"),
+                Err(error) => error,
+            }
         }
+        Expr::FunctionArg { .. } => crate::transpiler::MISPLACED_FUNCTION_ARG_SQL.to_string(),
         Expr::SpecialFunction { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
@@ -960,6 +974,86 @@ fn render_value_for_expression(
         }
         _ => value.to_string(),
     }
+}
+
+/// `(subquery) AS alias (cols)` or `func(args) [WITH ORDINALITY] AS alias (cols)`.
+fn render_from_source(cmd: &Qail, source: &FromSource, generator: &dyn SqlGenerator) -> String {
+    if let Some(error) = from_source_error(cmd, source) {
+        return format!("/* ERROR: {error} */");
+    }
+    let mut sql = match source {
+        FromSource::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
+        FromSource::Function {
+            name,
+            args,
+            with_ordinality,
+            ..
+        } => {
+            let Some(function) = render_function_name(name) else {
+                return "/* ERROR: Invalid FROM function name */".to_string();
+            };
+            let args = args
+                .iter()
+                .map(|arg| render_expr_for_orderby(arg, generator, cmd))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ordinality = if *with_ordinality {
+                " WITH ORDINALITY"
+            } else {
+                ""
+            };
+            format!("{function}({args}){ordinality}")
+        }
+    };
+    sql.push_str(" AS ");
+    sql.push_str(&generator.quote_identifier(source.alias()));
+    let columns = source.column_alias_list();
+    if !columns.is_empty() {
+        let columns = columns
+            .iter()
+            .map(|column| generator.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" ({columns})"));
+    }
+    sql
+}
+
+/// Shape errors shared by preview and native output for a typed FROM item.
+pub fn from_source_error(cmd: &Qail, source: &FromSource) -> Option<String> {
+    if !matches!(
+        cmd.action,
+        Action::Get
+            | Action::With
+            | Action::Cnt
+            | Action::Export
+            | Action::Explain
+            | Action::ExplainAnalyze
+    ) {
+        return Some(format!(
+            "typed FROM source is supported only for SELECT, got {}",
+            cmd.action
+        ));
+    }
+    if cmd.table != source.alias() {
+        return Some(format!(
+            "typed FROM source alias `{}` must equal the command table `{}`",
+            source.alias(),
+            cmd.table
+        ));
+    }
+    if cmd.only_table {
+        return Some("ONLY applies to tables, not a typed FROM source".to_string());
+    }
+    let sampled = cmd.sample.is_some()
+        || cmd
+            .cages
+            .iter()
+            .any(|cage| matches!(cage.kind, CageKind::Sample(_)));
+    if sampled {
+        return Some("TABLESAMPLE applies to tables, not a typed FROM source".to_string());
+    }
+    None
 }
 
 fn render_function_name(name: &str) -> Option<String> {

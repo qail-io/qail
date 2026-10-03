@@ -107,11 +107,43 @@ pub struct Table {
     pub enable_rls: bool,
     /// FORCE ROW LEVEL SECURITY
     pub force_rls: bool,
+    /// PostgreSQL 18 `PRIMARY KEY` / `UNIQUE` keys with `WITHOUT OVERLAPS`.
+    /// Their columns carry no column-level `primary_key` / `unique` flag.
+    pub temporal_keys: Vec<TemporalKey>,
     /// Owner column for user-scoped isolation (`owner <column>` attribute).
     ///
     /// Runtime metadata only — it emits no DDL. It drives the owner
     /// registry so `with_rls` injects `<column> = app.current_user_id`.
     pub owner_column: Option<String>,
+}
+
+/// PostgreSQL 18 temporal key:
+/// `[CONSTRAINT name] PRIMARY KEY | UNIQUE (col, ..., period WITHOUT OVERLAPS)`.
+///
+/// The server enforces it with a GiST index, so scalar key columns need the
+/// `btree_gist` extension; `period` must be a range or multirange column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporalKey {
+    /// Constraint name (server default when `None`).
+    pub name: Option<String>,
+    /// `PRIMARY KEY` when true, `UNIQUE` otherwise.
+    pub primary: bool,
+    /// Scalar key columns, in order, before the period column.
+    pub columns: Vec<String>,
+    /// Range column checked for overlap; always last in the key.
+    pub period: String,
+}
+
+impl TemporalKey {
+    /// Typed DDL constraint for `CREATE TABLE`.
+    pub fn to_table_constraint(&self) -> crate::ast::TableConstraint {
+        crate::ast::TableConstraint::TemporalKey {
+            name: self.name.clone(),
+            primary: self.primary,
+            columns: self.columns.clone(),
+            period: self.period.clone(),
+        }
+    }
 }
 
 /// A column definition with compile-time type safety.
@@ -687,6 +719,9 @@ pub struct MultiColumnForeignKey {
     pub on_update: FkAction,
     /// Deferral mode.
     pub deferrable: Deferrable,
+    /// PostgreSQL 18 temporal FK: the last column on both sides is
+    /// `PERIOD col` (range containment instead of equality).
+    pub period: bool,
     /// Optional constraint name.
     pub name: Option<String>,
 }
@@ -705,6 +740,7 @@ impl MultiColumnForeignKey {
             on_delete: FkAction::default(),
             on_update: FkAction::default(),
             deferrable: Deferrable::default(),
+            period: false,
             name: None,
         }
     }
@@ -1094,6 +1130,33 @@ impl Schema {
                 .collect::<std::collections::BTreeSet<_>>();
             let mut seen_constraint_names = std::collections::BTreeSet::new();
 
+            let column_primary_key = table.columns.iter().any(|col| col.primary_key);
+            let temporal_primary_keys = table.temporal_keys.iter().filter(|k| k.primary).count();
+            if temporal_primary_keys > 1 || (temporal_primary_keys == 1 && column_primary_key) {
+                errors.push(format!(
+                    "Temporal key error: table '{}' declares more than one PRIMARY KEY",
+                    table.name
+                ));
+            }
+            for key in &table.temporal_keys {
+                for column in key.columns.iter().chain(std::iter::once(&key.period)) {
+                    if !table_columns.contains(column.as_str()) {
+                        errors.push(format!(
+                            "Temporal key error: {} references non-existent column '{}.{}'",
+                            table.name, table.name, column
+                        ));
+                    }
+                }
+                if let Some(name) = &key.name
+                    && !seen_constraint_names.insert(name.as_str())
+                {
+                    errors.push(format!(
+                        "Constraint error: table '{}' has duplicate constraint name '{}'",
+                        table.name, name
+                    ));
+                }
+            }
+
             for col in &table.columns {
                 if col.primary_key && !col.data_type.can_be_primary_key() {
                     errors.push(format!(
@@ -1407,6 +1470,16 @@ fn schema_has_unique_key(schema: &Schema, table_name: &str, columns: &[String]) 
         return true;
     }
 
+    // A temporal FK (`PERIOD`) references a temporal key in key order.
+    if table.temporal_keys.iter().any(|key| {
+        key.columns
+            .iter()
+            .chain(std::iter::once(&key.period))
+            .eq(columns.iter())
+    }) {
+        return true;
+    }
+
     schema.indexes.iter().any(|index| {
         index.table == table_name
             && index.unique
@@ -1475,6 +1548,7 @@ impl Table {
             multi_column_fks: Vec::new(),
             enable_rls: false,
             force_rls: false,
+            temporal_keys: Vec::new(),
             owner_column: None,
         }
     }
@@ -2063,13 +2137,30 @@ pub fn to_qail_string(schema: &Schema) -> String {
                 constraint_str
             ));
         }
+        // PostgreSQL 18 temporal keys
+        for key in &table.temporal_keys {
+            let mut key_line = format!(
+                "  {} ({}{} without_overlaps)",
+                if key.primary { "primary_key" } else { "unique" },
+                key.columns
+                    .iter()
+                    .map(|column| format!("{column}, "))
+                    .collect::<String>(),
+                key.period
+            );
+            if let Some(name) = &key.name {
+                key_line.push_str(&format!(" constraint {}", name));
+            }
+            key_line.push('\n');
+            output.push_str(&key_line);
+        }
         // Multi-column foreign keys
         for fk in &table.multi_column_fks {
             let mut fk_line = format!(
                 "  foreign_key ({}) references {}({})\n",
-                fk.columns.join(", "),
+                fk_columns_qail(&fk.columns, fk.period),
                 fk.ref_table,
-                fk.ref_columns.join(", ")
+                fk_columns_qail(&fk.ref_columns, fk.period)
             );
             if fk.name.is_some()
                 || fk.on_delete != FkAction::NoAction
@@ -2297,6 +2388,18 @@ pub fn to_qail_string(schema: &Schema) -> String {
     output
 }
 
+/// `.qail` FK column list; a temporal FK marks its last column `period col`.
+fn fk_columns_qail(columns: &[String], period: bool) -> String {
+    match columns.split_last() {
+        Some((last, leading)) if period => leading
+            .iter()
+            .map(|column| format!("{column}, "))
+            .chain(std::iter::once(format!("period {last}")))
+            .collect(),
+        _ => columns.join(", "),
+    }
+}
+
 fn quote_qail_string(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -2439,6 +2542,11 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
             action: Action::Make,
             table: table.name.clone(),
             columns,
+            table_constraints: table
+                .temporal_keys
+                .iter()
+                .map(TemporalKey::to_table_constraint)
+                .collect(),
             ..Default::default()
         });
 
@@ -2506,6 +2614,7 @@ pub(super) fn multi_column_fk_to_table_constraint(
         columns: fk.columns.clone(),
         ref_table: fk.ref_table.clone(),
         ref_columns: fk.ref_columns.clone(),
+        period: fk.period,
         on_delete: (fk.on_delete != FkAction::NoAction)
             .then(|| fk_action_to_sql(&fk.on_delete).to_string()),
         on_update: (fk.on_update != FkAction::NoAction)
@@ -3563,6 +3672,7 @@ mod tests {
                             columns,
                             ref_table,
                             ref_columns,
+                            period: false,
                             on_delete,
                             on_update,
                             deferrable,

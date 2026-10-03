@@ -77,11 +77,9 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
         sql.push_str(&where_groups.join(" AND "));
     }
 
-    sql.push_str(&returning_clause_sql(
-        cmd.returning.as_ref(),
-        generator.as_ref(),
-        |expr| output_expr_sql(expr, generator.as_ref()),
-    ));
+    sql.push_str(&returning_clause_sql(cmd, generator.as_ref(), |expr| {
+        output_expr_sql(expr, generator.as_ref())
+    }));
 
     sql
 }

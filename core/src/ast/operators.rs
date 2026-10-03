@@ -335,6 +335,26 @@ pub enum Operator {
     ContainedBy,
     /// Array `&&` overlap.
     Overlaps,
+    /// Range `-|-`: adjacent to.
+    Adjacent,
+    /// `<<`: range strictly left of; inet strictly contained by.
+    StrictlyLeft,
+    /// `>>`: range strictly right of; inet strictly contains.
+    StrictlyRight,
+    /// Range `&<`: does not extend to the right of.
+    NotExtendsRight,
+    /// Range `&>`: does not extend to the left of.
+    NotExtendsLeft,
+    /// inet `<<=`: contained by or equal.
+    SubnetOrEqual,
+    /// inet `>>=`: contains or equal.
+    SupernetOrEqual,
+    /// JSONPath `@?`: the path returns at least one item.
+    /// The path is cast to `jsonpath`, so a non-jsonb left side fails.
+    JsonPathExists,
+    /// JSONPath `@@`: result of a JSONPath predicate. Not
+    /// [`TextSearch`](Operator::TextSearch), which owns the bare `@@` token.
+    JsonPathMatch,
     /// Full-text search `@@`.
     TextSearch,
     /// `?|` — does JSONB contain ANY of the given keys?
@@ -371,6 +391,36 @@ pub enum Operator {
 }
 
 impl Operator {
+    /// Range/network infix predicates rendered as `left <symbol> right`.
+    pub fn is_range_or_network(&self) -> bool {
+        matches!(
+            self,
+            Operator::Adjacent
+                | Operator::StrictlyLeft
+                | Operator::StrictlyRight
+                | Operator::NotExtendsRight
+                | Operator::NotExtendsLeft
+                | Operator::SubnetOrEqual
+                | Operator::SupernetOrEqual
+        )
+    }
+
+    /// JSONPath predicates (`@?`, `@@`) whose right side is cast to `jsonpath`.
+    pub fn is_jsonpath(&self) -> bool {
+        matches!(self, Operator::JsonPathExists | Operator::JsonPathMatch)
+    }
+
+    /// `left <symbol> right` for a plain infix operator. JSONPath operators
+    /// wrap `right` in `CAST(.. AS jsonpath)`: an untyped `@@` operand would
+    /// otherwise resolve to text search on a text left side.
+    pub fn infix_sql(&self, left: &str, right: &str) -> String {
+        if self.is_jsonpath() {
+            format!("{left} {} CAST({right} AS jsonpath)", self.sql_symbol())
+        } else {
+            format!("{left} {} {right}", self.sql_symbol())
+        }
+    }
+
     /// For simple operators, returns the symbol directly.
     /// For complex operators (BETWEEN, EXISTS), returns the keyword.
     pub fn sql_symbol(&self) -> &'static str {
@@ -404,6 +454,15 @@ impl Operator {
             Operator::SimilarTo => "SIMILAR TO",
             Operator::ContainedBy => "<@",
             Operator::Overlaps => "&&",
+            Operator::Adjacent => "-|-",
+            Operator::StrictlyLeft => "<<",
+            Operator::StrictlyRight => ">>",
+            Operator::NotExtendsRight => "&<",
+            Operator::NotExtendsLeft => "&>",
+            Operator::SubnetOrEqual => "<<=",
+            Operator::SupernetOrEqual => ">>=",
+            Operator::JsonPathExists => "@?",
+            Operator::JsonPathMatch => "@@",
             Operator::TextSearch => "@@",
             Operator::KeyExistsAny => "?|",
             Operator::KeyExistsAll => "?&",

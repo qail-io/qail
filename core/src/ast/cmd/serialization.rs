@@ -9,6 +9,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 struct Fields {
     action: Action,
     table: String,
+    // Absent in payloads written before typed FROM sources existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_source: Option<FromSource>,
     columns: Vec<Expr>,
     joins: Vec<Join>,
     cages: Vec<Cage>,
@@ -21,6 +24,9 @@ struct Fields {
     ctes: Vec<CTEDef>,
     distinct_on: Vec<Expr>,
     returning: Option<Vec<Expr>>,
+    // Absent in payloads written before PG 18 RETURNING aliases existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    returning_aliases: Option<ReturningAliases>,
     on_conflict: Option<OnConflict>,
     #[serde(skip)]
     conflict_update_scope: Vec<Condition>,

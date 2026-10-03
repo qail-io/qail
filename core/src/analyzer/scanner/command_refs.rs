@@ -88,7 +88,10 @@ fn command_to_references_with_cte_aliases(
     let mut local_cte_aliases = inherited_cte_aliases.to_vec();
     local_cte_aliases.extend(cmd.ctes.iter().map(|cte| cte.name.clone()));
 
-    if !is_cte_alias(&cmd.table, &local_cte_aliases)
+    // A typed FROM source's alias names a derived relation, not a table.
+    let derived_primary = cmd.from_source.is_some();
+    if !derived_primary
+        && !is_cte_alias(&cmd.table, &local_cte_aliases)
         && let Some(reference) = command_to_reference(path, line, cmd)
     {
         refs.push(reference);
@@ -267,6 +270,22 @@ fn collect_subquery_references(
             cte_aliases,
         ));
     }
+    match &cmd.from_source {
+        Some(crate::ast::FromSource::Subquery { query, .. }) => {
+            refs.extend(command_to_references_with_cte_aliases(
+                path,
+                line,
+                query,
+                cte_aliases,
+            ));
+        }
+        Some(crate::ast::FromSource::Function { args, .. }) => {
+            for expr in args {
+                collect_expr_subquery_references(path, line, expr, cte_aliases, refs);
+            }
+        }
+        None => {}
+    }
     for (_, set_query) in &cmd.set_ops {
         refs.extend(command_to_references_with_cte_aliases(
             path,
@@ -325,7 +344,8 @@ fn collect_expr_subquery_references(
         Expr::Cast { expr, .. }
         | Expr::Mod { col: expr, .. }
         | Expr::Collate { expr, .. }
-        | Expr::FieldAccess { expr, .. } => {
+        | Expr::FieldAccess { expr, .. }
+        | Expr::FunctionArg { value: expr, .. } => {
             collect_expr_subquery_references(path, line, expr, cte_aliases, refs)
         }
         Expr::Subscript { expr, index, .. } => {
@@ -599,7 +619,8 @@ fn collect_expr_columns(
         Expr::Cast { expr, .. }
         | Expr::Mod { col: expr, .. }
         | Expr::Collate { expr, .. }
-        | Expr::FieldAccess { expr, .. } => collect_expr_columns(expr, scope, cols, seen),
+        | Expr::FieldAccess { expr, .. }
+        | Expr::FunctionArg { value: expr, .. } => collect_expr_columns(expr, scope, cols, seen),
         Expr::Subscript { expr, index, .. } => {
             collect_expr_columns(expr, scope, cols, seen);
             collect_expr_columns(index, scope, cols, seen);

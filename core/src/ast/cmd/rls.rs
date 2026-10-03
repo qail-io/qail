@@ -33,8 +33,8 @@
 //! ```
 
 use crate::ast::{
-    Action, Cage, CageKind, Condition, ConflictAction, Expr, JoinKind, LogicalOp, MergeAction,
-    MergeMatchKind, MergeSource, Operator, OverridingKind, Qail, Value,
+    Action, Cage, CageKind, Condition, ConflictAction, Expr, FromSource, JoinKind, LogicalOp,
+    MergeAction, MergeMatchKind, MergeSource, Operator, OverridingKind, Qail, Value,
 };
 use crate::error::{QailBuildError, QailBuildResult};
 use crate::rls::RlsContext;
@@ -870,6 +870,20 @@ impl Qail {
             Self::scope_boxed_query_rls(source_query, ctx)?;
         }
 
+        // A FROM subquery reads its own tables: the outer `table` is only the
+        // derived alias, so the inner query carries the scope.
+        match &mut self.from_source {
+            Some(FromSource::Subquery { query, .. }) => {
+                Self::scope_boxed_query_rls(query, ctx)?;
+            }
+            Some(FromSource::Function { args, .. }) => {
+                for arg in args {
+                    Self::scope_expr_nested_rls(arg, ctx)?;
+                }
+            }
+            None => {}
+        }
+
         for (_, set_query) in &mut self.set_ops {
             Self::scope_boxed_query_rls(set_query, ctx)?;
         }
@@ -925,7 +939,10 @@ impl Qail {
                     }
                 }
             }
-            Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
+            Expr::Cast { expr, .. }
+            | Expr::Mod { col: expr, .. }
+            | Expr::Collate { expr, .. }
+            | Expr::FunctionArg { value: expr, .. } => {
                 Self::scope_expr_nested_rls(expr, ctx)?;
             }
             Expr::Window {
@@ -2679,6 +2696,82 @@ mod tests {
                     && matches!(&condition.value, Value::String(value) if value == "tenant-expr")
             })
         }));
+    }
+
+    fn has_tenant_filter(query: &Qail, tenant: &str) -> bool {
+        query.cages.iter().any(|cage| {
+            matches!(cage.kind, CageKind::Filter)
+                && cage.conditions.iter().any(|condition| {
+                    matches!(&condition.left, Expr::Named(name) if name.ends_with("tenant_id"))
+                        && matches!(&condition.value, Value::String(value) if value == tenant)
+                })
+        })
+    }
+
+    #[test]
+    fn test_with_rls_scopes_registered_table_inside_from_subquery() {
+        seal_tenant_table("_rls_from_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-from");
+        let inner = Qail::get("_rls_from_orders").columns(["id", "total"]);
+        let query = Qail::get("o")
+            .from_source(FromSource::subquery(inner, "o"))
+            .columns(["id"])
+            .with_rls(&ctx)
+            .expect("rls should apply");
+
+        let Some(FromSource::Subquery { query: inner, .. }) = &query.from_source else {
+            panic!("FROM subquery kept");
+        };
+        assert!(has_tenant_filter(inner, "tenant-from"), "{inner:?}");
+        // The derived alias is not a table: no predicate on the outer query.
+        assert!(!has_tenant_filter(&query, "tenant-from"));
+
+        // Fail closed: a registered table in the FROM subquery still demands scope.
+        let unscoped = Qail::get("o")
+            .from_source(FromSource::subquery(
+                Qail::get("_rls_from_orders").columns(["id"]),
+                "o",
+            ))
+            .with_rls(&RlsContext::user("user-only"));
+        assert!(unscoped.is_err(), "{unscoped:?}");
+    }
+
+    #[test]
+    fn test_with_rls_scopes_subquery_in_from_function_and_named_arg() {
+        seal_tenant_table("_rls_fn_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-fn");
+        let max_id = Expr::Subquery {
+            query: Box::new(Qail::get("_rls_fn_orders").columns(["id"])),
+            alias: None,
+        };
+        let source = FromSource::function(
+            "generate_series",
+            [
+                Expr::Literal(Value::Int(1)),
+                Expr::FunctionArg {
+                    name: None,
+                    variadic: false,
+                    value: Box::new(max_id),
+                },
+            ],
+            "g",
+        );
+        let query = Qail::get("g")
+            .from_source(source)
+            .with_rls(&ctx)
+            .expect("rls should apply");
+        let Some(FromSource::Function { args, .. }) = &query.from_source else {
+            panic!("FROM function kept");
+        };
+        let Expr::FunctionArg { value, .. } = &args[1] else {
+            panic!("argument kept");
+        };
+        let Expr::Subquery { query: inner, .. } = value.as_ref() else {
+            panic!("subquery kept");
+        };
+        assert!(has_tenant_filter(inner, "tenant-fn"), "{inner:?}");
     }
 
     #[test]

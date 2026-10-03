@@ -299,6 +299,20 @@ pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
             value(Operator::Like, tag_no_case("like")),
             value(Operator::In, tag_no_case("in")),
         )),
+        // JSONPath and range/network operators, before their `<`, `>`, `@` prefixes.
+        // Bare `@@` stays full-text search; JSONPath `@@` is `jsonpath_match`.
+        alt((
+            value(Operator::JsonPathExists, tag_no_case("jsonpath_exists")),
+            value(Operator::JsonPathMatch, tag_no_case("jsonpath_match")),
+            value(Operator::JsonPathExists, tag("@?")),
+            value(Operator::SubnetOrEqual, tag("<<=")),
+            value(Operator::SupernetOrEqual, tag(">>=")),
+            value(Operator::StrictlyLeft, tag("<<")),
+            value(Operator::StrictlyRight, tag(">>")),
+            value(Operator::Adjacent, tag("-|-")),
+            value(Operator::NotExtendsRight, tag("&<")),
+            value(Operator::NotExtendsLeft, tag("&>")),
+        )),
         // Multi-char symbol operators (before shorter prefixes)
         alt((
             value(Operator::RegexI, tag("~*")),
@@ -393,6 +407,8 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, Qail> {
             group_by_mode: GroupByMode::default(),
             ctes: vec![],
             returning: None,
+            returning_aliases: None,
+            from_source: None,
             on_conflict: None,
             conflict_update_scope: Vec::new(),
             merge: None,

@@ -60,6 +60,30 @@ fn push_identifier(buf: &mut BytesMut, ident: &str) {
     buf.extend_from_slice(escape_identifier(ident).as_bytes());
 }
 
+/// FK column list; with `period` the last column is written `PERIOD col`.
+fn push_fk_column_list(
+    buf: &mut BytesMut,
+    cols: &[String],
+    period: bool,
+) -> Result<(), crate::protocol::EncodeError> {
+    if !period {
+        push_joined_ident_list(buf, cols);
+        return Ok(());
+    }
+    let Some((last, leading)) = cols.split_last() else {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "PERIOD foreign key needs a period column".to_string(),
+        ));
+    };
+    for col in leading {
+        push_identifier(buf, col);
+        buf.extend_from_slice(b", ");
+    }
+    buf.extend_from_slice(b"PERIOD ");
+    push_identifier(buf, last);
+    Ok(())
+}
+
 fn quote_double_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\0', "").replace('"', "\"\""))
 }
@@ -656,11 +680,35 @@ fn encode_table_constraint(
             push_joined_ident_list(buf, cols);
             buf.extend_from_slice(b")");
         }
+        TableConstraint::TemporalKey {
+            name,
+            primary,
+            columns,
+            period,
+        } => {
+            if let Some(name) = name {
+                buf.extend_from_slice(b"CONSTRAINT ");
+                push_identifier(buf, name);
+                buf.extend_from_slice(b" ");
+            }
+            buf.extend_from_slice(if *primary {
+                b"PRIMARY KEY (" as &[u8]
+            } else {
+                b"UNIQUE ("
+            });
+            for column in columns {
+                push_identifier(buf, column);
+                buf.extend_from_slice(b", ");
+            }
+            push_identifier(buf, period);
+            buf.extend_from_slice(b" WITHOUT OVERLAPS)");
+        }
         TableConstraint::ForeignKey {
             name,
             columns,
             ref_table,
             ref_columns,
+            period,
             on_delete,
             on_update,
             deferrable,
@@ -671,11 +719,11 @@ fn encode_table_constraint(
                 buf.extend_from_slice(b" ");
             }
             buf.extend_from_slice(b"FOREIGN KEY (");
-            push_joined_ident_list(buf, columns);
+            push_fk_column_list(buf, columns, *period)?;
             buf.extend_from_slice(b") REFERENCES ");
             push_identifier(buf, ref_table);
             buf.extend_from_slice(b"(");
-            push_joined_ident_list(buf, ref_columns);
+            push_fk_column_list(buf, ref_columns, *period)?;
             buf.extend_from_slice(b")");
             if let Some(action) = on_delete {
                 let Some(action) = fk_action_option_to_sql(action) else {
@@ -2233,6 +2281,7 @@ mod tests {
                 columns: vec!["route_id".to_string(), "schedule_id".to_string()],
                 ref_table: "schedules".to_string(),
                 ref_columns: vec!["route_id".to_string(), "schedule_id".to_string()],
+                period: false,
                 on_delete: Some("CASCADE".to_string()),
                 on_update: Some("RESTRICT".to_string()),
                 deferrable: Some("DEFERRABLE INITIALLY DEFERRED".to_string()),

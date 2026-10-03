@@ -244,20 +244,21 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             let right = condition_left_sql(right, generator, context);
             match op {
                 op if op.is_postfix() => format!("({left} {op})"),
-                _ => format!("({left} {op} {right})"),
+                _ => op.infix_sql(&left, &right),
             }
         }
         Expr::FunctionCall { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
             };
-            let args = args
-                .iter()
-                .map(|arg| condition_left_sql(arg, generator, context))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{function}({args})")
+            match crate::transpiler::render_function_args(args, generator, |arg| {
+                condition_left_sql(arg, generator, context)
+            }) {
+                Ok(args) => format!("{function}({args})"),
+                Err(error) => error,
+            }
         }
+        Expr::FunctionArg { .. } => crate::transpiler::MISPLACED_FUNCTION_ARG_SQL.to_string(),
         Expr::SpecialFunction { name, args, .. } => {
             let Some(function) = render_function_name(name) else {
                 return "/* ERROR: Invalid function name */".to_string();
@@ -346,11 +347,11 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
 /// native encoder: `None` and an empty list render nothing, `[Star]` is `*`,
 /// output aliases are kept. `render` writes an expression without its alias.
 pub(crate) fn returning_clause_sql(
-    returning: Option<&Vec<Expr>>,
+    cmd: &Qail,
     generator: &dyn SqlGenerator,
     render: impl Fn(&Expr) -> String,
 ) -> String {
-    let Some(exprs) = returning.filter(|exprs| !exprs.is_empty()) else {
+    let Some(exprs) = cmd.returning.as_ref().filter(|exprs| !exprs.is_empty()) else {
         return String::new();
     };
     let items = exprs
@@ -369,7 +370,9 @@ pub(crate) fn returning_clause_sql(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!(" RETURNING {items}")
+    // PG 18 `RETURNING WITH (OLD AS o, NEW AS n)` precedes the items.
+    let aliases = crate::transpiler::dml::returning_aliases_sql(cmd, generator);
+    format!(" RETURNING {aliases}{items}")
 }
 
 /// Render an output expression without its alias (RETURNING items).
@@ -406,7 +409,8 @@ fn output_alias(expr: &Expr) -> Option<&str> {
         | Expr::Def { .. }
         | Expr::Mod { .. }
         | Expr::Literal(_)
-        | Expr::Default => None,
+        | Expr::Default
+        | Expr::FunctionArg { .. } => None,
     }
 }
 
@@ -526,9 +530,10 @@ fn validate_read_only_expr(expr: &Expr) -> Option<String> {
         Expr::SpecialFunction { args, .. } => args
             .iter()
             .find_map(|(_, expr)| validate_read_only_expr(expr)),
-        Expr::Cast { expr, .. } | Expr::FieldAccess { expr, .. } | Expr::Collate { expr, .. } => {
-            validate_read_only_expr(expr)
-        }
+        Expr::Cast { expr, .. }
+        | Expr::FieldAccess { expr, .. }
+        | Expr::Collate { expr, .. }
+        | Expr::FunctionArg { value: expr, .. } => validate_read_only_expr(expr),
         Expr::ArrayConstructor { elements, .. } | Expr::RowConstructor { elements, .. } => {
             elements.iter().find_map(validate_read_only_expr)
         }
@@ -885,7 +890,7 @@ impl ConditionToSql for Condition {
                 }
             }
             // Simple binary operators are handled above by is_simple_binary()
-            _ => format!("{} {} {}", col, self.op.sql_symbol(), value_sql()),
+            _ => self.op.infix_sql(&col, &value_sql()),
         }
     }
 
@@ -1042,12 +1047,9 @@ impl ConditionToSql for Condition {
                 }
             }
             // Simple operators (Ne, Gt, Gte, Lt, Lte, Like, NotLike, ILike, NotILike) use sql_symbol()
-            _ => format!(
-                "{} {} {}",
-                col,
-                self.op.sql_symbol(),
-                value_placeholder(&self.value, params)
-            ),
+            _ => self
+                .op
+                .infix_sql(&col, &value_placeholder(&self.value, params)),
         }
     }
 }

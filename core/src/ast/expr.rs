@@ -17,6 +17,22 @@ pub enum BinaryOp {
     Div,
     /// Modulo (%)
     Rem,
+    // Bitwise (integer and bit-string operands)
+    /// Bitwise AND `&`.
+    BitAnd,
+    /// Bitwise OR `|`.
+    BitOr,
+    /// Bitwise XOR `#`.
+    BitXor,
+    /// Bitwise shift left `<<`.
+    ShiftLeft,
+    /// Bitwise shift right `>>`.
+    ShiftRight,
+    // JSONPath (right side is cast to jsonpath)
+    /// JSONPath `@?`.
+    JsonPathExists,
+    /// JSONPath `@@` (not full-text search).
+    JsonPathMatch,
     // Logical
     /// Logical AND.
     And,
@@ -77,6 +93,23 @@ impl BinaryOp {
     }
 }
 
+impl BinaryOp {
+    /// JSONPath operators: the right operand is wrapped in `CAST(.. AS jsonpath)`
+    /// so an untyped literal or parameter cannot resolve to text search `@@`.
+    pub fn is_jsonpath(&self) -> bool {
+        matches!(self, BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch)
+    }
+
+    /// `(left op right)` for an infix operator whose operands are already rendered.
+    pub fn infix_sql(&self, left: &str, right: &str) -> String {
+        if self.is_jsonpath() {
+            format!("({left} {self} CAST({right} AS jsonpath))")
+        } else {
+            format!("({left} {self} {right})")
+        }
+    }
+}
+
 impl std::fmt::Display for BinaryOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -86,6 +119,13 @@ impl std::fmt::Display for BinaryOp {
             BinaryOp::Mul => write!(f, "*"),
             BinaryOp::Div => write!(f, "/"),
             BinaryOp::Rem => write!(f, "%"),
+            BinaryOp::BitAnd => write!(f, "&"),
+            BinaryOp::BitOr => write!(f, "|"),
+            BinaryOp::BitXor => write!(f, "#"),
+            BinaryOp::ShiftLeft => write!(f, "<<"),
+            BinaryOp::ShiftRight => write!(f, ">>"),
+            BinaryOp::JsonPathExists => write!(f, "@?"),
+            BinaryOp::JsonPathMatch => write!(f, "@@"),
             BinaryOp::And => write!(f, "AND"),
             BinaryOp::Or => write!(f, "OR"),
             BinaryOp::Eq => write!(f, "="),
@@ -461,6 +501,50 @@ pub enum Expr {
     /// `DEFAULT`: the column default, as a whole MERGE UPDATE assignment value
     /// or MERGE INSERT value. Every other position rejects it.
     Default,
+    /// One argument of a [`FunctionCall`](Expr::FunctionCall) in named
+    /// notation (`name => value`) and/or as the `VARIADIC` array expansion.
+    /// Valid only directly inside `FunctionCall.args` (or a FROM function's
+    /// args); encoders reject it anywhere else. PostgreSQL requires named
+    /// arguments after positional ones and `VARIADIC` on the last argument.
+    FunctionArg {
+        /// Parameter name for named notation.
+        name: Option<String>,
+        /// `VARIADIC`: pass `value` (an array) as the variadic parameter.
+        variadic: bool,
+        /// Argument value.
+        value: Box<Expr>,
+    },
+}
+
+/// PostgreSQL call-argument rules for [`Expr::FunctionArg`]: named arguments
+/// after every positional one, `VARIADIC` only on the last argument, no
+/// repeated name. Bare positional args need no wrapper.
+pub fn validate_function_args(args: &[Expr]) -> Result<(), String> {
+    let mut seen_named = false;
+    let mut names: Vec<&str> = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        let (name, variadic) = match arg {
+            Expr::FunctionArg { name, variadic, .. } => (name.as_deref(), *variadic),
+            _ => (None, false),
+        };
+        if variadic && i + 1 != args.len() {
+            return Err("VARIADIC must mark the last function argument".to_string());
+        }
+        match name {
+            Some(name) => {
+                if names.iter().any(|seen| seen.eq_ignore_ascii_case(name)) {
+                    return Err(format!("function argument `{name}` is named twice"));
+                }
+                names.push(name);
+                seen_named = true;
+            }
+            None if seen_named => {
+                return Err("positional function argument after a named one".to_string());
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for Expr {
@@ -678,7 +762,7 @@ impl std::fmt::Display for Expr {
                 if op.is_postfix() {
                     write!(f, "({} {})", left, op)?;
                 } else {
-                    write!(f, "({} {} {})", left, op, right)?;
+                    write!(f, "{}", op.infix_sql(&left.to_string(), &right.to_string()))?;
                 }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
@@ -789,6 +873,19 @@ impl std::fmt::Display for Expr {
                 Ok(())
             }
             Expr::Default => write!(f, "DEFAULT"),
+            Expr::FunctionArg {
+                name,
+                variadic,
+                value,
+            } => {
+                if *variadic {
+                    write!(f, "VARIADIC ")?;
+                }
+                if let Some(name) = name {
+                    write!(f, "{} => ", name)?;
+                }
+                write!(f, "{}", value)
+            }
         }
     }
 }
@@ -820,7 +917,8 @@ impl Expr {
             | Expr::Def { .. }
             | Expr::Mod { .. }
             | Expr::Literal(_)
-            | Expr::Default => None,
+            | Expr::Default
+            | Expr::FunctionArg { .. } => None,
         }
     }
 
@@ -862,7 +960,8 @@ impl Expr {
             | Expr::Def { .. }
             | Expr::Mod { .. }
             | Expr::Literal(_)
-            | Expr::Default => return false,
+            | Expr::Default
+            | Expr::FunctionArg { .. } => return false,
         };
         *slot = Some(alias);
         true
@@ -1149,6 +1248,18 @@ pub enum TableConstraint {
     Unique(Vec<String>),
     /// Composite PRIMARY KEY.
     PrimaryKey(Vec<String>),
+    /// PostgreSQL 18 temporal key:
+    /// `[CONSTRAINT name] PRIMARY KEY | UNIQUE (columns..., period WITHOUT OVERLAPS)`.
+    TemporalKey {
+        /// Optional constraint name.
+        name: Option<String>,
+        /// `PRIMARY KEY` when true, `UNIQUE` otherwise.
+        primary: bool,
+        /// Scalar key columns before the period column.
+        columns: Vec<String>,
+        /// Range column checked for overlap (emitted last).
+        period: String,
+    },
     /// Composite FOREIGN KEY constraint.
     ForeignKey {
         /// Optional constraint name.
@@ -1159,6 +1270,10 @@ pub enum TableConstraint {
         ref_table: String,
         /// Referenced columns.
         ref_columns: Vec<String>,
+        /// PostgreSQL 18 temporal FK: the last column of `columns` and of
+        /// `ref_columns` is emitted as `PERIOD col`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        period: bool,
         /// Optional ON DELETE action.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         on_delete: Option<String>,

@@ -317,6 +317,16 @@ fn reject_unsupported_mutation_features(qail: &Qail) -> Result<(), NormalizeMuta
     if !qail.joins.is_empty() {
         return Err(NormalizeMutationError::UnsupportedFeature("joins"));
     }
+    if qail.returning_aliases.is_some() {
+        return Err(NormalizeMutationError::UnsupportedFeature(
+            "RETURNING aliases",
+        ));
+    }
+    if qail.from_source.is_some() {
+        return Err(NormalizeMutationError::UnsupportedFeature(
+            "typed FROM source",
+        ));
+    }
     if qail.distinct {
         return Err(NormalizeMutationError::UnsupportedFeature("DISTINCT"));
     }
@@ -387,10 +397,11 @@ fn reject_unsupported_mutation_features(qail: &Qail) -> Result<(), NormalizeMuta
 }
 
 fn condition_signature(condition: &Condition) -> String {
+    // Keyed by variant, not symbol: TextSearch and JsonPathMatch share `@@`.
     format!(
-        "{}|{}|{}|{}",
+        "{}|{:?}|{}|{}",
         expr_signature(&condition.left),
-        condition.op.sql_symbol(),
+        condition.op,
         value_signature(&condition.value),
         condition.is_array_unnest
     )

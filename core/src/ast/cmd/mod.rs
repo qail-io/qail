@@ -10,6 +10,10 @@ pub struct Qail {
     pub action: Action,
     /// Target table name.
     pub table: String,
+    /// Typed FROM item that replaces `table` in a SELECT (`FROM (subquery) AS t`,
+    /// `FROM generate_series(..) AS t`). `table` must equal the source alias:
+    /// scoping and policy lookups key on `table`, so a mismatch is rejected.
+    pub from_source: Option<FromSource>,
     /// Selected / inserted / modified columns.
     pub columns: Vec<Expr>,
     /// Join clauses.
@@ -34,6 +38,8 @@ pub struct Qail {
     pub distinct_on: Vec<Expr>,
     /// RETURNING clause.
     pub returning: Option<Vec<Expr>>,
+    /// `RETURNING WITH (OLD AS .., NEW AS ..)` row-alias renames (PostgreSQL 18).
+    pub returning_aliases: Option<ReturningAliases>,
     /// ON CONFLICT clause for upsert.
     pub on_conflict: Option<OnConflict>,
     /// Applied INSERT scope retained for later conflict-builder calls.
@@ -171,6 +177,132 @@ pub struct CteCycle {
     pub set_column: String,
     /// Added path column that records visited rows.
     pub using_column: String,
+}
+
+/// Renames for the PostgreSQL 18 `OLD` / `NEW` row aliases in RETURNING:
+/// `RETURNING WITH (OLD AS before, NEW AS after) ...`. Needed when the
+/// target table or a source is itself named `old` or `new`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReturningAliases {
+    /// Name for the `OLD` row (values before the write; NULL for INSERT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Name for the `NEW` row (values after the write; NULL for DELETE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+impl ReturningAliases {
+    /// The ` WITH (OLD AS x, NEW AS y)` text that follows `RETURNING`, or
+    /// `None` when neither alias is set. Identifiers are emitted as given and
+    /// must be validated by the caller.
+    pub fn sql_parts(&self) -> Option<Vec<(&'static str, &str)>> {
+        let mut parts = Vec::new();
+        if let Some(before) = &self.before {
+            parts.push(("OLD", before.as_str()));
+        }
+        if let Some(after) = &self.after {
+            parts.push(("NEW", after.as_str()));
+        }
+        if parts.is_empty() { None } else { Some(parts) }
+    }
+}
+
+/// Typed FROM item for a SELECT (PostgreSQL table expressions).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum FromSource {
+    /// `FROM (SELECT ...) AS alias [(col, ...)]`.
+    Subquery {
+        /// Derived-table query (read-only SELECT).
+        query: Box<Qail>,
+        /// Required alias.
+        alias: String,
+        /// Optional column renames.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_aliases: Vec<String>,
+    },
+    /// `FROM func(args) [WITH ORDINALITY] AS alias [(col, ...)]` for a
+    /// set-returning function such as `generate_series` or `unnest`.
+    Function {
+        /// Function name (optionally schema-qualified).
+        name: String,
+        /// Arguments.
+        args: Vec<Expr>,
+        /// Append an ordinality (`bigint`, 1-based) column.
+        #[serde(default)]
+        with_ordinality: bool,
+        /// Required alias.
+        alias: String,
+        /// Optional column renames.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_aliases: Vec<String>,
+    },
+}
+
+impl FromSource {
+    /// `FROM (query) AS alias`.
+    pub fn subquery(query: Qail, alias: impl Into<String>) -> Self {
+        FromSource::Subquery {
+            query: Box::new(query),
+            alias: alias.into(),
+            column_aliases: Vec::new(),
+        }
+    }
+
+    /// `FROM name(args) AS alias`.
+    pub fn function<I, E>(name: impl Into<String>, args: I, alias: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<Expr>,
+    {
+        FromSource::Function {
+            name: name.into(),
+            args: args.into_iter().map(Into::into).collect(),
+            with_ordinality: false,
+            alias: alias.into(),
+            column_aliases: Vec::new(),
+        }
+    }
+
+    /// Rename the source's columns: `AS alias (c1, c2, ...)`.
+    pub fn column_aliases<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let columns: Vec<String> = columns.into_iter().map(Into::into).collect();
+        match &mut self {
+            FromSource::Subquery { column_aliases, .. }
+            | FromSource::Function { column_aliases, .. } => *column_aliases = columns,
+        }
+        self
+    }
+
+    /// `WITH ORDINALITY` (functions only; a no-op on a subquery source).
+    pub fn with_ordinality(mut self) -> Self {
+        if let FromSource::Function {
+            with_ordinality, ..
+        } = &mut self
+        {
+            *with_ordinality = true;
+        }
+        self
+    }
+
+    /// The source alias.
+    pub fn alias(&self) -> &str {
+        match self {
+            FromSource::Subquery { alias, .. } | FromSource::Function { alias, .. } => alias,
+        }
+    }
+
+    /// Column renames after the alias.
+    pub fn column_alias_list(&self) -> &[String] {
+        match self {
+            FromSource::Subquery { column_aliases, .. }
+            | FromSource::Function { column_aliases, .. } => column_aliases,
+        }
+    }
 }
 
 /// ON CONFLICT clause for upsert.
@@ -314,6 +446,7 @@ impl Default for Qail {
         Self {
             action: Action::Get,
             table: String::new(),
+            from_source: None,
             columns: vec![],
             joins: vec![],
             cages: vec![],
@@ -326,6 +459,7 @@ impl Default for Qail {
             ctes: vec![],
             distinct_on: vec![],
             returning: None,
+            returning_aliases: None,
             on_conflict: None,
             conflict_update_scope: Vec::new(),
             merge: None,

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{
-    CageKind, Condition, ConflictAction, Expr, MergeAction, MergeSource, Qail, Value,
+    CageKind, Condition, ConflictAction, Expr, FromSource, MergeAction, MergeSource, Qail, Value,
 };
 
 mod columns;
@@ -60,6 +60,17 @@ impl AccessPolicy {
         if let Some(source_query) = &cmd.source_query {
             self.check_command_inner(ctx, source_query)?;
         }
+        // The derived relation's own reads are checked here; its alias is then
+        // treated like a CTE name below.
+        match &cmd.from_source {
+            Some(FromSource::Subquery { query, .. }) => self.check_command_inner(ctx, query)?,
+            Some(FromSource::Function { args, .. }) => {
+                for arg in args {
+                    self.check_expr(ctx, arg)?;
+                }
+            }
+            None => {}
+        }
         if let Some(merge) = &cmd.merge {
             match &merge.source {
                 MergeSource::Query { query, .. } => self.check_command_inner(ctx, query)?,
@@ -79,11 +90,14 @@ impl AccessPolicy {
         self.check_embedded_queries(ctx, cmd)?;
         self.check_condition_read_columns(&table, cmd)?;
 
-        let cte_names: BTreeSet<String> = cmd
+        let mut cte_names: BTreeSet<String> = cmd
             .ctes
             .iter()
             .map(|cte| normalize_table_ref(&cte.name))
             .collect();
+        if let Some(source) = &cmd.from_source {
+            cte_names.insert(normalize_table_ref(source.alias()));
+        }
         self.check_join_read_access(ctx, cmd, &cte_names)?;
         self.check_auxiliary_read_access(ctx, cmd, &cte_names)?;
 
@@ -484,7 +498,8 @@ impl AccessPolicy {
             Expr::Cast { expr, .. }
             | Expr::Mod { col: expr, .. }
             | Expr::FieldAccess { expr, .. }
-            | Expr::Collate { expr, .. } => {
+            | Expr::Collate { expr, .. }
+            | Expr::FunctionArg { value: expr, .. } => {
                 self.check_expr_column_refs(table, rule, target_refs, expr, context)
             }
             Expr::Subscript { expr, index, .. } => {
@@ -748,7 +763,8 @@ impl AccessPolicy {
             Expr::Cast { expr, .. }
             | Expr::Mod { col: expr, .. }
             | Expr::FieldAccess { expr, .. }
-            | Expr::Collate { expr, .. } => {
+            | Expr::Collate { expr, .. }
+            | Expr::FunctionArg { value: expr, .. } => {
                 self.check_outer_expr_column_refs(table, rule, target_refs, expr)
             }
             Expr::Subscript { expr, index, .. } => {
@@ -1008,7 +1024,8 @@ impl AccessPolicy {
             Expr::Cast { expr, .. }
             | Expr::Mod { col: expr, .. }
             | Expr::FieldAccess { expr, .. }
-            | Expr::Collate { expr, .. } => self.check_expr(ctx, expr),
+            | Expr::Collate { expr, .. }
+            | Expr::FunctionArg { value: expr, .. } => self.check_expr(ctx, expr),
             Expr::Subscript { expr, index, .. } => {
                 self.check_expr(ctx, expr)?;
                 self.check_expr(ctx, index)

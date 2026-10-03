@@ -32,6 +32,7 @@ pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependen
 pub use parser::{parse_check_expr_fragment, parse_qail, parse_qail_file};
 pub use policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy, session_bool_check, tenant_check};
 pub use policy_parser::parse_policy_expr;
+pub use schema::TemporalKey;
 pub use schema::{
     CheckComparisonOp, CheckConstraint, CheckExpr, Column, Comment, CommentTarget, Deferrable,
     EnumType, Extension, FkAction, ForeignKey, Generated, Grant, GrantAction, Index, IndexMethod,

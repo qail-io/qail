@@ -33,6 +33,46 @@ pub use traits::{escape_identifier, escape_sql_string_literal};
 
 pub(crate) const INVALID_INSERT_SCOPE_SQL: &str = "INVALID APPLIED INSERT SCOPE";
 
+/// Render call arguments, unwrapping [`Expr::FunctionArg`] into
+/// `[VARIADIC ][name => ]value`. `Err` carries an error comment to emit in
+/// place of the call.
+pub(crate) fn render_function_args(
+    args: &[Expr],
+    generator: &dyn SqlGenerator,
+    mut render: impl FnMut(&Expr) -> String,
+) -> Result<String, String> {
+    if let Err(error) = validate_function_args(args) {
+        return Err(format!("/* ERROR: {error} */"));
+    }
+    Ok(args
+        .iter()
+        .map(|arg| match arg {
+            Expr::FunctionArg {
+                name,
+                variadic,
+                value,
+            } => {
+                let mut sql = String::new();
+                if *variadic {
+                    sql.push_str("VARIADIC ");
+                }
+                if let Some(name) = name {
+                    sql.push_str(&generator.quote_identifier(name));
+                    sql.push_str(" => ");
+                }
+                sql.push_str(&render(value));
+                sql
+            }
+            other => render(other),
+        })
+        .collect::<Vec<_>>()
+        .join(", "))
+}
+
+/// Error comment for an [`Expr::FunctionArg`] rendered outside a call.
+pub(crate) const MISPLACED_FUNCTION_ARG_SQL: &str =
+    "/* ERROR: named/VARIADIC argument outside a function call */";
+
 /// Result of transpilation with extracted parameters.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TranspileResult {
@@ -88,6 +128,12 @@ impl ToSql for Qail {
     fn to_sql_with_dialect(&self, dialect: Dialect) -> String {
         if self.validate_applied_insert_scope().is_err() {
             return INVALID_INSERT_SCOPE_SQL.to_string();
+        }
+        // Only SELECT builders read `from_source`; never drop it silently.
+        if let Some(source) = &self.from_source
+            && let Some(error) = dml::select::from_source_error(self, source)
+        {
+            return format!("/* ERROR: {error} */");
         }
         match self.action {
             Action::Get => dml::select::build_select(self, dialect),
