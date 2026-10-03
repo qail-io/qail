@@ -95,6 +95,60 @@ pub mod oid {
     pub const MACADDR_ARRAY: u32 = 1040;
     /// `jsonb[]` array — OID 3807.
     pub const JSONB_ARRAY: u32 = 3807;
+    /// `json[]` array — OID 199.
+    pub const JSON_ARRAY: u32 = 199;
+    /// `bytea[]` array — OID 1001.
+    pub const BYTEA_ARRAY: u32 = 1001;
+    /// `name[]` array — OID 1003.
+    pub const NAME_ARRAY: u32 = 1003;
+    /// `bpchar[]` array — OID 1014.
+    pub const BPCHAR_ARRAY: u32 = 1014;
+    /// `oid[]` array — OID 1028.
+    pub const OID_ARRAY: u32 = 1028;
+    /// `numeric[]` array — OID 1231.
+    pub const NUMERIC_ARRAY: u32 = 1231;
+    /// `date[]` array — OID 1182.
+    pub const DATE_ARRAY: u32 = 1182;
+    /// `time[]` array — OID 1183.
+    pub const TIME_ARRAY: u32 = 1183;
+    /// `timestamp[]` array — OID 1115.
+    pub const TIMESTAMP_ARRAY: u32 = 1115;
+    /// `timestamptz[]` array — OID 1185.
+    pub const TIMESTAMPTZ_ARRAY: u32 = 1185;
+    /// `interval[]` array — OID 1187.
+    pub const INTERVAL_ARRAY: u32 = 1187;
+}
+
+/// Element type OID of a built-in array type OID, or `None` when unknown
+/// (user-defined element types, or a non-array OID).
+pub fn array_element_oid(array_oid: u32) -> Option<u32> {
+    Some(match array_oid {
+        oid::BOOL_ARRAY => oid::BOOL,
+        oid::BYTEA_ARRAY => oid::BYTEA,
+        oid::NAME_ARRAY => oid::NAME,
+        oid::INT2_ARRAY => oid::INT2,
+        oid::INT4_ARRAY => oid::INT4,
+        oid::INT8_ARRAY => oid::INT8,
+        oid::TEXT_ARRAY => oid::TEXT,
+        oid::BPCHAR_ARRAY => oid::BPCHAR,
+        oid::VARCHAR_ARRAY => oid::VARCHAR,
+        oid::OID_ARRAY => oid::OID,
+        oid::JSON_ARRAY => oid::JSON,
+        oid::JSONB_ARRAY => oid::JSONB,
+        oid::FLOAT4_ARRAY => oid::FLOAT4,
+        oid::FLOAT8_ARRAY => oid::FLOAT8,
+        oid::NUMERIC_ARRAY => oid::NUMERIC,
+        oid::DATE_ARRAY => oid::DATE,
+        oid::TIME_ARRAY => oid::TIME,
+        oid::TIMESTAMP_ARRAY => oid::TIMESTAMP,
+        oid::TIMESTAMPTZ_ARRAY => oid::TIMESTAMPTZ,
+        oid::INTERVAL_ARRAY => oid::INTERVAL,
+        oid::UUID_ARRAY => oid::UUID,
+        oid::INET_ARRAY => oid::INET,
+        oid::CIDR_ARRAY => oid::CIDR,
+        oid::MACADDR_ARRAY => oid::MACADDR,
+        _ => return None,
+    })
 }
 
 /// Map OID to a human-readable type name
@@ -265,11 +319,16 @@ pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
 
 /// Decode a PostgreSQL text-format array like `{a,b,c}` to `Vec<String>`.
 /// This handles the common text-format arrays returned by PostgreSQL.
+/// Returns an empty vector for anything [`try_decode_text_array`] rejects,
+/// including NULL elements and multidimensional arrays.
 pub fn decode_text_array(s: &str) -> Vec<String> {
     try_decode_text_array(s).unwrap_or_default()
 }
 
-/// Strictly decode a PostgreSQL text-format array like `{a,b,c}`.
+/// Strictly decode a one-dimensional PostgreSQL text-format array like `{a,b,c}`.
+///
+/// NULL elements, multidimensional arrays and explicit bounds (`[0:1]={a,b}`)
+/// are errors; [`crate::types::PgArray`] keeps all three.
 pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
     if s == "{}" {
         return Ok(vec![]);
@@ -314,6 +373,14 @@ pub fn try_decode_text_array(s: &str) -> Result<Vec<String>, String> {
                 element_quoted = true;
             }
             '"' => return Err("Unexpected quote in unquoted array element".to_string()),
+            // array_out quotes elements containing braces, so an unquoted
+            // brace is a nested dimension that a flat list would split apart.
+            '{' | '}' => {
+                return Err(
+                    "Multidimensional array cannot be decoded as a flat list; use PgArray"
+                        .to_string(),
+                );
+            }
             '\\' => {
                 escape_next = true;
                 element_started = true;
@@ -472,6 +539,12 @@ mod tests {
         assert!(try_decode_text_array("{,a}").is_err());
         assert!(try_decode_text_array(r#"{a\}"#).is_err());
         assert!(try_decode_text_array("{NULL}").is_err());
+        assert!(try_decode_text_array("{{a,b},{c,d}}").is_err());
+        assert!(try_decode_text_array("{a}}").is_err());
+        assert_eq!(
+            try_decode_text_array(r#"{"{a}",\{}"#).unwrap(),
+            vec!["{a}", "{"]
+        );
         assert_eq!(try_decode_text_array(r#"{"NULL"}"#).unwrap(), vec!["NULL"]);
     }
 

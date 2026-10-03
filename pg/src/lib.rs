@@ -47,7 +47,8 @@ pub use driver::{
 };
 pub use protocol::PgEncoder;
 pub use types::{
-    Cidr, Date, FromPg, Inet, Json, MacAddr, Numeric, Time, Timestamp, ToPg, TypeError, Uuid,
+    ArrayDimension, Cidr, Date, FromPg, Inet, Json, MacAddr, Numeric, PgArray, Time, Timestamp,
+    ToPg, TypeError, Uuid,
 };
 
 /// Generate the RLS SQL string for pipelined execution.

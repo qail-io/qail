@@ -16,7 +16,31 @@ QAIL provides type conversion between Rust and PostgreSQL.
 | `Date` | DATE | |
 | `Time` | TIME | |
 | `Json` | JSON, JSONB | |
-| `Decimal` | NUMERIC | Arbitrary precision |
+| `Numeric` | NUMERIC | Arbitrary precision, kept as text |
+| `Vec<u8>` | BYTEA | Text results in hex or escape `bytea_output` |
+| `Vec<String>`, `Vec<i64>` | one-dimensional arrays | No NULL elements, lower bound 1 |
+| `PgArray<T>` | any array | Dimensions, lower bounds, NULL elements |
+
+### Special values
+
+Text and binary results decode to the same value:
+
+- `Numeric` keeps `NaN`, `Infinity`, `-Infinity` as those strings.
+- `Timestamp::INFINITY` / `NEG_INFINITY` and `Date::INFINITY` / `NEG_INFINITY`
+  are PostgreSQL's `infinity` sentinels; check `is_finite()` before
+  converting (`Timestamp::try_to_unix_usec` refuses infinity).
+  `chrono::DateTime<Utc>` cannot hold infinity and returns an error.
+- `Time::END_OF_DAY` is `24:00:00`.
+- `BC` dates use astronomical years (1 BC is year 0).
+- Text temporal results decode from DateStyle ISO and German. SQL and Postgres
+  DateStyles, and zone abbreviations, are errors: the value alone does not say
+  day/month order or offset. Use DateStyle ISO or binary results.
+- `Vec<String>` / `Vec<i64>` refuse multidimensional arrays, NULL elements and
+  explicit bounds instead of flattening them; use `PgArray<T>`.
+
+The AST `Value::Float` is finite-only: the native encoder rejects NaN and
+infinity and the SQL preview renders them as an error marker. Write special
+float values as a cast text literal, e.g. `'Infinity'::float8`.
 
 ## Compile-Time Type Safety
 

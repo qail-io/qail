@@ -150,11 +150,17 @@ fn bytes_to_json_typed(bytes: &[u8], oid: u32, format: i16) -> serde_json::Value
             Ok(v) => serde_json::Value::String(v.0),
             Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
         },
+        // Infinity keeps the text-format spelling; a saturated epoch number
+        // would read as a real instant.
         pg_oid::TIMESTAMP | pg_oid::TIMESTAMPTZ => match Timestamp::from_pg(bytes, oid, format) {
+            Ok(ts) if ts.is_infinity() => serde_json::Value::String("infinity".to_string()),
+            Ok(ts) if ts.is_neg_infinity() => serde_json::Value::String("-infinity".to_string()),
             Ok(ts) => serde_json::Value::Number(ts.to_unix_secs().into()),
             Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
         },
         pg_oid::DATE => match Date::from_pg(bytes, oid, format) {
+            Ok(d) if d.is_infinity() => serde_json::Value::String("infinity".to_string()),
+            Ok(d) if d.is_neg_infinity() => serde_json::Value::String("-infinity".to_string()),
             Ok(d) => serde_json::Value::Number(d.days.into()),
             Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
         },

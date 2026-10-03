@@ -241,15 +241,30 @@ impl PgRow {
         std::str::from_utf8(bytes).ok().map(str::to_owned)
     }
 
+    fn is_binary_column(&self, idx: usize) -> bool {
+        matches!(self.column_type_meta(idx), Ok((_, 1)))
+    }
+
     /// Get a column value as text array.
+    ///
+    /// `None` for NULL, and for arrays a flat `Vec` cannot hold (NULL
+    /// elements, more than one dimension, explicit bounds); use
+    /// `try_get::<PgArray<String>>` for those.
     pub fn get_text_array(&self, idx: usize) -> Option<Vec<String>> {
+        if self.is_binary_column(idx) {
+            return self.try_get::<Vec<String>>(idx).ok();
+        }
         let bytes = self.columns.get(idx)?.as_ref()?;
         let s = std::str::from_utf8(bytes).ok()?;
         crate::protocol::types::try_decode_text_array(s).ok()
     }
 
-    /// Get a column value as integer array.
+    /// Get a column value as integer array. Same shape limits as
+    /// [`PgRow::get_text_array`]; use `try_get::<PgArray<i64>>` otherwise.
     pub fn get_int_array(&self, idx: usize) -> Option<Vec<i64>> {
+        if self.is_binary_column(idx) {
+            return self.try_get::<Vec<i64>>(idx).ok();
+        }
         let bytes = self.columns.get(idx)?.as_ref()?;
         let s = std::str::from_utf8(bytes).ok()?;
         crate::protocol::types::decode_int_array(s).ok()

@@ -776,6 +776,9 @@ impl Formatter {
             Value::Null => write!(self.buffer, "null")?,
             Value::Bool(b) => write!(self.buffer, "{}", b)?,
             Value::Int(n) => write!(self.buffer, "{}", n)?,
+            // `NaN` / `inf` would re-parse as identifiers; the parser rejects
+            // non-finite float literals, so refuse to format them.
+            Value::Float(n) if !n.is_finite() => return Err(std::fmt::Error),
             Value::Float(n) => write!(self.buffer, "{}", n)?,
             Value::Param(n) => write!(self.buffer, "${}", n)?,
             Value::Function(f) => write!(self.buffer, "{}", f)?,

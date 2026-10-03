@@ -638,6 +638,8 @@ fn fuzzy_pattern_sql(value: &Value, generator: &dyn SqlGenerator) -> String {
             let p = render_named_param(name);
             generator.string_concat(&["'%'", &p, "'%'"])
         }
+        // Inside quotes the error marker would become pattern text.
+        v @ Value::Float(n) if !n.is_finite() => v.to_string(),
         v => format!("'%{}%'", escape_sql_string_literal(&v.to_string())),
     }
 }

@@ -2,9 +2,11 @@
 //!
 //! This module provides traits for converting Rust types to/from PostgreSQL wire format.
 
+pub mod array;
 pub mod numeric;
 pub mod temporal;
 
+pub use array::{ArrayDimension, PgArray};
 pub use numeric::Numeric;
 pub use temporal::{Date, Time, Timestamp};
 
@@ -570,24 +572,28 @@ impl ToPg for Json {
 
 // ==================== Arrays ====================
 
+/// One-dimensional arrays without NULLs and with lower bound 1. Other shapes
+/// are errors; decode them with [`PgArray`]. Binary results accept
+/// text/varchar/bpchar/name elements only.
 impl FromPg for Vec<String> {
     fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
         if format == 1 {
-            return Err(TypeError::InvalidData(
-                "binary array decoding is not supported for Vec<String>".to_string(),
-            ));
+            return array::decode_binary_vec(bytes, "Vec<String>", array::is_text_like_oid);
         }
         let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
         try_decode_text_array(s).map_err(TypeError::InvalidData)
     }
 }
 
+/// One-dimensional arrays without NULLs and with lower bound 1. Other shapes
+/// are errors; decode them with [`PgArray`]. Binary results accept
+/// int2/int4/int8 elements.
 impl FromPg for Vec<i64> {
     fn from_pg(bytes: &[u8], _oid: u32, format: i16) -> Result<Self, TypeError> {
         if format == 1 {
-            return Err(TypeError::InvalidData(
-                "binary array decoding is not supported for Vec<i64>".to_string(),
-            ));
+            return array::decode_binary_vec(bytes, "Vec<i64>", |element_oid| {
+                matches!(element_oid, oid::INT2 | oid::INT4 | oid::INT8)
+            });
         }
         let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
         crate::protocol::types::decode_int_array(s).map_err(TypeError::InvalidData)
@@ -605,9 +611,11 @@ impl<T: FromPg> FromPg for Option<T> {
 
 // ==================== Bytes ====================
 
-fn decode_bytea_hex_text(bytes: &[u8]) -> Result<Vec<u8>, TypeError> {
+/// Text bytea in either `bytea_output` format. Hex output always starts with
+/// `\x`; escape output writes a data backslash as `\\`, so it never does.
+fn decode_bytea_text(bytes: &[u8]) -> Result<Vec<u8>, TypeError> {
     if !bytes.starts_with(br"\x") {
-        return Ok(bytes.to_vec());
+        return decode_bytea_escape_text(bytes);
     }
 
     let hex = &bytes[2..];
@@ -622,6 +630,45 @@ fn decode_bytea_hex_text(bytes: &[u8]) -> Result<Vec<u8>, TypeError> {
         let hi = decode_hex_nibble(pair[0])?;
         let lo = decode_hex_nibble(pair[1])?;
         out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+/// `bytea_output = 'escape'`: `\\` is a backslash, `\ooo` an octal byte,
+/// every other byte is itself (the same input rules as PostgreSQL's byteain).
+fn decode_bytea_escape_text(bytes: &[u8]) -> Result<Vec<u8>, TypeError> {
+    if !bytes.contains(&b'\\') {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte != b'\\' {
+            out.push(byte);
+            rest = tail;
+            continue;
+        }
+        match tail {
+            [b'\\', after @ ..] => {
+                out.push(b'\\');
+                rest = after;
+            }
+            [
+                a @ b'0'..=b'3',
+                b @ b'0'..=b'7',
+                c @ b'0'..=b'7',
+                after @ ..,
+            ] => {
+                out.push(((a - b'0') << 6) | ((b - b'0') << 3) | (c - b'0'));
+                rest = after;
+            }
+            _ => {
+                return Err(TypeError::InvalidData(
+                    "Invalid bytea escape sequence".to_string(),
+                ));
+            }
+        }
     }
     Ok(out)
 }
@@ -641,7 +688,7 @@ fn decode_hex_nibble(byte: u8) -> Result<u8, TypeError> {
 impl FromPg for Vec<u8> {
     fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
         if format == 0 && oid_val == oid::BYTEA {
-            return decode_bytea_hex_text(bytes);
+            return decode_bytea_text(bytes);
         }
         Ok(bytes.to_vec())
     }
@@ -768,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_arrays_return_explicit_error() {
+    fn test_binary_arrays_reject_truncated_payloads() {
         assert!(Vec::<String>::from_pg(b"\0\0\0\0", oid::TEXT_ARRAY, 1).is_err());
         assert!(Vec::<i64>::from_pg(b"\0\0\0\0", oid::INT8_ARRAY, 1).is_err());
     }

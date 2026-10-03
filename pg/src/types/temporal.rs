@@ -1,6 +1,12 @@
 //! Timestamp type conversions for PostgreSQL.
 //!
 //! PostgreSQL timestamps are stored as microseconds since 2000-01-01 00:00:00 UTC.
+//!
+//! Text results decode from DateStyle ISO (the default) and German output,
+//! including `BC` years, `infinity`, and offsets with seconds. SQL and
+//! Postgres DateStyles print day/month order and zone abbreviations that the
+//! value alone cannot resolve; those return an error naming DateStyle. Binary
+//! results do not depend on DateStyle.
 
 use super::{FromPg, ToPg, TypeError};
 use crate::protocol::types::oid;
@@ -10,7 +16,12 @@ use crate::protocol::types::oid;
 const PG_EPOCH_OFFSET_USEC: i64 = 946_684_800_000_000;
 const USEC_PER_DAY: i64 = 86_400_000_000;
 
-/// Timestamp without timezone (microseconds since 2000-01-01)
+const DATESTYLE_HINT: &str = "use DateStyle ISO or binary results";
+
+/// Timestamp without timezone (microseconds since 2000-01-01).
+///
+/// `infinity` / `-infinity` are [`Timestamp::INFINITY`] /
+/// [`Timestamp::NEG_INFINITY`], the same sentinels PostgreSQL sends in binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamp {
     /// Microseconds since PostgreSQL epoch (2000-01-01 00:00:00)
@@ -18,6 +29,46 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
+    /// PostgreSQL `infinity` (`DT_NOEND`).
+    pub const INFINITY: Timestamp = Timestamp { usec: i64::MAX };
+    /// PostgreSQL `-infinity` (`DT_NOBEGIN`).
+    pub const NEG_INFINITY: Timestamp = Timestamp { usec: i64::MIN };
+
+    /// Whether this is neither `infinity` nor `-infinity`.
+    pub fn is_finite(&self) -> bool {
+        !self.is_infinity() && !self.is_neg_infinity()
+    }
+
+    /// Whether this is PostgreSQL `infinity`.
+    pub fn is_infinity(&self) -> bool {
+        *self == Self::INFINITY
+    }
+
+    /// Whether this is PostgreSQL `-infinity`.
+    pub fn is_neg_infinity(&self) -> bool {
+        *self == Self::NEG_INFINITY
+    }
+
+    /// Unix microseconds, or an error for `infinity` / `-infinity`.
+    ///
+    /// [`Timestamp::to_unix_usec`] saturates instead and cannot tell
+    /// infinity from a finite instant.
+    pub fn try_to_unix_usec(&self) -> Result<i64, TypeError> {
+        if !self.is_finite() {
+            return Err(TypeError::InvalidData(format!(
+                "timestamp {} has no Unix time",
+                if self.is_infinity() {
+                    "infinity"
+                } else {
+                    "-infinity"
+                }
+            )));
+        }
+        self.usec
+            .checked_add(PG_EPOCH_OFFSET_USEC)
+            .ok_or_else(|| TypeError::InvalidData("Timestamp out of range".to_string()))
+    }
+
     /// Create from microseconds since PostgreSQL epoch
     pub fn from_pg_usec(usec: i64) -> Self {
         Self { usec }
@@ -97,6 +148,10 @@ impl FromPg for chrono::DateTime<chrono::Utc> {
             let pg_usec = i64::from_be_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
+            let ts = Timestamp::from_pg_usec(pg_usec);
+            if !ts.is_finite() {
+                return Err(chrono_infinity_error(ts));
+            }
             let unix_usec = pg_usec.saturating_add(PG_EPOCH_OFFSET_USEC);
             chrono::DateTime::<chrono::Utc>::from_timestamp_micros(unix_usec).ok_or_else(|| {
                 TypeError::InvalidData(format!("Timestamp out of range: {}", unix_usec))
@@ -105,7 +160,7 @@ impl FromPg for chrono::DateTime<chrono::Utc> {
             let s =
                 std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
 
-            if oid_val == oid::TIMESTAMPTZ {
+            let parsed = if oid_val == oid::TIMESTAMPTZ {
                 chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
                     .or_else(|_| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%#z"))
                     .or_else(|_| chrono::DateTime::parse_from_rfc3339(s))
@@ -121,9 +176,39 @@ impl FromPg for chrono::DateTime<chrono::Utc> {
                         )
                     })
                     .map_err(|e| TypeError::InvalidData(format!("Invalid timestamp: {}", e)))
-            }
+            };
+            // Only text chrono refuses reaches the qail parser (BC years,
+            // offsets with seconds, German DateStyle, infinity), so every
+            // value chrono accepted keeps its result.
+            parsed.or_else(|chrono_err| {
+                let (ts, has_zone) = parse_timestamp_text_with_zone(s)?;
+                if !ts.is_finite() {
+                    return Err(chrono_infinity_error(ts));
+                }
+                // timestamptz text always carries an offset and timestamp
+                // text never does; do not assume UTC for either.
+                if has_zone != (oid_val == oid::TIMESTAMPTZ) {
+                    return Err(chrono_err);
+                }
+                let unix_usec = ts.try_to_unix_usec()?;
+                chrono::DateTime::<chrono::Utc>::from_timestamp_micros(unix_usec).ok_or_else(|| {
+                    TypeError::InvalidData(format!("Timestamp out of range: {}", unix_usec))
+                })
+            })
         }
     }
+}
+
+#[cfg(feature = "chrono")]
+fn chrono_infinity_error(ts: Timestamp) -> TypeError {
+    TypeError::InvalidData(format!(
+        "timestamp {} cannot be represented as chrono::DateTime<Utc>; decode as Timestamp",
+        if ts.is_infinity() {
+            "infinity"
+        } else {
+            "-infinity"
+        }
+    ))
 }
 
 #[cfg(feature = "chrono")]
@@ -137,44 +222,142 @@ impl ToPg for chrono::DateTime<chrono::Utc> {
 
 /// Parse PostgreSQL text timestamp format
 fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
-    // Format: "2024-12-25 17:30:00" or "2024-12-25 17:30:00.123456"
-    // This is a simplified parser - production would use chrono or time crate
+    parse_timestamp_text_with_zone(s).map(|(ts, _)| ts)
+}
+
+/// Parse text timestamp output; the flag reports an explicit `Z` or numeric offset.
+fn parse_timestamp_text_with_zone(s: &str) -> Result<(Timestamp, bool), TypeError> {
+    // ISO: "2024-12-25 17:30:00[.ffffff][+hh[:mm[:ss]]][ BC]"
+    // German: "25.12.2024 17:30:00[.ffffff][ +hh...][ BC]"
+    match s {
+        "infinity" => return Ok((Timestamp::INFINITY, false)),
+        "-infinity" => return Ok((Timestamp::NEG_INFINITY, false)),
+        _ => {}
+    }
+    if s.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        // Postgres style: "Wed Sep 30 14:05:06.5 2026 IST".
+        return Err(TypeError::InvalidData(format!(
+            "timestamp text {:?} depends on the session DateStyle; {}",
+            s, DATESTYLE_HINT
+        )));
+    }
+    let (s, bc) = strip_bc_suffix(s);
 
     let parts: Vec<&str> = s.splitn(2, &[' ', 'T'][..]).collect();
     if parts.len() != 2 {
         return Err(TypeError::InvalidData(format!("Invalid timestamp: {}", s)));
     }
 
-    let (year, month, day) = parse_date_components(parts[0])?;
+    let (year, month, day) = parse_date_components(parts[0], bc)?;
     let (time_str, timezone_offset_usec) = split_timezone_suffix(parts[1])?;
+    let has_zone = timezone_offset_usec.is_some();
+    let timezone_offset_usec = timezone_offset_usec.unwrap_or(0);
+    if time_str.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return Err(TypeError::InvalidData(format!(
+            "time zone abbreviation in {:?} cannot be resolved to an offset; {}",
+            s, DATESTYLE_HINT
+        )));
+    }
     let (hour, minute, second, usec) = parse_time_components(time_str)?;
     let days_since_epoch = days_from_ymd_checked(year, month, day)?;
 
-    let total_usec = days_since_epoch as i64 * 86_400_000_000
-        + hour as i64 * 3_600_000_000
-        + minute as i64 * 60_000_000
-        + second as i64 * 1_000_000
-        + usec;
-
-    Ok(Timestamp::from_pg_usec(total_usec - timezone_offset_usec))
+    let out_of_range = || TypeError::InvalidData(format!("Timestamp out of range: {}", s));
+    let total_usec = i64::from(days_since_epoch)
+        .checked_mul(USEC_PER_DAY)
+        .and_then(|v| {
+            v.checked_add(
+                hour as i64 * 3_600_000_000
+                    + minute as i64 * 60_000_000
+                    + second as i64 * 1_000_000
+                    + usec,
+            )
+        })
+        .and_then(|v| v.checked_sub(timezone_offset_usec))
+        .ok_or_else(out_of_range)?;
+    let ts = Timestamp::from_pg_usec(total_usec);
+    if !ts.is_finite() {
+        // A finite text value must not alias the infinity sentinels.
+        return Err(out_of_range());
+    }
+    Ok((ts, has_zone))
 }
 
-fn parse_date_components(s: &str) -> Result<(i32, i32, i32), TypeError> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 {
-        return Err(TypeError::InvalidData(format!("Invalid date: {}", s)));
+/// Split a trailing ` BC` era marker.
+fn strip_bc_suffix(s: &str) -> (&str, bool) {
+    match s.strip_suffix(" BC") {
+        Some(rest) => (rest, true),
+        None => (s, false),
     }
-    let year = parse_i32_part(parts[0], "year")?;
-    let month = parse_i32_part(parts[1], "month")?;
-    let day = parse_i32_part(parts[2], "day")?;
+}
+
+/// Year, month, day from ISO (`YYYY-MM-DD`) or German (`DD.MM.YYYY`) text.
+/// `bc` converts the year to astronomical numbering (1 BC is year 0).
+fn parse_date_components(s: &str, bc: bool) -> Result<(i32, i32, i32), TypeError> {
+    if s.starts_with(|c: char| c.is_ascii_alphabetic()) || s.contains('/') {
+        // Postgres style ("Wed Sep 30 ...") or SQL style ("09/30/2026").
+        return Err(TypeError::InvalidData(format!(
+            "date text {:?} depends on the session DateStyle; {}",
+            s, DATESTYLE_HINT
+        )));
+    }
+
+    let (year, month, day) = if s.contains('.') {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 3 {
+            return Err(TypeError::InvalidData(format!("Invalid date: {}", s)));
+        }
+        (parts[2], parts[1], parts[0])
+    } else {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 3 {
+            return Err(TypeError::InvalidData(format!("Invalid date: {}", s)));
+        }
+        // ISO years have at least 4 digits; Postgres style prints
+        // MM-DD-YYYY or DD-MM-YYYY, which cannot be told apart.
+        if parts[0].len() == 2 && parts[2].len() >= 4 {
+            return Err(TypeError::InvalidData(format!(
+                "date text {:?} depends on the session DateStyle; {}",
+                s, DATESTYLE_HINT
+            )));
+        }
+        (parts[0], parts[1], parts[2])
+    };
+    let mut year = parse_i32_part(year, "year")?;
+    let month = parse_i32_part(month, "month")?;
+    let day = parse_i32_part(day, "day")?;
+    if bc {
+        if year < 1 {
+            return Err(TypeError::InvalidData(format!("Invalid BC year: {}", s)));
+        }
+        year = 1 - year;
+    }
     validate_ymd(year, month, day)?;
     Ok((year, month, day))
 }
 
-fn split_timezone_suffix(s: &str) -> Result<(&str, i64), TypeError> {
+/// Parse PostgreSQL text date output (ISO or German DateStyle).
+fn parse_date_text(s: &str) -> Result<Date, TypeError> {
+    match s {
+        "infinity" => return Ok(Date::INFINITY),
+        "-infinity" => return Ok(Date::NEG_INFINITY),
+        _ => {}
+    }
+    let (s, bc) = strip_bc_suffix(s);
+    let (year, month, day) = parse_date_components(s, bc)?;
+    let date = Date {
+        days: days_from_ymd_checked(year, month, day)?,
+    };
+    if !date.is_finite() {
+        return Err(TypeError::InvalidData(format!("Date out of range: {}", s)));
+    }
+    Ok(date)
+}
+
+/// Time text and its UTC offset; `None` when the text has no zone.
+fn split_timezone_suffix(s: &str) -> Result<(&str, Option<i64>), TypeError> {
     let s = s.trim_end();
     if let Some(stripped) = s.strip_suffix('Z') {
-        return Ok((stripped, 0));
+        return Ok((stripped, Some(0)));
     }
     if let Some(idx) = s
         .char_indices()
@@ -184,9 +367,10 @@ fn split_timezone_suffix(s: &str) -> Result<(&str, i64), TypeError> {
         let offset = parse_timezone_offset_usec(&s[idx..]).ok_or_else(|| {
             TypeError::InvalidData(format!("Invalid timezone offset: {}", &s[idx..]))
         })?;
-        Ok((&s[..idx], offset))
+        // German DateStyle separates a numeric zone with a space.
+        Ok((s[..idx].trim_end(), Some(offset)))
     } else {
-        Ok((s, 0))
+        Ok((s, None))
     }
 }
 
@@ -201,24 +385,29 @@ fn parse_timezone_offset_usec(s: &str) -> Option<i64> {
         return None;
     }
 
-    let (hours, minutes) = if let Some((hours, minutes)) = raw.split_once(':') {
-        (hours, minutes)
+    // Historical local mean time offsets print seconds: "+05:53:28".
+    let (hours, minutes, seconds) = if let Some((hours, rest)) = raw.split_once(':') {
+        match rest.split_once(':') {
+            Some((minutes, seconds)) => (hours, minutes, seconds),
+            None => (hours, rest, "0"),
+        }
     } else if raw.len() == 4 {
-        (&raw[..2], &raw[2..])
+        (&raw[..2], &raw[2..], "0")
     } else {
-        (raw, "0")
+        (raw, "0", "0")
     };
 
-    if hours.is_empty() || minutes.is_empty() {
+    if hours.is_empty() || minutes.is_empty() || seconds.is_empty() {
         return None;
     }
     let hours = hours.parse::<i64>().ok()?;
     let minutes = minutes.parse::<i64>().ok()?;
-    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+    let seconds = seconds.parse::<i64>().ok()?;
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) || !(0..=59).contains(&seconds) {
         return None;
     }
 
-    Some(sign * ((hours * 3_600 + minutes * 60) * 1_000_000))
+    Some(sign * ((hours * 3_600 + minutes * 60 + seconds) * 1_000_000))
 }
 
 fn parse_time_components(s: &str) -> Result<(i32, i32, i32, i64), TypeError> {
@@ -304,8 +493,9 @@ fn validate_time_components(
     Ok(())
 }
 
+/// PostgreSQL `time` spans 00:00:00 through 24:00:00 inclusive.
 fn validate_time_usec(usec: i64) -> Result<(), TypeError> {
-    if !(0..USEC_PER_DAY).contains(&usec) {
+    if !(0..=USEC_PER_DAY).contains(&usec) {
         return Err(TypeError::InvalidData(format!(
             "Time out of range: {} microseconds",
             usec
@@ -351,11 +541,36 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-/// Date type (days since 2000-01-01)
+/// Date type (days since 2000-01-01).
+///
+/// `infinity` / `-infinity` are [`Date::INFINITY`] / [`Date::NEG_INFINITY`],
+/// the same sentinels PostgreSQL sends in binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Date {
     /// Days since PostgreSQL epoch (2000-01-01). Negative values represent dates before the epoch.
     pub days: i32,
+}
+
+impl Date {
+    /// PostgreSQL `infinity` (`DATEVAL_NOEND`).
+    pub const INFINITY: Date = Date { days: i32::MAX };
+    /// PostgreSQL `-infinity` (`DATEVAL_NOBEGIN`).
+    pub const NEG_INFINITY: Date = Date { days: i32::MIN };
+
+    /// Whether this is neither `infinity` nor `-infinity`.
+    pub fn is_finite(&self) -> bool {
+        !self.is_infinity() && !self.is_neg_infinity()
+    }
+
+    /// Whether this is PostgreSQL `infinity`.
+    pub fn is_infinity(&self) -> bool {
+        *self == Self::INFINITY
+    }
+
+    /// Whether this is PostgreSQL `-infinity`.
+    pub fn is_neg_infinity(&self) -> bool {
+        *self == Self::NEG_INFINITY
+    }
 }
 
 impl FromPg for Date {
@@ -377,13 +592,10 @@ impl FromPg for Date {
             let days = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             Ok(Date { days })
         } else {
-            // Text format: YYYY-MM-DD
+            // Text format: YYYY-MM-DD (or German DD.MM.YYYY), optional " BC"
             let s =
                 std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
-            let (year, month, day) = parse_date_components(s)?;
-            Ok(Date {
-                days: days_from_ymd_checked(year, month, day)?,
-            })
+            parse_date_text(s)
         }
     }
 }
@@ -394,14 +606,20 @@ impl ToPg for Date {
     }
 }
 
-/// Time type (microseconds since midnight)
+/// Time type (microseconds since midnight).
+///
+/// PostgreSQL also stores `24:00:00`, the end of the day, as
+/// [`Time::END_OF_DAY`]; it is distinct from midnight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Time {
-    /// Microseconds since midnight
+    /// Microseconds since midnight (0 through 86 400 000 000 inclusive)
     pub usec: i64,
 }
 
 impl Time {
+    /// PostgreSQL `24:00:00`.
+    pub const END_OF_DAY: Time = Time { usec: USEC_PER_DAY };
+
     /// Create from hours, minutes, seconds, microseconds.
     ///
     /// Invalid components return midnight instead of panicking. Use
@@ -428,8 +646,11 @@ impl Time {
         })
     }
 
-    /// Get hours component (0-23)
+    /// Get hours component (0-23, or 24 for [`Time::END_OF_DAY`])
     pub fn hour(&self) -> u8 {
+        if *self == Self::END_OF_DAY {
+            return 24;
+        }
         ((self.usec / 3_600_000_000) % 24) as u8
     }
 
@@ -487,6 +708,10 @@ impl ToPg for Time {
 
 /// Parse PostgreSQL text time format
 fn parse_time_text(s: &str) -> Result<Time, TypeError> {
+    // The server prints the end of the day as "24:00:00"; nothing past it exists.
+    if matches!(s, "24:00:00" | "24:00") {
+        return Ok(Time::END_OF_DAY);
+    }
     let (hour, minute, second, usec) = parse_time_components(s)?;
 
     Ok(Time {
@@ -553,7 +778,11 @@ mod tests {
     #[test]
     fn test_time_from_pg_binary_rejects_out_of_range_values() {
         assert!(Time::from_pg(&(-1i64).to_be_bytes(), oid::TIME, 1).is_err());
-        assert!(Time::from_pg(&USEC_PER_DAY.to_be_bytes(), oid::TIME, 1).is_err());
+        assert!(Time::from_pg(&(USEC_PER_DAY + 1).to_be_bytes(), oid::TIME, 1).is_err());
+        assert_eq!(
+            Time::from_pg(&USEC_PER_DAY.to_be_bytes(), oid::TIME, 1).unwrap(),
+            Time::END_OF_DAY
+        );
     }
 
     #[test]
@@ -627,7 +856,9 @@ mod tests {
 
     #[test]
     fn test_time_from_pg_text_rejects_invalid_components() {
-        assert!(parse_time_text("24:00:00").is_err());
+        assert_eq!(parse_time_text("24:00:00").unwrap(), Time::END_OF_DAY);
+        assert!(parse_time_text("24:00:00.000001").is_err());
+        assert!(parse_time_text("24:00:01").is_err());
         assert!(parse_time_text("14:60:00").is_err());
         assert!(parse_time_text("14:30:bad").is_err());
         assert!(parse_time_text("14:30:00.bad").is_err());

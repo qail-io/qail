@@ -48,7 +48,9 @@ pub enum Value {
     Bool(bool),
     /// 64-bit integer.
     Int(i64),
-    /// 64-bit float.
+    /// 64-bit float. Must be finite: the native encoder rejects NaN and
+    /// ±infinity, and the SQL preview renders them as an error marker. Write
+    /// PostgreSQL special values as a cast text literal (`'Infinity'::float8`).
     Float(f64),
     /// Text string.
     String(String),
@@ -93,6 +95,11 @@ impl std::fmt::Display for Value {
             Value::Null => write!(f, "NULL"),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
+            // Unquoted `inf` / `NaN` would be column references; the parens
+            // keep this a syntax error wherever the value lands.
+            Value::Float(n) if !n.is_finite() => {
+                write!(f, "(/* ERROR: float value must be finite, got {} */)", n)
+            }
             Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "'{}'", escape_sql_literal_body(s)),
             Value::Param(n) => write!(f, "${}", n),

@@ -659,3 +659,26 @@ fn test_parameterized_sql_ignores_param_markers_inside_literals() {
     );
     assert_eq!(result.named_params, vec!["owner"]);
 }
+
+#[test]
+fn test_non_finite_float_preview_never_renders_an_identifier() {
+    use crate::ast::{Operator, Qail, Value};
+
+    // `inf` / `NaN` unquoted are column references to PostgreSQL; the native
+    // encoder rejects these values, so the preview must not run either.
+    for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let sql = Qail::get("readings")
+            .filter("x", Operator::Eq, Value::Float(value))
+            .to_sql();
+        assert_eq!(
+            sql,
+            format!(
+                "SELECT * FROM readings WHERE x = (/* ERROR: float value must be finite, got {value} */)"
+            )
+        );
+    }
+    let finite = Qail::get("readings")
+        .filter("x", Operator::Eq, Value::Float(1.5))
+        .to_sql();
+    assert_eq!(finite, "SELECT * FROM readings WHERE x = 1.5");
+}

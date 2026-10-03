@@ -140,6 +140,17 @@ fn test_fmt_escapes_single_quoted_literals() {
 }
 
 #[test]
+fn test_fmt_refuses_non_finite_floats() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let cmd = Qail::get("readings").filter("x", Operator::Eq, Value::Float(value));
+        assert!(Formatter::new().format(&cmd).is_err(), "{value}");
+    }
+    let cmd = Qail::get("readings").filter("x", Operator::Eq, Value::Float(1.5));
+    let output = Formatter::new().format(&cmd).unwrap();
+    assert!(output.contains("x = 1.5"), "{output}");
+}
+
+#[test]
 fn test_fmt_cte() {
     // with cte = get table
     // get cte
