@@ -140,6 +140,17 @@ pub enum QailBuildError {
         tenant_column: String,
     },
 
+    /// RLS-protected INSERT cannot use `OVERRIDING USER VALUE`.
+    ///
+    /// PostgreSQL discards supplied values for identity columns under it, so
+    /// the injected tenant or owner value is not guaranteed to land.
+    RlsInsertOverridingUserValueDenied {
+        /// Target table being scoped.
+        table: String,
+        /// Tenant or owner column that would be injected.
+        column: String,
+    },
+
     /// RLS-protected updates cannot rewrite the tenant column.
     RlsTenantColumnMutationDenied {
         /// Target table being scoped.
@@ -275,6 +286,10 @@ impl std::fmt::Display for QailBuildError {
             } => write!(
                 f,
                 "with_rls requires explicit columns for positional INSERT payloads on table '{table}' (tenant column '{tenant_column}')"
+            ),
+            Self::RlsInsertOverridingUserValueDenied { table, column } => write!(
+                f,
+                "with_rls rejects INSERT OVERRIDING USER VALUE on table '{table}' (scope column '{column}')"
             ),
             Self::RlsTenantColumnMutationDenied {
                 table,

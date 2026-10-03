@@ -276,11 +276,31 @@ fn make_positional_payload_condition(index: usize, tenant_id: &str) -> Condition
     tenant_filter_condition(format!("${}", index + 1), tenant_id)
 }
 
+fn reject_insert_overriding_user_value(
+    cmd: &Qail,
+    tenant_column: &str,
+) -> Result<(), TenantProjectionError> {
+    if cmd.overriding == Some(OverridingKind::UserValue) {
+        // PostgreSQL discards supplied values for identity columns under
+        // USER VALUE, for VALUES and SELECT sources alike.
+        return Err(tenant_projection_error(
+            tenant_column,
+            format!(
+                "Tenant-scoped {:?} into '{}' cannot use OVERRIDING USER VALUE",
+                cmd.action, cmd.table
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn inject_tenant_payload(
     cmd: &mut Qail,
     tenant_column: &str,
     tenant_id: &str,
 ) -> Result<(), TenantProjectionError> {
+    reject_insert_overriding_user_value(cmd, tenant_column)?;
+
     let payload_idx = cmd
         .cages
         .iter()
@@ -441,6 +461,7 @@ fn inject_tenant_payload_from_source_query(
     tenant_column: &str,
     tenant_id: &str,
 ) -> Result<(), TenantProjectionError> {
+    reject_insert_overriding_user_value(cmd, tenant_column)?;
     ensure_explicit_insert_select_columns(cmd, tenant_column)?;
 
     let tenant_column_count = cmd

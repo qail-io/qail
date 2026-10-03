@@ -1225,6 +1225,15 @@ impl Qail {
         tenant_col: &str,
         tenant_value: Value,
     ) -> QailBuildResult<Self> {
+        // PostgreSQL discards supplied values for identity columns under
+        // USER VALUE, for VALUES and SELECT sources alike: refuse before
+        // either source is stamped.
+        if self.overriding == Some(OverridingKind::UserValue) {
+            return Err(QailBuildError::RlsInsertOverridingUserValueDenied {
+                table: self.table,
+                column: tenant_col.to_string(),
+            });
+        }
         if self.source_query.is_some() {
             return self.scope_insert_select_value(tenant_col, tenant_value);
         }
@@ -3693,6 +3702,26 @@ mod tests {
         );
     }
 
+    // ── INSERT OVERRIDING ────────────────────────────────────────────
+    // PostgreSQL discards supplied values for identity columns under
+    // OVERRIDING USER VALUE (PG 17.6: `(tenant_id) OVERRIDING USER VALUE
+    // VALUES (42)` stored 1), so the injected stamp is not guaranteed.
+
+    fn assert_overriding_user_value_denied(err: QailBuildError, table: &str, column: &str) {
+        let text = err.to_string();
+        assert!(
+            text.contains("OVERRIDING USER VALUE") && text.contains(table) && text.contains(column),
+            "{text}"
+        );
+        assert_eq!(
+            err,
+            QailBuildError::RlsInsertOverridingUserValueDenied {
+                table: table.to_string(),
+                column: column.to_string(),
+            }
+        );
+    }
+
     #[test]
     fn merge_insert_default_in_tenant_position_is_stamped() {
         let query = merge_insert_shape_base("_rls_merge_dt_target", "_rls_merge_dt_source")
@@ -3744,5 +3773,104 @@ mod tests {
             sql.starts_with("/* ERROR: MERGE INSERT DEFAULT VALUES cannot have columns"),
             "{sql}"
         );
+    }
+
+    #[test]
+    fn insert_overriding_user_value_on_tenant_table_fails_closed() {
+        seal_tenant_table("_rls_ouv_orders", "tenant_id");
+        let err = Qail::add("_rls_ouv_orders")
+            .set_value("total", 100)
+            .overriding_user_value()
+            .with_rls(&RlsContext::tenant("t-ouv"))
+            .expect_err("OVERRIDING USER VALUE must fail closed");
+        assert_overriding_user_value_denied(err, "_rls_ouv_orders", "tenant_id");
+    }
+
+    #[test]
+    fn insert_overriding_user_value_under_global_fails_closed() {
+        seal_tenant_table("_rls_ouv_global", "tenant_id");
+        let err = Qail::add("_rls_ouv_global")
+            .set_value("total", 100)
+            .overriding_user_value()
+            .with_rls(&RlsContext::global())
+            .expect_err("a NULL stamp is not guaranteed either");
+        assert_overriding_user_value_denied(err, "_rls_ouv_global", "tenant_id");
+    }
+
+    #[test]
+    fn insert_select_overriding_user_value_fails_closed() {
+        seal_tenant_table("_rls_ouv_sel_target", "tenant_id");
+        let mut cmd = Qail::add("_rls_ouv_sel_target")
+            .columns(["id", "tenant_id"])
+            .overriding_user_value();
+        cmd.source_query = Some(Box::new(
+            Qail::get("_rls_ouv_sel_unregistered").columns(["id", "tenant_id"]),
+        ));
+        let err = cmd
+            .with_rls(&RlsContext::tenant("t-ouv"))
+            .expect_err("INSERT ... SELECT OVERRIDING USER VALUE must fail closed");
+        assert_overriding_user_value_denied(err, "_rls_ouv_sel_target", "tenant_id");
+    }
+
+    #[test]
+    fn insert_overriding_user_value_on_owner_table_fails_closed() {
+        seal_owner_table("_rls_ouv_owner_posts", "author_id");
+        let err = Qail::add("_rls_ouv_owner_posts")
+            .set_value("title", "hi")
+            .overriding_user_value()
+            .with_rls(&RlsContext::user("u-ouv"))
+            .expect_err("owner stamp is not guaranteed either");
+        assert_overriding_user_value_denied(err, "_rls_ouv_owner_posts", "author_id");
+    }
+
+    #[test]
+    fn insert_overriding_system_value_keeps_tenant_stamp() {
+        seal_tenant_table("_rls_osv_orders", "tenant_id");
+        let query = Qail::add("_rls_osv_orders")
+            .set_value("id", 7)
+            .set_value("tenant_id", "forged")
+            .overriding_system_value()
+            .with_rls(&RlsContext::tenant("t-osv"))
+            .expect("OVERRIDING SYSTEM VALUE keeps the stamp");
+        let payload: Vec<_> = query
+            .cages
+            .iter()
+            .filter(|c| matches!(c.kind, CageKind::Payload))
+            .flat_map(|c| c.conditions.iter())
+            .collect();
+        assert!(payload.iter().any(|c| {
+            matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                && matches!(&c.value, Value::String(v) if v == "t-osv")
+        }));
+        // The preview omits named payload columns (audit E5); assert the clause and values only.
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("OVERRIDING SYSTEM VALUE VALUES (7, 't-osv')"),
+            "{sql}"
+        );
+        assert!(!sql.contains("forged"), "{sql}");
+    }
+
+    #[test]
+    fn insert_overriding_user_value_bypass_and_unregistered_are_untouched() {
+        seal_tenant_table("_rls_ouv_admin", "tenant_id");
+        let token = crate::rls::SuperAdminToken::for_system_process("ouv_bypass_test");
+        let admin = Qail::add("_rls_ouv_admin")
+            .set_value("total", 1)
+            .overriding_user_value()
+            .with_rls(&RlsContext::super_admin(token))
+            .expect("bypass is a no-op");
+        assert_eq!(
+            admin.overriding,
+            Some(crate::ast::OverridingKind::UserValue)
+        );
+
+        ensure_initialized();
+        let plain = Qail::add("_rls_ouv_unregistered")
+            .set_value("total", 1)
+            .overriding_user_value()
+            .with_rls(&RlsContext::tenant("t-ouv"))
+            .expect("unregistered table is not scoped");
+        assert!(plain.to_sql().contains("OVERRIDING USER VALUE"));
     }
 }
