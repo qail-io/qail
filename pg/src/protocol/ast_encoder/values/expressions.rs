@@ -112,21 +112,55 @@ pub fn encode_columns_with_params(
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_column_expr_inner(col, buf, params_opt.as_deref_mut())?;
+        encode_projection_expr(col, buf, params_opt.as_deref_mut())?;
     }
     Ok(())
 }
 
 /// Encode a single column expression (supports complex expressions).
+#[cfg(test)]
 pub fn encode_column_expr(
     col: &Expr,
     buf: &mut BytesMut,
 ) -> Result<(), crate::protocol::EncodeError> {
     super::super::dml::validate_expr_ref("column", col)?;
-    encode_column_expr_inner(col, buf, None)
+    encode_projection_expr(col, buf, None)
 }
 
-/// Encode a single column expression with optional shared params.
+fn encode_projection_expr(
+    expr: &Expr,
+    buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    encode_column_expr_inner(expr, buf, params)?;
+    // An alias labels a result column; it is not part of the operand syntax.
+    let alias = match expr {
+        Expr::Aliased { alias, .. } => Some(alias.as_str()),
+        Expr::Aggregate { alias, .. }
+        | Expr::FunctionCall { alias, .. }
+        | Expr::Cast { alias, .. }
+        | Expr::Binary { alias, .. }
+        | Expr::Case { alias, .. }
+        | Expr::SpecialFunction { alias, .. }
+        | Expr::JsonAccess { alias, .. }
+        | Expr::ArrayConstructor { alias, .. }
+        | Expr::RowConstructor { alias, .. }
+        | Expr::Subscript { alias, .. }
+        | Expr::Collate { alias, .. }
+        | Expr::FieldAccess { alias, .. }
+        | Expr::Subquery { alias, .. }
+        | Expr::Exists { alias, .. } => alias.as_deref(),
+        Expr::Window { name, .. } if !name.is_empty() => Some(name.as_str()),
+        _ => None,
+    };
+    if let Some(alias) = alias {
+        buf.extend_from_slice(b" AS ");
+        push_identifier_ref(buf, alias, false);
+    }
+    Ok(())
+}
+
+/// Encode an operand expression with optional shared params, without output aliases.
 ///
 /// When `params` is `Some`, subqueries share the outer query's parameter
 /// buffer so that `$1, $2, ...` numbering is continuous.
@@ -138,17 +172,15 @@ fn encode_column_expr_inner(
     match col {
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Named(name) => push_identifier_ref(buf, name, true),
-        Expr::Aliased { name, alias } => {
+        Expr::Aliased { name, .. } => {
             push_identifier_ref(buf, name, true);
-            buf.extend_from_slice(b" AS ");
-            push_identifier_ref(buf, alias, false);
         }
         Expr::Aggregate {
             col,
             func,
             distinct,
             filter,
-            alias,
+            ..
         } => {
             buf.extend_from_slice(func.to_string().as_bytes());
             buf.extend_from_slice(b"(");
@@ -170,13 +202,8 @@ fn encode_column_expr_inner(
                 }
                 buf.extend_from_slice(b")");
             }
-
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::FunctionCall { name, args, alias } => {
+        Expr::FunctionCall { name, args, .. } => {
             buf.extend_from_slice(name.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
             for (i, arg) in args.iter().enumerate() {
@@ -186,29 +213,16 @@ fn encode_column_expr_inner(
                 encode_column_expr_inner(arg, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b")");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::Cast {
-            expr,
-            target_type,
-            alias,
+            expr, target_type, ..
         } => {
             encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"::");
             buf.extend_from_slice(target_type.as_bytes());
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::Binary {
-            left,
-            op,
-            right,
-            alias,
+            left, op, right, ..
         } => {
             buf.extend_from_slice(b"(");
             encode_column_expr_inner(left, buf, params.as_deref_mut())?;
@@ -217,10 +231,6 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b" ");
             encode_column_expr_inner(right, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b")");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::Literal(val) => {
             encode_inline_value(val, buf)?;
@@ -228,7 +238,7 @@ fn encode_column_expr_inner(
         Expr::Case {
             when_clauses,
             else_value,
-            alias,
+            ..
         } => {
             buf.extend_from_slice(b"CASE");
             for (cond, then_expr) in when_clauses {
@@ -248,12 +258,8 @@ fn encode_column_expr_inner(
                 encode_column_expr_inner(else_val, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b" END");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::SpecialFunction { name, args, alias } => {
+        Expr::SpecialFunction { name, args, .. } => {
             if name.eq_ignore_ascii_case("INTERVAL") {
                 buf.extend_from_slice(b"INTERVAL ");
                 for (_kw, expr) in args {
@@ -274,15 +280,11 @@ fn encode_column_expr_inner(
                 }
                 buf.extend_from_slice(b")");
             }
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::JsonAccess {
             column,
             path_segments,
-            alias,
+            ..
         } => {
             // Wrap in parentheses to avoid operator precedence issues with || (concat)
             buf.extend_from_slice(b"(");
@@ -301,19 +303,15 @@ fn encode_column_expr_inner(
                 }
             }
             buf.extend_from_slice(b")");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::Window {
-            name,
             func,
             params: window_params,
             filter,
             partition,
             order,
             frame,
+            ..
         } => {
             buf.extend_from_slice(func.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
@@ -378,12 +376,8 @@ fn encode_column_expr_inner(
                 encode_window_frame(f, buf);
             }
             buf.extend_from_slice(b")");
-            if !name.is_empty() {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, name, false);
-            }
         }
-        Expr::ArrayConstructor { elements, alias } => {
+        Expr::ArrayConstructor { elements, .. } => {
             buf.extend_from_slice(b"ARRAY[");
             for (i, elem) in elements.iter().enumerate() {
                 if i > 0 {
@@ -392,12 +386,8 @@ fn encode_column_expr_inner(
                 encode_column_expr_inner(elem, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b"]");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::RowConstructor { elements, alias } => {
+        Expr::RowConstructor { elements, .. } => {
             buf.extend_from_slice(b"ROW(");
             for (i, elem) in elements.iter().enumerate() {
                 if i > 0 {
@@ -406,45 +396,27 @@ fn encode_column_expr_inner(
                 encode_column_expr_inner(elem, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b")");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::Subscript { expr, index, alias } => {
+        Expr::Subscript { expr, index, .. } => {
             encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"[");
             encode_column_expr_inner(index, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"]");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::Collate {
-            expr,
-            collation,
-            alias,
+            expr, collation, ..
         } => {
             encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b" COLLATE ");
             push_identifier_ref(buf, collation, false);
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::FieldAccess { expr, field, alias } => {
+        Expr::FieldAccess { expr, field, .. } => {
             buf.extend_from_slice(b"(");
             encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b").");
             push_identifier_ref(buf, field, false);
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::Subquery { query, alias } => {
+        Expr::Subquery { query, .. } => {
             // Encode scalar subquery: (SELECT ... LIMIT 1)
             // When params is available, share it so $N numbering is continuous.
             buf.extend_from_slice(b"(");
@@ -465,16 +437,8 @@ fn encode_column_expr_inner(
                 }
             }
             buf.extend_from_slice(b")");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
-        Expr::Exists {
-            query,
-            negated,
-            alias,
-        } => {
+        Expr::Exists { query, negated, .. } => {
             // Encode EXISTS or NOT EXISTS subquery
             if *negated {
                 buf.extend_from_slice(b"NOT ");
@@ -497,10 +461,6 @@ fn encode_column_expr_inner(
                 }
             }
             buf.extend_from_slice(b")");
-            if let Some(a) = alias {
-                buf.extend_from_slice(b" AS ");
-                push_identifier_ref(buf, a, false);
-            }
         }
         Expr::Def {
             name,
@@ -749,7 +709,10 @@ fn encode_inline_value(
         }
         Value::Bool(value) => buf.extend_from_slice(if *value { b"TRUE" } else { b"FALSE" }),
         Value::Column(column) => push_identifier_ref(buf, column, false),
-        Value::Expr(expr) => encode_column_expr(expr, buf)?,
+        Value::Expr(expr) => {
+            super::super::dml::validate_expr_ref("expression", expr)?;
+            encode_column_expr_inner(expr, buf, None)?;
+        }
         Value::Param(n) => {
             return Err(crate::protocol::EncodeError::InvalidAst(format!(
                 "unresolved positional parameter ${n} cannot be encoded without a bind value"
@@ -821,8 +784,10 @@ pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) -> Result<(), crate::protoco
         Expr::Named(name) => push_identifier_ref(buf, name, true),
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Aliased { name, .. } => push_identifier_ref(buf, name, true),
-        // Delegate complex expressions to the full encoder
-        _ => encode_column_expr(expr, buf)?,
+        _ => {
+            super::super::dml::validate_expr_ref("expression", expr)?;
+            encode_column_expr_inner(expr, buf, None)?;
+        }
     }
     Ok(())
 }

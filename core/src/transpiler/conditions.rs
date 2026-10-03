@@ -161,7 +161,7 @@ fn resolve_text_search_vector(
 
 fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option<&Qail>) -> String {
     match expr {
-        Expr::Named(name) => {
+        Expr::Named(name) | Expr::Aliased { name, .. } => {
             if name.starts_with('{') && name.ends_with('}') {
                 name[1..name.len() - 1].to_string()
             } else if let Some(cmd) = context {
