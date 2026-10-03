@@ -1,20 +1,26 @@
 //! CTE (Common Table Expression) builder methods.
 
-use crate::ast::{CTEDef, Expr, Qail};
+use crate::ast::{Action, CTEDef, Expr, Qail};
 
 impl Qail {
     /// Convert this query into a reusable CTE definition.
     pub fn to_cte(self, name: impl Into<String>) -> CTEDef {
         let cte_name = name.into();
-        let columns: Vec<String> = self
-            .columns
-            .iter()
-            .filter_map(|c| match c {
-                Expr::Named(n) => Some(n.clone()),
-                Expr::Aliased { alias, .. } => Some(alias.clone()),
-                _ => None,
-            })
-            .collect();
+        // A write body's `columns` are its target columns, not its output:
+        // the relation it exposes is its RETURNING list, named by PostgreSQL.
+        let columns: Vec<String> = if matches!(self.action, Action::Add | Action::Set | Action::Del)
+        {
+            Vec::new()
+        } else {
+            self.columns
+                .iter()
+                .filter_map(|c| match c {
+                    Expr::Named(n) => Some(n.clone()),
+                    Expr::Aliased { alias, .. } => Some(alias.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
 
         CTEDef {
             name: cte_name,

@@ -437,6 +437,43 @@ async fn prepare_tenant_guarded_query_filters_merge_query_source() {
 }
 
 #[tokio::test]
+async fn prepare_tenant_guarded_query_scopes_write_cte_bodies() {
+    let state = build_tenant_guard_state().await;
+    let auth = tenant_auth();
+    let mut cmd = qail_core::ast::Qail::get("gone").with(
+        "gone",
+        qail_core::ast::Qail::del("orders")
+            .eq("status", "void")
+            .returning(["id"]),
+    );
+    cmd = cmd.with(
+        "made",
+        qail_core::ast::Qail::add("orders")
+            .set_value("status", "draft")
+            .set_value("tenant_id", "tenant-2")
+            .returning(["id"]),
+    );
+
+    prepare_tenant_guarded_query(&state, &auth, &mut cmd).unwrap();
+
+    let (sql, params) = qail_pg::protocol::AstEncoder::encode_cmd_sql(&cmd).unwrap();
+    let params: Vec<String> = params
+        .iter()
+        .map(|p| String::from_utf8(p.clone().unwrap_or_default()).unwrap())
+        .collect();
+    assert!(
+        sql.contains("DELETE FROM orders WHERE") && sql.contains("tenant_id = $"),
+        "{sql}"
+    );
+    assert!(params.iter().all(|p| p != "tenant-2"), "{sql} {params:?}");
+    assert_eq!(
+        params.iter().filter(|p| p.as_str() == "tenant-1").count(),
+        2,
+        "{sql} {params:?}"
+    );
+}
+
+#[tokio::test]
 async fn prepare_tenant_guarded_query_filters_expression_subquery() {
     let state = build_tenant_guard_state().await;
     let auth = tenant_auth();

@@ -47,6 +47,23 @@ pub fn build_cte(cmd: &Qail, dialect: Dialect) -> String {
     sql
 }
 
+/// `WITH [RECURSIVE] ... ` prefix for INSERT, UPDATE, and DELETE, or empty.
+pub(crate) fn build_write_with_prefix(cmd: &Qail, dialect: Dialect) -> String {
+    if cmd.ctes.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = cmd
+        .ctes
+        .iter()
+        .map(|cte| build_single_cte(cte, dialect))
+        .collect();
+    if cmd.ctes.iter().any(|c| c.recursive) {
+        format!("WITH RECURSIVE {} ", parts.join(", "))
+    } else {
+        format!("WITH {} ", parts.join(", "))
+    }
+}
+
 /// Build a single CTE definition (without the WITH keyword)
 pub fn build_single_cte(cte: &CTEDef, dialect: Dialect) -> String {
     let generator = dialect.generator();
@@ -66,6 +83,21 @@ pub fn build_single_cte(cte: &CTEDef, dialect: Dialect) -> String {
     }
 
     sql.push_str(" AS (");
+
+    // Data-modifying bodies keep their own statement and RETURNING relation.
+    if matches!(
+        cte.base_query.action,
+        Action::Add | Action::Set | Action::Del
+    ) {
+        use crate::transpiler::ToSql;
+        if cte.recursive_query.is_some() {
+            sql.push_str("/* ERROR: data-modifying CTE cannot have a recursive arm */");
+        } else {
+            sql.push_str(&cte.base_query.to_sql_with_dialect(dialect));
+        }
+        sql.push(')');
+        return sql;
+    }
 
     sql.push_str(&build_set_operand(&cte.base_query, dialect));
 

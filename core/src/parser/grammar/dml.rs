@@ -137,6 +137,7 @@ pub fn parse_on_conflict(input: &str) -> IResult<&str, OnConflict> {
         input,
         OnConflict {
             columns: columns.iter().map(|s| s.to_string()).collect(),
+            constraint: None,
             action,
             where_conditions: Vec::new(),
         },

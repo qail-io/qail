@@ -119,6 +119,9 @@ pub struct CTEDef {
 pub struct OnConflict {
     /// Conflict target columns.
     pub columns: Vec<String>,
+    /// `ON CONFLICT ON CONSTRAINT <name>` target. Exclusive with `columns`.
+    #[serde(default)]
+    pub constraint: Option<String>,
     /// What to do on conflict.
     pub action: ConflictAction,
     /// `DO UPDATE ... WHERE <conditions>` — predicates over the EXISTING row.
@@ -222,6 +225,7 @@ impl Default for OnConflict {
     fn default() -> Self {
         Self {
             columns: vec![],
+            constraint: None,
             action: ConflictAction::DoNothing,
             where_conditions: Vec::new(),
         }

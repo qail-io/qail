@@ -42,6 +42,10 @@ impl Qail {
     }
 
     /// UPSERT — insert or update.
+    ///
+    /// SQL preview only: the qail-pg native encoder rejects `Put` because its
+    /// DO UPDATE has no existing-row guard. Execute upserts with
+    /// `Qail::add(..).on_conflict_update(..)`.
     pub fn put(table: impl Into<String>) -> Self {
         Self {
             action: Action::Put,
@@ -78,6 +82,9 @@ impl Qail {
     }
 
     /// TRUNCATE — empty a table.
+    ///
+    /// Takes only the table: any filter or other clause is rejected, never
+    /// dropped. `with_rls` refuses it on a scoped table.
     pub fn truncate(table: impl Into<String>) -> Self {
         Self {
             action: Action::Truncate,
@@ -96,6 +103,8 @@ impl Qail {
     }
 
     /// EXPLAIN ANALYZE — show query plan with execution stats.
+    ///
+    /// Executes the query; the explained query must be read-only.
     pub fn explain_analyze(table: impl Into<String>) -> Self {
         Self {
             action: Action::ExplainAnalyze,
@@ -104,7 +113,10 @@ impl Qail {
         }
     }
 
-    /// LOCK TABLE.
+    /// LOCK TABLE ... IN ACCESS EXCLUSIVE MODE.
+    ///
+    /// PostgreSQL accepts it only inside a transaction block. Takes only the
+    /// table; `with_rls` refuses it on a scoped table.
     pub fn lock(table: impl Into<String>) -> Self {
         Self {
             action: Action::Lock,

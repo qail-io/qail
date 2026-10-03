@@ -124,6 +124,9 @@ impl ToSql for Qail {
             // COPY protocol (AST-native in qail-pg, generates SELECT for fallback)
             Action::Export => dml::select::build_select(self, dialect),
             // TRUNCATE TABLE
+            Action::Truncate if !is_table_only(self) => {
+                "/* ERROR: TRUNCATE takes only a table */".to_string()
+            }
             Action::Truncate => format!("TRUNCATE TABLE {}", escape_identifier(&self.table)),
             // EXPLAIN - wrap SELECT query
             Action::Explain => format!("EXPLAIN {}", dml::select::build_select(self, dialect)),
@@ -133,6 +136,9 @@ impl ToSql for Qail {
                 dml::select::build_select(self, dialect)
             ),
             // LOCK TABLE
+            Action::Lock if !is_table_only(self) => {
+                "/* ERROR: LOCK TABLE takes only a table */".to_string()
+            }
             Action::Lock => format!(
                 "LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
                 escape_identifier(&self.table)
@@ -666,6 +672,16 @@ fn contains_unquoted_statement_delimiter(value: &str) -> bool {
     }
 
     false
+}
+
+/// TRUNCATE and LOCK act on the whole relation; any other populated field
+/// (a filter above all) would be dropped from the rendered statement.
+fn is_table_only(cmd: &Qail) -> bool {
+    *cmd == Qail {
+        action: cmd.action,
+        table: cmd.table.clone(),
+        ..Default::default()
+    }
 }
 
 fn checked_sql_query_fragment(query: &str, context: &str) -> Result<String, String> {

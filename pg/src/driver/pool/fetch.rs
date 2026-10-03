@@ -543,7 +543,7 @@ impl PooledConnection {
         // Encode SQL + params to reusable buffers
         match cmd.action {
             qail_core::ast::Action::Get | qail_core::ast::Action::With => {
-                crate::protocol::ast_encoder::dml::encode_select(
+                crate::protocol::ast_encoder::dml::encode_select_statement(
                     cmd,
                     &mut conn.sql_buf,
                     &mut conn.params_buf,

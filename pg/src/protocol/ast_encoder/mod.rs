@@ -153,7 +153,7 @@ impl AstEncoder {
 
         match cmd.action {
             Action::Get | Action::With => {
-                dml::encode_select(cmd, sql_buf, params)?;
+                dml::encode_select_statement(cmd, sql_buf, params)?;
             }
             Action::Cnt => {
                 dml::encode_count(cmd, sql_buf, params)?;
@@ -173,6 +173,12 @@ impl AstEncoder {
             Action::Export => {
                 dml::encode_export(cmd, sql_buf, params)?;
             }
+            Action::Explain | Action::ExplainAnalyze => {
+                dml::encode_explain(cmd, sql_buf, params)?;
+            }
+            Action::Truncate => dml::encode_truncate(cmd, sql_buf)?,
+            Action::Lock => dml::encode_lock_table(cmd, sql_buf)?,
+            Action::Put => return Err(dml::reject_put()),
             Action::Make => ddl::encode_make(cmd, sql_buf)?,
             Action::Index => ddl::encode_index(cmd, sql_buf)?,
             Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
@@ -240,7 +246,7 @@ impl AstEncoder {
 
         match cmd.action {
             Action::Get | Action::With => {
-                dml::encode_select(cmd, &mut sql_buf, &mut params)?;
+                dml::encode_select_statement(cmd, &mut sql_buf, &mut params)?;
             }
             Action::Cnt => {
                 dml::encode_count(cmd, &mut sql_buf, &mut params)?;
@@ -260,6 +266,12 @@ impl AstEncoder {
             Action::Export => {
                 dml::encode_export(cmd, &mut sql_buf, &mut params)?;
             }
+            Action::Explain | Action::ExplainAnalyze => {
+                dml::encode_explain(cmd, &mut sql_buf, &mut params)?;
+            }
+            Action::Truncate => dml::encode_truncate(cmd, &mut sql_buf)?,
+            Action::Lock => dml::encode_lock_table(cmd, &mut sql_buf)?,
+            Action::Put => return Err(dml::reject_put()),
             Action::Make => ddl::encode_make(cmd, &mut sql_buf)?,
             Action::Index => ddl::encode_index(cmd, &mut sql_buf)?,
             Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
@@ -343,7 +355,7 @@ impl AstEncoder {
 
         match cmd.action {
             Action::Get | Action::With => {
-                dml::encode_select(cmd, sql_buf, params)?;
+                dml::encode_select_statement(cmd, sql_buf, params)?;
             }
             Action::Cnt => {
                 dml::encode_count(cmd, sql_buf, params)?;
@@ -388,7 +400,7 @@ impl AstEncoder {
 
         match cmd.action {
             Action::Get => {
-                dml::encode_select(cmd, &mut sql_buf, &mut params)?;
+                dml::encode_select_statement(cmd, &mut sql_buf, &mut params)?;
             }
             Action::Add => {
                 dml::encode_insert(cmd, &mut sql_buf, &mut params)?;
@@ -2087,11 +2099,22 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_cte_rejects_mutating_base_query() {
-        let cmd = Qail::get("recent_orders").with("recent_orders", Qail::del("orders"));
+    fn test_encode_cte_mutating_base_query_only_at_top_level() {
+        let cmd =
+            Qail::get("recent_orders").with("recent_orders", Qail::del("orders").returning(["id"]));
+        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd).expect("top-level write CTE");
+        assert_eq!(
+            sql,
+            "WITH recent_orders AS (DELETE FROM orders RETURNING id) SELECT * FROM recent_orders"
+        );
 
-        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating CTE must fail");
-
+        // The same command in a subquery slot stays read-only.
+        let nested = Qail::get("orders").filter(
+            "id",
+            qail_core::ast::Operator::In,
+            qail_core::ast::Value::Subquery(Box::new(cmd)),
+        );
+        let err = AstEncoder::encode_cmd_sql(&nested).expect_err("nested mutating CTE must fail");
         assert!(
             err.to_string()
                 .contains("read-only SELECT query slot requires get/with action"),

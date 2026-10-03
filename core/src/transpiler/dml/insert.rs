@@ -8,7 +8,8 @@ use crate::transpiler::dialect::Dialect;
 /// Generate INSERT INTO SQL with VALUES, ON CONFLICT, and RETURNING clauses.
 pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
-    let mut sql = String::from("INSERT INTO ");
+    let mut sql = super::cte::build_write_with_prefix(cmd, dialect);
+    sql.push_str("INSERT INTO ");
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
     // For ADD queries, we use columns and first cage contains values
@@ -92,14 +93,31 @@ fn build_on_conflict(
 
 /// PostgreSQL style: ON CONFLICT (cols) DO UPDATE SET ... or DO NOTHING
 fn build_on_conflict_postgres(on_conflict: &OnConflict, generator: &dyn SqlGenerator) -> String {
-    let mut sql = String::from(" ON CONFLICT (");
-    let cols: Vec<String> = on_conflict
-        .columns
-        .iter()
-        .map(|c| generator.quote_identifier(c))
-        .collect();
-    sql.push_str(&cols.join(", "));
-    sql.push(')');
+    let mut sql = String::from(" ON CONFLICT");
+    match (&on_conflict.constraint, on_conflict.columns.is_empty()) {
+        (Some(_), false) => {
+            sql.push_str(" /* ERROR: conflict target has both columns and a constraint */");
+        }
+        (Some(constraint), true) if constraint.is_empty() || constraint.contains(['.', '\0']) => {
+            sql.push_str(" /* ERROR: Invalid conflict constraint name */");
+        }
+        (Some(constraint), true) => {
+            sql.push_str(" ON CONSTRAINT ");
+            sql.push_str(&generator.quote_identifier(constraint));
+        }
+        // PostgreSQL omits the target entirely; `()` is a syntax error.
+        (None, true) => {}
+        (None, false) => {
+            let cols: Vec<String> = on_conflict
+                .columns
+                .iter()
+                .map(|c| generator.quote_identifier(c))
+                .collect();
+            sql.push_str(" (");
+            sql.push_str(&cols.join(", "));
+            sql.push(')');
+        }
+    }
 
     match &on_conflict.action {
         ConflictAction::DoNothing => {

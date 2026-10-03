@@ -194,6 +194,17 @@ pub enum QailBuildError {
         owner_column: String,
     },
 
+    /// A whole-relation action (TRUNCATE, LOCK TABLE) targets a scoped table.
+    ///
+    /// Neither statement takes a row predicate, and PostgreSQL row security
+    /// does not filter TRUNCATE, so no scope can be applied.
+    RlsWholeTableActionDenied {
+        /// Target table being scoped.
+        table: String,
+        /// The whole-relation action.
+        action: crate::ast::Action,
+    },
+
     /// Runtime relation registry lock failed.
     RelationRegistryLock(String),
 
@@ -259,6 +270,10 @@ impl std::fmt::Display for QailBuildError {
             } => write!(
                 f,
                 "with_rls cannot owner-scope MERGE on table '{table}' (owner column '{owner_column}'); use with_rls_policy and a DB policy"
+            ),
+            Self::RlsWholeTableActionDenied { table, action } => write!(
+                f,
+                "with_rls cannot scope {action} on scoped table '{table}': it acts on every row"
             ),
             Self::RlsMergeSourceTenantProjectionRequired {
                 table,
