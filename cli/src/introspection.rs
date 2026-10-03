@@ -323,7 +323,7 @@ pub(crate) enum IntrospectedForeignKey {
 
 pub(crate) enum IntrospectedUniqueConstraint {
     Single { table: String, column: String },
-    Multi(Index),
+    Multi(Box<Index>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -575,14 +575,14 @@ pub(crate) fn unique_constraint_with_nulls_not_distinct(
     }
     match unique {
         IntrospectedUniqueConstraint::Single { table, column } => {
-            IntrospectedUniqueConstraint::Multi(
+            IntrospectedUniqueConstraint::Multi(Box::new(
                 Index::new(constraint_name, table, vec![column])
                     .unique()
                     .nulls_not_distinct(),
-            )
+            ))
         }
         IntrospectedUniqueConstraint::Multi(index) => {
-            IntrospectedUniqueConstraint::Multi(index.nulls_not_distinct())
+            IntrospectedUniqueConstraint::Multi(Box::new(index.nulls_not_distinct()))
         }
     }
 }
@@ -800,7 +800,7 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
 
     let scheme = url_str.split("://").next().unwrap_or("");
 
-    let schema = match scheme {
+    let (schema, lossy) = match scheme {
         "postgres" | "postgresql" => inspect_postgres(url_str).await?,
         _ => {
             return Err(anyhow!(
@@ -814,8 +814,23 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
     let preserved = preserve_owner_declarations("schema.qail", &mut schema)?;
 
     // Always output .qail format now
-    let qail = to_qail_string(&schema);
+    let qail = with_lossy_header(&to_qail_string(&schema), &lossy);
     write_atomically("schema.qail", &qail)?;
+    if !lossy.is_empty() {
+        eprintln!(
+            "{} {} database detail(s) could not be represented in schema.qail:",
+            "⚠".yellow(),
+            lossy.len()
+        );
+        for note in &lossy {
+            eprintln!("    {note}");
+        }
+        eprintln!(
+            "    {}",
+            "These stay in the database but will NOT be recreated from schema.qail (listed in its header)."
+                .dimmed()
+        );
+    }
     println!("{}", "✓ Schema synced to schema.qail".green().bold());
     println!("  Tables: {}", schema.tables.len());
     if !preserved.kept.is_empty() {
@@ -834,6 +849,24 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
     }
 
     Ok(())
+}
+
+/// Record what the pull could not represent at the top of the file, so the
+/// loss travels with the schema instead of only scrolling past on stderr.
+pub(crate) fn with_lossy_header(qail: &str, lossy: &[String]) -> String {
+    if lossy.is_empty() {
+        return qail.to_string();
+    }
+    let mut out =
+        String::from("# LOSSY PULL: not represented below, not recreated from this file:\n");
+    for note in lossy {
+        out.push_str("#   - ");
+        out.push_str(&note.replace(['\r', '\n'], " "));
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(qail);
+    out
 }
 
 /// Write via a uniquely-created sibling temp file + rename so a crash or
@@ -974,7 +1007,7 @@ pub(crate) fn merge_owner_declarations(existing: &Schema, pulled: &mut Schema) -
     out
 }
 
-async fn inspect_postgres(url: &str) -> Result<Schema> {
+async fn inspect_postgres(url: &str) -> Result<(Schema, Vec<String>)> {
     let (host, port, user, password, database) = parse_pg_url(url)?;
 
     let mut driver = if let Some(pwd) = password {
@@ -1003,10 +1036,33 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     let nulls_not_distinct_indexes =
         fetch_nulls_not_distinct_indexes(&mut driver, &public_namespace_oid, version_num).await?;
 
+    // Pull reads one schema. Objects elsewhere are reported, and references
+    // that would bind to a different (same-named) public object refuse.
+    let mut lossy: Vec<String> = Vec::new();
+    let leaving_fks =
+        crate::pull_catalog::foreign_keys_leaving_namespace(&mut driver, &public_namespace_oid)
+            .await?;
+    if !leaving_fks.is_empty() {
+        return Err(anyhow!(
+            "Pull reads the public schema only, but these foreign keys reference tables in other schemas: {}. \
+             schema.qail cannot qualify them; refusing to write a file that would point them at public tables.",
+            leaving_fks.join(", ")
+        ));
+    }
+    lossy.extend(
+        crate::pull_catalog::schemas_outside_pull(&mut driver, &public_namespace_oid).await?,
+    );
+    let column_catalog =
+        crate::pull_catalog::fetch_column_catalog(&mut driver, &public_namespace_oid).await?;
+    let sequence_catalog =
+        crate::pull_catalog::fetch_sequence_catalog(&mut driver, &public_namespace_oid).await?;
+
     // ── 0. Enums (must be before columns to resolve enum column types) ──
     let enum_cmd = Qail::get("pg_catalog.pg_type")
         .columns(["typname", "oid"])
-        .filter("typtype", Operator::Eq, "e"); // 'e' = enum type
+        .filter("typtype", Operator::Eq, "e") // 'e' = enum type
+        .filter("typnamespace", Operator::Eq, public_namespace_oid.clone())
+        .order_by("typname", qail_core::ast::SortOrder::Asc);
 
     let enum_rows = driver
         .fetch_all(&enum_cmd)
@@ -1020,9 +1076,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let type_name = row.text(0);
         let oid = row.text(1);
 
+        // Logical enum order is enumsortorder (labels added BEFORE/AFTER an
+        // existing one get fractional positions), not OID or physical order.
         let values_cmd = Qail::get("pg_catalog.pg_enum")
             .columns(["enumlabel"])
-            .filter("enumtypid", Operator::Eq, oid.clone());
+            .filter("enumtypid", Operator::Eq, oid.clone())
+            .order_by("enumsortorder", qail_core::ast::SortOrder::Asc);
 
         let val_rows = driver
             .fetch_all(&values_cmd)
@@ -1139,6 +1198,33 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     let mut ordered_columns: std::collections::HashMap<String, Vec<(i32, Column)>> =
         std::collections::HashMap::new();
 
+    // A nextval default is a `serial` only when it uses the exact sequence
+    // serial would create for that column; any other sequence is pulled as a
+    // sequence plus an explicit default so its settings and name survive.
+    let mut plain_serial_sequences: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let mut identity_options: std::collections::HashMap<
+        (String, String),
+        qail_core::ast::IdentityOptions,
+    > = std::collections::HashMap::new();
+    for seq in &sequence_catalog {
+        let Some((table, column)) = &seq.owner else {
+            continue;
+        };
+        if seq.identity {
+            identity_options.insert((table.clone(), column.clone()), seq.non_default_options());
+            continue;
+        }
+        let column_type = column_catalog
+            .get(&(table.clone(), column.clone()))
+            .map(|c| c.formatted_type.as_str())
+            .unwrap_or_default();
+        if seq.is_plain_serial_for(column_type) {
+            plain_serial_sequences.insert(seq.name.clone(), (table.clone(), column.clone()));
+        }
+    }
+    let mut foreign_type_columns = Vec::new();
+
     for row in rows {
         let table_name = row.text(0);
         if !base_tables.contains(&table_name) {
@@ -1158,19 +1244,43 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let is_generated = row.get_string(11);
         let generation_expression = row.get_string(12);
 
-        let is_nextval_default = column_default_raw
+        let catalog = column_catalog
+            .get(&(table_name.clone(), col_name.clone()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Column {}.{} is missing from pg_attribute",
+                    table_name,
+                    col_name
+                )
+            })?;
+        if let Some(foreign) = &catalog.foreign_type {
+            foreign_type_columns.push(format!("{}.{} ({})", table_name, col_name, foreign));
+        }
+        let is_serial_default = column_default_raw
             .as_deref()
-            .map(|d| d.trim_start().starts_with("nextval("))
-            .unwrap_or(false);
-        let col_type = map_pg_column_type(
+            .and_then(crate::pull_catalog::nextval_sequence_name)
+            .and_then(|seq| plain_serial_sequences.get(&seq))
+            .is_some_and(|(table, column)| *table == table_name && *column == col_name);
+        let mapped_type = map_pg_column_type(
             &udt_name,
             &data_type,
             char_max_len.as_deref(),
             numeric_precision.as_deref(),
             numeric_scale.as_deref(),
-            is_nextval_default,
+            is_serial_default,
             &enum_names,
         );
+        let (col_type, exact) =
+            crate::pull_catalog::exact_column_type(mapped_type, &catalog.formatted_type);
+        if !exact {
+            lossy.push(format!(
+                "column {}.{}: declared type {} is pulled as {}",
+                table_name,
+                col_name,
+                catalog.formatted_type,
+                col_type.to_pg_type()
+            ));
+        }
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;
@@ -1179,7 +1289,23 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             identity_generation.as_deref(),
             is_generated.as_deref(),
             generation_expression.as_deref(),
-        );
+            &catalog.attgenerated,
+        )
+        .map_err(|e| anyhow!("{}.{}: {}", table_name, col_name, e))?;
+        if is_identity
+            && let Some(options) = identity_options.get(&(table_name.clone(), col_name.clone()))
+        {
+            col.identity_options = options.clone();
+        }
+        if let Some(collation) = &catalog.collation {
+            if catalog.custom_collation {
+                lossy.push(format!(
+                    "column {}.{}: collation \"{}\" is not built in; schema.qail does not create it",
+                    table_name, col_name, collation
+                ));
+            }
+            col.collation = Some(collation.clone());
+        }
 
         // Parse default value (skip nextval sequences — those are serial types)
         if let Some(ref default_str) = column_default_raw {
@@ -1217,6 +1343,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             (table, columns.into_iter().map(|(_, col)| col).collect())
         })
         .collect();
+    if !foreign_type_columns.is_empty() {
+        return Err(anyhow!(
+            "Pull reads the public schema only, but these columns use types from other schemas: {}. \
+             schema.qail cannot qualify them; refusing to write a file that would bind them to other types.",
+            foreign_type_columns.join(", ")
+        ));
+    }
 
     // ── 2. Primary Keys (AST-native) ────────────────────────────────────
     let pk_cmd = Qail::get("information_schema.table_constraints")
@@ -1334,7 +1467,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
                 IntrospectedUniqueConstraint::Single { table, column } => {
                     unique_columns.insert((table, column));
                 }
-                IntrospectedUniqueConstraint::Multi(index) => unique_constraint_indexes.push(index),
+                IntrospectedUniqueConstraint::Multi(index) => {
+                    unique_constraint_indexes.push(*index)
+                }
             }
         }
     }
@@ -1694,13 +1829,17 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // ── 7. Indexes (AST-native) ─────────────────────────────────────────
     let idx_cmd = Qail::get("pg_indexes")
-        .columns(["indexname", "tablename", "indexdef"])
-        .filter("schemaname", Operator::Eq, "public");
+        .columns(["indexname", "tablename", "indexdef", "tablespace"])
+        .filter("schemaname", Operator::Eq, "public")
+        .order_by("tablename", qail_core::ast::SortOrder::Asc)
+        .order_by("indexname", qail_core::ast::SortOrder::Asc);
 
     let index_rows = driver
         .fetch_all(&idx_cmd)
         .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
+    let index_storage_params =
+        crate::pull_catalog::fetch_index_storage_params(&mut driver, &public_namespace_oid).await?;
 
     // Index OID -> name map (public schema)
     let idx_class_cmd = Qail::get("pg_catalog.pg_class")
@@ -1762,78 +1901,48 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         });
     }
 
-    // ── 10. Sequences (AST-native) ──────────────────────────────────────
-    let seq_cmd = Qail::get("information_schema.sequences")
-        .columns([
-            "sequence_name",
-            "start_value",
-            "increment",
-            "minimum_value",
-            "maximum_value",
-        ])
-        .filter("sequence_schema", Operator::Eq, "public");
-
-    let seq_rows = driver
-        .fetch_all(&seq_cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query sequences: {}", e))?;
-
-    // Sequence OID map for ownership detection.
-    let seq_class_cmd = Qail::get("pg_catalog.pg_class")
-        .columns(["oid", "relname"])
-        .filter("relkind", Operator::Eq, "S")
-        .filter("relnamespace", Operator::Eq, public_namespace_oid.clone());
-    let seq_class_rows = driver
-        .fetch_all(&seq_class_cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query sequence class metadata: {}", e))?;
-    let mut seq_name_to_oid: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for row in seq_class_rows {
-        seq_name_to_oid.insert(row.text(1), row.text(0));
-    }
-
-    // deptype='a' marks auto dependency (owned by table column / serial identity).
-    let dep_cmd = Qail::get("pg_catalog.pg_depend").columns(["objid", "deptype"]);
-    let dep_rows = driver
-        .fetch_all(&dep_cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query sequence dependencies: {}", e))?;
-    let mut owned_sequence_oids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    for row in dep_rows {
-        if row.text(1) == "a" {
-            owned_sequence_oids.insert(row.text(0));
-        }
-    }
-
+    // ── 10. Sequences (pg_sequence + OWNED BY / identity dependencies) ──
+    // Identity sequences belong to their column (identity options); a plain
+    // serial sequence is recreated by the `serial` type. Every other sequence
+    // is emitted with its settings and ownership.
     let mut sequences: Vec<qail_core::migrate::Sequence> = Vec::new();
-    for row in seq_rows {
-        let name = row.text(0);
-        if is_internal_qail_relation(&name) {
-            continue;
-        }
-        // Skip sequences owned by table columns (auto-generated serial/identity).
-        if let Some(oid) = seq_name_to_oid.get(&name)
-            && owned_sequence_oids.contains(oid)
+    for seq in &sequence_catalog {
+        if is_internal_qail_relation(&seq.name)
+            || seq.identity
+            || plain_serial_sequences.contains_key(&seq.name)
         {
             continue;
         }
-        let start = row.get_string(1).and_then(|s| s.parse::<i64>().ok());
-        let increment = row.get_string(2).and_then(|s| s.parse::<i64>().ok());
-        let min_value = row.get_string(3).and_then(|s| s.parse::<i64>().ok());
-        let max_value = row.get_string(4).and_then(|s| s.parse::<i64>().ok());
-
+        let owned_by = match (&seq.owner, &seq.foreign_owner) {
+            (Some((table, column)), _) if base_tables.contains(table) => {
+                Some(format!("{table}.{column}"))
+            }
+            (Some((table, column)), _) => {
+                lossy.push(format!(
+                    "sequence {}: OWNED BY {}.{} (table not pulled) is not represented",
+                    seq.name, table, column
+                ));
+                None
+            }
+            (None, Some(foreign)) => {
+                lossy.push(format!(
+                    "sequence {}: OWNED BY {} (other schema) is not represented",
+                    seq.name, foreign
+                ));
+                None
+            }
+            (None, None) => None,
+        };
         sequences.push(qail_core::migrate::Sequence {
-            name,
-            data_type: None,
-            start,
-            increment,
-            min_value,
-            max_value,
-            cache: None,
-            cycle: false,
-            owned_by: None,
+            name: seq.name.clone(),
+            data_type: (seq.type_name != "bigint").then(|| seq.type_name.to_string()),
+            start: Some(seq.start),
+            increment: Some(seq.increment),
+            min_value: Some(seq.min_value),
+            max_value: Some(seq.max_value),
+            cache: (seq.cache != 1).then_some(seq.cache),
+            cycle: seq.cycle,
+            owned_by,
         });
     }
 
@@ -2090,39 +2199,39 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             .push((ordinal, arg_str));
     }
 
-    // 13c: Volatility from pg_proc (AST-native — no function calls needed)
-    let vol_cmd = Qail::get("pg_catalog.pg_proc")
-        .columns(["proname", "provolatile"])
-        .filter("pronamespace", Operator::Eq, public_namespace_oid.clone());
+    // 13c: Execution properties from pg_proc, joined by routine identity
+    // (`specific_name` = proname_oid) so overloads never share properties.
+    let mut function_catalog =
+        crate::pull_catalog::fetch_function_catalog(&mut driver, &public_namespace_oid).await?;
 
-    let vol_rows = driver.fetch_all(&vol_cmd).await;
-
-    let mut volatility_map: std::collections::HashMap<String, Option<String>> =
-        std::collections::HashMap::new();
-    if let Ok(rows) = vol_rows {
-        for row in rows {
-            let name = row.text(0);
-            let vol = match row.text(1).as_str() {
-                "i" => Some("immutable".to_string()),
-                "s" => Some("stable".to_string()),
-                _ => None,
-            };
-            volatility_map.insert(name, vol);
-        }
-    }
-
-    // Build functions
-    let mut functions: Vec<SchemaFunctionDef> = Vec::new();
+    // Build functions in creation (OID) order: SQL bodies may call earlier ones.
+    let mut functions: Vec<(u32, SchemaFunctionDef)> = Vec::new();
     for row in routine_rows {
         let name = row.text(0);
         let specific = row.text(1);
         let body = row.get_string(2).unwrap_or_default().trim().to_string();
         let language = row.text(3);
-        let returns = row.text(4);
 
         // Skip extension/internal functions that are not user-authored routine bodies.
-        if body.is_empty() || language.eq_ignore_ascii_case("c") {
+        if language.eq_ignore_ascii_case("c") || language.eq_ignore_ascii_case("internal") {
             continue;
+        }
+        let Some(catalog) = function_catalog.remove(&specific) else {
+            lossy.push(format!(
+                "function {name}: not a plain function (aggregate/window/procedure); not pulled"
+            ));
+            continue;
+        };
+        if body.is_empty() {
+            lossy.push(format!(
+                "function {name}: body is not visible to the pulling role; not pulled"
+            ));
+            continue;
+        }
+        if catalog.has_non_in_args {
+            lossy.push(format!(
+                "function {name}: OUT/INOUT/VARIADIC parameters are not represented; pulled with IN arguments only"
+            ));
         }
 
         // Assemble sorted args from param_map
@@ -2133,14 +2242,20 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             Vec::new()
         };
 
-        let volatility = volatility_map.get(&name).cloned().flatten();
-
-        let mut func = SchemaFunctionDef::new(&name, &returns, body);
+        let oid = specific
+            .rsplit('_')
+            .next()
+            .and_then(|oid| oid.parse::<u32>().ok())
+            .ok_or_else(|| anyhow!("Unexpected routine specific_name {:?}", specific))?;
+        let mut func = SchemaFunctionDef::new(&name, &catalog.returns, body);
         func.language = language;
         func.args = args;
-        func.volatility = volatility;
-        functions.push(func);
+        func.volatility = catalog.volatility;
+        func.options = catalog.options;
+        functions.push((oid, func));
     }
+    functions.sort_by_key(|(oid, _)| *oid);
+    let functions: Vec<SchemaFunctionDef> = functions.into_iter().map(|(_, f)| f).collect();
 
     // ── 14. Triggers (AST-native) ───────────────────────────────────────
     let trig_cmd = Qail::get("information_schema.triggers")
@@ -2150,6 +2265,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "action_timing",
             "event_manipulation",
             "action_statement",
+            "action_orientation",
+            "action_condition",
+            "action_reference_old_table",
+            "action_reference_new_table",
         ])
         .filter("trigger_schema", Operator::Eq, "public");
 
@@ -2185,40 +2304,121 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             .push(col);
     }
 
+    let trigger_catalog =
+        crate::pull_catalog::fetch_trigger_catalog(&mut driver, &public_namespace_oid).await?;
+
     // Group by (trigger_name, table) since each event is a separate row
-    let mut trigger_map: std::collections::HashMap<
-        (String, String),
-        (String, Vec<String>, String),
-    > = std::collections::HashMap::new();
+    struct PulledTrigger {
+        timing: String,
+        events: Vec<String>,
+        action: String,
+        for_each_row: bool,
+        condition: Option<String>,
+        old_table: Option<String>,
+        new_table: Option<String>,
+    }
+    let mut trigger_map: std::collections::BTreeMap<(String, String), PulledTrigger> =
+        std::collections::BTreeMap::new();
     for row in trig_rows {
         let name = row.text(0);
         let table = row.text(1);
         if !base_tables.contains(&table) {
+            if !trigger_map.contains_key(&(name.clone(), table.clone())) {
+                lossy.push(format!(
+                    "trigger {name} on {table}: relation is not a pulled table; not pulled"
+                ));
+                trigger_map.insert(
+                    (name, table),
+                    PulledTrigger {
+                        timing: String::new(),
+                        events: Vec::new(),
+                        action: String::new(),
+                        for_each_row: true,
+                        condition: None,
+                        old_table: None,
+                        new_table: None,
+                    },
+                );
+            }
             continue;
         }
-        let timing = row.text(2);
-        let event = row.text(3);
-        let action = row.text(4);
-
+        let orientation = row.text(5);
+        let for_each_row = match orientation.to_ascii_uppercase().as_str() {
+            "ROW" => true,
+            "STATEMENT" => false,
+            other => {
+                return Err(anyhow!(
+                    "Trigger {} on {} has unknown action_orientation {:?}",
+                    name,
+                    table,
+                    other
+                ));
+            }
+        };
         let entry = trigger_map
             .entry((name, table))
-            .or_insert_with(|| (timing, Vec::new(), action));
-        entry.1.push(event);
+            .or_insert_with(|| PulledTrigger {
+                timing: row.text(2),
+                events: Vec::new(),
+                action: row.text(4),
+                for_each_row,
+                condition: row
+                    .get_string(6)
+                    .map(|cond| strip_wrapping_parens(cond.trim()).to_string())
+                    .filter(|cond| !cond.is_empty()),
+                old_table: row.get_string(7).filter(|t| !t.is_empty()),
+                new_table: row.get_string(8).filter(|t| !t.is_empty()),
+            });
+        entry.events.push(row.text(3));
     }
 
     let mut triggers: Vec<SchemaTriggerDef> = Vec::new();
-    for ((name, table), (timing, events, action_stmt)) in trigger_map {
+    for ((name, table), pulled) in trigger_map {
+        if pulled.events.is_empty() {
+            continue; // relation not pulled (noted above)
+        }
+        let catalog = trigger_catalog
+            .get(&(name.clone(), table.clone()))
+            .copied()
+            .unwrap_or_default();
+        if catalog.constraint {
+            lossy.push(format!(
+                "trigger {name} on {table}: CONSTRAINT trigger (deferrable firing) is not represented; not pulled"
+            ));
+            continue;
+        }
+        if catalog.nargs > 0 {
+            lossy.push(format!(
+                "trigger {name} on {table}: trigger function arguments are not represented; not pulled"
+            ));
+            continue;
+        }
         // Extract function name from "EXECUTE FUNCTION func_name()" or "EXECUTE PROCEDURE func_name()"
-        let exec_fn = action_stmt
+        let exec_fn = pulled
+            .action
             .replace("EXECUTE FUNCTION ", "")
             .replace("EXECUTE PROCEDURE ", "")
             .trim_end_matches("()")
             .trim()
             .to_string();
 
+        // information_schema returns one row per event in no defined order.
+        let mut events = pulled.events;
+        events.sort_by_key(|event| {
+            ["INSERT", "UPDATE", "DELETE", "TRUNCATE"]
+                .iter()
+                .position(|known| event.eq_ignore_ascii_case(known))
+                .unwrap_or(usize::MAX)
+        });
+        events.dedup();
+
         let mut trig = SchemaTriggerDef::new(&name, &table, &exec_fn);
-        trig.timing = timing;
+        trig.timing = pulled.timing;
         trig.events = events.clone();
+        trig.for_each_row = pulled.for_each_row;
+        trig.condition = pulled.condition;
+        trig.old_table = pulled.old_table;
+        trig.new_table = pulled.new_table;
         if events.iter().any(|e| e.eq_ignore_ascii_case("UPDATE"))
             && let Some(mut cols) = trig_update_cols_map.remove(&(name.clone(), table.clone()))
         {
@@ -2499,6 +2699,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         index.method = method;
         // parse_index_parts skips the NULLS NOT DISTINCT clause; the catalog flag is authoritative.
         index.nulls_not_distinct = nulls_not_distinct_indexes.contains(&name);
+        index.storage_params = index_storage_params.get(&name).cloned().unwrap_or_default();
+        if let Some(tablespace) = row.get_string(3).filter(|t| !t.is_empty()) {
+            lossy.push(format!(
+                "index {name}: TABLESPACE {tablespace} is not represented"
+            ));
+        }
         schema.add_index(index);
     }
     for index in unique_constraint_indexes {
@@ -2521,7 +2727,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         );
     }
 
-    Ok(schema)
+    Ok((schema, lossy))
 }
 
 fn map_pg_column_type(
@@ -3058,29 +3264,41 @@ pub(crate) fn identity_generation_to_generated(
     }
 }
 
+/// `attgenerated` is `pg_attribute.attgenerated`: information_schema reports
+/// `is_generated = ALWAYS` for both stored (`s`) and virtual (`v`) columns.
 pub(crate) fn introspected_column_generation(
     is_identity: bool,
     identity_generation: Option<&str>,
     is_generated: Option<&str>,
     generation_expression: Option<&str>,
-) -> Option<Generated> {
+    attgenerated: &str,
+) -> Result<Option<Generated>> {
     if let Some(generated) = identity_generation_to_generated(is_identity, identity_generation) {
-        return Some(generated);
+        return Ok(Some(generated));
     }
 
-    let is_stored_generated = is_generated
+    let is_generated = is_generated
         .map(|value| value.trim().eq_ignore_ascii_case("ALWAYS"))
         .unwrap_or(false);
-    if !is_stored_generated {
-        return None;
+    if !is_generated {
+        return Ok(None);
     }
 
-    let expression = generation_expression?.trim();
-    if expression.is_empty() {
-        return None;
-    }
+    let Some(expression) = generation_expression
+        .map(str::trim)
+        .filter(|expression| !expression.is_empty())
+    else {
+        return Ok(None);
+    };
 
-    Some(Generated::AlwaysStored(expression.to_string()))
+    match attgenerated {
+        "s" => Ok(Some(Generated::AlwaysStored(expression.to_string()))),
+        "v" => Ok(Some(Generated::AlwaysVirtual(expression.to_string()))),
+        other => Err(anyhow!(
+            "Generated column has unknown pg_attribute.attgenerated {:?}",
+            other
+        )),
+    }
 }
 
 pub(crate) fn resolve_introspected_unique_constraint(
@@ -3104,14 +3322,14 @@ pub(crate) fn resolve_introspected_unique_constraint(
         });
     }
 
-    Some(IntrospectedUniqueConstraint::Multi(
+    Some(IntrospectedUniqueConstraint::Multi(Box::new(
         Index::new(
             constraint_name,
             table_name,
             columns.iter().map(|col| col.column.clone()).collect(),
         )
         .unique(),
-    ))
+    )))
 }
 
 /// PostgreSQL 18 temporal constraints (`pg_constraint.conperiod`) in `public`.
@@ -3885,12 +4103,30 @@ mod tests {
             None,
             Some("ALWAYS"),
             Some("first_name || ' ' || last_name"),
-        );
+            "s",
+        )
+        .expect("stored generation");
 
         assert!(matches!(
             generated,
             Some(Generated::AlwaysStored(expr)) if expr == "first_name || ' ' || last_name"
         ));
+    }
+
+    #[test]
+    fn maps_virtual_generated_expression_by_attgenerated() {
+        // information_schema says ALWAYS for both kinds; attgenerated decides.
+        let generated =
+            introspected_column_generation(false, None, Some("ALWAYS"), Some("(a * 2)"), "v")
+                .expect("virtual generation");
+        assert!(matches!(
+            generated,
+            Some(Generated::AlwaysVirtual(expr)) if expr == "(a * 2)"
+        ));
+
+        let err = introspected_column_generation(false, None, Some("ALWAYS"), Some("a"), "x")
+            .expect_err("unknown generation kind fails closed");
+        assert!(err.to_string().contains("attgenerated"), "{err}");
     }
 
     #[test]
@@ -3900,9 +4136,32 @@ mod tests {
             Some("BY DEFAULT"),
             Some("ALWAYS"),
             Some("ignored_expr"),
-        );
+            "",
+        )
+        .expect("identity");
 
         assert!(matches!(generated, Some(Generated::ByDefaultIdentity)));
+    }
+
+    #[test]
+    fn lossy_header_lists_every_unrepresented_detail() {
+        let qail = "# QAIL Schema\n";
+        assert_eq!(with_lossy_header(qail, &[]), qail);
+        let out = with_lossy_header(
+            qail,
+            &[
+                "schema 'other' is not pulled".to_string(),
+                "a\nb".to_string(),
+            ],
+        );
+        assert!(out.starts_with("# LOSSY PULL:"), "{out}");
+        assert!(
+            out.contains("#   - schema 'other' is not pulled\n"),
+            "{out}"
+        );
+        assert!(out.contains("#   - a b\n"), "{out}");
+        assert!(out.ends_with(qail), "{out}");
+        qail_core::migrate::parse_qail(&out).expect("header lines are comments");
     }
 
     #[test]

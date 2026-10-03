@@ -4,11 +4,11 @@
 //! Now with intent-awareness from MigrationHint.
 
 use super::schema::{
-    Generated, MigrationHint, Schema, check_expr_to_sql, foreign_key_to_sql, index_method_str,
-    multi_column_fk_to_alter_command,
+    Generated, MigrationHint, Schema, check_expr_to_sql, foreign_key_to_sql,
+    generated_column_constraint, index_method_str, multi_column_fk_to_alter_command,
 };
 use super::types::ColumnType;
-use crate::ast::{Action, ColumnGeneration, Constraint, Expr, IndexDef, Qail};
+use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
 use std::collections::BTreeSet;
 
 /// Return unsupported non-table object families present in a schema.
@@ -399,7 +399,7 @@ fn existing_column_generated_diffs(old: &Schema, new: &Schema) -> Vec<String> {
                 continue;
             };
 
-            if generated_signature(&old_col.generated) != generated_signature(&new_col.generated) {
+            if generated_signature(old_col) != generated_signature(new_col) {
                 changes.push(format!("{}.{}", table_name, new_col.name));
             }
         }
@@ -745,46 +745,103 @@ fn multi_column_fk_signature(fk: &super::schema::MultiColumnForeignKey) -> Strin
     }
 }
 
-fn generated_signature(generated: &Option<Generated>) -> Option<String> {
-    match generated {
+fn generated_signature(column: &super::schema::Column) -> Option<String> {
+    let identity_options = column.identity_options.to_sql();
+    match &column.generated {
         Some(Generated::AlwaysStored(expr)) => Some(format!("stored:{expr}")),
-        Some(Generated::AlwaysIdentity) => Some("identity:always".to_string()),
-        Some(Generated::ByDefaultIdentity) => Some("identity:by_default".to_string()),
+        Some(Generated::AlwaysVirtual(expr)) => Some(format!("virtual:{expr}")),
+        Some(Generated::AlwaysIdentity) => Some(format!("identity:always{identity_options}")),
+        Some(Generated::ByDefaultIdentity) => {
+            Some(format!("identity:by_default{identity_options}"))
+        }
         None => None,
     }
 }
 
-fn generated_to_constraint(generated: &Generated) -> Constraint {
-    match generated {
-        Generated::AlwaysStored(expr) => {
-            Constraint::Generated(ColumnGeneration::Stored(expr.clone()))
-        }
-        Generated::AlwaysIdentity => {
-            Constraint::Generated(ColumnGeneration::Stored("identity".to_string()))
-        }
-        Generated::ByDefaultIdentity => {
-            Constraint::Generated(ColumnGeneration::Stored("identity_by_default".to_string()))
+fn existing_column_collation_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+            if old_col.collation != new_col.collation {
+                changes.push(format!(
+                    "{}.{} ({:?} -> {:?})",
+                    table_name, new_col.name, old_col.collation, new_col.collation
+                ));
+            }
         }
     }
+
+    changes.sort();
+    changes
+}
+
+fn column_constraints_for_create(col: &super::schema::Column) -> Vec<Constraint> {
+    let mut constraints = Vec::new();
+    if let Some(generated) = &col.generated {
+        constraints.push(generated_column_constraint(
+            generated,
+            &col.identity_options,
+        ));
+    }
+    if let Some(collation) = &col.collation {
+        constraints.push(Constraint::Collate(collation.clone()));
+    }
+    constraints
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ComparableIndex {
     table: String,
-    columns: Vec<String>,
-    expressions: Vec<String>,
+    /// Key list as rendered into CREATE INDEX. Pull and the parser classify a
+    /// fragment such as `email text_pattern_ops` differently (expression vs
+    /// column) while the DDL is identical, so they are compared as one list.
+    key_parts: Vec<String>,
     unique: bool,
     method: &'static str,
     where_clause: Option<String>,
     include: Vec<String>,
     nulls_not_distinct: bool,
+    storage_params: Vec<String>,
+}
+
+fn normalized_storage_params(params: &[String]) -> Vec<String> {
+    let mut normalized = params
+        .iter()
+        .map(|param| match param.split_once('=') {
+            Some((name, value)) => {
+                let value = value.trim();
+                let value = value
+                    .strip_prefix('\'')
+                    .and_then(|v| v.strip_suffix('\''))
+                    .unwrap_or(value);
+                format!("{}={}", name.trim().to_ascii_lowercase(), value)
+            }
+            None => param.trim().to_string(),
+        })
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized
 }
 
 fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
     ComparableIndex {
         table: idx.table.clone(),
-        columns: normalized_index_fragments(&idx.columns),
-        expressions: normalized_index_fragments(&idx.expressions),
+        key_parts: normalized_index_fragments(if idx.expressions.is_empty() {
+            &idx.columns
+        } else {
+            &idx.expressions
+        }),
         unique: idx.unique,
         method: index_method_str(&idx.method),
         where_clause: idx
@@ -794,6 +851,7 @@ fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
             .map(|fragment| normalize_index_sql_fragment(&fragment)),
         include: normalized_index_fragments(&idx.include),
         nulls_not_distinct: idx.nulls_not_distinct,
+        storage_params: normalized_storage_params(&idx.storage_params),
     }
 }
 
@@ -806,13 +864,7 @@ fn index_difference_reasons(
     let mut reasons = Vec::new();
 
     push_index_diff(&mut reasons, "table", &old.table, &new.table);
-    push_index_diff(&mut reasons, "columns", &old.columns, &new.columns);
-    push_index_diff(
-        &mut reasons,
-        "expressions",
-        &old.expressions,
-        &new.expressions,
-    );
+    push_index_diff(&mut reasons, "columns", &old.key_parts, &new.key_parts);
     push_index_diff(&mut reasons, "unique", &old.unique, &new.unique);
     push_index_diff(&mut reasons, "method", &old.method, &new.method);
     push_index_diff(&mut reasons, "where", &old.where_clause, &new.where_clause);
@@ -822,6 +874,12 @@ fn index_difference_reasons(
         "nulls_not_distinct",
         &old.nulls_not_distinct,
         &new.nulls_not_distinct,
+    );
+    push_index_diff(
+        &mut reasons,
+        "storage_params",
+        &old.storage_params,
+        &new.storage_params,
     );
 
     reasons
@@ -1301,6 +1359,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
         ));
     }
 
+    let collation_diffs = existing_column_collation_diffs(old, new);
+    if !collation_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely alter column collations on existing columns: {}. \
+             Use an explicit migration for ALTER COLUMN ... TYPE ... COLLATE (it rewrites dependent indexes).",
+            collation_diffs.join(", ")
+        ));
+    }
+
     let rls_downgrades = existing_table_rls_downgrades(old, new);
     if !rls_downgrades.is_empty() {
         return Err(format!(
@@ -1460,9 +1527,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         constraints.push(Constraint::Check(vec![check_sql]));
                     }
                 }
-                if let Some(generated) = &col.generated {
-                    constraints.push(generated_to_constraint(generated));
-                }
+                constraints.extend(column_constraints_for_create(col));
 
                 Expr::Def {
                     name: col.name.clone(),
@@ -1594,9 +1659,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                                 constraints.push(Constraint::Check(vec![check_sql]));
                             }
                         }
-                        if let Some(generated) = &col.generated {
-                            constraints.push(generated_to_constraint(generated));
-                        }
+                        constraints.extend(column_constraints_for_create(col));
                         // SERIAL is a pseudo-type only valid in CREATE TABLE
                         // For ALTER TABLE ADD COLUMN, convert to INTEGER/BIGINT
                         let data_type = match &col.data_type {
@@ -1775,6 +1838,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     concurrently: new_idx.concurrently,
                     where_clause: new_idx.where_clause.as_ref().map(check_expr_to_sql),
                     nulls_not_distinct: new_idx.nulls_not_distinct,
+                    storage_params: new_idx.storage_params.clone(),
                 }),
                 ..Default::default()
             });
@@ -2973,7 +3037,7 @@ table agents {
         assert!(constraints.iter().any(|constraint| {
             matches!(
                 constraint,
-                Constraint::Generated(ColumnGeneration::Stored(expr))
+                Constraint::Generated(crate::ast::ColumnGeneration::Stored(expr))
                     if expr == "first_name || ' ' || last_name"
             )
         }));

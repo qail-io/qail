@@ -515,6 +515,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -531,6 +532,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };

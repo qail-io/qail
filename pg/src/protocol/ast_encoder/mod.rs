@@ -231,6 +231,7 @@ impl AstEncoder {
             Action::CommentOn => ddl::encode_comment_on(cmd, sql_buf),
             Action::CreateSequence => ddl::encode_create_sequence(cmd, sql_buf)?,
             Action::DropSequence => ddl::encode_drop_sequence(cmd, sql_buf),
+            Action::AlterSequence => ddl::encode_alter_sequence(cmd, sql_buf)?,
             Action::CreateEnum => ddl::encode_create_enum(cmd, sql_buf),
             Action::DropEnum => ddl::encode_drop_enum(cmd, sql_buf),
             Action::AlterEnumAddValue => ddl::encode_alter_enum_add_value(cmd, sql_buf),
@@ -330,6 +331,7 @@ impl AstEncoder {
             Action::CommentOn => ddl::encode_comment_on(cmd, &mut sql_buf),
             Action::CreateSequence => ddl::encode_create_sequence(cmd, &mut sql_buf)?,
             Action::DropSequence => ddl::encode_drop_sequence(cmd, &mut sql_buf),
+            Action::AlterSequence => ddl::encode_alter_sequence(cmd, &mut sql_buf)?,
             Action::CreateEnum => ddl::encode_create_enum(cmd, &mut sql_buf),
             Action::DropEnum => ddl::encode_drop_enum(cmd, &mut sql_buf),
             Action::AlterEnumAddValue => ddl::encode_alter_enum_add_value(cmd, &mut sql_buf),
@@ -3098,6 +3100,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3220,6 +3223,7 @@ mod tests {
                 concurrently: false,
                 where_clause: Some("active = true".to_string()),
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3240,6 +3244,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3260,6 +3265,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3280,6 +3286,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3300,6 +3307,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3322,6 +3330,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3344,6 +3353,7 @@ mod tests {
                 concurrently: false,
                 where_clause: Some("active = true; DROP TABLE users; --".to_string()),
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3366,6 +3376,7 @@ mod tests {
                 concurrently: false,
                 where_clause: Some("active = true\0".to_string()),
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3388,6 +3399,7 @@ mod tests {
                 concurrently: true,
                 where_clause: Some("deleted_at IS NULL".to_string()),
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -3408,6 +3420,7 @@ mod tests {
                 concurrently: false,
                 where_clause: None,
                 nulls_not_distinct: false,
+                storage_params: vec![],
             }),
             ..Default::default()
         };
@@ -4134,6 +4147,7 @@ mod tests {
                 body: "BEGIN RETURN v + 1; END;".to_string(),
                 language: Some("plpgsql".to_string()),
                 volatility: None,
+                options: Default::default(),
             }),
             ..Default::default()
         };
@@ -4156,6 +4170,7 @@ mod tests {
                 body: "BEGIN RETURN; END;".to_string(),
                 language: Some("plpgsql".to_string()),
                 volatility: None,
+                options: Default::default(),
             }),
             ..Default::default()
         };
@@ -4178,6 +4193,7 @@ mod tests {
                 body: "BEGIN RETURN; END;".to_string(),
                 language: Some("plpgsql".to_string()),
                 volatility: None,
+                options: Default::default(),
             }),
             ..Default::default()
         };
@@ -4200,6 +4216,7 @@ mod tests {
                 body: "BEGIN RETURN; END;".to_string(),
                 language: Some("plpgsql".to_string()),
                 volatility: Some("stable; DROP TABLE users".to_string()),
+                options: Default::default(),
             }),
             ..Default::default()
         };
@@ -4253,6 +4270,7 @@ mod tests {
                 body: "BEGIN RAISE NOTICE $$boom$$; END;".to_string(),
                 language: Some("plpgsql".to_string()),
                 volatility: None,
+                options: Default::default(),
             }),
             ..Default::default()
         };

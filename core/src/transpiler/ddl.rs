@@ -697,6 +697,10 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
         {
             let sql_type = data_type_to_sql(data_type);
             let mut line = format!("    {} {}", generator.quote_identifier(name), sql_type);
+            match column_collate_sql(constraints) {
+                Ok(collate) => line.push_str(&collate),
+                Err(err) => return err,
+            }
 
             // Default to NOT NULL unless Nullable (?) constraint is present
             let is_nullable = constraints.contains(&Constraint::Nullable);
@@ -722,6 +726,12 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
                 }
                 if let Constraint::Generated(generation) = constraint {
                     match generation {
+                        ColumnGeneration::Identity {
+                            by_default,
+                            options,
+                        } => {
+                            line.push_str(&identity_generation_sql(*by_default, options));
+                        }
                         ColumnGeneration::Stored(expr) if expr == "identity" => {
                             line.push_str(" GENERATED ALWAYS AS IDENTITY");
                         }
@@ -939,11 +949,16 @@ pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
                 sql.push_str(&include_cols.join(", "));
                 sql.push(')');
             }
+            // PostgreSQL's order: INCLUDE, NULLS NOT DISTINCT, WITH (...), WHERE.
             if idx.nulls_not_distinct {
                 if !idx.unique {
                     return "/* ERROR: NULLS NOT DISTINCT requires a UNIQUE index */".to_string();
                 }
                 sql.push_str(" NULLS NOT DISTINCT");
+            }
+            match index_storage_params_sql(&idx.storage_params) {
+                Ok(with) => sql.push_str(&with),
+                Err(_) => return "/* ERROR: Invalid index storage parameter */".to_string(),
             }
             if let Some(where_clause) = &idx.where_clause {
                 if where_clause.trim().is_empty()
@@ -1094,6 +1109,21 @@ pub fn build_alter_column(cmd: &Qail, dialect: Dialect) -> String {
     }
 }
 
+/// Column `COLLATE` from the constraint list; more than one is rejected.
+fn column_collate_sql(constraints: &[Constraint]) -> Result<String, String> {
+    let mut collations = constraints.iter().filter_map(|c| match c {
+        Constraint::Collate(name) => Some(name),
+        _ => None,
+    });
+    let Some(collation) = collations.next() else {
+        return Ok(String::new());
+    };
+    if collations.next().is_some() {
+        return Err("/* ERROR: Multiple column collations */".to_string());
+    }
+    collate_clause_sql(collation).map_err(|_| "/* ERROR: Invalid column collation */".to_string())
+}
+
 /// Generate ALTER TABLE ADD COLUMN SQL (for migrations).
 pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
@@ -1114,6 +1144,10 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
         let quoted_name = generator.quote_identifier(name);
 
         let mut col_def = format!("{} {}", quoted_name, sql_type);
+        match column_collate_sql(constraints) {
+            Ok(collate) => col_def.push_str(&collate),
+            Err(err) => return err,
+        }
 
         let is_nullable = constraints.contains(&Constraint::Nullable);
         if !is_nullable {
@@ -1138,6 +1172,12 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
             }
             if let Constraint::Generated(generation) = constraint {
                 match generation {
+                    ColumnGeneration::Identity {
+                        by_default,
+                        options,
+                    } => {
+                        col_def.push_str(&identity_generation_sql(*by_default, options));
+                    }
                     ColumnGeneration::Stored(expr) if expr == "identity" => {
                         col_def.push_str(" GENERATED ALWAYS AS IDENTITY");
                     }
@@ -1414,6 +1454,28 @@ pub fn build_create_sequence(cmd: &Qail, dialect: Dialect) -> String {
     sql
 }
 
+/// Generate ALTER SEQUENCE SQL (same option grammar as CREATE SEQUENCE).
+pub fn build_alter_sequence(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    if cmd.columns.is_empty() {
+        return "/* ERROR: ALTER SEQUENCE requires at least one option */".to_string();
+    }
+    let mut sql = format!("ALTER SEQUENCE {}", generator.quote_identifier(&cmd.table));
+    for col in &cmd.columns {
+        match col {
+            Expr::Named(opt) => {
+                let Some(option) = sequence_option_to_sql(opt, generator.as_ref()) else {
+                    return "/* ERROR: Invalid sequence option */".to_string();
+                };
+                sql.push(' ');
+                sql.push_str(&option);
+            }
+            _ => return "/* ERROR: Invalid sequence option */".to_string(),
+        }
+    }
+    sql
+}
+
 /// Generate DROP SEQUENCE SQL.
 pub fn build_drop_sequence(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
@@ -1481,4 +1543,269 @@ pub fn build_alter_enum_add_value(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     parts.join(";\n")
+}
+
+// ==================== Shared DDL fragments ====================
+//
+// The SQL preview (this module) and the native encoder (`qail_pg`) both call
+// these, so a property is either rendered identically by both or rejected by
+// both. Errors are plain messages; callers wrap them in their own error form.
+
+fn is_plain_sql_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// ` COLLATE "name"` for a column definition. Every dotted part is
+/// double-quoted because collation names such as `C` are case-sensitive.
+pub fn collate_clause_sql(collation: &str) -> Result<String, String> {
+    let collation = collation.trim();
+    if collation.is_empty() || collation.contains('\0') {
+        return Err(format!("invalid column collation: {collation:?}"));
+    }
+    let parts = split_collation_name(collation)
+        .ok_or_else(|| format!("invalid column collation: {collation:?}"))?;
+    Ok(format!(
+        " COLLATE {}",
+        parts
+            .iter()
+            .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(".")
+    ))
+}
+
+/// Split `schema.name` / `"Name"` / `name` into unquoted parts (at most two).
+fn split_collation_name(raw: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = raw.chars().peekable();
+    let mut quoted_part = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                if !current.is_empty() || quoted_part {
+                    return None;
+                }
+                quoted_part = true;
+                loop {
+                    match chars.next()? {
+                        '"' if chars.peek() == Some(&'"') => {
+                            chars.next();
+                            current.push('"');
+                        }
+                        '"' => break,
+                        other => current.push(other),
+                    }
+                }
+            }
+            '.' => {
+                if current.is_empty() {
+                    return None;
+                }
+                parts.push(std::mem::take(&mut current));
+                quoted_part = false;
+            }
+            c if !quoted_part && (c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) => {
+                current.push(c)
+            }
+            _ => return None,
+        }
+    }
+    if current.is_empty() {
+        return None;
+    }
+    parts.push(current);
+    (parts.len() <= 2).then_some(parts)
+}
+
+/// ` GENERATED {ALWAYS|BY DEFAULT} AS IDENTITY [(options)]`.
+pub fn identity_generation_sql(by_default: bool, options: &IdentityOptions) -> String {
+    let mut sql = if by_default {
+        " GENERATED BY DEFAULT AS IDENTITY".to_string()
+    } else {
+        " GENERATED ALWAYS AS IDENTITY".to_string()
+    };
+    let opts = options.to_sql();
+    if !opts.is_empty() {
+        sql.push(' ');
+        sql.push_str(&opts);
+    }
+    sql
+}
+
+/// ` WITH (name = 'value', ...)` for index storage parameters given as `name=value`.
+pub fn index_storage_params_sql(params: &[String]) -> Result<String, String> {
+    if params.is_empty() {
+        return Ok(String::new());
+    }
+    let mut rendered = Vec::with_capacity(params.len());
+    for param in params {
+        let Some((name, value)) = param.split_once('=') else {
+            return Err(format!("invalid index storage parameter: {param:?}"));
+        };
+        let name = name.trim();
+        let value = value.trim();
+        let name_ok = !name.is_empty() && name.split('.').all(is_plain_sql_name);
+        if !name_ok || value.is_empty() || value.contains('\0') {
+            return Err(format!("invalid index storage parameter: {param:?}"));
+        }
+        let value = value
+            .strip_prefix('\'')
+            .and_then(|v| v.strip_suffix('\''))
+            .map(|v| v.replace("''", "'"))
+            .unwrap_or_else(|| value.to_string());
+        rendered.push(format!(
+            "{} = '{}'",
+            name.to_ascii_lowercase(),
+            value.replace('\'', "''")
+        ));
+    }
+    Ok(format!(" WITH ({})", rendered.join(", ")))
+}
+
+fn planner_estimate_sql(value: &str, label: &str) -> Result<String, String> {
+    let value = value.trim();
+    match value.parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(value.to_string()),
+        _ => Err(format!("invalid function {label}: {value:?}")),
+    }
+}
+
+/// Function properties after volatility: STRICT, SECURITY DEFINER, LEAKPROOF,
+/// PARALLEL, COST, ROWS, and SET clauses (leading space included).
+pub fn function_options_sql(options: &FunctionOptions) -> Result<String, String> {
+    let mut sql = String::new();
+    if options.strict {
+        sql.push_str(" STRICT");
+    }
+    if options.security_definer {
+        sql.push_str(" SECURITY DEFINER");
+    }
+    if options.leakproof {
+        sql.push_str(" LEAKPROOF");
+    }
+    if let Some(parallel) = &options.parallel {
+        let parallel = match parallel.trim().to_ascii_lowercase().as_str() {
+            "safe" => "SAFE",
+            "restricted" => "RESTRICTED",
+            "unsafe" => "UNSAFE",
+            _ => return Err(format!("invalid function parallel mode: {parallel:?}")),
+        };
+        sql.push_str(" PARALLEL ");
+        sql.push_str(parallel);
+    }
+    if let Some(cost) = &options.cost {
+        sql.push_str(" COST ");
+        sql.push_str(&planner_estimate_sql(cost, "cost")?);
+    }
+    if let Some(rows) = &options.rows {
+        sql.push_str(" ROWS ");
+        sql.push_str(&planner_estimate_sql(rows, "rows")?);
+    }
+    for setting in &options.config {
+        sql.push_str(" SET ");
+        sql.push_str(&function_setting_sql(setting)?);
+    }
+    Ok(sql)
+}
+
+/// Validate one `name TO value` / `name = value` SET clause.
+fn function_setting_sql(setting: &str) -> Result<String, String> {
+    let setting = setting.trim();
+    let err = || format!("invalid function SET clause: {setting:?}");
+    if setting.contains('\n') || setting.contains('\r') {
+        return Err(err());
+    }
+    let (name, rest) = setting.split_once(char::is_whitespace).ok_or_else(err)?;
+    if name.is_empty() || !name.split('.').all(is_plain_sql_name) {
+        return Err(err());
+    }
+    let rest = rest.trim_start();
+    let value = if let Some(value) = rest.strip_prefix("TO ") {
+        value
+    } else if let Some(value) = rest.strip_prefix("to ") {
+        value
+    } else if let Some(value) = rest.strip_prefix('=') {
+        value
+    } else {
+        return Err(err());
+    };
+    let value = value.trim();
+    if value.is_empty() || contains_unquoted_statement_delimiter(value) {
+        return Err(err());
+    }
+    Ok(format!("{} TO {}", name.to_ascii_lowercase(), value))
+}
+
+/// ` REFERENCING OLD TABLE AS a NEW TABLE AS b` (empty when neither is set).
+pub fn trigger_referencing_sql(
+    old_table: Option<&str>,
+    new_table: Option<&str>,
+) -> Result<String, String> {
+    if old_table.is_none() && new_table.is_none() {
+        return Ok(String::new());
+    }
+    let mut sql = " REFERENCING".to_string();
+    for (label, name) in [("OLD", old_table), ("NEW", new_table)] {
+        let Some(name) = name else { continue };
+        let name = name.trim();
+        if !is_plain_sql_name(name) {
+            return Err(format!("invalid trigger transition table name: {name:?}"));
+        }
+        sql.push_str(&format!(
+            " {label} TABLE AS {}",
+            super::escape_identifier(name)
+        ));
+    }
+    Ok(sql)
+}
+
+/// ` WHEN (condition)` (empty when no condition is set).
+pub fn trigger_when_sql(condition: Option<&str>) -> Result<String, String> {
+    let Some(condition) = condition else {
+        return Ok(String::new());
+    };
+    let condition = condition.trim();
+    if condition.is_empty()
+        || condition.contains('\0')
+        || contains_unquoted_statement_delimiter(condition)
+        || !parens_balanced(condition)
+    {
+        return Err(format!("invalid trigger WHEN condition: {condition:?}"));
+    }
+    Ok(format!(" WHEN ({condition})"))
+}
+
+fn parens_balanced(input: &str) -> bool {
+    let mut depth = 0i64;
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                if chars.peek() == Some(&q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0 && quote.is_none()
 }

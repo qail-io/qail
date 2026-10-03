@@ -1013,15 +1013,86 @@ pub enum Constraint {
     References(String),
     /// GENERATED column.
     Generated(ColumnGeneration),
+    /// Column-definition `COLLATE` (collation name, unquoted).
+    Collate(String),
 }
 
-/// Generated column type (STORED or VIRTUAL)
+/// Generated column type (STORED, VIRTUAL, or IDENTITY with sequence options)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColumnGeneration {
     /// GENERATED ALWAYS AS (expr) STORED - computed and stored
     Stored(String),
     /// GENERATED ALWAYS AS (expr) - computed at query time (default in Postgres 18+)
     Virtual(String),
+    /// GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY ( sequence options ).
+    ///
+    /// Plain identity without options is still written as
+    /// `Stored("identity")` / `Stored("identity_by_default")`.
+    Identity {
+        /// BY DEFAULT instead of ALWAYS.
+        by_default: bool,
+        /// Identity sequence options.
+        options: IdentityOptions,
+    },
+}
+
+/// Sequence options of an identity column (unset fields use PostgreSQL defaults).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdentityOptions {
+    /// START WITH.
+    #[serde(default)]
+    pub start: Option<i64>,
+    /// INCREMENT BY.
+    #[serde(default)]
+    pub increment: Option<i64>,
+    /// MINVALUE.
+    #[serde(default)]
+    pub min_value: Option<i64>,
+    /// MAXVALUE.
+    #[serde(default)]
+    pub max_value: Option<i64>,
+    /// CACHE.
+    #[serde(default)]
+    pub cache: Option<i64>,
+    /// CYCLE.
+    #[serde(default)]
+    pub cycle: bool,
+}
+
+impl IdentityOptions {
+    /// True when no option is set.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Render as a parenthesized PostgreSQL sequence option list, or an empty
+    /// string when no option is set.
+    pub fn to_sql(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(v) = self.start {
+            parts.push(format!("START WITH {v}"));
+        }
+        if let Some(v) = self.increment {
+            parts.push(format!("INCREMENT BY {v}"));
+        }
+        if let Some(v) = self.min_value {
+            parts.push(format!("MINVALUE {v}"));
+        }
+        if let Some(v) = self.max_value {
+            parts.push(format!("MAXVALUE {v}"));
+        }
+        if let Some(v) = self.cache {
+            parts.push(format!("CACHE {v}"));
+        }
+        if self.cycle {
+            parts.push("CYCLE".to_string());
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("({})", parts.join(" "))
+        }
+    }
 }
 
 /// Window frame definition for window functions
@@ -1213,7 +1284,21 @@ impl std::fmt::Display for Constraint {
             Constraint::Generated(generation) => match generation {
                 ColumnGeneration::Stored(expr) => write!(f, "gen({})", expr),
                 ColumnGeneration::Virtual(expr) => write!(f, "vgen({})", expr),
+                ColumnGeneration::Identity {
+                    by_default,
+                    options,
+                } => write!(
+                    f,
+                    "identity({}{})",
+                    if *by_default { "by_default" } else { "always" },
+                    if options.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", options.to_sql())
+                    }
+                ),
             },
+            Constraint::Collate(name) => write!(f, "collate({})", name),
         }
     }
 }
@@ -1242,6 +1327,9 @@ pub struct IndexDef {
     /// `NULLS NOT DISTINCT` (PostgreSQL 15+): NULL keys collide in a unique index.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nulls_not_distinct: bool,
+    /// Storage parameters rendered as `WITH (name = 'value', ...)`, each `name=value`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage_params: Vec<String>,
 }
 
 /// Foreign-key semantics beyond columns, actions, and deferral.
@@ -1419,6 +1507,43 @@ pub struct FunctionDef {
     pub language: Option<String>,
     /// Volatility modifier (IMMUTABLE/STABLE/VOLATILE), if specified.
     pub volatility: Option<String>,
+    /// Execution properties beyond volatility (STRICT, SECURITY DEFINER, SET, ...).
+    #[serde(default, skip_serializing_if = "FunctionOptions::is_empty")]
+    pub options: FunctionOptions,
+}
+
+/// Function execution properties. Unset fields keep PostgreSQL defaults
+/// (CALLED ON NULL INPUT, SECURITY INVOKER, NOT LEAKPROOF, PARALLEL UNSAFE).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FunctionOptions {
+    /// STRICT (RETURNS NULL ON NULL INPUT).
+    #[serde(default)]
+    pub strict: bool,
+    /// SECURITY DEFINER.
+    #[serde(default)]
+    pub security_definer: bool,
+    /// LEAKPROOF.
+    #[serde(default)]
+    pub leakproof: bool,
+    /// PARALLEL SAFE / RESTRICTED / UNSAFE.
+    #[serde(default)]
+    pub parallel: Option<String>,
+    /// COST planner estimate (decimal text).
+    #[serde(default)]
+    pub cost: Option<String>,
+    /// ROWS planner estimate for set-returning functions (decimal text).
+    #[serde(default)]
+    pub rows: Option<String>,
+    /// SET clauses, each `name TO value` with the value already in SQL form.
+    #[serde(default)]
+    pub config: Vec<String>,
+}
+
+impl FunctionOptions {
+    /// True when every property is at its PostgreSQL default.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Trigger timing (BEFORE or AFTER)
@@ -1462,4 +1587,13 @@ pub struct TriggerDef {
     pub for_each_row: bool,
     /// Function to execute.
     pub execute_function: String,
+    /// WHEN condition (expression without the surrounding parentheses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// REFERENCING OLD TABLE AS name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_table: Option<String>,
+    /// REFERENCING NEW TABLE AS name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_table: Option<String>,
 }

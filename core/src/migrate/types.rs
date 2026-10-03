@@ -126,6 +126,27 @@ impl ColumnType {
         )
     }
 
+    /// Native variant whose value mapping (Rust type, decoder) also fits this
+    /// exact raw type, e.g. `JSON` → `Jsonb`, `TIMESTAMP(3)` → `Timestamp`.
+    /// Returns `self` unchanged when there is no closer native variant.
+    pub fn native_family(&self) -> Self {
+        let Self::Range(raw) = self else {
+            return self.clone();
+        };
+        let upper = raw.to_ascii_uppercase();
+        let base = upper.split('(').next().unwrap_or(&upper).trim();
+        match base {
+            "JSON" => Self::Jsonb,
+            "REAL" => Self::Float,
+            "TIMESTAMP" => Self::Timestamp,
+            "TIMESTAMPTZ" => Self::Timestamptz,
+            "TIME" => Self::Time,
+            "CHARACTER" | "BPCHAR" => Self::Varchar(None),
+            _ if base.starts_with("INTERVAL") => Self::Interval,
+            _ => self.clone(),
+        }
+    }
+
     /// Check if this type supports indexing.
     /// Most types support indexing except large binary/JSON types.
     pub const fn supports_indexing(&self) -> bool {
@@ -271,26 +292,37 @@ impl std::str::FromStr for ColumnType {
             return Err(());
         }
 
+        if let Some(exact) = parse_exact_raw_type(&lower) {
+            return Ok(Self::Range(exact));
+        }
+
         match lower.as_str() {
             "uuid" => Ok(Self::Uuid),
             "text" | "string" | "str" => Ok(Self::Text),
-            "varchar" | "character varying" | "bpchar" | "char" | "character" => {
-                Ok(Self::Varchar(None))
-            }
+            "varchar" | "character varying" => Ok(Self::Varchar(None)),
+            // Fixed-length character types are distinct from VARCHAR; bare
+            // `char` / `character` is char(1) in PostgreSQL.
+            "char" | "character" => Ok(Self::Range("CHARACTER(1)".to_string())),
+            "bpchar" => Ok(Self::Range("BPCHAR".to_string())),
             "smallint" | "int2" => Ok(Self::Range("SMALLINT".to_string())),
             "int" | "integer" | "i32" | "int4" => Ok(Self::Int),
             "bigint" | "i64" | "int8" => Ok(Self::BigInt),
             "serial" => Ok(Self::Serial),
             "bigserial" => Ok(Self::BigSerial),
             "bool" | "boolean" => Ok(Self::Bool),
-            "float" | "f64" | "double" | "double precision" | "float8" | "real" | "float4" => {
-                Ok(Self::Float)
-            }
+            "float" | "f64" | "double" | "double precision" | "float8" => Ok(Self::Float),
+            // REAL (float4) and JSON keep their identity: they are not
+            // DOUBLE PRECISION / JSONB.
+            "real" | "float4" => Ok(Self::Range("REAL".to_string())),
             "decimal" | "numeric" | "dec" => Ok(Self::Decimal(None)),
-            "jsonb" | "json" => Ok(Self::Jsonb),
-            "timestamp" => Ok(Self::Timestamp),
+            "jsonb" => Ok(Self::Jsonb),
+            "json" => Ok(Self::Range("JSON".to_string())),
+            "timestamp" | "timestamp without time zone" => Ok(Self::Timestamp),
             "timestamptz" | "timestamp with time zone" => Ok(Self::Timestamptz),
             "time" | "time without time zone" => Ok(Self::Time),
+            "timetz" | "time with time zone" => Ok(Self::Range("TIMETZ".to_string())),
+            "bit" => Ok(Self::Range("BIT".to_string())),
+            "varbit" | "bit varying" => Ok(Self::Range("VARBIT".to_string())),
             "date" => Ok(Self::Date),
             "bytea" | "bytes" => Ok(Self::Bytea),
             "interval" => Ok(Self::Interval),
@@ -304,6 +336,97 @@ impl std::str::FromStr for ColumnType {
             _ => Err(()),
         }
     }
+}
+
+/// Typmod'd types kept as exact raw contracts (lowercase input → canonical
+/// uppercase spelling). Returns `None` for anything else.
+fn parse_exact_raw_type(lower: &str) -> Option<String> {
+    fn paren_number<'a>(s: &'a str, prefix: &str) -> Option<(&'a str, &'a str)> {
+        let rest = s.strip_prefix(prefix)?.strip_prefix('(')?;
+        let (num, tail) = rest.split_once(')')?;
+        let num = num.trim();
+        (!num.is_empty() && num.chars().all(|c| c.is_ascii_digit())).then_some((num, tail))
+    }
+    fn precision(num: &str) -> Option<&str> {
+        num.parse::<u8>().ok().filter(|p| *p <= 6).map(|_| num)
+    }
+
+    if let Some((p, tail)) = paren_number(lower, "timestamp") {
+        let p = precision(p)?;
+        return match tail.trim() {
+            "" | "without time zone" => Some(format!("TIMESTAMP({p})")),
+            "with time zone" => Some(format!("TIMESTAMPTZ({p})")),
+            _ => None,
+        };
+    }
+    if let Some((p, "")) = paren_number(lower, "timestamptz") {
+        return Some(format!("TIMESTAMPTZ({})", precision(p)?));
+    }
+    if let Some((p, tail)) = paren_number(lower, "time") {
+        let p = precision(p)?;
+        return match tail.trim() {
+            "" | "without time zone" => Some(format!("TIME({p})")),
+            "with time zone" => Some(format!("TIMETZ({p})")),
+            _ => None,
+        };
+    }
+    if let Some((p, "")) = paren_number(lower, "timetz") {
+        return Some(format!("TIMETZ({})", precision(p)?));
+    }
+    if let Some((n, "")) = paren_number(lower, "bit") {
+        return n
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|_| format!("BIT({n})"));
+    }
+    if let Some((n, "")) =
+        paren_number(lower, "varbit").or_else(|| paren_number(lower, "bit varying"))
+    {
+        return n
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|_| format!("VARBIT({n})"));
+    }
+    if let Some((p, "")) = paren_number(lower, "interval") {
+        return Some(format!("INTERVAL({})", precision(p)?));
+    }
+    if let Some(fields) = lower.strip_prefix("interval ") {
+        const FIELDS: &[&str] = &[
+            "year to month",
+            "day to hour",
+            "day to minute",
+            "day to second",
+            "hour to minute",
+            "hour to second",
+            "minute to second",
+            "year",
+            "month",
+            "day",
+            "hour",
+            "minute",
+            "second",
+        ];
+        let fields = fields.trim();
+        let (fields, p) = match fields.strip_suffix(')').and_then(|f| f.rsplit_once('(')) {
+            Some((f, p)) => (f.trim(), Some(precision(p.trim())?)),
+            None => (fields, None),
+        };
+        if !FIELDS.contains(&fields) {
+            return None;
+        }
+        // Only SECOND-ending fields accept a precision.
+        if p.is_some() && !fields.ends_with("second") {
+            return None;
+        }
+        let mut out = format!("INTERVAL {}", fields.to_ascii_uppercase());
+        if let Some(p) = p {
+            out.push_str(&format!("({p})"));
+        }
+        return Some(out);
+    }
+    None
 }
 
 fn is_custom_array_type_name(input: &str) -> bool {

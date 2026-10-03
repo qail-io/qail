@@ -110,15 +110,28 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
                     )
                 })
                 .unwrap_or_else(|| "-".to_string());
+            let generated = match &col.generated {
+                Some(Generated::AlwaysStored(_)) => "stored".to_string(),
+                Some(Generated::AlwaysVirtual(_)) => "virtual".to_string(),
+                Some(Generated::AlwaysIdentity) => {
+                    format!("identity{}", col.identity_options.to_sql())
+                }
+                Some(Generated::ByDefaultIdentity) => {
+                    format!("identity_by_default{}", col.identity_options.to_sql())
+                }
+                None => "-".to_string(),
+            };
             lines.push(format!(
-                "C|{}|{}|{}|nullable={}|pk={}|unique={}|fk={}",
+                "C|{}|{}|{}|nullable={}|pk={}|unique={}|fk={}|gen={}|collate={}",
                 table.name,
                 col.name,
                 col.data_type.to_pg_type(),
                 effective_nullable(&col),
                 col.primary_key,
                 col.unique,
-                fk
+                fk,
+                generated,
+                col.collation.as_deref().unwrap_or("-")
             ));
         }
 
@@ -165,7 +178,7 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
             continue;
         }
         lines.push(format!(
-            "I|{}|{}|unique={}|cols={}",
+            "I|{}|{}|unique={}|cols={}|with={}",
             idx.table,
             idx.name,
             idx.unique,
@@ -173,7 +186,8 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
                 .iter()
                 .map(|c| normalize_ident(c))
                 .collect::<Vec<_>>()
-                .join(",")
+                .join(","),
+            normalized_storage_params(&idx.storage_params)
         ));
     }
 
@@ -254,6 +268,7 @@ fn verify_indexes(expected: &Schema, live: &Schema) -> Result<()> {
             idx.name.as_str(),
             idx.unique,
             &idx.columns,
+            &idx.storage_params,
         );
         live_index_keys.insert(key);
     }
@@ -270,6 +285,7 @@ fn verify_indexes(expected: &Schema, live: &Schema) -> Result<()> {
             idx.name.as_str(),
             idx.unique,
             &idx.columns,
+            &idx.storage_params,
         );
         if !live_index_keys.contains(&key) {
             missing.push(format!(
@@ -388,17 +404,33 @@ async fn smoke_read_checks(
     Ok(())
 }
 
-fn index_key(table: &str, name: &str, unique: bool, cols: &[String]) -> String {
+fn index_key(
+    table: &str,
+    name: &str,
+    unique: bool,
+    cols: &[String],
+    storage_params: &[String],
+) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|with={}",
         normalize_ident(table),
         normalize_ident(name),
         unique,
         cols.iter()
             .map(|c| normalize_ident(c))
             .collect::<Vec<_>>()
-            .join(",")
+            .join(","),
+        normalized_storage_params(storage_params)
     )
+}
+
+fn normalized_storage_params(params: &[String]) -> String {
+    let mut params = params
+        .iter()
+        .map(|param| param.replace([' ', '\''], "").to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    params.sort();
+    params.join(",")
 }
 
 fn effective_nullable(col: &Column) -> bool {

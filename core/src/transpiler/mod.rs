@@ -370,14 +370,18 @@ impl ToSql for Qail {
                     } else {
                         String::new()
                     };
+                    let Ok(options) = ddl::function_options_sql(&func.options) else {
+                        return "/* ERROR: Invalid function options */".to_string();
+                    };
                     let body = dollar_quote_block(&func.body);
                     format!(
-                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{} AS {}",
+                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{}{} AS {}",
                         escape_identifier(&func.name),
                         args,
                         func.returns.trim(),
                         escape_identifier(lang),
                         volatility,
+                        options,
                         body
                     )
                 } else {
@@ -429,13 +433,24 @@ impl ToSql for Qail {
                     } else {
                         "FOR EACH STATEMENT"
                     };
+                    let Ok(referencing) = ddl::trigger_referencing_sql(
+                        trig.old_table.as_deref(),
+                        trig.new_table.as_deref(),
+                    ) else {
+                        return "/* ERROR: Invalid trigger transition tables */".to_string();
+                    };
+                    let Ok(when) = ddl::trigger_when_sql(trig.condition.as_deref()) else {
+                        return "/* ERROR: Invalid trigger WHEN condition */".to_string();
+                    };
                     format!(
-                        "CREATE TRIGGER {} {} {} ON {} {} EXECUTE FUNCTION {}()",
+                        "CREATE TRIGGER {} {} {} ON {}{} {}{} EXECUTE FUNCTION {}()",
                         escape_identifier(&trig.name),
                         timing,
                         events.join(" OR "),
                         escape_identifier(&trig.table),
+                        referencing,
                         for_each,
+                        when,
                         escape_identifier(&trig.execute_function)
                     )
                 } else {
@@ -459,6 +474,7 @@ impl ToSql for Qail {
             Action::CommentOn => ddl::build_comment_on(self, dialect),
             Action::CreateSequence => ddl::build_create_sequence(self, dialect),
             Action::DropSequence => ddl::build_drop_sequence(self, dialect),
+            Action::AlterSequence => ddl::build_alter_sequence(self, dialect),
             Action::CreateEnum => ddl::build_create_enum(self, dialect),
             Action::DropEnum => ddl::build_drop_enum(self, dialect),
             Action::AlterEnumAddValue => ddl::build_alter_enum_add_value(self, dialect),

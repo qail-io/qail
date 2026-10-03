@@ -851,6 +851,8 @@ fn validate_expr_limits(
                     | Constraint::Generated(ColumnGeneration::Virtual(v)) => {
                         ensure_str("expr.def.generated", v)?;
                     }
+                    Constraint::Generated(ColumnGeneration::Identity { .. }) => {}
+                    Constraint::Collate(v) => ensure_str("expr.def.collate", v)?,
                 }
             }
         }
@@ -1096,6 +1098,14 @@ fn validate_index_def_limits(index_def: &crate::ast::IndexDef) -> Result<(), Str
     if let Some(where_clause) = &index_def.where_clause {
         ensure_str("index_def.where_clause", where_clause)?;
     }
+    ensure_len(
+        "index_def.storage_params",
+        index_def.storage_params.len(),
+        MAX_AST_COLLECTION_LEN,
+    )?;
+    for param in &index_def.storage_params {
+        ensure_str("index_def.storage_param", param)?;
+    }
     Ok(())
 }
 
@@ -1116,6 +1126,24 @@ fn validate_function_def_limits(function_def: &crate::ast::FunctionDef) -> Resul
     }
     if let Some(volatility) = &function_def.volatility {
         ensure_str("function_def.volatility", volatility)?;
+    }
+    let options = &function_def.options;
+    for (label, value) in [
+        ("function_def.options.parallel", &options.parallel),
+        ("function_def.options.cost", &options.cost),
+        ("function_def.options.rows", &options.rows),
+    ] {
+        if let Some(value) = value {
+            ensure_str(label, value)?;
+        }
+    }
+    ensure_len(
+        "function_def.options.config",
+        options.config.len(),
+        MAX_AST_COLLECTION_LEN,
+    )?;
+    for setting in &options.config {
+        ensure_str("function_def.options.config", setting)?;
     }
     Ok(())
 }
@@ -1140,6 +1168,15 @@ fn validate_trigger_def_limits(trigger_def: &crate::ast::TriggerDef) -> Result<(
         "trigger_def.execute_function",
         &trigger_def.execute_function,
     )?;
+    for (label, value) in [
+        ("trigger_def.condition", &trigger_def.condition),
+        ("trigger_def.old_table", &trigger_def.old_table),
+        ("trigger_def.new_table", &trigger_def.new_table),
+    ] {
+        if let Some(value) = value {
+            ensure_str(label, value)?;
+        }
+    }
     Ok(())
 }
 
