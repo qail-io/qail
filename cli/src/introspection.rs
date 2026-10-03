@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use qail_core::ast::{Condition, Expr, JoinKind, Operator, Qail, Value};
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::TemporalKey;
-use qail_core::migrate::schema::{Deferrable, FkAction};
+use qail_core::migrate::schema::{Deferrable, ExclusionConstraint, FkAction, ForeignKeyOptions};
 use qail_core::migrate::schema::{Grant, Privilege, SchemaFunctionDef, SchemaTriggerDef, ViewDef};
 use qail_core::migrate::{
     CheckConstraint, Column, ForeignKey, Generated, Index, MultiColumnForeignKey, Schema, Table,
@@ -165,10 +165,16 @@ fn parse_pg_attnum_array(raw: &str, label: &str) -> Result<Vec<i32>> {
         .collect()
 }
 
+/// Ordinary and partitioned tables: a partitioned parent carries its own
+/// ENABLE/FORCE flags, independent of its partitions'.
 fn public_rls_status_cmd(public_namespace_oid: String) -> Qail {
     Qail::get("pg_catalog.pg_class")
         .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
-        .filter("relkind", Operator::Eq, "r")
+        .filter(
+            "relkind",
+            Operator::In,
+            Value::Array(vec![Value::String("r".into()), Value::String("p".into())]),
+        )
         .filter("relnamespace", Operator::Eq, public_namespace_oid)
 }
 
@@ -339,6 +345,443 @@ pub(crate) struct IntrospectedForeignKeyReference {
     pub on_delete: FkAction,
     pub on_update: FkAction,
     pub deferrable: Deferrable,
+}
+
+impl IntrospectedForeignKey {
+    /// Attach MATCH / ON DELETE column subset / validation state read from pg_constraint.
+    pub(crate) fn with_options(mut self, options: Option<&ForeignKeyOptions>) -> Self {
+        let Some(options) = options else {
+            return self;
+        };
+        match &mut self {
+            IntrospectedForeignKey::Single { foreign_key, .. } => {
+                foreign_key.options = options.clone();
+            }
+            IntrospectedForeignKey::Multi { foreign_key, .. } => {
+                foreign_key.options = options.clone();
+            }
+        }
+        self
+    }
+}
+
+/// Constraint metadata that information_schema does not expose, read from
+/// pg_constraint so pull and shadow introspection agree.
+#[derive(Debug, Default)]
+pub(crate) struct ConstraintCatalog {
+    /// `(table, constraint)` → `(not_valid, not_enforced)` for CHECK constraints.
+    pub check_states: std::collections::HashMap<(String, String), (bool, bool)>,
+    /// `(table, constraint)` → foreign-key options.
+    pub fk_options: std::collections::HashMap<(String, String), ForeignKeyOptions>,
+    /// Table → EXCLUDE constraints, sorted by name.
+    pub exclusions: std::collections::HashMap<String, Vec<ExclusionConstraint>>,
+    /// Constraint states the model cannot represent.
+    pub unsupported: Vec<String>,
+}
+
+/// `server_version_num`, so catalog columns added in newer releases are only
+/// selected where they exist (confdelsetcols/indnullsnotdistinct: 15, conenforced: 18).
+pub(crate) async fn server_version_num(driver: &mut PgDriver) -> Result<i32> {
+    let cmd = Qail::get("pg_catalog.pg_settings")
+        .columns(["setting"])
+        .filter("name", Operator::Eq, "server_version_num");
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query server_version_num: {}", e))?;
+    parse_required_i32(
+        rows.first().and_then(|row| row.get_string(0)),
+        "server_version_num",
+    )
+}
+
+pub(crate) fn constraint_catalog_cmd(public_namespace_oid: String, version_num: i32) -> Qail {
+    let mut columns = vec![
+        Expr::Named("con.conname".to_string()),
+        Expr::Named("src.relname".to_string()),
+        Expr::Named("con.contype".to_string()),
+        Expr::Named("con.convalidated".to_string()),
+        Expr::Named("con.connoinherit".to_string()),
+        Expr::Named("con.confmatchtype".to_string()),
+        Expr::FunctionCall {
+            name: "pg_catalog.pg_get_constraintdef".to_string(),
+            args: vec![Expr::Named("con.oid".to_string())],
+            alias: None,
+        },
+    ];
+    if version_num >= 150_000 {
+        columns.push(Expr::Named("con.confdelsetcols".to_string()));
+    }
+    if version_num >= 180_000 {
+        columns.push(Expr::Named("con.conenforced".to_string()));
+    }
+    Qail::get("pg_catalog.pg_constraint")
+        .table_alias("con")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class src",
+            "src.oid",
+            "con.conrelid",
+        )
+        .columns_expr(columns)
+        .filter("con.connamespace", Operator::Eq, public_namespace_oid)
+}
+
+pub(crate) async fn fetch_constraint_catalog(
+    driver: &mut PgDriver,
+    public_namespace_oid: &str,
+    version_num: i32,
+    tables: &std::collections::HashSet<String>,
+    attnum_columns: &std::collections::HashMap<(String, i32), String>,
+) -> Result<ConstraintCatalog> {
+    let cmd = constraint_catalog_cmd(public_namespace_oid.to_string(), version_num);
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query constraint state metadata: {}", e))?;
+
+    let mut catalog = ConstraintCatalog::default();
+    for row in rows {
+        let name = row.text(0);
+        let table = row.text(1);
+        if !tables.contains(&table) {
+            continue;
+        }
+        let contype = row.text(2);
+        let validated = row.text(3) == "t";
+        let no_inherit = row.text(4) == "t";
+        let match_type = row.text(5);
+        let definition = row.text(6);
+        let mut next = 7;
+        let delete_set_attnums = if version_num >= 150_000 {
+            next += 1;
+            row.get_string(next - 1)
+                .filter(|raw| !raw.trim().is_empty())
+        } else {
+            None
+        };
+        // Before PostgreSQL 18 every constraint is enforced.
+        let enforced = version_num < 180_000 || row.text(next) == "t";
+        // NOT ENFORCED implies not validated; recording both would ask for an
+        // ALTER-only NOT VALID the server sets on its own.
+        let not_enforced = !enforced;
+        let not_valid = enforced && !validated;
+
+        match contype.as_str() {
+            "c" => {
+                if no_inherit {
+                    catalog.unsupported.push(format!(
+                        "CHECK constraint {name} on {table} is NO INHERIT; schema.qail cannot express it"
+                    ));
+                }
+                catalog
+                    .check_states
+                    .insert((table, name), (not_valid, not_enforced));
+            }
+            "f" => {
+                let mut options = ForeignKeyOptions {
+                    match_full: match_type == "f",
+                    not_valid,
+                    not_enforced,
+                    ..ForeignKeyOptions::default()
+                };
+                if match_type == "p" {
+                    catalog.unsupported.push(format!(
+                        "foreign key {name} on {table} uses MATCH PARTIAL; schema.qail cannot express it"
+                    ));
+                }
+                if let Some(raw) = delete_set_attnums {
+                    for attnum in parse_pg_attnum_array(&raw, "pg_constraint.confdelsetcols")? {
+                        let column = attnum_columns.get(&(table.clone(), attnum)).ok_or_else(
+                            || {
+                                anyhow!(
+                                    "foreign key {} on {} names unknown ON DELETE column attnum {}",
+                                    name,
+                                    table,
+                                    attnum
+                                )
+                            },
+                        )?;
+                        options.on_delete_columns.push(column.clone());
+                    }
+                }
+                catalog.fk_options.insert((table, name), options);
+            }
+            "x" => {
+                catalog
+                    .exclusions
+                    .entry(table)
+                    .or_default()
+                    .push(ExclusionConstraint { name, definition });
+            }
+            "n" if !validated || no_inherit => {
+                catalog.unsupported.push(format!(
+                    "NOT NULL constraint {name} on {table} is NOT VALID or NO INHERIT; schema.qail cannot express it"
+                ));
+            }
+            _ => {}
+        }
+    }
+    for exclusions in catalog.exclusions.values_mut() {
+        exclusions.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    catalog.unsupported.sort();
+    Ok(catalog)
+}
+
+/// Unique indexes (constraint-backed or not) declared NULLS NOT DISTINCT.
+pub(crate) async fn fetch_nulls_not_distinct_indexes(
+    driver: &mut PgDriver,
+    public_namespace_oid: &str,
+    version_num: i32,
+) -> Result<std::collections::HashSet<String>> {
+    if version_num < 150_000 {
+        return Ok(std::collections::HashSet::new());
+    }
+    let cmd = Qail::get("pg_catalog.pg_index")
+        .table_alias("i")
+        .join(
+            JoinKind::Inner,
+            "pg_catalog.pg_class c",
+            "c.oid",
+            "i.indexrelid",
+        )
+        .columns(["c.relname", "i.indnullsnotdistinct"])
+        .filter(
+            "c.relnamespace",
+            Operator::Eq,
+            public_namespace_oid.to_string(),
+        );
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query index NULLS NOT DISTINCT metadata: {}", e))?;
+    Ok(rows
+        .iter()
+        .filter(|row| row.text(1) == "t")
+        .map(|row| row.text(0))
+        .collect())
+}
+
+/// A NULLS NOT DISTINCT unique constraint cannot be a plain column `unique`
+/// flag, so it is carried as a unique index with the flag set.
+pub(crate) fn unique_constraint_with_nulls_not_distinct(
+    constraint_name: &str,
+    unique: IntrospectedUniqueConstraint,
+    nulls_not_distinct: bool,
+) -> IntrospectedUniqueConstraint {
+    if !nulls_not_distinct {
+        return unique;
+    }
+    match unique {
+        IntrospectedUniqueConstraint::Single { table, column } => {
+            IntrospectedUniqueConstraint::Multi(
+                Index::new(constraint_name, table, vec![column])
+                    .unique()
+                    .nulls_not_distinct(),
+            )
+        }
+        IntrospectedUniqueConstraint::Multi(index) => {
+            IntrospectedUniqueConstraint::Multi(index.nulls_not_distinct())
+        }
+    }
+}
+
+/// Apply CHECK states from pg_constraint onto checks attached to columns.
+pub(crate) fn apply_check_states<'a>(
+    tables: impl Iterator<Item = (&'a String, &'a mut Vec<Column>)>,
+    check_states: &std::collections::HashMap<(String, String), (bool, bool)>,
+) {
+    for (table, columns) in tables {
+        for column in columns.iter_mut() {
+            let checks = column
+                .check
+                .iter_mut()
+                .chain(column.extra_checks.iter_mut());
+            for check in checks {
+                let Some(name) = check.name.clone() else {
+                    continue;
+                };
+                if let Some((not_valid, not_enforced)) = check_states.get(&(table.clone(), name)) {
+                    check.not_valid = *not_valid;
+                    check.not_enforced = *not_enforced;
+                }
+            }
+        }
+    }
+}
+
+/// Decode a PostgreSQL `name[]` text rendering (`{a,"b c"}`) into its elements.
+pub(crate) fn parse_pg_name_array(raw: &str) -> Result<Vec<String>> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| anyhow!("Invalid PostgreSQL array {:?}", raw))?;
+    let mut out = Vec::new();
+    if inner.is_empty() {
+        return Ok(out);
+    }
+    let mut chars = inner.chars().peekable();
+    loop {
+        let mut item = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            let mut closed = false;
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\\' => {
+                        let escaped = chars
+                            .next()
+                            .ok_or_else(|| anyhow!("Invalid PostgreSQL array {:?}", raw))?;
+                        item.push(escaped);
+                    }
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    other => item.push(other),
+                }
+            }
+            if !closed {
+                return Err(anyhow!("Invalid PostgreSQL array {:?}", raw));
+            }
+        } else {
+            while let Some(&ch) = chars.peek() {
+                if ch == ',' {
+                    break;
+                }
+                item.push(ch);
+                chars.next();
+            }
+        }
+        out.push(item);
+        match chars.next() {
+            None => break,
+            Some(',') => continue,
+            Some(_) => return Err(anyhow!("Invalid PostgreSQL array {:?}", raw)),
+        }
+    }
+    Ok(out)
+}
+
+/// `pg_policies.roles` → policy roles. `{public}` is PUBLIC (no `TO`).
+pub(crate) fn policy_roles_from_pg(raw: &str) -> Result<Vec<String>> {
+    let roles = parse_pg_name_array(raw)?;
+    if roles.len() == 1 && roles[0] == "public" {
+        return Ok(Vec::new());
+    }
+    Ok(roles)
+}
+
+/// View storage options from `pg_class.reloptions`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ViewOptions {
+    pub security_invoker: bool,
+    pub security_barrier: bool,
+    pub check_option: Option<qail_core::ast::ViewCheckOption>,
+}
+
+pub(crate) fn parse_view_reloptions(raw: Option<&str>) -> Result<ViewOptions> {
+    let mut options = ViewOptions::default();
+    let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) else {
+        return Ok(options);
+    };
+    for entry in parse_pg_name_array(raw)? {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("Invalid view reloption {:?}", entry))?;
+        let value = value.trim().to_ascii_lowercase();
+        let as_bool = || match value.as_str() {
+            "true" | "on" | "yes" | "1" => Ok(true),
+            "false" | "off" | "no" | "0" => Ok(false),
+            _ => Err(anyhow!("Invalid boolean view reloption {:?}", entry)),
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "security_invoker" => options.security_invoker = as_bool()?,
+            "security_barrier" => options.security_barrier = as_bool()?,
+            "check_option" => {
+                options.check_option = Some(match value.as_str() {
+                    "local" => qail_core::ast::ViewCheckOption::Local,
+                    "cascaded" => qail_core::ast::ViewCheckOption::Cascaded,
+                    _ => return Err(anyhow!("Invalid view check_option {:?}", entry)),
+                });
+            }
+            _ => {
+                return Err(anyhow!(
+                    "View reloption {:?} is not modelled; refusing a lossy pull",
+                    entry
+                ));
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// Partitioned parents, partitions, and INHERITS children. The table model has
+/// no partitioning or inheritance, so each becomes an `unsupported` marker.
+pub(crate) fn table_hierarchy_cmd(public_namespace_oid: String) -> Qail {
+    Qail::get("pg_catalog.pg_class")
+        .table_alias("c")
+        .left_join_conds(
+            "pg_catalog.pg_inherits i",
+            vec![join_column_eq("i.inhrelid", "c.oid")],
+        )
+        .left_join_conds(
+            "pg_catalog.pg_class p",
+            vec![join_column_eq("p.oid", "i.inhparent")],
+        )
+        .columns_expr([
+            Expr::Named("c.relname".to_string()),
+            Expr::Named("c.relkind".to_string()),
+            Expr::Named("c.relispartition".to_string()),
+            Expr::Named("p.relname".to_string()),
+            Expr::FunctionCall {
+                name: "pg_catalog.pg_get_partkeydef".to_string(),
+                args: vec![Expr::Named("c.oid".to_string())],
+                alias: None,
+            },
+            Expr::FunctionCall {
+                name: "pg_catalog.pg_get_expr".to_string(),
+                args: vec![
+                    Expr::Named("c.relpartbound".to_string()),
+                    Expr::Named("c.oid".to_string()),
+                ],
+                alias: None,
+            },
+        ])
+        .filter("c.relnamespace", Operator::Eq, public_namespace_oid)
+        .filter(
+            "c.relkind",
+            Operator::In,
+            Value::Array(vec![Value::String("r".into()), Value::String("p".into())]),
+        )
+}
+
+pub(crate) fn table_hierarchy_marker(
+    table: &str,
+    relkind: &str,
+    is_partition: bool,
+    parent: Option<&str>,
+    partition_key: Option<&str>,
+    partition_bound: Option<&str>,
+) -> Option<String> {
+    if relkind == "p" {
+        return Some(format!(
+            "table {table} is partitioned ({}); partitioning is not modelled",
+            partition_key.unwrap_or("unknown key")
+        ));
+    }
+    if is_partition {
+        return Some(format!(
+            "table {table} is a partition of {} ({}); partitioning is not modelled",
+            parent.unwrap_or("unknown parent"),
+            partition_bound.unwrap_or("unknown bound")
+        ));
+    }
+    parent.map(|parent| {
+        format!("table {table} inherits from {parent}; table inheritance is not modelled")
+    })
 }
 
 /// Output format for schema generation
@@ -556,6 +999,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .first()
         .map(|r| r.text(0))
         .ok_or_else(|| anyhow!("Public schema not found in pg_namespace"))?;
+    let version_num = server_version_num(&mut driver).await?;
+    let nulls_not_distinct_indexes =
+        fetch_nulls_not_distinct_indexes(&mut driver, &public_namespace_oid, version_num).await?;
 
     // ── 0. Enums (must be before columns to resolve enum column types) ──
     let enum_cmd = Qail::get("pg_catalog.pg_type")
@@ -649,6 +1095,17 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     )
     .await?;
 
+    // CHECK/FK validation and enforcement state, MATCH mode, ON DELETE column
+    // subsets, and EXCLUDE constraints are not in information_schema.
+    let constraint_catalog = fetch_constraint_catalog(
+        &mut driver,
+        &public_namespace_oid,
+        version_num,
+        &base_tables,
+        &attnum_columns,
+    )
+    .await?;
+
     // ── 1. Columns + Defaults (AST-native) ──────────────────────────────
     let columns_cmd = Qail::get("information_schema.columns")
         .columns([
@@ -665,6 +1122,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "identity_generation",
             "is_generated",
             "generation_expression",
+            "ordinal_position",
         ])
         .filter("table_schema", Operator::Eq, "public")
         // Without ORDER BY the view returns heap order, which changes after
@@ -677,7 +1135,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query columns: {}", e))?;
 
-    let mut tables: std::collections::HashMap<String, Vec<Column>> =
+    // Column order is CREATE TABLE order; the view returns rows unordered.
+    let mut ordered_columns: std::collections::HashMap<String, Vec<(i32, Column)>> =
         std::collections::HashMap::new();
 
     for row in rows {
@@ -742,8 +1201,22 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             }
         }
 
-        tables.entry(table_name).or_default().push(col);
+        let ordinal = parse_required_i32(
+            row.get_string(13),
+            "information_schema.columns.ordinal_position",
+        )?;
+        ordered_columns
+            .entry(table_name)
+            .or_default()
+            .push((ordinal, col));
     }
+    let mut tables: std::collections::HashMap<String, Vec<Column>> = ordered_columns
+        .into_iter()
+        .map(|(table, mut columns)| {
+            columns.sort_by_key(|(ordinal, _)| *ordinal);
+            (table, columns.into_iter().map(|(_, col)| col).collect())
+        })
+        .collect();
 
     // ── 2. Primary Keys (AST-native) ────────────────────────────────────
     let pk_cmd = Qail::get("information_schema.table_constraints")
@@ -851,6 +1324,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             && let Some(unique) =
                 resolve_introspected_unique_constraint(&constraint_name, &table_name, cols)
         {
+            // A unique constraint's backing index carries its name.
+            let unique = unique_constraint_with_nulls_not_distinct(
+                &constraint_name,
+                unique,
+                nulls_not_distinct_indexes.contains(&constraint_name),
+            );
             match unique {
                 IntrospectedUniqueConstraint::Single { table, column } => {
                     unique_columns.insert((table, column));
@@ -929,10 +1408,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
                 if col.name == *col_name {
                     push_column_check(
                         col,
-                        qail_core::migrate::CheckConstraint {
-                            expr: expr.clone(),
-                            name: Some(constraint_name.clone()),
-                        },
+                        qail_core::migrate::CheckConstraint::new(
+                            expr.clone(),
+                            Some(constraint_name.clone()),
+                        ),
                     );
                     applied = true;
                 }
@@ -948,13 +1427,15 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         {
             push_column_check(
                 col,
-                qail_core::migrate::CheckConstraint {
-                    expr: qail_core::migrate::schema::CheckExpr::Sql(check_clause.clone()),
-                    name: Some(constraint_name.clone()),
-                },
+                qail_core::migrate::CheckConstraint::new(
+                    qail_core::migrate::schema::CheckExpr::Sql(check_clause.clone()),
+                    Some(constraint_name.clone()),
+                ),
             );
         }
     }
+
+    apply_check_states(tables.iter_mut(), &constraint_catalog.check_states);
 
     // Get FK constraint names and referenced constraints. Actions come from
     // pg_constraint below because this view is keyed by bare constraint name.
@@ -1095,6 +1576,11 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             &on_update,
             status,
         ) {
+            let resolved = resolved.with_options(
+                constraint_catalog
+                    .fk_options
+                    .get(&(source_table.clone(), constraint_name.clone())),
+            );
             match resolved {
                 IntrospectedForeignKey::Single {
                     table,
@@ -1119,10 +1605,16 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // Resolve FK source column → referenced table.column with actions
     for fk_reference in &fk_references {
+        let options = constraint_catalog.fk_options.get(&(
+            fk_reference.constraint.table.clone(),
+            fk_reference.constraint.name.clone(),
+        ));
         match resolve_qualified_introspected_foreign_key(
             fk_reference,
             &qualified_constraint_columns,
-        ) {
+        )
+        .map(|resolved| resolved.with_options(options))
+        {
             Some(IntrospectedForeignKey::Single {
                 table,
                 column,
@@ -1172,6 +1664,33 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             rls_map.insert(table_name, (enable_rls, force_rls));
         }
     }
+
+    // ── 6b. Partitioning / inheritance (not modelled → explicit markers) ──
+    let hierarchy_rows = driver
+        .fetch_all(&table_hierarchy_cmd(public_namespace_oid.clone()))
+        .await
+        .map_err(|e| anyhow!("Failed to query table partitioning/inheritance: {}", e))?;
+    let mut hierarchy_markers = Vec::new();
+    for row in hierarchy_rows {
+        let table = row.text(0);
+        if !base_tables.contains(&table) {
+            continue;
+        }
+        let parent = row.get_string(3).filter(|s| !s.is_empty());
+        let partition_key = row.get_string(4).filter(|s| !s.is_empty());
+        let partition_bound = row.get_string(5).filter(|s| !s.is_empty());
+        if let Some(marker) = table_hierarchy_marker(
+            &table,
+            &row.text(1),
+            row.text(2) == "t",
+            parent.as_deref(),
+            partition_key.as_deref(),
+            partition_bound.as_deref(),
+        ) {
+            hierarchy_markers.push(marker);
+        }
+    }
+    hierarchy_markers.dedup();
 
     // ── 7. Indexes (AST-native) ─────────────────────────────────────────
     let idx_cmd = Qail::get("pg_indexes")
@@ -1432,34 +1951,46 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query views: {}", e))?;
 
-    // `pg_views` carries no storage options, so read `security_invoker` off
-    // pg_class. Without this the flag is silently dropped on every pull and a
-    // round-trip would quietly downgrade a caller-rights view back to the
-    // owner-rights default — i.e. re-open the RLS bypass it was set to close.
+    // `pg_views` carries no storage options, so read them off pg_class.
+    // Dropping security_invoker re-opens the owner-rights RLS bypass;
+    // dropping security_barrier lets leaky caller functions see filtered rows;
+    // dropping CHECK OPTION lets writes escape the view's WHERE clause.
     let view_opts_cmd = Qail::get("pg_catalog.pg_class")
-        .columns(["relname", "reloptions"])
-        .filter("relkind", Operator::Eq, "v")
+        .columns(["relname", "reloptions", "oid", "relkind"])
+        .filter(
+            "relkind",
+            Operator::In,
+            Value::Array(vec![Value::String("v".into()), Value::String("m".into())]),
+        )
         .filter("relnamespace", Operator::Eq, public_namespace_oid.clone());
     let view_opts_rows = driver
         .fetch_all(&view_opts_cmd)
         .await
         .map_err(|e| anyhow!("Failed to query view options: {}", e))?;
-    let security_invoker_views: std::collections::HashSet<String> = view_opts_rows
-        .iter()
-        .filter(|row| {
-            let opts = row.text(1).to_ascii_lowercase();
-            opts.replace(' ', "").contains("security_invoker=true")
-        })
-        .map(|row| row.text(0))
-        .collect();
+    let mut view_options = std::collections::HashMap::new();
+    // Creation (OID) order keeps a view after the views it selects from.
+    let mut view_oids = std::collections::HashMap::new();
+    for row in &view_opts_rows {
+        let name = row.text(0);
+        let oid = row.text(2).parse::<u64>().unwrap_or(u64::MAX);
+        view_oids.insert(name.clone(), oid);
+        if row.text(3) != "v" {
+            continue;
+        }
+        let options = parse_view_reloptions(row.get_string(1).as_deref())
+            .map_err(|e| anyhow!("View {}: {}", name, e))?;
+        view_options.insert(name, options);
+    }
 
     let mut views: Vec<ViewDef> = Vec::new();
     for row in view_rows {
         let name = row.text(0);
         let query = row.text(1).trim().trim_end_matches(';').to_string();
         let mut view = ViewDef::new(&name, query);
-        if security_invoker_views.contains(&name) {
-            view = view.security_invoker();
+        if let Some(options) = view_options.get(&name) {
+            view.security_invoker = options.security_invoker;
+            view.security_barrier = options.security_barrier;
+            view.check_option = options.check_option;
         }
         views.push(view);
     }
@@ -1479,6 +2010,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let query = row.text(1).trim().trim_end_matches(';').to_string();
         views.push(ViewDef::new(&name, query).materialized());
     }
+    views.sort_by_key(|view| {
+        (
+            view_oids.get(&view.name).copied().unwrap_or(u64::MAX),
+            view.name.clone(),
+        )
+    });
 
     // ── 13. Functions (AST-native) ────────────────────────────────────────
     // 13a: Function metadata from information_schema.routines
@@ -1691,6 +2228,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
         triggers.push(trig);
     }
+    // Built from a HashMap; sort so two pulls of one database are identical.
+    triggers.sort_by(|a, b| a.table.cmp(&b.table).then_with(|| a.name.cmp(&b.name)));
 
     // ── 15. RLS Policies (AST-native) ──────────────────────────────────
     let policy_cmd = Qail::get("pg_policies")
@@ -1729,7 +2268,15 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "INSERT" => PolicyTarget::Insert,
             "UPDATE" => PolicyTarget::Update,
             "DELETE" => PolicyTarget::Delete,
-            _ => PolicyTarget::All,
+            // Widening an unknown command to ALL would grant more than the database does.
+            other => {
+                return Err(anyhow!(
+                    "Policy {} on {} has unmodelled command {:?}",
+                    name,
+                    table,
+                    other
+                ));
+            }
         };
 
         let permissiveness = if permissive_str == "RESTRICTIVE" {
@@ -1738,29 +2285,23 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             PolicyPermissiveness::Permissive
         };
 
-        // Parse roles: "{app_user}" → Some("app_user"), "{public}" → None
-        let role = {
-            let r = roles_str.trim_matches(|c| c == '{' || c == '}');
-            if r.eq_ignore_ascii_case("public") {
-                None
-            } else {
-                Some(r.to_string())
-            }
-        };
+        // `name[]` text: "{app_user,audit_user}", "{\"space role\"}", "{public}".
+        let roles = policy_roles_from_pg(&roles_str)
+            .map_err(|e| anyhow!("Policy {} on {}: {}", name, table, e))?;
 
         // Preserve policy predicates as raw SQL expressions from pg_policies.
         // Parsing/re-serializing can mutate semantics for complex predicates.
         let using_expr = qual.map(qail_core::ast::Expr::Named);
         let with_check_expr = with_check.map(qail_core::ast::Expr::Named);
 
-        let mut policy = RlsPolicy::create(&name, &table);
+        let mut policy = RlsPolicy::create(&name, &table).to_roles(roles);
         policy.target = target;
         policy.permissiveness = permissiveness;
-        policy.role = role;
         policy.using = using_expr;
         policy.with_check = with_check_expr;
         policies.push(policy);
     }
+    policies.sort_by(|a, b| a.table.cmp(&b.table).then_with(|| a.name.cmp(&b.name)));
 
     // ── 16. Table/Column comments (AST-native joins) ───────────────────
     let table_comment_cmd = table_comment_cmd(public_namespace_oid.clone());
@@ -1903,11 +2444,20 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     schema.policies = policies;
     schema.comments = comments;
 
+    schema.unsupported = constraint_catalog.unsupported.clone();
+    schema.unsupported.extend(hierarchy_markers);
+    schema.unsupported.sort();
+    schema.unsupported.dedup();
+    let mut table_exclusions = constraint_catalog.exclusions;
     for (name, columns) in tables {
         let mut table = Table::new(&name);
         table.columns = columns;
         table.multi_column_fks = table_multi_column_fks.remove(&name).unwrap_or_default();
         table.temporal_keys = temporal_keys.remove(&name).unwrap_or_default();
+        table
+            .multi_column_fks
+            .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.columns.cmp(&b.columns)));
+        table.exclusions = table_exclusions.remove(&name).unwrap_or_default();
         // Apply RLS status
         if let Some((enable, force)) = rls_map.get(&name) {
             table.enable_rls = *enable;
@@ -1947,10 +2497,28 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
         index.include = include;
         index.method = method;
+        // parse_index_parts skips the NULLS NOT DISTINCT clause; the catalog flag is authoritative.
+        index.nulls_not_distinct = nulls_not_distinct_indexes.contains(&name);
         schema.add_index(index);
     }
     for index in unique_constraint_indexes {
         schema.add_index(index);
+    }
+    schema.indexes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if !schema.unsupported.is_empty() {
+        eprintln!(
+            "{} {} object(s) cannot be represented in schema.qail; recorded as `unsupported`:",
+            "⚠".yellow(),
+            schema.unsupported.len()
+        );
+        for item in &schema.unsupported {
+            eprintln!("    {item}");
+        }
+        eprintln!(
+            "    {}",
+            "Strict apply and checked diff refuse this schema until they are resolved.".dimmed()
+        );
     }
 
     Ok(schema)
@@ -2709,6 +3277,7 @@ pub(crate) fn resolve_introspected_foreign_key(
                 on_delete: on_delete.clone(),
                 on_update: on_update.clone(),
                 deferrable,
+                options: ForeignKeyOptions::default(),
             },
         });
     }
@@ -2728,6 +3297,7 @@ pub(crate) fn resolve_introspected_foreign_key(
             } else {
                 Some(constraint_name.to_string())
             },
+            options: ForeignKeyOptions::default(),
         },
     })
 }
@@ -3148,6 +3718,132 @@ mod tests {
                     && condition.value == qail_core::ast::Value::String("2200".to_string())
             })
         }));
+    }
+
+    #[test]
+    fn rls_status_query_includes_partitioned_parents() {
+        let (sql, params) =
+            qail_pg::protocol::AstEncoder::encode_cmd_sql(&public_rls_status_cmd("2200".into()))
+                .expect("encode RLS status query");
+        assert!(sql.contains("relkind IN ($1, $2)"), "{sql}");
+        let params = params
+            .iter()
+            .map(|param| String::from_utf8(param.clone().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(params[..2], ["r".to_string(), "p".to_string()], "{sql}");
+    }
+
+    #[test]
+    fn policy_roles_decode_postgres_name_arrays() {
+        assert_eq!(
+            policy_roles_from_pg("{app_user,audit_user}").unwrap(),
+            vec!["app_user", "audit_user"]
+        );
+        assert_eq!(
+            policy_roles_from_pg(r#"{"space role"}"#).unwrap(),
+            vec!["space role"]
+        );
+        assert_eq!(
+            policy_roles_from_pg(r#"{"a,b","q\"x",plain}"#).unwrap(),
+            vec!["a,b", "q\"x", "plain"]
+        );
+        assert!(policy_roles_from_pg("{public}").unwrap().is_empty());
+        assert!(policy_roles_from_pg("app_user").is_err());
+        assert!(policy_roles_from_pg(r#"{"unterminated}"#).is_err());
+    }
+
+    #[test]
+    fn view_reloptions_preserve_barrier_and_check_option() {
+        let options = parse_view_reloptions(Some(
+            "{security_invoker=true,security_barrier=on,check_option=cascaded}",
+        ))
+        .unwrap();
+        assert_eq!(
+            options,
+            ViewOptions {
+                security_invoker: true,
+                security_barrier: true,
+                check_option: Some(qail_core::ast::ViewCheckOption::Cascaded),
+            }
+        );
+        assert_eq!(
+            parse_view_reloptions(Some("{check_option=local,security_barrier=false}"))
+                .unwrap()
+                .check_option,
+            Some(qail_core::ast::ViewCheckOption::Local)
+        );
+        assert_eq!(parse_view_reloptions(None).unwrap(), ViewOptions::default());
+        assert!(parse_view_reloptions(Some("{some_future_option=true}")).is_err());
+        assert!(parse_view_reloptions(Some("{check_option=sideways}")).is_err());
+    }
+
+    #[test]
+    fn partitioning_and_inheritance_become_markers() {
+        assert_eq!(
+            table_hierarchy_marker("events", "p", false, None, Some("RANGE (created_at)"), None)
+                .as_deref(),
+            Some("table events is partitioned (RANGE (created_at)); partitioning is not modelled")
+        );
+        assert!(
+            table_hierarchy_marker(
+                "events_2026",
+                "r",
+                true,
+                Some("events"),
+                None,
+                Some("FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')")
+            )
+            .unwrap()
+            .contains("partition of events")
+        );
+        assert!(
+            table_hierarchy_marker("child", "r", false, Some("parent"), None, None)
+                .unwrap()
+                .contains("inherits from parent")
+        );
+        assert_eq!(
+            table_hierarchy_marker("plain", "r", false, None, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn nulls_not_distinct_unique_constraint_becomes_flagged_index() {
+        let single = IntrospectedUniqueConstraint::Single {
+            table: "handles".to_string(),
+            column: "handle".to_string(),
+        };
+        let IntrospectedUniqueConstraint::Multi(index) =
+            unique_constraint_with_nulls_not_distinct("handles_handle_key", single, true)
+        else {
+            panic!("NULLS NOT DISTINCT cannot stay a column unique flag");
+        };
+        assert!(index.unique && index.nulls_not_distinct);
+        assert_eq!(index.columns, vec!["handle"]);
+
+        let plain = IntrospectedUniqueConstraint::Single {
+            table: "handles".to_string(),
+            column: "handle".to_string(),
+        };
+        assert!(matches!(
+            unique_constraint_with_nulls_not_distinct("handles_handle_key", plain, false),
+            IntrospectedUniqueConstraint::Single { .. }
+        ));
+    }
+
+    #[test]
+    fn constraint_catalog_query_selects_version_gated_columns() {
+        use qail_core::transpiler::ToSql;
+
+        let pg17 = constraint_catalog_cmd("2200".into(), 170_000).to_sql();
+        assert!(
+            pg17.contains("confdelsetcols") && !pg17.contains("conenforced"),
+            "{pg17}"
+        );
+        let pg14 = constraint_catalog_cmd("2200".into(), 140_000).to_sql();
+        assert!(!pg14.contains("confdelsetcols"), "{pg14}");
+        let pg18 = constraint_catalog_cmd("2200".into(), 180_000).to_sql();
+        assert!(pg18.contains("conenforced"), "{pg18}");
     }
 
     #[test]

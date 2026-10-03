@@ -46,7 +46,69 @@ fn unsupported_state_diff_features(schema: &Schema) -> BTreeSet<&'static str> {
     if !schema.resources.is_empty() {
         out.insert("resources");
     }
+    if !schema.unsupported.is_empty() {
+        out.insert("objects marked unsupported by pull");
+    }
     out
+}
+
+/// Constraints the state diff would have to create but cannot express:
+/// NOT VALID / NOT ENFORCED state on an added FK or CHECK, and any EXCLUDE
+/// constraint that is not identical on both sides.
+fn unsupported_constraint_state_changes(source: &Schema, target: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+    let mut table_names = target.tables.keys().collect::<Vec<_>>();
+    table_names.sort();
+    for table_name in table_names {
+        let target_table = &target.tables[table_name];
+        let source_table = source.tables.get(table_name);
+        for col in &target_table.columns {
+            let existed =
+                source_table.is_some_and(|t| t.columns.iter().any(|c| c.name == col.name));
+            if existed {
+                continue;
+            }
+            if col
+                .foreign_key
+                .as_ref()
+                .is_some_and(|fk| fk.options.not_valid || fk.options.not_enforced)
+            {
+                changes.push(format!(
+                    "{}.{} (NOT VALID/NOT ENFORCED foreign key)",
+                    table_name, col.name
+                ));
+            }
+            if col.checks().any(|check| check.has_state()) {
+                changes.push(format!(
+                    "{}.{} (NOT VALID/NOT ENFORCED CHECK)",
+                    table_name, col.name
+                ));
+            }
+        }
+        if source_table.is_none()
+            && target_table
+                .multi_column_fks
+                .iter()
+                .any(|fk| fk.options.not_valid || fk.options.not_enforced)
+        {
+            changes.push(format!(
+                "{} (NOT VALID/NOT ENFORCED foreign key)",
+                table_name
+            ));
+        }
+        let source_exclusions = source_table.map(|t| t.exclusions.as_slice()).unwrap_or(&[]);
+        if target_table.exclusions != source_exclusions {
+            changes.push(format!("{} (EXCLUDE constraints)", table_name));
+        }
+    }
+    for (table_name, source_table) in &source.tables {
+        if !target.tables.contains_key(table_name) && !source_table.exclusions.is_empty() {
+            changes.push(format!("{} (EXCLUDE constraints)", table_name));
+        }
+    }
+    changes.sort();
+    changes.dedup();
+    changes
 }
 
 fn unconfirmed_drop_hints(schema: &Schema) -> Vec<String> {
@@ -659,7 +721,16 @@ fn existing_table_rls_downgrades(old: &Schema, new: &Schema) -> Vec<String> {
 fn check_signatures(column: &super::schema::Column) -> Vec<String> {
     column
         .checks()
-        .map(|check| normalize_index_sql_fragment(&check_expr_to_sql(&check.expr)))
+        .map(|check| {
+            let mut signature = normalize_index_sql_fragment(&check_expr_to_sql(&check.expr));
+            if check.not_valid {
+                signature.push_str(" NOT VALID");
+            }
+            if check.not_enforced {
+                signature.push_str(" NOT ENFORCED");
+            }
+            signature
+        })
         .collect()
 }
 
@@ -706,6 +777,7 @@ struct ComparableIndex {
     method: &'static str,
     where_clause: Option<String>,
     include: Vec<String>,
+    nulls_not_distinct: bool,
 }
 
 fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
@@ -721,6 +793,7 @@ fn comparable_index(idx: &super::schema::Index) -> ComparableIndex {
             .map(check_expr_to_sql)
             .map(|fragment| normalize_index_sql_fragment(&fragment)),
         include: normalized_index_fragments(&idx.include),
+        nulls_not_distinct: idx.nulls_not_distinct,
     }
 }
 
@@ -744,6 +817,12 @@ fn index_difference_reasons(
     push_index_diff(&mut reasons, "method", &old.method, &new.method);
     push_index_diff(&mut reasons, "where", &old.where_clause, &new.where_clause);
     push_index_diff(&mut reasons, "include", &old.include, &new.include);
+    push_index_diff(
+        &mut reasons,
+        "nulls_not_distinct",
+        &old.nulls_not_distinct,
+        &new.nulls_not_distinct,
+    );
 
     reasons
 }
@@ -1048,6 +1127,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
              Unsupported schema object families present: {}. \
              Use folder-based strict migrations for these objects.",
             detail
+        ));
+    }
+
+    let constraint_state_changes = unsupported_constraint_state_changes(old, new);
+    if !constraint_state_changes.is_empty() {
+        return Err(format!(
+            "State-based diff cannot create or change NOT VALID / NOT ENFORCED constraints \
+             or EXCLUDE constraints: {}. Use folder-based strict migrations for these constraints.",
+            constraint_state_changes.join(", ")
         ));
     }
 
@@ -1686,6 +1774,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     include: new_idx.include.clone(),
                     concurrently: new_idx.concurrently,
                     where_clause: new_idx.where_clause.as_ref().map(check_expr_to_sql),
+                    nulls_not_distinct: new_idx.nulls_not_distinct,
                 }),
                 ..Default::default()
             });

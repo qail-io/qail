@@ -62,6 +62,11 @@ struct Fields {
     policy_def: Option<crate::migrate::policy::RlsPolicy>,
     #[serde(default)]
     view_security_invoker: bool,
+    // Absent in payloads written before these view options were kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    view_security_barrier: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view_check_option: Option<crate::ast::ViewCheckOption>,
 }
 
 #[derive(Serialize)]

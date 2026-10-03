@@ -514,6 +514,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -529,6 +530,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };

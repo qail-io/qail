@@ -37,6 +37,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: Some("active = true".to_string()),
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -56,6 +57,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -75,6 +77,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -94,6 +97,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -113,6 +117,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -132,6 +137,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: None,
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -151,6 +157,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: Some("active = true; DROP TABLE users; --".to_string()),
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -170,6 +177,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec![],
             concurrently: false,
             where_clause: Some("active = true\0".to_string()),
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -189,6 +197,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec!["name".to_string(), "created_at".to_string()],
             concurrently: true,
             where_clause: Some("deleted_at IS NULL".to_string()),
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };
@@ -208,6 +217,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             include: vec!["lower(name)".to_string()],
             concurrently: false,
             where_clause: None,
+            nulls_not_distinct: false,
         }),
         ..Default::default()
     };

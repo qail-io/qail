@@ -390,9 +390,18 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                 on_delete,
                 on_update,
                 deferrable,
+                options,
             } => {
                 if let Some(name) = name {
                     ensure_str("qail.table_constraint.name", name)?;
+                }
+                ensure_len(
+                    "qail.table_constraint.on_delete_columns",
+                    options.on_delete_columns.len(),
+                    MAX_AST_COLLECTION_LEN,
+                )?;
+                for col in &options.on_delete_columns {
+                    ensure_str("qail.table_constraint.on_delete_column", col)?;
                 }
                 ensure_len(
                     "qail.table_constraint.columns",
@@ -420,6 +429,16 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                 if let Some(clause) = deferrable {
                     ensure_str("qail.table_constraint.deferrable", clause)?;
                 }
+            }
+            crate::ast::TableConstraint::Check { name, expr, .. } => {
+                if let Some(name) = name {
+                    ensure_str("qail.table_constraint.name", name)?;
+                }
+                ensure_str("qail.table_constraint.check", expr)?;
+            }
+            crate::ast::TableConstraint::Exclude { name, definition } => {
+                ensure_str("qail.table_constraint.name", name)?;
+                ensure_str("qail.table_constraint.exclude", definition)?;
             }
         }
     }
@@ -1138,6 +1157,14 @@ fn validate_policy_def_limits(
         validate_expr_limits(with_check_expr, depth + 1, state)?;
     }
     if let Some(role) = &policy_def.role {
+        ensure_str("policy_def.role", role)?;
+    }
+    ensure_len(
+        "policy_def.additional_roles",
+        policy_def.additional_roles.len(),
+        MAX_AST_COLLECTION_LEN,
+    )?;
+    for role in &policy_def.additional_roles {
         ensure_str("policy_def.role", role)?;
     }
     Ok(())

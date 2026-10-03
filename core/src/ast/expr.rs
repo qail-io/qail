@@ -1239,6 +1239,77 @@ pub struct IndexDef {
     pub concurrently: bool,
     /// Optional partial-index predicate (`WHERE ...` body without the keyword).
     pub where_clause: Option<String>,
+    /// `NULLS NOT DISTINCT` (PostgreSQL 15+): NULL keys collide in a unique index.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nulls_not_distinct: bool,
+}
+
+/// Foreign-key semantics beyond columns, actions, and deferral.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForeignKeyOptions {
+    /// `MATCH FULL`; the default is `MATCH SIMPLE`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub match_full: bool,
+    /// Column subset for `ON DELETE SET NULL (..)` / `SET DEFAULT (..)` (PostgreSQL 15+).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_delete_columns: Vec<String>,
+    /// `NOT VALID`. PostgreSQL ignores it inside CREATE TABLE, so encoders
+    /// accept it only on `ALTER TABLE ... ADD`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_valid: bool,
+    /// `NOT ENFORCED` (PostgreSQL 18+). The server records it as not validated too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_enforced: bool,
+}
+
+impl ForeignKeyOptions {
+    /// True when every option is at its PostgreSQL default.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `WITH [LOCAL | CASCADED] CHECK OPTION` on an updatable view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ViewCheckOption {
+    /// `WITH LOCAL CHECK OPTION`.
+    Local,
+    /// `WITH CASCADED CHECK OPTION`.
+    Cascaded,
+}
+
+impl ViewCheckOption {
+    /// SQL keyword for the option.
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            ViewCheckOption::Local => "LOCAL",
+            ViewCheckOption::Cascaded => "CASCADED",
+        }
+    }
+}
+
+/// ` WITH (...)` storage clause for `CREATE VIEW`, or empty when no option is set.
+pub fn view_with_clause(security_invoker: bool, security_barrier: bool) -> String {
+    let mut opts = Vec::new();
+    if security_invoker {
+        opts.push("security_invoker = true");
+    }
+    if security_barrier {
+        opts.push("security_barrier = true");
+    }
+    if opts.is_empty() {
+        String::new()
+    } else {
+        format!(" WITH ({})", opts.join(", "))
+    }
+}
+
+/// ` WITH LOCAL|CASCADED CHECK OPTION` suffix for `CREATE VIEW`, or empty.
+pub fn view_check_option_clause(check_option: Option<ViewCheckOption>) -> String {
+    match check_option {
+        Some(option) => format!(" WITH {} CHECK OPTION", option.as_sql()),
+        None => String::new(),
+    }
 }
 
 /// Table-level constraints for composite keys
@@ -1283,6 +1354,29 @@ pub enum TableConstraint {
         /// Optional DEFERRABLE clause.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deferrable: Option<String>,
+        /// MATCH mode, ON DELETE column subset, and validation/enforcement state.
+        #[serde(default, skip_serializing_if = "ForeignKeyOptions::is_default")]
+        options: ForeignKeyOptions,
+    },
+    /// CHECK constraint carrying validation/enforcement state.
+    Check {
+        /// Optional constraint name.
+        name: Option<String>,
+        /// Boolean SQL expression (without the `CHECK` keyword).
+        expr: String,
+        /// `NOT VALID`; only legal on `ALTER TABLE ... ADD`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        not_valid: bool,
+        /// `NOT ENFORCED` (PostgreSQL 18+).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        not_enforced: bool,
+    },
+    /// EXCLUDE constraint, kept as the `pg_get_constraintdef` text from `EXCLUDE` onward.
+    Exclude {
+        /// Constraint name.
+        name: String,
+        /// `EXCLUDE USING ... (...) [INCLUDE ...] [WHERE (...)] [DEFERRABLE ...]`.
+        definition: String,
     },
 }
 

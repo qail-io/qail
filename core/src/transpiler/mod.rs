@@ -200,6 +200,10 @@ impl ToSql for Qail {
             ),
             // CREATE MATERIALIZED VIEW - uses source_query for the view definition
             Action::CreateMaterializedView => {
+                if self.view_security_barrier || self.view_check_option.is_some() {
+                    return "/* ERROR: security_barrier and CHECK OPTION apply to plain views only */"
+                        .to_string();
+                }
                 if let Some(source) = &self.source_query {
                     format!(
                         "CREATE MATERIALIZED VIEW {} AS {}",
@@ -295,36 +299,39 @@ impl ToSql for Qail {
                 // OWNER's rights, so RLS on those tables is evaluated as the
                 // owner and effectively bypassed. `security_invoker` makes
                 // Postgres use the CALLER's rights instead (PG15+).
-                let opts = if self.view_security_invoker {
-                    " WITH (security_invoker = true)"
-                } else {
-                    ""
-                };
+                let opts = crate::ast::view_with_clause(
+                    self.view_security_invoker,
+                    self.view_security_barrier,
+                );
+                let check_option = crate::ast::view_check_option_clause(self.view_check_option);
                 if let Some(source) = &self.source_query {
                     format!(
-                        "CREATE VIEW {}{} AS {}",
+                        "CREATE VIEW {}{} AS {}{}",
                         escape_identifier(&self.table),
                         opts,
-                        source.to_sql_with_dialect(dialect)
+                        source.to_sql_with_dialect(dialect),
+                        check_option
                     )
                 } else if let Some(query) = &self.payload {
                     match checked_sql_query_fragment(query, "view query") {
                         Ok(query) => {
                             format!(
-                                "CREATE VIEW {}{} AS {}",
+                                "CREATE VIEW {}{} AS {}{}",
                                 escape_identifier(&self.table),
                                 opts,
-                                query
+                                query,
+                                check_option
                             )
                         }
                         Err(err) => err,
                     }
                 } else {
                     format!(
-                        "CREATE VIEW {}{} AS {}",
+                        "CREATE VIEW {}{} AS {}{}",
                         escape_identifier(&self.table),
                         opts,
-                        dml::select::build_select(self, dialect)
+                        dml::select::build_select(self, dialect),
+                        check_option
                     )
                 }
             }

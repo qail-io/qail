@@ -126,9 +126,15 @@ pub fn create_policy_sql(policy: &RlsPolicy) -> String {
     // FOR ALL / SELECT / INSERT / UPDATE / DELETE
     sql.push_str(&format!(" FOR {}", policy.target));
 
-    // TO role
+    // TO role[, role...]
+    if policy.validate_roles().is_err() {
+        return "/* ERROR: Invalid policy role list */".to_string();
+    }
     if let Some(role) = &policy.role {
         sql.push_str(&format!(" TO {}", escape_identifier(role)));
+        for role in &policy.additional_roles {
+            sql.push_str(&format!(", {}", escape_identifier(role)));
+        }
     }
 
     // USING (expr)

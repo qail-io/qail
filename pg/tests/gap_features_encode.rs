@@ -428,6 +428,7 @@ fn c_native_temporal_key_ddl() {
             on_delete: None,
             on_update: None,
             deferrable: None,
+            options: Default::default(),
         }],
         ..Default::default()
     };

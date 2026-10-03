@@ -15,12 +15,14 @@ use qail_pg::driver::PgDriver;
 
 use crate::introspection::{
     IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
-    IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspect_temporal_constraints,
+    IntrospectedKeyColumn, IntrospectedUniqueConstraint, fetch_constraint_catalog,
+    fetch_nulls_not_distinct_indexes, introspect_temporal_constraints,
     introspected_column_generation, is_simple_index_column, is_trivial_not_null_check,
     is_unique_index_definition, mark_period_foreign_key, parse_check_expr, parse_index_parts,
     parse_pg_constraint_fk_action, resolve_introspected_foreign_key,
     resolve_introspected_unique_constraint, resolve_qualified_introspected_foreign_key,
-    sort_introspected_key_columns, sort_qualified_introspected_key_columns,
+    server_version_num, sort_introspected_key_columns, sort_qualified_introspected_key_columns,
+    table_hierarchy_cmd, table_hierarchy_marker, unique_constraint_with_nulls_not_distinct,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -62,10 +64,19 @@ fn parse_pg_attnum_array(raw: &str, label: &str) -> Result<Vec<i32>> {
         .collect()
 }
 
+/// Ordinary and partitioned tables, matching pull: a partitioned parent has its
+/// own ENABLE/FORCE flags.
 fn public_rls_status_cmd(public_namespace_oid: String) -> Qail {
     Qail::get("pg_catalog.pg_class")
         .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
-        .filter("relkind", qail_core::ast::Operator::Eq, "r")
+        .filter(
+            "relkind",
+            qail_core::ast::Operator::In,
+            qail_core::ast::Value::Array(vec![
+                qail_core::ast::Value::String("r".into()),
+                qail_core::ast::Value::String("p".into()),
+            ]),
+        )
         .filter(
             "relnamespace",
             qail_core::ast::Operator::Eq,
@@ -537,6 +548,7 @@ mod tests {
                     Column::new("pax_count", ColumnType::Int),
                 ],
                 multi_column_fks: vec![],
+                exclusions: vec![],
                 enable_rls: false,
                 force_rls: false,
                 temporal_keys: vec![],
@@ -599,6 +611,7 @@ mod tests {
                 name: "bookings".to_string(),
                 columns: vec![Column::new("start_date", ColumnType::Text)],
                 multi_column_fks: vec![],
+                exclusions: vec![],
                 enable_rls: false,
                 force_rls: false,
                 temporal_keys: vec![],
@@ -644,6 +657,7 @@ mod tests {
                     Column::new("virtual_segment_id", ColumnType::Uuid),
                 ],
                 multi_column_fks: vec![],
+                exclusions: vec![],
                 enable_rls: false,
                 force_rls: false,
                 temporal_keys: vec![],
@@ -1069,6 +1083,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .transpose()?
         .ok_or_else(|| anyhow!("Public schema not found in pg_namespace"))?;
 
+    let version_num = server_version_num(driver).await?;
+    let nulls_not_distinct_indexes =
+        fetch_nulls_not_distinct_indexes(driver, &public_namespace_oid, version_num).await?;
+
     // 1. Query all tables
     let tables_cmd = Qail::get("information_schema.tables")
         .column("table_name")
@@ -1126,7 +1144,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     .await?;
 
     let (single_unique_columns, unique_constraint_indexes, _unique_constraint_names) =
-        introspect_unique_constraints(driver, &temporal.key_names).await?;
+        introspect_unique_constraints(driver, &temporal.key_names, &nulls_not_distinct_indexes)
+            .await?;
     let primary_key_columns = introspect_primary_key_columns(driver, &temporal.key_names).await?;
 
     // 2. For each table, query columns
@@ -1221,6 +1240,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 name: table_name.clone(),
                 columns,
                 multi_column_fks: vec![],
+                exclusions: vec![],
                 enable_rls: false,
                 force_rls: false,
                 temporal_keys: temporal.keys.remove(table_name).unwrap_or_default(),
@@ -1291,10 +1311,21 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             continue;
         }
 
-        schema
-            .indexes
-            .push(index_from_pg_indexdef(idx_name, table_name, indexdef));
+        let mut index = index_from_pg_indexdef(idx_name, table_name, indexdef);
+        index.nulls_not_distinct = nulls_not_distinct_indexes.contains(&index.name);
+        schema.indexes.push(index);
     }
+
+    // Same pg_constraint state pull reads, so a pulled file and the live
+    // schema compare equal instead of tripping the CHECK/FK change guards.
+    let constraint_catalog = fetch_constraint_catalog(
+        driver,
+        &public_namespace_oid,
+        version_num,
+        &table_name_set,
+        &attnum_columns,
+    )
+    .await?;
 
     // 4. Query CHECK constraints. PostgreSQL stores CHECKs as table
     // constraints; QAIL's schema format may render them inline on a column.
@@ -1365,6 +1396,14 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             expr,
         );
     }
+
+    crate::introspection::apply_check_states(
+        schema
+            .tables
+            .iter_mut()
+            .map(|(name, table)| (name, &mut table.columns)),
+        &constraint_catalog.check_states,
+    );
 
     // 4. Query FK constraints (batch approach, not N+1)
     let fk_ref_cmd = Qail::get("information_schema.referential_constraints")
@@ -1549,6 +1588,11 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             &on_update,
             qail_core::migrate::schema::Deferrable::NotDeferrable,
         ) {
+            let resolved = resolved.with_options(
+                constraint_catalog
+                    .fk_options
+                    .get(&(source_table.clone(), constraint_name.clone())),
+            );
             match resolved {
                 IntrospectedForeignKey::Single {
                     table,
@@ -1572,7 +1616,13 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
 
     // Resolve FKs
     for fk_reference in &fk_references {
-        match resolve_qualified_introspected_foreign_key(fk_reference, &constraint_cols) {
+        let options = constraint_catalog.fk_options.get(&(
+            fk_reference.constraint.table.clone(),
+            fk_reference.constraint.name.clone(),
+        ));
+        match resolve_qualified_introspected_foreign_key(fk_reference, &constraint_cols)
+            .map(|resolved| resolved.with_options(options))
+        {
             Some(IntrospectedForeignKey::Single {
                 table,
                 column,
@@ -1607,7 +1657,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     }
 
     // 5. Query RLS status from pg_class
-    let rls_cmd = public_rls_status_cmd(public_namespace_oid);
+    let rls_cmd = public_rls_status_cmd(public_namespace_oid.clone());
 
     let rls_rows = driver
         .fetch_all(&rls_cmd)
@@ -1625,6 +1675,40 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             table.force_rls = force;
         }
     }
+
+    let mut exclusions = constraint_catalog.exclusions;
+    for (name, table) in schema.tables.iter_mut() {
+        table.exclusions = exclusions.remove(name).unwrap_or_default();
+    }
+
+    // Partitioning and inheritance have no model; markers keep a checked diff
+    // from treating these tables as plain ones.
+    let hierarchy_rows = driver
+        .fetch_all(&table_hierarchy_cmd(public_namespace_oid))
+        .await
+        .map_err(|e| anyhow!("Failed to query table partitioning/inheritance: {}", e))?;
+    schema.unsupported = constraint_catalog.unsupported;
+    for row in hierarchy_rows {
+        let table = row.text(0);
+        if !schema.tables.contains_key(&table) {
+            continue;
+        }
+        let parent = row.get_string(3).filter(|s| !s.is_empty());
+        let partition_key = row.get_string(4).filter(|s| !s.is_empty());
+        let partition_bound = row.get_string(5).filter(|s| !s.is_empty());
+        if let Some(marker) = table_hierarchy_marker(
+            &table,
+            &row.text(1),
+            row.text(2) == "t",
+            parent.as_deref(),
+            partition_key.as_deref(),
+            partition_bound.as_deref(),
+        ) {
+            schema.unsupported.push(marker);
+        }
+    }
+    schema.unsupported.sort();
+    schema.unsupported.dedup();
 
     Ok(schema)
 }
@@ -1730,6 +1814,7 @@ fn constraint_index_names_from_metadata(
 async fn introspect_unique_constraints(
     driver: &mut PgDriver,
     temporal_key_names: &std::collections::HashSet<String>,
+    nulls_not_distinct_indexes: &std::collections::HashSet<String>,
 ) -> Result<(
     std::collections::HashSet<(String, String)>,
     Vec<Index>,
@@ -1791,6 +1876,11 @@ async fn introspect_unique_constraints(
             && let Some(unique) =
                 resolve_introspected_unique_constraint(&constraint_name, &table_name, cols)
         {
+            let unique = unique_constraint_with_nulls_not_distinct(
+                &constraint_name,
+                unique,
+                nulls_not_distinct_indexes.contains(&constraint_name),
+            );
             match unique {
                 IntrospectedUniqueConstraint::Single { table, column } => {
                     unique_columns.insert((table, column));
@@ -1996,10 +2086,7 @@ fn apply_shadow_column_check_expr(
 
     push_shadow_column_check(
         column,
-        CheckConstraint {
-            expr,
-            name: Some(constraint_name.to_string()),
-        },
+        CheckConstraint::new(expr, Some(constraint_name.to_string())),
     );
 }
 

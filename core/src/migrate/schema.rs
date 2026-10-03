@@ -47,6 +47,10 @@ pub struct Schema {
     pub policies: Vec<RlsPolicy>,
     /// Infrastructure resources (buckets, queues, topics)
     pub resources: Vec<ResourceDef>,
+    /// Database objects a pull found but this model cannot represent
+    /// (`unsupported "..."`). Strict apply and checked diff refuse a schema that
+    /// carries any, so a lossy export can never be recreated silently.
+    pub unsupported: Vec<String>,
 }
 
 // ============================================================================
@@ -103,6 +107,8 @@ pub struct Table {
     pub columns: Vec<Column>,
     /// Table-level multi-column foreign keys
     pub multi_column_fks: Vec<MultiColumnForeignKey>,
+    /// EXCLUDE constraints.
+    pub exclusions: Vec<ExclusionConstraint>,
     /// ENABLE ROW LEVEL SECURITY
     pub enable_rls: bool,
     /// FORCE ROW LEVEL SECURITY
@@ -188,6 +194,19 @@ pub struct ForeignKey {
     pub on_update: FkAction,
     /// DEFERRABLE clause (Phase 2)
     pub deferrable: Deferrable,
+    /// MATCH mode, ON DELETE column subset, NOT VALID / NOT ENFORCED.
+    pub options: ForeignKeyOptions,
+}
+
+pub use crate::ast::{ForeignKeyOptions, ViewCheckOption};
+
+/// `CONSTRAINT name EXCLUDE ...`, kept as the server-normalized definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExclusionConstraint {
+    /// Constraint name.
+    pub name: String,
+    /// `EXCLUDE USING ... (...) [INCLUDE ...] [WHERE (...)] [DEFERRABLE ...]`.
+    pub definition: String,
 }
 
 /// Foreign key action on DELETE/UPDATE.
@@ -227,6 +246,8 @@ pub struct Index {
     pub concurrently: bool,
     /// Expression columns (e.g. `(lower(email))`) — if set, these replace `columns`
     pub expressions: Vec<String>,
+    /// `NULLS NOT DISTINCT` (unique indexes, PostgreSQL 15+).
+    pub nulls_not_distinct: bool,
 }
 
 /// Hints for the migration diff engine to improve migration quality.
@@ -423,6 +444,27 @@ pub struct CheckConstraint {
     pub expr: CheckExpr,
     /// Optional constraint name.
     pub name: Option<String>,
+    /// `NOT VALID`: existing rows were never checked.
+    pub not_valid: bool,
+    /// `NOT ENFORCED` (PostgreSQL 18+).
+    pub not_enforced: bool,
+}
+
+impl CheckConstraint {
+    /// Validated, enforced CHECK constraint.
+    pub fn new(expr: CheckExpr, name: Option<String>) -> Self {
+        Self {
+            expr,
+            name,
+            not_valid: false,
+            not_enforced: false,
+        }
+    }
+
+    /// True when the constraint is NOT VALID or NOT ENFORCED.
+    pub fn has_state(&self) -> bool {
+        self.not_valid || self.not_enforced
+    }
 }
 
 // ============================================================================
@@ -724,6 +766,8 @@ pub struct MultiColumnForeignKey {
     pub period: bool,
     /// Optional constraint name.
     pub name: Option<String>,
+    /// MATCH mode, ON DELETE column subset, NOT VALID / NOT ENFORCED.
+    pub options: ForeignKeyOptions,
 }
 
 impl MultiColumnForeignKey {
@@ -742,6 +786,7 @@ impl MultiColumnForeignKey {
             deferrable: Deferrable::default(),
             period: false,
             name: None,
+            options: ForeignKeyOptions::default(),
         }
     }
 
@@ -807,6 +852,12 @@ pub struct ViewDef {
     /// direction. Requires PostgreSQL 15+; ignored on MATERIALIZED views,
     /// which Postgres does not support it for.
     pub security_invoker: bool,
+    /// `WITH (security_barrier = true)`: caller-supplied functions and
+    /// operators cannot see rows the view's own WHERE filters out.
+    pub security_barrier: bool,
+    /// `WITH LOCAL|CASCADED CHECK OPTION`: writes through the view must
+    /// satisfy its WHERE clause.
+    pub check_option: Option<ViewCheckOption>,
 }
 
 impl ViewDef {
@@ -817,6 +868,8 @@ impl ViewDef {
             query: query.into(),
             materialized: false,
             security_invoker: false,
+            security_barrier: false,
+            check_option: None,
         }
     }
 
@@ -829,6 +882,18 @@ impl ViewDef {
     /// Evaluate base tables with the caller's privileges so their RLS applies.
     pub fn security_invoker(mut self) -> Self {
         self.security_invoker = true;
+        self
+    }
+
+    /// Mark as a security barrier view.
+    pub fn security_barrier(mut self) -> Self {
+        self.security_barrier = true;
+        self
+    }
+
+    /// Require writes through the view to satisfy its WHERE clause.
+    pub fn check_option(mut self, option: ViewCheckOption) -> Self {
+        self.check_option = Some(option);
         self
     }
 }
@@ -1192,6 +1257,13 @@ impl Schema {
                 }
 
                 if let Some(ref fk) = col.foreign_key {
+                    if let Some(error) = fk_on_delete_columns_error(
+                        &fk.on_delete,
+                        &fk.options,
+                        std::slice::from_ref(&col.name),
+                    ) {
+                        errors.push(format!("FK error: {}.{} {}", table.name, col.name, error));
+                    }
                     if !self.tables.contains_key(&fk.table) {
                         errors.push(format!(
                             "FK error: {}.{} references non-existent table '{}'",
@@ -1245,6 +1317,11 @@ impl Schema {
                     }
                 }
 
+                if let Some(error) =
+                    fk_on_delete_columns_error(&fk.on_delete, &fk.options, &fk.columns)
+                {
+                    errors.push(format!("Multi-column FK error: {} {}", table.name, error));
+                }
                 if fk.columns.is_empty() {
                     errors.push(format!(
                         "Multi-column FK error: {} has no source columns",
@@ -1307,6 +1384,29 @@ impl Schema {
                     ));
                 }
             }
+
+            for exclusion in &table.exclusions {
+                if !seen_constraint_names.insert(exclusion.name.as_str()) {
+                    errors.push(format!(
+                        "Constraint error: table '{}' has duplicate constraint name '{}'",
+                        table.name, exclusion.name
+                    ));
+                }
+                if crate::transpiler::ddl::checked_exclude_definition(&exclusion.definition)
+                    .is_none()
+                {
+                    errors.push(format!(
+                        "Exclusion error: {}.{} must be a single EXCLUDE clause",
+                        table.name, exclusion.name
+                    ));
+                }
+            }
+        }
+
+        for policy in &self.policies {
+            if let Err(error) = policy.validate_roles() {
+                errors.push(format!("Policy error: {}", error));
+            }
         }
 
         let mut seen_index_names = std::collections::BTreeSet::new();
@@ -1329,6 +1429,12 @@ impl Schema {
             if index.columns.is_empty() && index.expressions.is_empty() {
                 errors.push(format!(
                     "Index error: {} must define at least one column or expression",
+                    index.name
+                ));
+            }
+            if index.nulls_not_distinct && !index.unique {
+                errors.push(format!(
+                    "Index error: {} uses NULLS NOT DISTINCT without UNIQUE",
                     index.name
                 ));
             }
@@ -1396,6 +1502,26 @@ impl Schema {
             Err(errors)
         }
     }
+}
+
+/// PostgreSQL accepts an ON DELETE column list only for SET NULL / SET DEFAULT,
+/// and only naming the constraint's own referencing columns.
+fn fk_on_delete_columns_error(
+    on_delete: &FkAction,
+    options: &ForeignKeyOptions,
+    fk_columns: &[String],
+) -> Option<String> {
+    if options.on_delete_columns.is_empty() {
+        return None;
+    }
+    if !matches!(on_delete, FkAction::SetNull | FkAction::SetDefault) {
+        return Some("lists ON DELETE columns without SET NULL or SET DEFAULT".to_string());
+    }
+    options
+        .on_delete_columns
+        .iter()
+        .find(|col| !fk_columns.contains(col))
+        .map(|col| format!("lists ON DELETE column '{}' outside the foreign key", col))
 }
 
 fn check_expr_column_references(expr: &CheckExpr) -> Vec<&str> {
@@ -1546,6 +1672,7 @@ impl Table {
             name: name.into(),
             columns: Vec::new(),
             multi_column_fks: Vec::new(),
+            exclusions: Vec::new(),
             enable_rls: false,
             force_rls: false,
             temporal_keys: Vec::new(),
@@ -1689,6 +1816,7 @@ impl Column {
             on_delete: FkAction::default(),
             on_update: FkAction::default(),
             deferrable: Deferrable::default(),
+            options: ForeignKeyOptions::default(),
         });
         self
     }
@@ -1713,31 +1841,26 @@ impl Column {
 
     /// Add a CHECK constraint (AST-native)
     pub fn check(mut self, expr: CheckExpr) -> Self {
-        self.check = Some(CheckConstraint { expr, name: None });
+        self.check = Some(CheckConstraint::new(expr, None));
         self
     }
 
     /// Add a named CHECK constraint
     pub fn check_named(mut self, name: impl Into<String>, expr: CheckExpr) -> Self {
-        self.check = Some(CheckConstraint {
-            expr,
-            name: Some(name.into()),
-        });
+        self.check = Some(CheckConstraint::new(expr, Some(name.into())));
         self
     }
 
     /// Add another CHECK constraint to a column that already has one.
     pub fn additional_check(mut self, expr: CheckExpr) -> Self {
-        self.extra_checks.push(CheckConstraint { expr, name: None });
+        self.extra_checks.push(CheckConstraint::new(expr, None));
         self
     }
 
     /// Add another named CHECK constraint to a column that already has one.
     pub fn additional_check_named(mut self, name: impl Into<String>, expr: CheckExpr) -> Self {
-        self.extra_checks.push(CheckConstraint {
-            expr,
-            name: Some(name.into()),
-        });
+        self.extra_checks
+            .push(CheckConstraint::new(expr, Some(name.into())));
         self
     }
 
@@ -1806,6 +1929,7 @@ impl Index {
             include: Vec::new(),
             concurrently: false,
             expressions: Vec::new(),
+            nulls_not_distinct: false,
         }
     }
 
@@ -1825,7 +1949,14 @@ impl Index {
             include: Vec::new(),
             concurrently: false,
             expressions,
+            nulls_not_distinct: false,
         }
+    }
+
+    /// Treat NULL keys as equal (`NULLS NOT DISTINCT`); only valid on UNIQUE indexes.
+    pub fn nulls_not_distinct(mut self) -> Self {
+        self.nulls_not_distinct = true;
+        self
     }
 
     /// Mark this index as UNIQUE.
@@ -1871,6 +2002,31 @@ fn fk_action_str(action: &FkAction) -> &'static str {
         FkAction::SetDefault => "set_default",
         FkAction::Restrict => "restrict",
     }
+}
+
+/// `set_null(a,b)` when ON DELETE names a column subset; written without
+/// spaces so the token survives whitespace splitting.
+fn fk_on_delete_qail(action: &FkAction, options: &ForeignKeyOptions) -> String {
+    if options.on_delete_columns.is_empty() {
+        fk_action_str(action).to_string()
+    } else {
+        format!(
+            "{}({})",
+            fk_action_str(action),
+            options.on_delete_columns.join(",")
+        )
+    }
+}
+
+fn constraint_state_qail(not_valid: bool, not_enforced: bool) -> String {
+    let mut out = String::new();
+    if not_valid {
+        out.push_str(" not_valid");
+    }
+    if not_enforced {
+        out.push_str(" not_enforced");
+    }
+    out
 }
 
 fn format_qail_value_token(value: &str, extra_special: &[char]) -> String {
@@ -1993,10 +2149,36 @@ fn dollar_quote_qail_body(body: &str) -> String {
     format!("{delimiter}\n{body}\n{delimiter}")
 }
 
+/// Policy role token: bare when it is a plain lowercase identifier, otherwise
+/// double-quoted so a name containing `,` or spaces stays one role.
+fn format_policy_role(role: &str) -> String {
+    let plain = role
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && role
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if plain {
+        role.to_string()
+    } else {
+        quote_qail_string(role)
+    }
+}
+
 /// Serialize a `Schema` back to a QAIL-format string.
 pub fn to_qail_string(schema: &Schema) -> String {
     let mut output = String::new();
     output.push_str("# QAIL Schema\n\n");
+
+    // Objects the pull saw but cannot model. Kept first so a reader sees them;
+    // strict apply and checked diff refuse the schema while any remain.
+    for item in &schema.unsupported {
+        output.push_str(&format!("unsupported {}\n", quote_qail_string(item)));
+    }
+    if !schema.unsupported.is_empty() {
+        output.push('\n');
+    }
 
     // Extensions first (must be created before any DDL)
     for ext in &schema.extensions {
@@ -2103,8 +2285,14 @@ pub fn to_qail_string(schema: &Schema) -> String {
             }
             if let Some(ref fk) = col.foreign_key {
                 let mut fk_str = format!("references {}({})", fk.table, fk.column);
+                if fk.options.match_full {
+                    fk_str.push_str(" match_full");
+                }
                 if fk.on_delete != FkAction::NoAction {
-                    fk_str.push_str(&format!(" on_delete {}", fk_action_str(&fk.on_delete)));
+                    fk_str.push_str(&format!(
+                        " on_delete {}",
+                        fk_on_delete_qail(&fk.on_delete, &fk.options)
+                    ));
                 }
                 if fk.on_update != FkAction::NoAction {
                     fk_str.push_str(&format!(" on_update {}", fk_action_str(&fk.on_update)));
@@ -2115,12 +2303,20 @@ pub fn to_qail_string(schema: &Schema) -> String {
                     Deferrable::InitiallyImmediate => fk_str.push_str(" initially_immediate"),
                     Deferrable::NotDeferrable => {} // default, omit
                 }
+                fk_str.push_str(&constraint_state_qail(
+                    fk.options.not_valid,
+                    fk.options.not_enforced,
+                ));
                 constraints.push(fk_str);
             }
             for check in col.checks() {
                 constraints.push(format!("check({})", check_expr_str(&check.expr)));
                 if let Some(name) = &check.name {
                     constraints.push(format!("check_name {}", name));
+                }
+                let state = constraint_state_qail(check.not_valid, check.not_enforced);
+                if !state.is_empty() {
+                    constraints.push(state.trim_start().to_string());
                 }
             }
 
@@ -2166,13 +2362,20 @@ pub fn to_qail_string(schema: &Schema) -> String {
                 || fk.on_delete != FkAction::NoAction
                 || fk.on_update != FkAction::NoAction
                 || fk.deferrable != Deferrable::NotDeferrable
+                || !fk.options.is_default()
             {
                 fk_line.pop();
                 if let Some(name) = &fk.name {
                     fk_line.push_str(&format!(" constraint {}", name));
                 }
+                if fk.options.match_full {
+                    fk_line.push_str(" match_full");
+                }
                 if fk.on_delete != FkAction::NoAction {
-                    fk_line.push_str(&format!(" on_delete {}", fk_action_str(&fk.on_delete)));
+                    fk_line.push_str(&format!(
+                        " on_delete {}",
+                        fk_on_delete_qail(&fk.on_delete, &fk.options)
+                    ));
                 }
                 if fk.on_update != FkAction::NoAction {
                     fk_line.push_str(&format!(" on_update {}", fk_action_str(&fk.on_update)));
@@ -2183,9 +2386,19 @@ pub fn to_qail_string(schema: &Schema) -> String {
                     Deferrable::InitiallyImmediate => fk_line.push_str(" initially_immediate"),
                     Deferrable::NotDeferrable => {}
                 }
+                fk_line.push_str(&constraint_state_qail(
+                    fk.options.not_valid,
+                    fk.options.not_enforced,
+                ));
                 fk_line.push('\n');
             }
             output.push_str(&fk_line);
+        }
+        for exclusion in &table.exclusions {
+            output.push_str(&format!(
+                "  exclusion {} {}\n",
+                exclusion.name, exclusion.definition
+            ));
         }
         // RLS directives
         if table.enable_rls {
@@ -2228,6 +2441,9 @@ pub fn to_qail_string(schema: &Schema) -> String {
             line.push_str(&idx.include.join(", "));
             line.push(')');
         }
+        if idx.nulls_not_distinct {
+            line.push_str(" nulls_not_distinct");
+        }
         if let Some(where_clause) = &idx.where_clause {
             line.push_str(" where ");
             line.push_str(&check_expr_str(where_clause));
@@ -2259,11 +2475,18 @@ pub fn to_qail_string(schema: &Schema) -> String {
             "view"
         };
         let body = dollar_quote_qail_body(&view.query);
-        let modifier = if view.security_invoker {
-            " security_invoker"
-        } else {
-            ""
-        };
+        let mut modifier = String::new();
+        if view.security_invoker {
+            modifier.push_str(" security_invoker");
+        }
+        if view.security_barrier {
+            modifier.push_str(" security_barrier");
+        }
+        match view.check_option {
+            Some(ViewCheckOption::Local) => modifier.push_str(" check_option local"),
+            Some(ViewCheckOption::Cascaded) => modifier.push_str(" check_option cascaded"),
+            None => {}
+        }
         output.push_str(&format!(
             "{} {}{} {}\n\n",
             prefix, view.name, modifier, body
@@ -2322,9 +2545,18 @@ pub fn to_qail_string(schema: &Schema) -> String {
             PolicyPermissiveness::Permissive => "",
             PolicyPermissiveness::Restrictive => " restrictive",
         };
-        let role_str = match &policy.role {
-            Some(r) => format!(" to {}", r),
-            None => String::new(),
+        let roles = policy.roles();
+        let role_str = if roles.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " to {}",
+                roles
+                    .iter()
+                    .map(|role| format_policy_role(role))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         output.push_str(&format!(
             "policy {} on {} for {}{}{}",
@@ -2501,10 +2733,14 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 if let Some(def) = &col.default {
                     constraints.push(Constraint::Default(def.clone()));
                 }
-                if let Some(ref fk) = col.foreign_key {
+                // NOT VALID is ignored inside CREATE TABLE, so those foreign
+                // keys and stateful checks are added by ALTER TABLE below.
+                if let Some(ref fk) = col.foreign_key
+                    && !fk.options.not_valid
+                {
                     constraints.push(Constraint::References(foreign_key_to_sql(fk)));
                 }
-                for check in col.checks() {
+                for check in col.checks().filter(|check| !check.has_state()) {
                     let check_sql = check_expr_to_sql(&check.expr);
                     if let Some(name) = &check.name {
                         constraints.push(Constraint::Check(vec![format!(
@@ -2584,6 +2820,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 include: idx.include.clone(),
                 concurrently: idx.concurrently,
                 where_clause: idx.where_clause.as_ref().map(check_expr_to_sql),
+                nulls_not_distinct: idx.nulls_not_distinct,
             }),
             ..Default::default()
         });
@@ -2603,7 +2840,63 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
         }
     }
 
+    let mut table_names: Vec<&String> = schema.tables.keys().collect();
+    table_names.sort();
+    for table_name in table_names {
+        let table = &schema.tables[table_name];
+        let constraints = table_alter_constraints(table);
+        if !constraints.is_empty() {
+            cmds.push(crate::ast::Qail {
+                action: crate::ast::Action::Alter,
+                table: table.name.clone(),
+                table_constraints: constraints,
+                ..Default::default()
+            });
+        }
+    }
+
     cmds
+}
+
+/// Constraints that must be added after CREATE TABLE: NOT VALID foreign keys,
+/// CHECKs carrying NOT VALID / NOT ENFORCED, and EXCLUDE constraints.
+pub(crate) fn table_alter_constraints(table: &Table) -> Vec<crate::ast::TableConstraint> {
+    let mut out = Vec::new();
+    for col in &table.columns {
+        if let Some(fk) = &col.foreign_key
+            && fk.options.not_valid
+        {
+            out.push(crate::ast::TableConstraint::ForeignKey {
+                name: None,
+                columns: vec![col.name.clone()],
+                ref_table: fk.table.clone(),
+                ref_columns: vec![fk.column.clone()],
+                // A column-level reference has no PERIOD part.
+                period: false,
+                on_delete: (fk.on_delete != FkAction::NoAction)
+                    .then(|| fk_action_to_sql(&fk.on_delete).to_string()),
+                on_update: (fk.on_update != FkAction::NoAction)
+                    .then(|| fk_action_to_sql(&fk.on_update).to_string()),
+                deferrable: deferrable_to_sql(&fk.deferrable).map(str::to_string),
+                options: fk.options.clone(),
+            });
+        }
+        for check in col.checks().filter(|check| check.has_state()) {
+            out.push(crate::ast::TableConstraint::Check {
+                name: check.name.clone(),
+                expr: check_expr_to_sql(&check.expr),
+                not_valid: check.not_valid,
+                not_enforced: check.not_enforced,
+            });
+        }
+    }
+    for exclusion in &table.exclusions {
+        out.push(crate::ast::TableConstraint::Exclude {
+            name: exclusion.name.clone(),
+            definition: exclusion.definition.clone(),
+        });
+    }
+    out
 }
 
 pub(super) fn multi_column_fk_to_table_constraint(
@@ -2620,6 +2913,7 @@ pub(super) fn multi_column_fk_to_table_constraint(
         on_update: (fk.on_update != FkAction::NoAction)
             .then(|| fk_action_to_sql(&fk.on_update).to_string()),
         deferrable: deferrable_to_sql(&fk.deferrable).map(str::to_string),
+        options: fk.options.clone(),
     }
 }
 
@@ -2654,11 +2948,19 @@ fn deferrable_to_sql(deferrable: &Deferrable) -> Option<&'static str> {
     }
 }
 
+/// Inline `REFERENCES` target. NOT VALID is not rendered: PostgreSQL ignores it
+/// inside CREATE TABLE, so callers add such keys with ALTER TABLE instead.
 pub(crate) fn foreign_key_to_sql(fk: &ForeignKey) -> String {
     let mut target = format!("{}({})", fk.table, fk.column);
+    if fk.options.match_full {
+        target.push_str(" MATCH FULL");
+    }
     if fk.on_delete != FkAction::NoAction {
         target.push_str(" ON DELETE ");
         target.push_str(fk_action_to_sql(&fk.on_delete));
+        if !fk.options.on_delete_columns.is_empty() {
+            target.push_str(&format!(" ({})", fk.options.on_delete_columns.join(", ")));
+        }
     }
     if fk.on_update != FkAction::NoAction {
         target.push_str(" ON UPDATE ");
@@ -2667,6 +2969,9 @@ pub(crate) fn foreign_key_to_sql(fk: &ForeignKey) -> String {
     if let Some(def) = deferrable_to_sql(&fk.deferrable) {
         target.push(' ');
         target.push_str(def);
+    }
+    if fk.options.not_enforced {
+        target.push_str(" NOT ENFORCED");
     }
     target
 }
@@ -3676,6 +3981,7 @@ mod tests {
                             on_delete,
                             on_update,
                             deferrable,
+                            ..
                         } if columns == &["route_id", "schedule_id"]
                             && name.as_deref() == Some("fk_trips_schedule")
                             && ref_table == "schedules"

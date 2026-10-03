@@ -337,6 +337,7 @@ fn corpus() -> Vec<(&'static str, Qail)> {
                     include: vec![],
                     concurrently: false,
                     where_clause: None,
+                    nulls_not_distinct: false,
                 }),
                 ..Default::default()
             },

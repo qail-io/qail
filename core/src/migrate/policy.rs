@@ -99,6 +99,10 @@ pub struct RlsPolicy {
     pub with_check: Option<Expr>,
     /// Role this policy applies to (default: PUBLIC)
     pub role: Option<String>,
+    /// Further roles after `role` (`TO a, b, c`). Requires `role`; PostgreSQL
+    /// ignores every other role when PUBLIC is listed, so PUBLIC never appears here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_roles: Vec<String>,
 }
 
 impl RlsPolicy {
@@ -117,6 +121,7 @@ impl RlsPolicy {
             using: None,
             with_check: None,
             role: None,
+            additional_roles: Vec::new(),
         }
     }
 
@@ -174,6 +179,58 @@ impl RlsPolicy {
     pub fn to_role(mut self, role: impl Into<String>) -> Self {
         self.role = Some(role.into());
         self
+    }
+
+    /// Restrict policy to several roles (`TO a, b`). An empty list means PUBLIC.
+    pub fn to_roles<I, S>(mut self, roles: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut roles = roles.into_iter().map(Into::into);
+        self.role = roles.next();
+        self.additional_roles = roles.collect();
+        self
+    }
+
+    /// Every role in `TO` order; empty means PUBLIC.
+    pub fn roles(&self) -> Vec<&str> {
+        self.role
+            .iter()
+            .chain(self.additional_roles.iter())
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Reject role lists PostgreSQL would silently reinterpret.
+    pub fn validate_roles(&self) -> Result<(), String> {
+        if self.role.is_none() && !self.additional_roles.is_empty() {
+            return Err(format!(
+                "policy '{}' lists additional roles without a first role",
+                self.name
+            ));
+        }
+        let roles = self.roles();
+        let mut seen = std::collections::HashSet::new();
+        for role in &roles {
+            if role.trim().is_empty() {
+                return Err(format!("policy '{}' has an empty role name", self.name));
+            }
+            if !seen.insert(*role) {
+                return Err(format!(
+                    "policy '{}' lists role '{}' more than once",
+                    self.name, role
+                ));
+            }
+            // PostgreSQL warns and drops every other role when PUBLIC is listed.
+            if roles.len() > 1 && role.eq_ignore_ascii_case("public") {
+                return Err(format!(
+                    "policy '{}' combines PUBLIC with other roles; PostgreSQL would ignore the others",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

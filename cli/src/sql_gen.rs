@@ -437,6 +437,7 @@ mod tests {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };
@@ -463,6 +464,7 @@ mod tests {
                 include: vec!["name".to_string(), "created_at".to_string()],
                 concurrently: true,
                 where_clause: Some("deleted_at IS NULL".to_string()),
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         };

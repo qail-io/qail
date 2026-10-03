@@ -131,6 +131,14 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
         );
     }
 
+    if !schema.unsupported.is_empty() {
+        bail!(
+            "Strict AST migration compiler refuses a schema with `unsupported` objects \
+             recorded by pull; recreating it would silently drop them:\n  {}",
+            schema.unsupported.join("\n  ")
+        );
+    }
+
     let mut unsupported = Vec::new();
     unsupported.extend(hint_unsupported);
     if !unsupported.is_empty() {
@@ -524,13 +532,16 @@ fn compile_policies_strict(policies: &[RlsPolicy]) -> Result<Vec<Qail>> {
                 policy.table
             );
         }
-        if let Some(role) = &policy.role
-            && !is_valid_ident_path(role)
-        {
-            bail!(
-                "Strict AST migration compiler rejects invalid policy role '{}'",
-                role
-            );
+        if let Err(error) = policy.validate_roles() {
+            bail!("Strict AST migration compiler rejects {}", error);
+        }
+        for role in policy.roles() {
+            if !is_valid_ident_path(role) {
+                bail!(
+                    "Strict AST migration compiler rejects invalid policy role '{}'",
+                    role
+                );
+            }
         }
 
         cmds.push(Qail {
@@ -652,6 +663,9 @@ fn compile_views_strict(views: &[ViewDef]) -> Result<Vec<Qail>> {
             // Postgres has no security_invoker for MATERIALIZED views, so the
             // flag only rides along on plain ones.
             view_security_invoker: view.security_invoker && !view.materialized,
+            // The encoders reject these on a materialized view.
+            view_security_barrier: view.security_barrier,
+            view_check_option: view.check_option,
             ..Default::default()
         });
     }
@@ -1272,6 +1286,7 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
                 include: vec![],
                 concurrently: false,
                 where_clause: None,
+                nulls_not_distinct: false,
             }),
             ..Default::default()
         });
