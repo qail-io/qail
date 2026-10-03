@@ -7,24 +7,23 @@ fn rest_list_cache_key(
     uri: &axum::http::Uri,
     cmd: &qail_core::ast::Qail,
 ) -> String {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tenant.hash(&mut hasher);
-    table_name.hash(&mut hasher);
-    auth.user_id.hash(&mut hasher);
-    auth.role.hash(&mut hasher);
-    uri.to_string().hash(&mut hasher);
-    qail_core::wire::encode_cmd_text(cmd).hash(&mut hasher);
+    let mut digest = crate::cache::CacheKeyDigest::new("qail:rest-list-cache:v2");
+    digest.field(tenant.as_bytes());
+    digest.field(table_name.as_bytes());
+    digest.field(auth.user_id.as_bytes());
+    digest.field(auth.role.as_bytes());
+    digest.field(uri.to_string().as_bytes());
+    digest.qail(cmd);
 
     let mut claims: Vec<_> = auth.claims.iter().collect();
     claims.sort_by_key(|(left, _)| *left);
+    digest.field(&(claims.len() as u64).to_le_bytes());
     for (key, value) in claims {
-        key.hash(&mut hasher);
-        crate::auth::canonical_json_value(value).hash(&mut hasher);
+        digest.field(key.as_bytes());
+        digest.field(crate::auth::canonical_json_value(value).as_bytes());
     }
 
-    format!("rest:{}:{}:{:016x}", tenant, table_name, hasher.finish())
+    format!("rest:{}:{}:{}", tenant, table_name, digest.finish_hex())
 }
 
 fn encode_ndjson_rows(data: &[Value]) -> Result<String, ApiError> {
@@ -57,14 +56,16 @@ fn attach_rest_list_debug_headers(
     }
 }
 
-fn rest_explain_cache_shape_hash(sql_shape: &str, auth: &crate::auth::AuthContext) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    sql_shape.hash(&mut hasher);
-    auth.transaction_scope_fingerprint().hash(&mut hasher);
-    hasher.finish()
+/// `ExplainCache` keys are `u64`, so this is the SHA-256 prefix of the AST and
+/// auth scope; `to_sql()` would merge commands whose SQL preview drops a clause.
+fn rest_explain_cache_shape_hash(
+    cmd: &qail_core::ast::Qail,
+    auth: &crate::auth::AuthContext,
+) -> u64 {
+    let mut digest = crate::cache::CacheKeyDigest::new("qail:rest-explain-cache:v2");
+    digest.qail(cmd);
+    digest.field(auth.transaction_scope_fingerprint().as_bytes());
+    digest.finish_u64()
 }
 
 fn projection_json_column_name(expr: &Expr) -> Result<Option<String>, ApiError> {
@@ -716,7 +717,7 @@ pub(crate) async fn list_handler(
         if should_explain {
             // Hash the SQL shape for cache lookup
             let sql_shape = cmd.to_sql();
-            let shape_hash = rest_explain_cache_shape_hash(&sql_shape, &auth);
+            let shape_hash = rest_explain_cache_shape_hash(&cmd, &auth);
 
             let estimate = if let Some(cached) = state.explain_cache.get(shape_hash, None) {
                 cached
@@ -1729,7 +1730,7 @@ mod tests {
 
     #[test]
     fn explain_cache_shape_hash_includes_auth_scope() {
-        let sql_shape = "SELECT * FROM orders WHERE tenant_id = $1";
+        let cmd = qail_core::ast::Qail::get("orders").eq("tenant_id", "tenant-a");
         let operator = AuthContext {
             user_id: "user-1".to_string(),
             role: "operator".to_string(),
@@ -1742,12 +1743,12 @@ mod tests {
         other_tenant.tenant_id = Some("tenant-b".to_string());
 
         assert_ne!(
-            rest_explain_cache_shape_hash(sql_shape, &operator),
-            rest_explain_cache_shape_hash(sql_shape, &viewer)
+            rest_explain_cache_shape_hash(&cmd, &operator),
+            rest_explain_cache_shape_hash(&cmd, &viewer)
         );
         assert_ne!(
-            rest_explain_cache_shape_hash(sql_shape, &operator),
-            rest_explain_cache_shape_hash(sql_shape, &other_tenant)
+            rest_explain_cache_shape_hash(&cmd, &operator),
+            rest_explain_cache_shape_hash(&cmd, &other_tenant)
         );
     }
 

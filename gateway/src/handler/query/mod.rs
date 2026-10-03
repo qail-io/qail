@@ -29,6 +29,7 @@ pub use endpoints::{
 };
 pub(crate) use rules::{
     cache_tables_for_qail, clamp_query_limit, is_query_allowed, qail_command_is_read_only,
+    qail_command_takes_row_locks,
 };
 pub(crate) use rules::{qail_table_name, query_complexity};
 pub(crate) use rules::{reject_dangerous_action, reject_non_read_action};

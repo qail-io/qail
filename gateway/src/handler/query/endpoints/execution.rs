@@ -304,7 +304,9 @@ fn command_is_read_only_for_release(cmd: &qail_core::ast::Qail) -> bool {
 }
 
 fn command_is_cacheable_query(cmd: &qail_core::ast::Qail) -> bool {
-    matches!(cmd.action, Action::Get) && command_is_read_only_for_release(cmd)
+    matches!(cmd.action, Action::Get)
+        && command_is_read_only_for_release(cmd)
+        && !qail_command_takes_row_locks(cmd)
 }
 
 #[cfg(test)]
@@ -412,5 +414,75 @@ mod tests {
 
         assert!(!command_is_read_only_for_release(&cmd));
         assert!(!command_is_cacheable_query(&cmd));
+    }
+
+    #[test]
+    fn row_lock_queries_are_never_cacheable() {
+        let plain = Qail::get("orders").eq("id", 1);
+        assert!(command_is_cacheable_query(&plain));
+
+        let mut skip_locked_only = plain.clone();
+        skip_locked_only.skip_locked = true;
+        let locked = [
+            ("for_update", plain.clone().for_update()),
+            ("for_no_key_update", plain.clone().for_no_key_update()),
+            ("for_share", plain.clone().for_share()),
+            ("for_key_share", plain.clone().for_key_share()),
+            (
+                "for_update_skip_locked",
+                plain.clone().for_update_skip_locked(),
+            ),
+            ("skip_locked_flag", skip_locked_only),
+        ];
+
+        let mut cacheable = Vec::new();
+        for (name, top_level) in locked {
+            let in_cte = Qail::get("held").with("held", top_level.clone());
+
+            let mut in_set_op = Qail::get("orders");
+            in_set_op
+                .set_ops
+                .push((SetOp::UnionAll, Box::new(top_level.clone())));
+
+            let mut in_expr_subquery = Qail::get("orders");
+            in_expr_subquery.columns.push(Expr::Subquery {
+                query: Box::new(top_level.clone()),
+                alias: Some("held".to_string()),
+            });
+
+            let mut in_value_subquery = Qail::get("orders");
+            in_value_subquery.cages.push(Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("id".to_string()),
+                    op: Operator::In,
+                    value: Value::Subquery(Box::new(top_level.clone())),
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            });
+
+            // `FROM (SELECT ... FOR UPDATE) AS held`
+            let in_from_source = Qail::get("held").from_source(
+                qail_core::ast::FromSource::subquery(top_level.clone(), "held"),
+            );
+
+            for (place, cmd) in [
+                ("top", top_level),
+                ("cte", in_cte),
+                ("set_op", in_set_op),
+                ("expr_subquery", in_expr_subquery),
+                ("value_subquery", in_value_subquery),
+                ("from_source", in_from_source),
+            ] {
+                if command_is_cacheable_query(&cmd) {
+                    cacheable.push(format!("{name}@{place}"));
+                }
+            }
+        }
+        assert!(
+            cacheable.is_empty(),
+            "a cache hit would skip the row lock: {cacheable:?}"
+        );
     }
 }
