@@ -464,30 +464,73 @@ impl Qail {
         let condition_col = self.primary_tenant_condition_col(col);
         let primary = self.primary_relation_qualifier();
         let joined = self.join_qualifiers();
+        let condition = Self::scope_condition(&condition_col, value);
+        if matches!(self.action, Action::Add | Action::Upsert | Action::Put) {
+            self.conflict_update_scope.retain(|c| {
+                !matches!(&c.left, Expr::Named(existing)
+                    if same_scoped_column(existing, &condition_col, &primary, &joined))
+            });
+            self.conflict_update_scope.push(condition.clone());
+        }
         let table = self.table.clone();
         let Some(on_conflict) = self.on_conflict.as_mut() else {
             return Ok(self);
         };
-        let ConflictAction::DoUpdate { assignments } = &on_conflict.action else {
-            return Ok(self);
-        };
-        if assignments
-            .iter()
-            .any(|(assigned, _)| normalize_ident(assigned) == normalize_ident(col))
+        if let ConflictAction::DoUpdate { assignments } = &on_conflict.action
+            && assignments
+                .iter()
+                .any(|(assigned, _)| normalize_ident(assigned) == normalize_ident(col))
         {
             return Err(QailBuildError::RlsTenantColumnMutationDenied {
                 table,
                 tenant_column: col.to_string(),
             });
         }
+        // DO NOTHING keeps its predicates for a later DO UPDATE, so rescoping
+        // must replace the retained guard here too.
         on_conflict.where_conditions.retain(|c| {
             !matches!(&c.left, Expr::Named(existing)
                 if same_scoped_column(existing, &condition_col, &primary, &joined))
         });
-        on_conflict
-            .where_conditions
-            .push(Self::scope_condition(&condition_col, value));
+        on_conflict.where_conditions.push(condition);
         Ok(self)
+    }
+
+    /// Restore applied scope after a conflict builder replaces its configuration.
+    pub(super) fn restore_conflict_update_scope(&mut self) {
+        let Some(on_conflict) = self.on_conflict.as_mut() else {
+            return;
+        };
+        for condition in &self.conflict_update_scope {
+            // An additional predicate on this column may be more restrictive.
+            // Reconfiguration restores scope without discarding that predicate.
+            if !on_conflict.where_conditions.contains(condition) {
+                on_conflict.where_conditions.push(condition.clone());
+            }
+        }
+    }
+
+    /// Reject scope reassignment even when DO UPDATE was configured after scoping.
+    pub fn validate_conflict_update_scope(&self) -> QailBuildResult<()> {
+        let Some(on_conflict) = &self.on_conflict else {
+            return Ok(());
+        };
+        let ConflictAction::DoUpdate { assignments } = &on_conflict.action else {
+            return Ok(());
+        };
+        for condition in &self.conflict_update_scope {
+            if let Expr::Named(column) = &condition.left
+                && assignments
+                    .iter()
+                    .any(|(assigned, _)| normalize_ident(assigned) == normalize_ident(column))
+            {
+                return Err(QailBuildError::RlsTenantColumnMutationDenied {
+                    table: self.table.clone(),
+                    tenant_column: column.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn scope_tenant_dimension(self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
@@ -1713,6 +1756,149 @@ mod tests {
             .to_sql();
         assert!(sql.contains("DO NOTHING"), "{sql}");
         assert!(!sql.contains("DO NOTHING WHERE"), "{sql}");
+    }
+
+    #[test]
+    fn on_conflict_scope_is_independent_of_builder_order() {
+        let table = "_rls_conflict_order";
+        seal_tenant_table(table, "tenant_id");
+        let base = Qail::add(table)
+            .set_value("id", 1)
+            .set_value("status", "ready");
+        let updates = [("status", Expr::Named("EXCLUDED.status".into()))];
+        let ctx = RlsContext::tenant("t-1");
+        let scoped_insert = base.clone().with_rls(&ctx).unwrap();
+        assert!(scoped_insert.on_conflict.is_none());
+        assert!(!scoped_insert.to_sql().contains("ON CONFLICT"));
+        let before = scoped_insert.on_conflict_update(&["id"], &updates);
+        let after = base
+            .on_conflict_update(&["id"], &updates)
+            .with_rls(&ctx)
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(
+            before
+                .to_sql()
+                .contains("WHERE _rls_conflict_order.tenant_id = 't-1'")
+        );
+    }
+
+    #[test]
+    fn on_conflict_reconfiguration_retains_predicates_and_both_scopes() {
+        let table = "_rls_conflict_reconfigure";
+        seal_tenant_table(table, "tenant_id");
+        seal_owner_table(table, "owner_id");
+        let ctx = RlsContext::tenant("t-1").with_user("u-1");
+        let updates = [("status", Expr::Named("EXCLUDED.status".into()))];
+        let mut query = Qail::add(table)
+            .set_value("id", 1)
+            .with_rls(&ctx)
+            .unwrap()
+            .on_conflict_update(&["id"], &updates);
+        query
+            .on_conflict
+            .as_mut()
+            .unwrap()
+            .where_conditions
+            .push(make_named_condition(
+                "status",
+                Value::String("ready".into()),
+            ));
+        let query = query
+            .on_conflict_nothing(&["id"])
+            .on_conflict_update(&["other_key"], &updates)
+            .on_conflict_update(&["id"], &updates);
+        let guards = &query.on_conflict.as_ref().unwrap().where_conditions;
+        assert_eq!(guards.len(), 3);
+        assert_eq!(query.conflict_update_scope.len(), 2);
+        let sql = query.to_sql();
+        for predicate in [
+            "status = 'ready'",
+            "_rls_conflict_reconfigure.tenant_id = 't-1'",
+            "_rls_conflict_reconfigure.owner_id = 'u-1'",
+        ] {
+            assert_eq!(sql.matches(predicate).count(), 1, "{sql}");
+        }
+        let forbidden = query.on_conflict_update(
+            &["id"],
+            &[("owner_id", Expr::Named("EXCLUDED.owner_id".into()))],
+        );
+        assert!(matches!(
+            forbidden.validate_conflict_update_scope(),
+            Err(QailBuildError::RlsTenantColumnMutationDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn on_conflict_scope_roundtrip_and_global_rescope() {
+        let table = "_rls_conflict_roundtrip";
+        seal_tenant_table(table, "tenant_id");
+        let scoped = Qail::add(table)
+            .set_value("id", 1)
+            .with_rls(&RlsContext::tenant("t-1"))
+            .unwrap();
+        let encoded = crate::wire::encode_cmd_binary(&scoped).unwrap();
+        let decoded = crate::wire::decode_cmd_binary(&encoded).unwrap();
+        assert_eq!(decoded, scoped);
+        let query = decoded
+            .with_rls(&RlsContext::global())
+            .unwrap()
+            .on_conflict_update(
+                &["id"],
+                &[("status", Expr::Named("EXCLUDED.status".into()))],
+            );
+        let guards = &query.on_conflict.as_ref().unwrap().where_conditions;
+        assert_eq!(guards.len(), 1);
+        assert_eq!(guards[0].op, Operator::IsNull);
+        assert_eq!(query.conflict_update_scope, *guards);
+        assert!(!query.to_sql().contains("t-1"));
+    }
+
+    #[test]
+    fn rescope_while_do_nothing_replaces_retained_guard() {
+        let table = "_rls_conflict_rescope_nothing";
+        seal_tenant_table(table, "tenant_id");
+        let updates = [("status", Expr::Named("EXCLUDED.status".into()))];
+        let query = Qail::add(table)
+            .set_value("id", 1)
+            .with_rls(&RlsContext::tenant("t-1"))
+            .unwrap()
+            .on_conflict_update(&["id"], &updates)
+            .on_conflict_nothing(&["id"])
+            .with_rls(&RlsContext::tenant("t-2"))
+            .unwrap()
+            .on_conflict_update(&["id"], &updates);
+        let guards = &query.on_conflict.as_ref().unwrap().where_conditions;
+        assert_eq!(guards, &query.conflict_update_scope);
+        let sql = query.to_sql();
+        assert!(sql.contains("tenant_id = 't-2'"), "{sql}");
+        assert!(!sql.contains("t-1"), "{sql}");
+    }
+
+    #[test]
+    fn on_conflict_unscoped_payload_does_not_imply_applied_scope() {
+        let table = "_rls_conflict_unscoped_payload";
+        seal_tenant_table(table, "tenant_id");
+        let query = Qail::add(table)
+            .set_value("id", 1)
+            .set_value("tenant_id", "t-1")
+            .on_conflict_update(
+                &["id"],
+                &[("status", Expr::Named("EXCLUDED.status".into()))],
+            );
+        assert!(query.conflict_update_scope.is_empty());
+        assert!(
+            query
+                .on_conflict
+                .as_ref()
+                .unwrap()
+                .where_conditions
+                .is_empty()
+        );
+        let json = serde_json::to_value(&query).unwrap();
+        assert!(json.get("conflict_update_scope").is_none());
+        let decoded: Qail = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, query);
     }
 
     #[test]

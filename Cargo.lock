@@ -2203,6 +2203,7 @@ dependencies = [
  "rand 0.10.1",
  "rustls-native-certs",
  "ryu",
+ "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tokio-postgres",

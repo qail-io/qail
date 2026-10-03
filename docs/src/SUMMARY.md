@@ -25,6 +25,7 @@
 
 - [QAIL Language Reference](./core/qail-language-reference.md)
 - [AST Builder API](./core/builder-api.md)
+- [Applied-scope AST migration](./core/applied-scope-migration.md)
 - [Expression Types](./core/expressions.md)
 - [Expression Builders](./core/builders.md)
 - [QAIL vs Others](./core/comparison.md)

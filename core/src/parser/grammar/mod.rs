@@ -296,6 +296,7 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             returning: None,
             ctes,
             on_conflict,
+            conflict_update_scope: Vec::new(),
             merge: None,
             source_query,
             channel: None,

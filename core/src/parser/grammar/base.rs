@@ -375,6 +375,7 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, Qail> {
             ctes: vec![],
             returning: None,
             on_conflict: None,
+            conflict_update_scope: Vec::new(),
             merge: None,
             source_query: None,
             channel: None,

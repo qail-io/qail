@@ -588,6 +588,7 @@ impl Qail {
     }
 
     /// Add ON CONFLICT DO UPDATE clause for UPSERT operations.
+    /// Retains existing update predicates and scope applied by `with_rls()`.
     ///
     /// # Example
     /// ```ignore
@@ -602,6 +603,10 @@ impl Qail {
     {
         use super::{ConflictAction, OnConflict};
 
+        let where_conditions = self
+            .on_conflict
+            .take()
+            .map_or_else(Vec::new, |conflict| conflict.where_conditions);
         self.on_conflict = Some(OnConflict {
             columns: conflict_cols
                 .iter()
@@ -613,12 +618,15 @@ impl Qail {
                     .map(|(col, expr)| (col.as_ref().to_string(), expr.clone()))
                     .collect(),
             },
-            where_conditions: Vec::new(),
+            where_conditions,
         });
+        self.restore_conflict_update_scope();
         self
     }
 
     /// Add ON CONFLICT DO NOTHING clause (ignore duplicates).
+    /// Retains update predicates for a subsequent `on_conflict_update()` call;
+    /// they are not emitted while the action is DO NOTHING.
     ///
     /// # Example
     /// ```ignore
@@ -632,13 +640,17 @@ impl Qail {
     {
         use super::{ConflictAction, OnConflict};
 
+        let where_conditions = self
+            .on_conflict
+            .take()
+            .map_or_else(Vec::new, |conflict| conflict.where_conditions);
         self.on_conflict = Some(OnConflict {
             columns: conflict_cols
                 .iter()
                 .map(|c| c.as_ref().to_string())
                 .collect(),
             action: ConflictAction::DoNothing,
-            where_conditions: Vec::new(),
+            where_conditions,
         });
         self
     }

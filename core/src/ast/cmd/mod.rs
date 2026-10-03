@@ -4,7 +4,7 @@ use crate::ast::{
 };
 
 /// The core Qail AST node representing a single database operation.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Qail {
     /// SQL action to perform.
     pub action: Action,
@@ -36,8 +36,12 @@ pub struct Qail {
     pub returning: Option<Vec<Expr>>,
     /// ON CONFLICT clause for upsert.
     pub on_conflict: Option<OnConflict>,
+    /// Applied INSERT scope retained for later conflict-builder calls.
+    ///
+    /// These guards survive replacing the conflict action or target. The
+    /// builders copy them into `OnConflict::where_conditions` for DO UPDATE.
+    pub conflict_update_scope: Vec<Condition>,
     /// PostgreSQL MERGE specification.
-    #[serde(default)]
     pub merge: Option<Merge>,
     /// INSERT … SELECT source query.
     pub source_query: Option<Box<Qail>>,
@@ -93,7 +97,6 @@ pub struct Qail {
     /// OWNER's privileges, so row-level security on those tables is checked as
     /// the owner rather than the caller — a view over an RLS-protected table is
     /// an RLS bypass unless this is set. Only meaningful for [`Action::CreateView`].
-    #[serde(default)]
     pub view_security_invoker: bool,
 }
 
@@ -255,6 +258,7 @@ impl Default for Qail {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            conflict_update_scope: Vec::new(),
             merge: None,
             source_query: None,
             channel: None,
@@ -293,6 +297,7 @@ mod cte;
 mod merge;
 mod query;
 mod rls;
+mod serialization;
 mod vector;
 
 impl std::fmt::Display for Qail {
