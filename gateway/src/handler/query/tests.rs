@@ -593,6 +593,187 @@ fn read_only_gates_walk_window_filter_subqueries() {
     assert!(reject_non_read_action(&cmd, "test").is_err());
 }
 
+fn row_lock_variants() -> Vec<(&'static str, qail_core::ast::Qail)> {
+    let plain = qail_core::ast::Qail::get("orders").eq("status", "held");
+    let mut skip_locked_only = plain.clone();
+    skip_locked_only.skip_locked = true;
+    vec![
+        ("for_update", plain.clone().for_update()),
+        ("for_no_key_update", plain.clone().for_no_key_update()),
+        ("for_share", plain.clone().for_share()),
+        ("for_key_share", plain.clone().for_key_share()),
+        (
+            "for_update_skip_locked",
+            plain.clone().for_update_skip_locked(),
+        ),
+        ("skip_locked_flag", skip_locked_only),
+    ]
+}
+
+/// Places `inner` in every position a read-only surface accepts a nested query.
+fn row_lock_positions(inner: &qail_core::ast::Qail) -> Vec<(&'static str, qail_core::ast::Qail)> {
+    use qail_core::ast::{Condition, Expr, Operator, Qail, SetOp, Value};
+
+    let subquery_condition = |column: &str| Condition {
+        left: Expr::Named(column.to_string()),
+        op: Operator::In,
+        value: Value::Subquery(Box::new(inner.clone())),
+        is_array_unnest: false,
+    };
+
+    let cte_base = Qail::get("held").with("held", inner.clone());
+    let cte_recursive = Qail::get("tree")
+        .with("tree", Qail::get("nodes"))
+        .recursive(inner.clone());
+
+    let mut set_op = Qail::get("orders");
+    set_op
+        .set_ops
+        .push((SetOp::UnionAll, Box::new(inner.clone())));
+
+    let mut column_subquery = Qail::get("orders");
+    column_subquery.columns.push(Expr::Subquery {
+        query: Box::new(inner.clone()),
+        alias: Some("held".to_string()),
+    });
+
+    let where_subquery =
+        Qail::get("orders").filter("id", Operator::In, Value::Subquery(Box::new(inner.clone())));
+
+    let where_array_subquery = Qail::get("orders").filter(
+        "id",
+        Operator::In,
+        Value::Array(vec![Value::Subquery(Box::new(inner.clone()))]),
+    );
+
+    let mut where_exists = Qail::get("orders");
+    where_exists.cages.push(qail_core::ast::Cage {
+        kind: qail_core::ast::CageKind::Filter,
+        conditions: vec![Condition {
+            left: Expr::Exists {
+                query: Box::new(inner.clone()),
+                negated: false,
+                alias: None,
+            },
+            op: Operator::Eq,
+            value: Value::Bool(true),
+            is_array_unnest: false,
+        }],
+        logical_op: qail_core::ast::LogicalOp::And,
+    });
+
+    let mut case_subquery = Qail::get("orders");
+    case_subquery.columns.push(Expr::Case {
+        when_clauses: vec![(
+            subquery_condition("id"),
+            Box::new(Expr::Named("id".to_string())),
+        )],
+        else_value: None,
+        alias: Some("held_id".to_string()),
+    });
+
+    let having = Qail::get("orders").having_cond(subquery_condition("total"));
+    let join_on =
+        Qail::get("orders").left_join_conds("holds", vec![subquery_condition("holds.id")]);
+
+    let mut subquery_in_cte = Qail::get("orders");
+    subquery_in_cte.columns.push(Expr::Subquery {
+        query: Box::new(inner.clone()),
+        alias: Some("held".to_string()),
+    });
+    let nested_in_cte = Qail::get("wrapped").with("wrapped", subquery_in_cte);
+
+    let mut insert_select = Qail::add("audit");
+    insert_select.source_query = Some(Box::new(inner.clone()));
+
+    // `FROM (SELECT ... FOR UPDATE) AS held`
+    let from_source =
+        Qail::get("held").from_source(qail_core::ast::FromSource::subquery(inner.clone(), "held"));
+
+    vec![
+        ("top_level", inner.clone()),
+        ("cte_base", cte_base),
+        ("cte_recursive", cte_recursive),
+        ("set_op", set_op),
+        ("column_subquery", column_subquery),
+        ("where_subquery", where_subquery),
+        ("where_array_subquery", where_array_subquery),
+        ("where_exists", where_exists),
+        ("case_condition_subquery", case_subquery),
+        ("having_subquery", having),
+        ("join_on_subquery", join_on),
+        ("subquery_inside_cte", nested_in_cte),
+        ("insert_select_source", insert_select),
+        ("from_source", from_source),
+    ]
+}
+
+// WebSocket `query` and `live_query` both gate on reject_non_read_action;
+// live_query re-polls on an interval, so an accepted lock is re-taken every tick.
+const READ_ONLY_SURFACES: [&str; 2] = ["WebSocket query", "WebSocket live_query"];
+
+#[test]
+fn read_only_gates_reject_row_locks_in_every_position() {
+    let mut accepted = Vec::new();
+    let mut cases = 0;
+    for (lock, locked) in row_lock_variants() {
+        for (position, cmd) in row_lock_positions(&locked) {
+            for surface in READ_ONLY_SURFACES {
+                cases += 1;
+                match reject_non_read_action(&cmd, surface) {
+                    Ok(()) => accepted.push(format!("{surface} / {lock} / {position}")),
+                    Err(err) => assert!(
+                        err.message.contains(surface),
+                        "{surface} / {lock} / {position}: {}",
+                        err.message
+                    ),
+                }
+            }
+            cases += 1;
+            if qail_command_is_read_only(&cmd) {
+                accepted.push(format!("qail_command_is_read_only / {lock} / {position}"));
+            }
+        }
+    }
+    println!(
+        "row-lock cases checked: {cases}, accepted: {}",
+        accepted.len()
+    );
+    assert!(
+        accepted.is_empty(),
+        "read-only gates accepted {} of {cases} row-lock cases:\n{}",
+        accepted.len(),
+        accepted.join("\n")
+    );
+}
+
+#[test]
+fn read_only_gates_accept_plain_reads_in_every_position() {
+    let plain = qail_core::ast::Qail::get("orders").eq("status", "held");
+    for (position, cmd) in row_lock_positions(&plain) {
+        let is_insert = matches!(cmd.action, qail_core::ast::Action::Add);
+        for surface in READ_ONLY_SURFACES {
+            assert_eq!(
+                reject_non_read_action(&cmd, surface).is_ok(),
+                !is_insert,
+                "{surface} / {position}"
+            );
+        }
+        assert_eq!(qail_command_is_read_only(&cmd), !is_insert, "{position}");
+    }
+}
+
+#[test]
+fn public_query_gate_still_accepts_row_locks() {
+    // /qail and /txn/query run reject_dangerous_action; FOR UPDATE stays legal there.
+    for (lock, locked) in row_lock_variants() {
+        for (position, cmd) in row_lock_positions(&locked) {
+            reject_dangerous_action(&cmd)
+                .unwrap_or_else(|err| panic!("{lock} / {position}: {}", err.message));
+        }
+    }
+}
+
 #[tokio::test]
 async fn export_handler_rejects_empty_query() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
