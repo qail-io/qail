@@ -214,12 +214,7 @@ pub async fn txn_query(
             .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
 
     // Enforce query allow-list parity with non-transaction endpoints.
-    let allow_list_raw_query = if tenant_guard_plan.is_some() {
-        None
-    } else {
-        Some(query_text)
-    };
-    if !crate::handler::is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
+    if !crate::handler::is_query_allowed(&state.allow_list, &cmd) {
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",
             "Query not in allow-list",

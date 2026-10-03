@@ -78,6 +78,35 @@ fn allow_list_empty_file_enables_fail_closed_mode() {
 }
 
 #[test]
+fn allow_list_file_matches_commands_by_ast_and_ignores_sql_lines() {
+    let tmp_path = std::env::temp_dir().join(format!(
+        "qail_allowlist_ast_{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::write(
+        &tmp_path,
+        "get users fields id where active = true\nSELECT id FROM orders\n",
+    )
+    .expect("should write allow-list file");
+
+    let mut allow_list = QueryAllowList::new();
+    allow_list
+        .load_from_file(tmp_path.to_str().expect("utf8 path"))
+        .expect("load should succeed");
+    let _ = std::fs::remove_file(tmp_path);
+
+    let listed = qail_core::ast::Qail::get("users")
+        .columns(["id"])
+        .eq("active", true);
+    assert!(allow_list.allows_command(&listed));
+    assert!(!allow_list.allows_command(&listed.clone().for_update()));
+    assert!(!allow_list.allows_command(&qail_core::ast::Qail::get("orders").columns(["id"])));
+}
+
+#[test]
 fn test_complexity_guard() {
     let guard = QueryComplexityGuard::new(3, 10, 5);
 

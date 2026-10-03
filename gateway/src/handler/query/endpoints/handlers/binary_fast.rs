@@ -71,7 +71,7 @@ pub async fn execute_query_binary(
         crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
             .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
 
-    if !is_query_allowed(&state.allow_list, None, &cmd) {
+    if !is_query_allowed(&state.allow_list, &cmd) {
         tracing::warn!("Binary query rejected by allow-list");
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",
@@ -125,12 +125,7 @@ pub async fn execute_query_fast(
         crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
             .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
 
-    let allow_list_raw_query = if tenant_guard_plan.is_some() {
-        None
-    } else {
-        Some(query_text)
-    };
-    if !is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
+    if !is_query_allowed(&state.allow_list, &cmd) {
         tracing::warn!("Fast query rejected by allow-list: {}", query_text);
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",

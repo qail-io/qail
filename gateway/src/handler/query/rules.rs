@@ -348,6 +348,37 @@ pub(crate) fn qail_command_is_read_only(cmd: &qail_core::ast::Qail) -> bool {
             .all(|(_, set_query)| qail_command_is_read_only(set_query))
 }
 
+/// `FOR UPDATE` / `FOR SHARE` (and `SKIP LOCKED` / `NOWAIT` variants) anywhere
+/// in the tree. Such a query writes no rows but must reach the server: a cache
+/// hit would return rows without taking (or waiting for) the lock.
+pub(crate) fn qail_command_takes_row_locks(cmd: &qail_core::ast::Qail) -> bool {
+    cmd.lock_mode.is_some()
+        || cmd.skip_locked
+        || cmd.ctes.iter().any(|cte| {
+            qail_command_takes_row_locks(&cte.base_query)
+                || cte
+                    .recursive_query
+                    .as_deref()
+                    .is_some_and(qail_command_takes_row_locks)
+        })
+        || cmd
+            .source_query
+            .as_deref()
+            .is_some_and(qail_command_takes_row_locks)
+        || cmd
+            .set_ops
+            .iter()
+            .any(|(_, set_query)| qail_command_takes_row_locks(set_query))
+        || validate_embedded_subqueries(cmd, &mut |query| {
+            if qail_command_takes_row_locks(query) {
+                Err(ApiError::internal("row lock in subquery"))
+            } else {
+                Ok(())
+            }
+        })
+        .is_err()
+}
+
 pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
     if !public_query_action_allowed(cmd.action) {
         return Err(ApiError::with_code(
@@ -681,43 +712,41 @@ pub(crate) fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
 
 /// Common query execution logic
 pub(super) fn exact_cache_key(cmd: &qail_core::ast::Qail) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let payload = qail_core::wire::encode_cmd_text(cmd);
-    let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
-    format!("full:{:016x}", hasher.finish())
+    let mut digest = crate::cache::CacheKeyDigest::new("qail:query-cache:cmd:v2");
+    digest.qail(cmd);
+    format!("full:{}", digest.finish_hex())
 }
 
 pub(super) fn auth_scoped_cache_key(
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
 ) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
-    let mut hasher = DefaultHasher::new();
-    tenant.hash(&mut hasher);
-    auth.user_id.hash(&mut hasher);
-    auth.role.hash(&mut hasher);
-    auth.is_authenticated().hash(&mut hasher);
-    auth.is_denied().hash(&mut hasher);
-    auth.is_platform_admin().hash(&mut hasher);
+    let mut digest = crate::cache::CacheKeyDigest::new("qail:query-cache:auth:v2");
+    // A tenant literally named "_anon" must not share the anonymous scope.
+    digest.field(auth.tenant_id.as_deref().map_or(&[0][..], |_| &[1][..]));
+    digest.field(tenant.as_bytes());
+    digest.field(auth.user_id.as_bytes());
+    digest.field(auth.role.as_bytes());
+    digest.field(&[
+        u8::from(auth.is_authenticated()),
+        u8::from(auth.is_denied()),
+        u8::from(auth.is_platform_admin()),
+    ]);
 
     let mut claims: Vec<_> = auth.claims.iter().collect();
     claims.sort_by_key(|(left, _)| *left);
+    digest.field(&(claims.len() as u64).to_le_bytes());
     for (key, value) in claims {
-        key.hash(&mut hasher);
-        crate::auth::canonical_json_value(value).hash(&mut hasher);
+        digest.field(key.as_bytes());
+        digest.field(crate::auth::canonical_json_value(value).as_bytes());
     }
 
     format!(
-        "qail:{}:{}:{:016x}:{}",
+        "qail:{}:{}:{}:{}",
         tenant,
         auth.user_id,
-        hasher.finish(),
+        digest.finish_hex(),
         exact_cache_key(cmd)
     )
 }
@@ -759,32 +788,15 @@ pub(crate) fn clamp_query_limit(cmd: &mut qail_core::ast::Qail, max_rows: usize)
     });
 }
 
-/// Check allow-list against multiple canonical forms.
+/// Admit `cmd` only if an allow-list entry parses to exactly this AST.
+///
+/// Matching the raw text, `cmd.to_string()` or `cmd.to_sql()` against the list
+/// admitted commands with more semantics than the listed one: both renderings
+/// drop clauses (INSERT values, UPDATE assignments, DISTINCT, set ops, row
+/// locks), and raw text says nothing about a command rewritten after parsing.
 pub(crate) fn is_query_allowed(
     allow_list: &crate::middleware::QueryAllowList,
-    raw_query: Option<&str>,
     cmd: &qail_core::ast::Qail,
 ) -> bool {
-    use qail_core::transpiler::ToSql;
-
-    // Fast path: allow-list disabled.
-    if !allow_list.is_enabled() {
-        return true;
-    }
-
-    if let Some(raw) = raw_query
-        && allow_list.is_allowed(raw)
-    {
-        return true;
-    }
-
-    // Canonical QAIL formatter (Display impl).
-    let canonical_qail = cmd.to_string();
-    if allow_list.is_allowed(&canonical_qail) {
-        return true;
-    }
-
-    // SQL fallback for deployments that store SQL patterns.
-    let sql = cmd.to_sql();
-    allow_list.is_allowed(&sql)
+    allow_list.allows_command(cmd)
 }

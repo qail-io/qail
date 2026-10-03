@@ -137,6 +137,159 @@ fn cache_key_includes_filter_values() {
     );
 }
 
+/// Clauses the QAIL text form (`Display` / wire text v1) does not print.
+fn clause_variants_text_form_drops() -> Vec<(&'static str, qail_core::ast::Qail)> {
+    use qail_core::ast::{Qail, SetOp};
+
+    let base = Qail::get("users").columns(["id"]).eq("active", true);
+    let mut distinct = base.clone();
+    distinct.distinct = true;
+    let mut union = base.clone();
+    union
+        .set_ops
+        .push((SetOp::Union, Box::new(Qail::get("admins").columns(["id"]))));
+    let mut only = base.clone();
+    only.only_table = true;
+    let mut fetch = base.clone();
+    fetch.fetch = Some((5, true));
+
+    vec![
+        ("base", base.clone()),
+        ("for_update", base.clone().for_update()),
+        (
+            "for_update_skip_locked",
+            base.clone().for_update_skip_locked(),
+        ),
+        ("for_share", base.clone().for_share()),
+        ("distinct", distinct),
+        ("union", union),
+        ("only", only),
+        ("fetch_with_ties", fetch),
+        ("add_a", Qail::add("users").set_value("name", "a")),
+        ("add_b", Qail::add("users").set_value("name", "b")),
+        (
+            "add_a_on_conflict",
+            Qail::add("users")
+                .set_value("name", "a")
+                .on_conflict_nothing(&["name"]),
+        ),
+        (
+            "set_x",
+            Qail::set("users").set_value("name", "x").eq("id", 1),
+        ),
+        (
+            "set_y",
+            Qail::set("users").set_value("name", "y").eq("id", 1),
+        ),
+        ("float_nan", Qail::get("t").eq("x", f64::NAN)),
+        ("float_inf", Qail::get("t").eq("x", f64::INFINITY)),
+        ("float_neg_inf", Qail::get("t").eq("x", f64::NEG_INFINITY)),
+    ]
+}
+
+#[test]
+fn cache_key_distinguishes_clauses_text_form_drops() {
+    let variants = clause_variants_text_form_drops();
+    let auth = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: HashMap::new(),
+    };
+    let mut collisions = Vec::new();
+    for (i, (left_name, left)) in variants.iter().enumerate() {
+        for (right_name, right) in variants.iter().skip(i + 1) {
+            if exact_cache_key(left) == exact_cache_key(right)
+                || auth_scoped_cache_key(&auth, left) == auth_scoped_cache_key(&auth, right)
+            {
+                collisions.push(format!("{left_name} == {right_name}"));
+            }
+        }
+    }
+    assert!(
+        collisions.is_empty(),
+        "distinct queries share a cache key: {collisions:?}"
+    );
+
+    let (_, base) = &variants[0];
+    assert_eq!(
+        exact_cache_key(base),
+        exact_cache_key(&base.clone()),
+        "cache key must be deterministic"
+    );
+}
+
+#[test]
+fn allow_list_entry_for_simple_query_does_not_admit_extended_query() {
+    use qail_core::transpiler::ToSql;
+
+    let variants = clause_variants_text_form_drops();
+    let (_, base) = &variants[0];
+    let base_text = base.to_string();
+
+    let mut allow_list = QueryAllowList::new();
+    allow_list.allow(&base_text);
+    allow_list.allow("get users fields id where active = true");
+    allow_list.allow(&base.to_sql());
+    assert!(is_query_allowed(&allow_list, base));
+
+    let mut admitted = Vec::new();
+    for (name, cmd) in variants.iter().skip(1) {
+        if is_query_allowed(&allow_list, cmd) {
+            admitted.push(*name);
+        }
+    }
+    assert!(
+        admitted.is_empty(),
+        "allow-list admitted queries with extra clauses: {admitted:?}"
+    );
+}
+
+#[test]
+fn allow_list_entry_for_one_insert_does_not_admit_another() {
+    use qail_core::transpiler::ToSql;
+
+    // The text form drops the values and the SQL preview drops the column
+    // list, so an entry for one insert must not admit another.
+    let listed = qail_core::ast::Qail::add("users").set_value("name", "a");
+    let other_column = qail_core::ast::Qail::add("users").set_value("email", "a");
+    let mut insert_list = QueryAllowList::new();
+    insert_list.allow(&listed.to_string());
+    insert_list.allow(&listed.to_sql());
+    assert!(
+        !is_query_allowed(&insert_list, &other_column),
+        "insert allow-list entry admitted a different insert"
+    );
+}
+
+#[test]
+fn allow_list_still_admits_exact_query_via_raw_and_canonical_text() {
+    let raw = "get users fields id where active = true";
+    let cmd = qail_core::parser::parse(raw).expect("raw query parses");
+
+    let mut raw_list = QueryAllowList::new();
+    assert!(raw_list.allow(raw), "single-line QAIL entry parses");
+    assert!(!raw_list.allow(&qail_core::transpiler::ToSql::to_sql(&cmd)));
+    assert!(is_query_allowed(&raw_list, &cmd));
+
+    // A builder/binary AST equal to the parsed entry is the same command.
+    let built = qail_core::ast::Qail::get("users")
+        .columns(["id"])
+        .eq("active", true);
+    assert!(is_query_allowed(&raw_list, &built));
+
+    let mut canonical_list = QueryAllowList::new();
+    canonical_list.allow(&cmd.to_string());
+    assert!(is_query_allowed(&canonical_list, &cmd));
+
+    let mut sql_only_list = QueryAllowList::new();
+    sql_only_list.allow(&qail_core::transpiler::ToSql::to_sql(&cmd));
+    assert!(
+        !is_query_allowed(&sql_only_list, &cmd),
+        "SQL entries are not matched"
+    );
+}
+
 #[test]
 fn auth_scoped_cache_key_includes_role() {
     let cmd = qail_core::ast::Qail::get("orders");
@@ -228,7 +381,7 @@ fn auth_scoped_cache_key_canonicalizes_nested_claim_objects() {
 fn allow_list_disabled_allows_query() {
     let allow_list = QueryAllowList::new();
     let cmd = qail_core::ast::Qail::get("users");
-    assert!(is_query_allowed(&allow_list, None, &cmd));
+    assert!(is_query_allowed(&allow_list, &cmd));
 }
 
 #[test]
@@ -238,7 +391,7 @@ fn allow_list_accepts_canonical_qail() {
         .eq("active", true);
     let mut allow_list = QueryAllowList::new();
     allow_list.allow(&cmd.to_string());
-    assert!(is_query_allowed(&allow_list, None, &cmd));
+    assert!(is_query_allowed(&allow_list, &cmd));
 }
 
 #[test]
@@ -246,7 +399,7 @@ fn allow_list_rejects_unlisted_query() {
     let cmd = qail_core::ast::Qail::get("users").columns(["id"]);
     let mut allow_list = QueryAllowList::new();
     allow_list.allow("get other_table");
-    assert!(!is_query_allowed(&allow_list, None, &cmd));
+    assert!(!is_query_allowed(&allow_list, &cmd));
 }
 
 // ── Regression: query_complexity is pub(crate) for WS parity ─────

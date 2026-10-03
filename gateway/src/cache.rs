@@ -191,6 +191,47 @@ impl QueryCache {
     }
 }
 
+/// SHA-256 over length-framed fields, for cache keys that decide which stored
+/// result a request is served. A collision replays one query's rows for another.
+pub(crate) struct CacheKeyDigest(sha2::Sha256);
+
+impl CacheKeyDigest {
+    pub(crate) fn new(domain: &str) -> Self {
+        use sha2::Digest;
+        let mut digest = Self(sha2::Sha256::new());
+        digest.field(domain.as_bytes());
+        digest
+    }
+
+    pub(crate) fn field(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.0.update((bytes.len() as u64).to_le_bytes());
+        self.0.update(bytes);
+    }
+
+    /// The text form (`Display`, wire text v1) and `to_sql()` drop clauses
+    /// (INSERT values, ON CONFLICT, DISTINCT, set ops, row locks), and
+    /// serde_json writes NaN and ±inf all as `null`. The derived `Debug`
+    /// prints every field, floats exactly and strings escaped.
+    pub(crate) fn qail(&mut self, cmd: &qail_core::ast::Qail) {
+        self.field(format!("{cmd:?}").as_bytes());
+    }
+
+    pub(crate) fn finish_hex(self) -> String {
+        use sha2::Digest;
+        format!("{:x}", self.0.finalize())
+    }
+
+    /// First 64 bits, for caches whose key type is `u64`.
+    pub(crate) fn finish_u64(self) -> u64 {
+        use sha2::Digest;
+        let digest = self.0.finalize();
+        let mut prefix = [0_u8; 8];
+        prefix.copy_from_slice(&digest[..8]);
+        u64::from_le_bytes(prefix)
+    }
+}
+
 fn remove_key_from_table_index(map: &mut HashMap<String, HashSet<String>>, key: &str) {
     map.retain(|_, keys| {
         keys.remove(key);

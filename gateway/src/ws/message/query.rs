@@ -42,12 +42,7 @@ pub(super) async fn handle_query(
                 }
             };
 
-            let allow_list_raw_query = if tenant_guard_plan.is_some() {
-                None
-            } else {
-                Some(qail.as_str())
-            };
-            if !crate::handler::is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
+            if !crate::handler::is_query_allowed(&state.allow_list, &cmd) {
                 tracing::warn!("WS query rejected by allow-list: {}", qail);
                 let _ = tx
                     .send(WsServerMessage::Error {

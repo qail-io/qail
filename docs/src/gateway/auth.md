@@ -168,6 +168,10 @@ allow_list_path = "allow_list.txt"
 
 When enabled, any query pattern not in the allow-list is rejected with `403 Forbidden`. This provides defense-in-depth: even if auth is bypassed, only pre-approved query shapes can execute.
 
+Each line is one QAIL query (blank lines and `#` comments are skipped). Lines are parsed at load time, and a request is admitted only when the command the gateway is about to run (after tenant-guard rewriting) is exactly the AST of some line. Text, binary, batch, transaction and WebSocket queries are all matched this way, so formatting differences in the request text do not matter, but any extra clause does.
+
+Matching is not done on rendered text: the canonical QAIL text omits clauses (INSERT values, UPDATE assignments, `DISTINCT`, `UNION`, `FOR UPDATE`, …) and the SQL preview omits others, so a string match admitted commands carrying more than the listed one. Lines that do not parse as QAIL, including SQL lines, admit nothing and are reported in a startup warning. Commands that no QAIL line can express are rejected while an allow-list is loaded.
+
 ---
 
 ## RPC Contract Hardening

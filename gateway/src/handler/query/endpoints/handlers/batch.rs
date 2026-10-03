@@ -147,12 +147,7 @@ pub async fn execute_batch(
             }
         };
 
-        let allow_list_raw_query = if tenant_guard_plan.is_some() {
-            None
-        } else {
-            Some(query_text)
-        };
-        if !is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
+        if !is_query_allowed(&state.allow_list, &cmd) {
             results.push(BatchQueryResult {
                 index,
                 success: false,
