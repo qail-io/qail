@@ -5,6 +5,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// A prepared statement handle with pre-computed statement name.
 /// This eliminates per-query hash computation and HashMap lookup.
@@ -18,10 +19,22 @@ use std::hash::{Hash, Hasher};
 ///     conn.execute_prepared(&stmt, &[Some(id.to_string().into_bytes())]).await?;
 /// }
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PreparedStatement {
     /// Pre-computed statement name (e.g., "s1234567890abcdef")
     pub(crate) name: String,
+    /// SQL the handle stands for. The name is a 64-bit hash, so pipeline
+    /// paths compare this with the connection's record before binding.
+    pub(crate) sql: Arc<[u8]>,
+}
+
+impl std::fmt::Debug for PreparedStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedStatement")
+            .field("name", &self.name)
+            .field("sql", &String::from_utf8_lossy(&self.sql))
+            .finish()
+    }
 }
 
 /// A fully prepared AST query handle.
@@ -61,7 +74,10 @@ impl PreparedStatement {
     #[inline]
     pub fn from_sql_bytes(sql_bytes: &[u8]) -> Self {
         let name = sql_bytes_to_stmt_name(sql_bytes);
-        Self { name }
+        Self {
+            name,
+            sql: Arc::from(sql_bytes),
+        }
     }
 
     /// Create from SQL string (convenience method).
@@ -89,6 +105,13 @@ pub fn sql_bytes_hash(sql: &[u8]) -> u64 {
 #[inline]
 pub fn stmt_name_from_hash(hash: u64) -> String {
     format!("s{hash:016x}")
+}
+
+/// Statement name the AST fetch paths (`fetch_all_cached`,
+/// `fetch_all_with_rls`, pool hot statements) derive from a cache key.
+#[inline]
+pub(crate) fn ast_stmt_name_from_hash(hash: u64) -> String {
+    format!("qail_{hash:x}")
 }
 
 /// Hash SQL bytes directly to statement name (no String allocation).

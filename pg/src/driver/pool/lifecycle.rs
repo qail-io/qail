@@ -307,8 +307,14 @@ impl PgPool {
         // Collect data synchronously (guard dropped before async work).
         let missing: Vec<(u64, String, String)> = {
             if let Ok(hot) = self.inner.hot_statements.read() {
+                // A name this connection already records (possibly for other
+                // SQL under a colliding key) is never re-parsed: that would
+                // fail with 42P05 or rebind the name.
                 hot.iter()
-                    .filter(|(hash, _)| !conn.stmt_cache.contains(hash))
+                    .filter(|(hash, (name, _))| {
+                        !conn.stmt_cache.contains(hash)
+                            && !conn.prepared_statements.contains_key(name)
+                    })
                     .map(|(hash, (name, sql))| (*hash, name.clone(), sql.clone()))
                     .collect()
             } else {
@@ -385,6 +391,7 @@ impl PgPool {
                 // Register in local cache
                 for (hash, name, sql) in &missing {
                     conn.stmt_cache.put(*hash, name.clone());
+                    conn.column_info_cache.remove(hash);
                     conn.prepared_statements.insert(name.clone(), sql.clone());
                 }
             }

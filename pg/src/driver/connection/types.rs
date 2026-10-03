@@ -58,7 +58,10 @@ impl StatementCache {
         self.entries.contains_key(key)
     }
 
-    pub(crate) fn get(&mut self, key: &u64) -> Option<String> {
+    /// The unverified lookup cached paths used before hits were checked
+    /// against the SQL; kept only as the benchmark baseline.
+    #[cfg(test)]
+    pub(crate) fn get_unverified(&mut self, key: &u64) -> Option<String> {
         let value = self.entries.get(key).cloned()?;
         self.touch(*key);
         Some(value)
@@ -111,7 +114,8 @@ impl StatementCache {
         self.order.clear();
     }
 
-    fn touch(&mut self, key: u64) {
+    /// Mark `key` most recently used. Caller has seen the key present.
+    pub(crate) fn touch(&mut self, key: u64) {
         self.order.retain(|k| *k != key);
         self.order.push_back(key);
     }

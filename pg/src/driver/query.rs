@@ -741,23 +741,33 @@ impl PgConnection {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        let stmt_name = Self::sql_to_stmt_name(sql);
-        let is_new = !self.prepared_statements.contains_key(&stmt_name);
+        let derived_name = Self::sql_to_stmt_name(sql);
+        // The name is a 64-bit hash of the SQL: reuse it only for the SQL
+        // recorded under it. Other SQL holding it parses unnamed and
+        // registers nothing.
+        let (stmt_name, is_new, registers) = match self.prepared_statements.get(&derived_name) {
+            Some(record) if record == sql => (derived_name, false, false),
+            Some(_) => (String::new(), true, false),
+            None => (derived_name, true, true),
+        };
 
         let needed = prepared_bind_execute_sync_wire_len(&stmt_name, params, result_format)?;
         let mut buf = BytesMut::with_capacity(needed);
 
         if is_new {
-            // Evict LRU prepared statement if at capacity. This prevents
-            // unbounded memory growth from dynamic batch filters while
-            // preserving hot statements (unlike the old nuclear `.clear()`).
-            self.evict_prepared_if_full();
+            if registers {
+                // Evict LRU prepared statement if at capacity. This prevents
+                // unbounded memory growth from dynamic batch filters while
+                // preserving hot statements (a full `.clear()` would drop them).
+                self.evict_prepared_if_full();
+            }
             if let Err(e) = PgEncoder::try_encode_parse_to(&mut buf, &stmt_name, sql, &[]) {
                 return Err(PgError::Encode(e.to_string()));
             }
-            // Cache the SQL for debugging
-            self.prepared_statements
-                .insert(stmt_name.clone(), sql.to_string());
+            if registers {
+                self.prepared_statements
+                    .insert(stmt_name.clone(), sql.to_string());
+            }
         }
 
         // Use ULTRA-OPTIMIZED encoders - write directly to buffer
@@ -767,7 +777,7 @@ impl PgConnection {
             params,
             result_format,
         ) {
-            if is_new {
+            if registers {
                 self.prepared_statements.remove(&stmt_name);
             }
             return Err(PgError::Encode(e.to_string()));
@@ -776,7 +786,7 @@ impl PgConnection {
         PgEncoder::encode_sync_to(&mut buf);
 
         if let Err(err) = self.send_bytes(&buf).await {
-            if is_new {
+            if registers {
                 self.prepared_statements.remove(&stmt_name);
             }
             return Err(err);
@@ -791,7 +801,7 @@ impl PgConnection {
             let msg = match self.recv().await {
                 Ok(msg) => msg,
                 Err(err) => {
-                    if is_new && !flow.saw_parse_complete() {
+                    if registers && !flow.saw_parse_complete() {
                         self.prepared_statements.remove(&stmt_name);
                     }
                     return Err(err);
@@ -799,7 +809,7 @@ impl PgConnection {
             };
             if let Err(err) = flow.validate(&msg, "extended-query cached execute", error.is_some())
             {
-                if is_new && !flow.saw_parse_complete() {
+                if registers && !flow.saw_parse_complete() {
                     self.prepared_statements.remove(&stmt_name);
                 }
                 return return_with_desync(self, err);
@@ -819,16 +829,19 @@ impl PgConnection {
                 BackendMessage::NoData => {}
                 BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
-                        if is_new
-                            && !flow.saw_parse_complete()
-                            && !err.is_prepared_statement_already_exists()
-                        {
-                            self.prepared_statements.remove(&stmt_name);
+                        if registers && !flow.saw_parse_complete() {
+                            if err.is_prepared_statement_already_exists() {
+                                self.release_unrecorded_statement(None, &stmt_name);
+                            } else {
+                                self.prepared_statements.remove(&stmt_name);
+                            }
                         }
                         return Err(err);
                     }
                     if is_new && !flow.saw_parse_complete() {
-                        self.prepared_statements.remove(&stmt_name);
+                        if registers {
+                            self.prepared_statements.remove(&stmt_name);
+                        }
                         return return_with_desync(
                             self,
                             PgError::Protocol(
@@ -843,7 +856,7 @@ impl PgConnection {
                     if error.is_none() {
                         let query_err = PgError::QueryServer(err.into());
                         if query_err.is_prepared_statement_retryable()
-                            || (is_new
+                            || (registers
                                 && !flow.saw_parse_complete()
                                 && !query_err.is_prepared_statement_already_exists())
                         {
@@ -858,7 +871,7 @@ impl PgConnection {
                 }
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
-                    if is_new && !flow.saw_parse_complete() {
+                    if registers && !flow.saw_parse_complete() {
                         self.prepared_statements.remove(&stmt_name);
                     }
                     return return_with_desync(

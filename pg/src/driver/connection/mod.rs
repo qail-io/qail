@@ -17,6 +17,7 @@ mod tests;
 pub(crate) mod types;
 
 pub(crate) use helpers::parse_affected_rows;
+pub(crate) use startup::{RecordedName, StatementSlot};
 pub(crate) use types::CANCEL_REQUEST_CODE;
 #[cfg(test)]
 pub(crate) use types::StatementCache;

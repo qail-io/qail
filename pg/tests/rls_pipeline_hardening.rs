@@ -395,6 +395,21 @@ async fn fetch_all_with_rls_retry_already_exists_rolls_back_before_retry() {
         sock.write_all(&ready_failed()).await.unwrap();
         sock.flush().await.unwrap();
 
+        // 42P05 means the server holds the name with SQL the client never
+        // recorded: the client closes it (flushed ahead of the ROLLBACK)
+        // instead of binding it.
+        let (msg_type, payload) = timeout(Duration::from_secs(2), read_frontend_frame(&mut sock))
+            .await
+            .expect("timed out waiting for statement Close");
+        assert_eq!(msg_type, b'C');
+        assert_eq!(payload[0], b'S');
+        assert!(payload_cstr(&payload[1..]).starts_with("qail_"));
+        let (msg_type, _) = read_frontend_frame(&mut sock).await;
+        assert_eq!(msg_type, b'S');
+        sock.write_all(&backend_frame(b'3', &[])).await.unwrap();
+        sock.write_all(&ready_failed()).await.unwrap();
+        sock.flush().await.unwrap();
+
         // Retry path must rollback before retrying the RLS pipeline.
         let (msg_type, payload) = timeout(Duration::from_secs(2), read_frontend_frame(&mut sock))
             .await
@@ -406,15 +421,22 @@ async fn fetch_all_with_rls_retry_already_exists_rolls_back_before_retry() {
         sock.write_all(&ready_idle()).await.unwrap();
         sock.flush().await.unwrap();
 
-        // Second attempt should be a cache hit (no Parse) and succeed.
+        // Second attempt parses afresh under the closed name and succeeds.
         let second = read_frontend_msg_types_until_sync(&mut sock).await;
         assert_eq!(second.first().copied(), Some(b'Q'));
         assert!(
-            !second.contains(&b'P'),
-            "retry after 42P05 should avoid re-Parse and reuse statement mapping"
+            second.contains(&b'P'),
+            "retry after 42P05 must re-Parse, never bind the server's statement"
         );
 
         sock.write_all(&ready_in_block()).await.unwrap();
+        sock.write_all(&backend_frame(b'1', &[])).await.unwrap();
+        sock.write_all(&backend_frame(b't', &0i16.to_be_bytes()))
+            .await
+            .unwrap();
+        sock.write_all(&backend_frame(b'T', &0i16.to_be_bytes()))
+            .await
+            .unwrap();
         sock.write_all(&bind_complete()).await.unwrap();
         sock.write_all(&command_complete("SELECT 0")).await.unwrap();
         sock.write_all(&ready_in_block()).await.unwrap();
