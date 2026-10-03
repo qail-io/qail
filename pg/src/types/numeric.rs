@@ -6,7 +6,11 @@
 use super::{FromPg, ToPg, TypeError};
 use crate::protocol::types::oid;
 
-/// NUMERIC/DECIMAL type (stored as string for precision)
+/// NUMERIC/DECIMAL type (stored as string for precision).
+///
+/// Special values keep PostgreSQL's text spelling in both result formats:
+/// `NaN`, `Infinity`, `-Infinity`. [`Numeric::to_f64`] maps them to the
+/// matching `f64`; [`Numeric::to_i64`] rejects them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Numeric(pub String);
 
@@ -89,7 +93,7 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
     // PostgreSQL NUMERIC binary format:
     // 2 bytes: ndigits (number of base-10000 digits)
     // 2 bytes: weight (position of first digit relative to decimal point)
-    // 2 bytes: sign (0=pos, 0x4000=neg, 0xC000=NaN)
+    // 2 bytes: sign (0=pos, 0x4000=neg, 0xC000=NaN, 0xD000=+Inf, 0xF000=-Inf)
     // 2 bytes: dscale (number of decimal digits after decimal point)
     // ndigits * 2 bytes: digits (each 0-9999)
 
@@ -102,8 +106,12 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
         return Err(TypeError::InvalidData("NUMERIC truncated".to_string()));
     }
 
-    if sign == 0xC000 {
-        return Ok(Numeric("NaN".to_string()));
+    // Special values use the text-format spelling, so both formats agree.
+    match sign {
+        0xC000 => return Ok(Numeric("NaN".to_string())),
+        0xD000 => return Ok(Numeric("Infinity".to_string())),
+        0xF000 => return Ok(Numeric("-Infinity".to_string())),
+        _ => {}
     }
     if !matches!(sign, 0 | 0x4000) {
         return Err(TypeError::InvalidData(format!(

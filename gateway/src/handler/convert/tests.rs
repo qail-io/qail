@@ -85,6 +85,47 @@ fn binary_numeric_oid_1700_preserves_fractional_value() {
 }
 
 #[test]
+fn binary_special_values_match_text_spelling() {
+    use qail_pg::protocol::types::oid;
+
+    let numeric = |sign: u16| {
+        let mut bytes = vec![0, 0, 0, 0];
+        bytes.extend_from_slice(&sign.to_be_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes
+    };
+    assert_eq!(
+        bytes_to_json_typed(&numeric(0xD000), oid::NUMERIC, 1),
+        serde_json::json!("Infinity")
+    );
+    assert_eq!(
+        bytes_to_json_typed(&numeric(0xF000), oid::NUMERIC, 1),
+        serde_json::json!("-Infinity")
+    );
+    assert_eq!(
+        bytes_to_json_typed(&i64::MAX.to_be_bytes(), oid::TIMESTAMPTZ, 1),
+        serde_json::json!("infinity")
+    );
+    assert_eq!(
+        bytes_to_json_typed(&i64::MIN.to_be_bytes(), oid::TIMESTAMP, 1),
+        serde_json::json!("-infinity")
+    );
+    assert_eq!(
+        bytes_to_json_typed(&i32::MAX.to_be_bytes(), oid::DATE, 1),
+        serde_json::json!("infinity")
+    );
+    // Finite values keep their numeric form.
+    assert_eq!(
+        bytes_to_json_typed(&0i64.to_be_bytes(), oid::TIMESTAMP, 1),
+        serde_json::json!(946_684_800)
+    );
+    assert_eq!(
+        bytes_to_json_typed(&86_400_000_000i64.to_be_bytes(), oid::TIME, 1),
+        serde_json::json!(86_400_000_000i64)
+    );
+}
+
+#[test]
 fn row_to_array_hex_encodes_invalid_utf8() {
     let row = qail_pg::PgRow {
         columns: vec![Some(vec![0xff, 0x00, 0x41])],
