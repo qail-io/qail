@@ -244,8 +244,16 @@ fn query_projects_tenant_col(query: &Qail, tenant_col: &str) -> bool {
 }
 
 fn query_can_append_tenant_projection(query: &Qail) -> bool {
+    // A grouped source cannot gain a column: a grouping mode would infer it as
+    // a ROLLUP/CUBE key (subtotal rows with a NULL tenant), explicit keys
+    // would leave it ungrouped.
     query.set_ops.is_empty()
         && query.having.is_empty()
+        && query.group_by_mode.is_simple()
+        && !query
+            .cages
+            .iter()
+            .any(|cage| cage.kind == CageKind::Partition && !cage.conditions.is_empty())
         && !query
             .columns
             .iter()
@@ -675,9 +683,17 @@ impl Qail {
             Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
                 Self::scope_expr_nested_rls(expr, ctx)?;
             }
-            Expr::Window { params, order, .. } => {
+            Expr::Window {
+                params,
+                filter,
+                order,
+                ..
+            } => {
                 for expr in params {
                     Self::scope_expr_nested_rls(expr, ctx)?;
+                }
+                for condition in filter.iter_mut().flatten() {
+                    Self::scope_condition_nested_rls(condition, ctx)?;
                 }
                 for cage in order {
                     for condition in &mut cage.conditions {
@@ -2491,6 +2507,30 @@ mod tests {
             .expect_err("aggregate query source without tenant projection must fail closed");
 
         assert!(err.to_string().contains("MERGE query sources"));
+    }
+
+    #[test]
+    fn test_with_rls_rejects_grouped_merge_query_source_without_tenant_projection() {
+        seal_tenant_table("_rls_merge_grouped_target", "tenant_id");
+        seal_tenant_table("_rls_merge_grouped_source", "tenant_id");
+
+        let mut rollup = Qail::get("_rls_merge_grouped_source").columns(["id"]);
+        rollup.group_by_mode = crate::ast::GroupByMode::Rollup;
+        let explicit = Qail::get("_rls_merge_grouped_source")
+            .columns(["id"])
+            .group_by(["id"]);
+
+        for source in [rollup, explicit] {
+            let err = Qail::merge_into("_rls_merge_grouped_target")
+                .target_alias("t")
+                .using_query_as(source, "s")
+                .merge_on_column("t.id", Operator::Eq, "s.id")
+                .when_not_matched_insert(&["id"], &[Expr::Named("s.id".to_string())])
+                .with_rls(&RlsContext::tenant("tenant-grouped"))
+                .expect_err("grouped query source without tenant projection must fail closed");
+
+            assert!(err.to_string().contains("MERGE query sources"));
+        }
     }
 
     #[test]

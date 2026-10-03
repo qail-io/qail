@@ -355,9 +355,17 @@ fn collect_expr_subquery_references(
                 collect_expr_subquery_references(path, line, value, cte_aliases, refs);
             }
         }
-        Expr::Window { params, order, .. } => {
+        Expr::Window {
+            params,
+            filter,
+            order,
+            ..
+        } => {
             for param in params {
                 collect_expr_subquery_references(path, line, param, cte_aliases, refs);
+            }
+            if let Some(conditions) = filter {
+                collect_conditions_subquery_references(path, line, conditions, cte_aliases, refs);
             }
             for cage in order {
                 collect_cage_subquery_references(path, line, cage, cte_aliases, refs);
@@ -591,11 +599,15 @@ fn collect_expr_columns(
         }
         Expr::Window {
             params,
+            filter,
             partition,
             order,
             ..
         } => {
             collect_exprs_columns(params, scope, cols, seen);
+            if let Some(conditions) = filter {
+                collect_conditions_columns(conditions, scope, cols, seen);
+            }
             for column in partition {
                 push_column_ref(column, scope, cols, seen);
             }

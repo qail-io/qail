@@ -35,9 +35,17 @@ fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Q
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
             for_each_expr_subquery(expr, visit);
         }
-        Expr::Window { params, order, .. } => {
+        Expr::Window {
+            params,
+            filter,
+            order,
+            ..
+        } => {
             for expr in params {
                 for_each_expr_subquery(expr, visit);
+            }
+            for condition in filter.iter().flatten() {
+                for_each_condition_subquery(condition, visit);
             }
             for cage in order {
                 for condition in &cage.conditions {
@@ -241,8 +249,14 @@ fn expr_is_read_only(expr: &Expr) -> bool {
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
             expr_is_read_only(expr)
         }
-        Expr::Window { params, order, .. } => {
+        Expr::Window {
+            params,
+            filter,
+            order,
+            ..
+        } => {
             params.iter().all(expr_is_read_only)
+                && filter.iter().flatten().all(condition_is_read_only)
                 && order
                     .iter()
                     .flat_map(|cage| &cage.conditions)

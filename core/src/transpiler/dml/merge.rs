@@ -493,13 +493,9 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String
             ..
         } => {
             let mut sql = render_named_expr(column, generator, context);
-            for (path, as_text) in path_segments {
+            for (segment, as_text) in path_segments {
                 let op = if *as_text { "->>" } else { "->" };
-                if path.parse::<i64>().is_ok() {
-                    sql.push_str(&format!("{}{}", op, path));
-                } else {
-                    sql.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
-                }
+                sql.push_str(&format!("{}{}", op, segment));
             }
             sql
         }

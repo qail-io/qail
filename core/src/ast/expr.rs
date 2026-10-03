@@ -64,6 +64,143 @@ impl std::fmt::Display for BinaryOp {
     }
 }
 
+/// Operand of one JSON `->` / `->>` step.
+///
+/// PostgreSQL overloads these operators: a text operand selects an object
+/// key and an integer operand selects an array position (negative counts
+/// from the end), so `doc->'0'` and `doc->0` read different values.
+///
+/// Serde form: an index is the decimal string (`"0"`), a key whose text is
+/// not an `i64` literal is the plain string (`"name"`), and a key whose text
+/// is an `i64` literal is `{"key": "0"}`. A plain string therefore keeps the
+/// meaning it had when segments were bare strings, and a bare JSON integer
+/// also decodes as an index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum JsonPathSegment {
+    /// Object key, rendered as a quoted text operand (`->'0'`).
+    Key(String),
+    /// Array position, rendered as an integer operand (`->0`).
+    Index(i64),
+}
+
+impl JsonPathSegment {
+    /// Classify a segment written as plain path text: an `i64` literal is an
+    /// array position, anything else an object key.
+    ///
+    /// String-path builders (`json_path`, `.path("items.0.name")`) and
+    /// plain-string serde segments use this rule.
+    pub fn from_path_text(text: &str) -> Self {
+        match text.parse::<i64>() {
+            Ok(index) => Self::Index(index),
+            Err(_) => Self::Key(text.to_string()),
+        }
+    }
+
+    /// Object key text, if this segment is a key.
+    pub fn as_key(&self) -> Option<&str> {
+        match self {
+            Self::Key(key) => Some(key),
+            Self::Index(_) => None,
+        }
+    }
+}
+
+impl From<&str> for JsonPathSegment {
+    fn from(key: &str) -> Self {
+        Self::Key(key.to_string())
+    }
+}
+
+impl From<String> for JsonPathSegment {
+    fn from(key: String) -> Self {
+        Self::Key(key)
+    }
+}
+
+impl From<i64> for JsonPathSegment {
+    fn from(index: i64) -> Self {
+        Self::Index(index)
+    }
+}
+
+/// Renders the SQL operand: `'key'` with quotes doubled, or the bare integer.
+impl std::fmt::Display for JsonPathSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => write!(f, "'{}'", key.replace('\'', "''")),
+            Self::Index(index) => write!(f, "{index}"),
+        }
+    }
+}
+
+impl serde::Serialize for JsonPathSegment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Self::Index(index) => serializer.serialize_str(&index.to_string()),
+            Self::Key(key) if key.parse::<i64>().is_ok() => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("key", key)?;
+                map.end()
+            }
+            Self::Key(key) => serializer.serialize_str(key),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for JsonPathSegment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SegmentVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SegmentVisitor {
+            type Value = JsonPathSegment;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON path string, integer index, or {\"key\": text}")
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, index: i64) -> Result<Self::Value, E> {
+                Ok(JsonPathSegment::Index(index))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, index: u64) -> Result<Self::Value, E> {
+                i64::try_from(index)
+                    .map(JsonPathSegment::Index)
+                    .map_err(|_| E::custom("JSON path index out of i64 range"))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+                Ok(JsonPathSegment::from_path_text(text))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let Some(tag) = map.next_key::<String>()? else {
+                    return Err(A::Error::custom("empty JSON path segment object"));
+                };
+                let segment = match tag.as_str() {
+                    "key" => JsonPathSegment::Key(map.next_value()?),
+                    "index" => JsonPathSegment::Index(map.next_value()?),
+                    other => {
+                        return Err(A::Error::unknown_field(other, &["key", "index"]));
+                    }
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(A::Error::custom(
+                        "JSON path segment object takes exactly one field",
+                    ));
+                }
+                Ok(segment)
+            }
+        }
+
+        deserializer.deserialize_any(SegmentVisitor)
+    }
+}
+
 /// An expression node in the AST.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
@@ -124,6 +261,9 @@ pub enum Expr {
         func: String,
         /// Function arguments as expressions (e.g., for SUM(amount), use Expr::Named("amount"))
         params: Vec<Expr>,
+        /// Aggregate FILTER (WHERE ...) applied before OVER.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Vec<Condition>>,
         /// PARTITION BY columns.
         partition: Vec<String>,
         /// ORDER BY clauses.
@@ -144,10 +284,11 @@ pub enum Expr {
     JsonAccess {
         /// Base column name
         column: String,
-        /// JSON path segments: (key, as_text)
+        /// JSON path segments: (operand, as_text)
         /// as_text: true for ->> (extract as text), false for -> (extract as JSON)
-        /// For chained access like x->'a'->0->>'b', this is [("a", false), ("0", false), ("b", true)]
-        path_segments: Vec<(String, bool)>,
+        /// For chained access like x->'a'->0->>'b', this is
+        /// [(Key("a"), false), (Index(0), false), (Key("b"), true)]
+        path_segments: Vec<(JsonPathSegment, bool)>,
         /// Optional alias
         alias: Option<String>,
     },
@@ -309,6 +450,7 @@ impl std::fmt::Display for Expr {
                 name,
                 func,
                 params,
+                filter,
                 partition,
                 order,
                 frame,
@@ -321,6 +463,17 @@ impl std::fmt::Display for Expr {
                     write!(f, "{}", p)?;
                 }
                 write!(f, ")")?;
+                if let Some(conditions) = filter {
+                    write!(
+                        f,
+                        " FILTER (WHERE {})",
+                        conditions
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" AND ")
+                    )?;
+                }
 
                 // Print partitions if any
                 if !partition.is_empty() {
@@ -369,15 +522,9 @@ impl std::fmt::Display for Expr {
                 alias,
             } => {
                 write!(f, "{}", column)?;
-                for (path, as_text) in path_segments {
+                for (segment, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    // Integer indices should NOT be quoted (array access)
-                    // String keys should be quoted (object access)
-                    if path.parse::<i64>().is_ok() {
-                        write!(f, "{}{}", op, path)?;
-                    } else {
-                        write!(f, "{}'{}'", op, path)?;
-                    }
+                    write!(f, "{}{}", op, segment)?;
                 }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;

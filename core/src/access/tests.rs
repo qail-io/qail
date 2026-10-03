@@ -522,6 +522,7 @@ fn read_column_policy_checks_window_partition_columns() {
         name: "ranked_orders".to_string(),
         func: "row_number".to_string(),
         params: vec![],
+        filter: None,
         partition: vec!["private_note".to_string()],
         order: vec![],
         frame: None,
@@ -534,6 +535,45 @@ fn read_column_policy_checks_window_partition_columns() {
         policy
             .check_command(&AccessContext::anonymous(), &cmd)
             .expect_err("window PARTITION BY denied column should fail")
+            .kind,
+        AccessErrorKind::ColumnDenied {
+            column: "private_note".to_string()
+        }
+    );
+}
+
+#[test]
+fn read_column_policy_checks_window_filter_columns() {
+    let policy = AccessPolicy::new().with_table(
+        "orders",
+        TableAccessPolicy::new()
+            .allow_operations([AccessOperation::Read])
+            .read_columns(ColumnRule::only(["id", "amount"])),
+    );
+
+    // Window projections are refused outright under a column rule; ORDER BY
+    // reaches the column walk.
+    let window = crate::parser::parse(
+        "get orders fields sum(amount) filter (where private_note = 'x') over () as total",
+    )
+    .unwrap()
+    .columns
+    .remove(0);
+    assert!(matches!(
+        window,
+        Expr::Window {
+            filter: Some(_),
+            ..
+        }
+    ));
+    let cmd = Qail::get("orders")
+        .columns(["id"])
+        .order_by_expr(window, crate::ast::SortOrder::Asc);
+
+    assert_eq!(
+        policy
+            .check_command(&AccessContext::anonymous(), &cmd)
+            .expect_err("window FILTER denied column should fail")
             .kind,
         AccessErrorKind::ColumnDenied {
             column: "private_note".to_string()

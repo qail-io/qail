@@ -176,6 +176,37 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
             ..
         } => render_json_access(column, path_segments, generator),
         Expr::Literal(value) => condition_value_sql_with_context(value, generator, context),
+        Expr::Aggregate {
+            col,
+            func,
+            distinct,
+            filter,
+            ..
+        } => {
+            let col = if col == "*" {
+                "*".to_string()
+            } else if let Some(cmd) = context {
+                resolve_col_syntax(col, cmd, generator)
+            } else {
+                generator.quote_identifier(col)
+            };
+            let mut sql = if *distinct {
+                format!("{func}(DISTINCT {col})")
+            } else {
+                format!("{func}({col})")
+            };
+            if let Some(conditions) = filter
+                && !conditions.is_empty()
+            {
+                let filter = conditions
+                    .iter()
+                    .map(|condition| condition.to_sql(generator, context))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                sql.push_str(&format!(" FILTER (WHERE {filter})"));
+            }
+            sql
+        }
         Expr::Case {
             when_clauses,
             else_value,
@@ -488,17 +519,13 @@ fn render_qualified_identifier(value: &str, generator: &dyn SqlGenerator) -> Str
 
 fn render_json_access(
     column: &str,
-    path_segments: &[(String, bool)],
+    path_segments: &[(JsonPathSegment, bool)],
     generator: &dyn SqlGenerator,
 ) -> String {
     let mut result = generator.quote_identifier(column);
-    for (path, as_text) in path_segments {
+    for (segment, as_text) in path_segments {
         let op = if *as_text { "->>" } else { "->" };
-        if path.parse::<i64>().is_ok() {
-            result.push_str(&format!("{}{}", op, path));
-        } else {
-            result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
-        }
+        result.push_str(&format!("{}{}", op, segment));
     }
     result
 }

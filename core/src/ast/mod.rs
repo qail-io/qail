@@ -14,17 +14,19 @@ pub mod joins;
 pub mod operators;
 /// Value types for parameters and literals.
 pub mod values;
+/// INSERT/UPDATE payload rules shared by the transpiler and native encoder.
+pub mod write_payload;
 
 pub use self::cages::{Cage, CageKind};
 pub use self::cmd::Qail;
 pub use self::cmd::{
-    CTEDef, ConflictAction, Merge, MergeAction, MergeClause, MergeMatchKind, MergeSource,
-    OnConflict,
+    CTEDef, ConflictAction, GroupByClause, Merge, MergeAction, MergeClause, MergeMatchKind,
+    MergeSource, OnConflict,
 };
 pub use self::conditions::Condition;
 pub use self::expr::{
     BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FunctionDef, IndexDef,
-    TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
+    JsonPathSegment, TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
 };
 pub use self::joins::Join;
 pub use self::operators::{

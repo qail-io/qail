@@ -276,6 +276,7 @@ async fn gateway_native_access_policy_enforces_live_queries() {
                 name: "ranked_rows".to_string(),
                 func: "row_number".to_string(),
                 params: vec![],
+                filter: None,
                 partition: vec!["private_note".to_string()],
                 order: vec![],
                 frame: None,

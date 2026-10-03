@@ -1,20 +1,34 @@
 //! INSERT SQL generation.
 
+use crate::ast::write_payload::{
+    check_insert_shape, insert_columns, insert_values, simple_write_column,
+};
 use crate::ast::*;
 use crate::transpiler::SqlGenerator;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
+/// Shape errors echo column names. A name holding `*/` or `/*` would end or
+/// nest the comment and leave the rest of the name as executable SQL.
+pub(crate) fn shape_error_comment(error: &str) -> String {
+    format!(
+        "/* ERROR: {} */",
+        error.replace("*/", "* /").replace("/*", "/ *")
+    )
+}
+
 /// Generate INSERT INTO SQL with VALUES, ON CONFLICT, and RETURNING clauses.
 pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
+    if let Err(error) = check_insert_shape(cmd, simple_write_column, |message| message) {
+        return shape_error_comment(&error);
+    }
+
     let generator = dialect.generator();
     let mut sql = String::from("INSERT INTO ");
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
-    // For ADD queries, we use columns and first cage contains values
-    let cols: Vec<String> = cmd
-        .columns
-        .iter()
+    let cols: Vec<String> = insert_columns(cmd)
+        .into_iter()
         .map(|c| render_insert_column(c, generator.as_ref()))
         .collect();
 
@@ -40,19 +54,14 @@ pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
         use crate::transpiler::ToSql;
         sql.push(' ');
         sql.push_str(&source_query.to_sql_with_dialect(dialect));
-    } else if let Some(cage) = cmd.cages.first() {
-        // Traditional INSERT with VALUES
-        let values: Vec<String> = cage
-            .conditions
+    } else {
+        let values: Vec<String> = insert_values(cmd)
             .iter()
             .map(|c| c.to_value_sql(generator.as_ref()))
             .collect();
-
-        if !values.is_empty() {
-            sql.push_str(" VALUES (");
-            sql.push_str(&values.join(", "));
-            sql.push(')');
-        }
+        sql.push_str(" VALUES (");
+        sql.push_str(&values.join(", "));
+        sql.push(')');
     }
 
     // ON CONFLICT clause
@@ -262,21 +271,13 @@ fn render_qualified_identifier(value: &str, generator: &dyn SqlGenerator) -> Str
 
 fn render_json_access(
     column: &str,
-    path_segments: &[(String, bool)],
+    path_segments: &[(JsonPathSegment, bool)],
     generator: &dyn SqlGenerator,
 ) -> String {
     let mut sql = generator.quote_identifier(column);
-    for (path, as_text) in path_segments {
+    for (segment, as_text) in path_segments {
         let op = if *as_text { "->>" } else { "->" };
-        if path.parse::<i64>().is_ok() {
-            sql.push_str(&format!("{}{}", op, path));
-        } else {
-            sql.push_str(&format!(
-                "{}'{}'",
-                op,
-                crate::transpiler::escape_sql_string_literal(path)
-            ));
-        }
+        sql.push_str(&format!("{}{}", op, segment));
     }
     sql
 }

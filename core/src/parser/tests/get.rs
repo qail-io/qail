@@ -285,6 +285,84 @@ fn test_v2_rejects_case_without_when_and_empty_window_clauses() {
 }
 
 #[test]
+fn test_v2_generic_aggregate_keeps_distinct_and_filter() {
+    use crate::transpiler::ToSql;
+
+    for (query, expected) in [
+        (
+            "get orders fields array_agg(distinct status)",
+            "SELECT ARRAY_AGG(DISTINCT status) FROM orders",
+        ),
+        (
+            "get orders fields jsonb_agg(payload) filter (where active = true)",
+            "SELECT JSONB_AGG(payload) FILTER (WHERE active = true) FROM orders",
+        ),
+        (
+            "get orders fields array_agg(distinct status) filter (where active = true) as statuses",
+            "SELECT ARRAY_AGG(DISTINCT status) FILTER (WHERE active = true) AS statuses FROM orders",
+        ),
+    ] {
+        let cmd = parse(query).unwrap();
+        assert_eq!(cmd.to_sql(), expected, "{query}");
+    }
+}
+
+#[test]
+fn test_v2_window_keeps_aggregate_filter() {
+    use crate::transpiler::ToSql;
+
+    let cmd = parse("get orders fields sum(amount) filter (where active = true) over ()").unwrap();
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT SUM(amount) FILTER (WHERE active = true) OVER () AS sum FROM orders"
+    );
+}
+
+#[test]
+fn test_v2_aggregate_modifiers_round_trip_through_display() {
+    for query in [
+        "get orders fields array_agg(distinct status)",
+        "get orders fields jsonb_agg(payload) filter (where active = true)",
+        "get orders fields sum(amount) filter (where active = true) over ()",
+        "get orders fields sum(amount) filter (where active = true) over (partition by region order by created_at desc rows between unbounded preceding and current row) as running",
+        "get orders fields sum(amount) filter (where status = 'paid' and deleted_at is null) over (order by id range between 2 preceding and 1 following) as paid",
+        "get orders fields count(distinct status) filter (where region = 'bali') as n",
+        "get orders fields count(*) filter (where amount >= 10 and deleted_at is not null) as n",
+    ] {
+        let cmd = parse(query).unwrap();
+        let rendered = cmd.to_string();
+        let reparsed = parse(&rendered)
+            .unwrap_or_else(|err| panic!("{query} rendered as {rendered:?}: {err}"));
+        assert_eq!(reparsed, cmd, "{query} rendered as {rendered:?}");
+    }
+}
+
+#[test]
+fn test_v2_rejects_aggregate_modifiers_it_cannot_keep() {
+    for query in [
+        // PostgreSQL has no DISTINCT for window functions.
+        "get orders fields count(distinct status) over ()",
+        "get orders fields array_agg(distinct status) over ()",
+        // No AST node keeps a second argument next to DISTINCT/FILTER.
+        "get orders fields string_agg(distinct status, ',')",
+        "get orders fields string_agg(status, ',') filter (where active = true)",
+        "get orders fields array_agg(distinct status, region)",
+        "get orders fields count(distinct status, region)",
+        "get orders fields max(amount, fee)",
+        // Only a plain column reference fits the aggregate column slot.
+        "get orders fields array_agg(distinct lower(status))",
+        // Functions outside the aggregate set have no node for the modifiers.
+        "get orders fields bit_or(flags) filter (where active = true)",
+        "get orders fields coalesce(distinct status)",
+    ] {
+        assert!(
+            parse(query).is_err(),
+            "aggregate modifiers would be dropped: {query}"
+        );
+    }
+}
+
+#[test]
 fn test_v2_get_mixed_and_or_rejected() {
     let result = parse("get users fields * where active = true and role = \"admin\" or age > 18");
     assert!(result.is_err());

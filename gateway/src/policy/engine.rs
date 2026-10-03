@@ -1054,6 +1054,7 @@ impl PolicyEngine {
             }
             Expr::Window {
                 params,
+                filter,
                 partition,
                 order,
                 ..
@@ -1061,6 +1062,15 @@ impl PolicyEngine {
                 for param in params {
                     Self::enforce_expr_write_refs_for_policies(
                         param,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                for condition in filter.iter().flatten() {
+                    Self::enforce_condition_write_expr_refs_for_policies(
+                        condition,
                         policies,
                         target_refs,
                         operation,
@@ -1689,9 +1699,17 @@ impl PolicyEngine {
             Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
                 self.apply_expr_subquery_policies(auth, expr)?;
             }
-            Expr::Window { params, order, .. } => {
+            Expr::Window {
+                params,
+                filter,
+                order,
+                ..
+            } => {
                 for expr in params {
                     self.apply_expr_subquery_policies(auth, expr)?;
+                }
+                for condition in filter.iter_mut().flatten() {
+                    self.apply_condition_subquery_policies(auth, condition)?;
                 }
                 for cage in order {
                     for condition in &mut cage.conditions {

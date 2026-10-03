@@ -710,9 +710,17 @@ fn prepare_expr_subquery_guards(
         Expr::Cast { expr, .. } | Expr::Mod { col: expr, .. } | Expr::Collate { expr, .. } => {
             prepare_expr_subquery_guards(state, auth, expr, plan)?;
         }
-        Expr::Window { params, order, .. } => {
+        Expr::Window {
+            params,
+            filter,
+            order,
+            ..
+        } => {
             for expr in params {
                 prepare_expr_subquery_guards(state, auth, expr, plan)?;
+            }
+            for condition in filter.iter_mut().flatten() {
+                prepare_condition_subquery_guards(state, auth, condition, plan)?;
             }
             for cage in order {
                 for condition in &mut cage.conditions {

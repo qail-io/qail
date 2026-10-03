@@ -1,6 +1,6 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, Join, LogicalOp, MergeAction, MergeMatchKind,
-    MergeSource, Operator, Qail, SortOrder, Value,
+    Action, Cage, CageKind, Condition, Expr, FrameBound, Join, LogicalOp, MergeAction,
+    MergeMatchKind, MergeSource, Operator, Qail, SortOrder, Value, WindowFrame,
 };
 use std::fmt::{Result, Write};
 
@@ -306,15 +306,7 @@ impl Formatter {
                     write!(self.buffer, "{}({})", func_name, col)?;
                 }
                 if let Some(conditions) = filter {
-                    write!(
-                        self.buffer,
-                        " filter (where {})",
-                        conditions
-                            .iter()
-                            .map(|c| c.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" and ")
-                    )?;
+                    self.format_aggregate_filter(conditions)?;
                 }
                 if let Some(a) = alias {
                     write!(self.buffer, " as {}", a)?;
@@ -331,16 +323,52 @@ impl Formatter {
                 name,
                 func,
                 params,
+                filter,
                 partition,
-                ..
+                order,
+                frame,
             } => {
-                // Use Window function format: func(params) OVER (PARTITION BY ...)
+                // func(params) filter (where ...) over (partition by ... order by ... rows ...)
+                // `over` is always written: without it the text reparses as a plain aggregate.
                 let params_str: Vec<String> = params.iter().map(|p| p.to_string()).collect();
                 write!(self.buffer, "{}({})", func, params_str.join(", "))?;
-                if !partition.is_empty() {
-                    write!(self.buffer, " over (partition by {})", partition.join(", "))?;
+                if let Some(conditions) = filter {
+                    self.format_aggregate_filter(conditions)?;
                 }
-                write!(self.buffer, " as {}", name)?;
+                let mut over_parts = Vec::new();
+                if !partition.is_empty() {
+                    over_parts.push(format!("partition by {}", partition.join(", ")));
+                }
+                if !order.is_empty() {
+                    let items: Vec<String> = order
+                        .iter()
+                        .filter_map(|cage| {
+                            let column = cage.conditions.first()?.left.to_string();
+                            let suffix = match cage.kind {
+                                CageKind::Sort(SortOrder::Desc) => " desc",
+                                CageKind::Sort(SortOrder::AscNullsFirst) => " nulls first",
+                                CageKind::Sort(SortOrder::AscNullsLast) => " nulls last",
+                                CageKind::Sort(SortOrder::DescNullsFirst) => " desc nulls first",
+                                CageKind::Sort(SortOrder::DescNullsLast) => " desc nulls last",
+                                _ => "",
+                            };
+                            Some(format!("{column}{suffix}"))
+                        })
+                        .collect();
+                    over_parts.push(format!("order by {}", items.join(", ")));
+                }
+                if let Some(frame) = frame {
+                    let (unit, start, end) = match frame {
+                        WindowFrame::Rows { start, end } => ("rows", start, end),
+                        WindowFrame::Range { start, end } => ("range", start, end),
+                    };
+                    over_parts.push(format!(
+                        "{unit} between {} and {}",
+                        frame_bound_text(start),
+                        frame_bound_text(end)
+                    ));
+                }
+                write!(self.buffer, " over ({}) as {}", over_parts.join(" "), name)?;
             }
             Expr::Case {
                 when_clauses,
@@ -365,13 +393,9 @@ impl Formatter {
                 alias,
             } => {
                 write!(self.buffer, "{}", column)?;
-                for (path, as_text) in path_segments {
+                for (segment, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    if path.parse::<i64>().is_ok() {
-                        write!(self.buffer, "{}{}", op, path)?;
-                    } else {
-                        write!(self.buffer, "{}'{}'", op, path)?;
-                    }
+                    write!(self.buffer, "{}{}", op, segment)?;
                 }
                 if let Some(a) = alias {
                     write!(self.buffer, " as {}", a)?;
@@ -572,6 +596,13 @@ impl Formatter {
         Ok(())
     }
 
+    /// ` filter (where ...)`, spelled like WHERE so `is null` reads back.
+    fn format_aggregate_filter(&mut self, conditions: &[Condition]) -> Result {
+        write!(self.buffer, " filter (where ")?;
+        self.format_conditions(conditions, LogicalOp::And)?;
+        write!(self.buffer, ")")
+    }
+
     fn format_value(&mut self, val: &Value) -> Result {
         match val {
             Value::Null => write!(self.buffer, "null")?,
@@ -652,5 +683,16 @@ impl Formatter {
             SortOrder::DescNullsLast => write!(self.buffer, " desc nulls last")?,
         }
         Ok(())
+    }
+}
+
+/// Window frame bound in the DSL spelling the parser reads back.
+fn frame_bound_text(bound: &FrameBound) -> String {
+    match bound {
+        FrameBound::UnboundedPreceding => "unbounded preceding".to_string(),
+        FrameBound::Preceding(n) => format!("{n} preceding"),
+        FrameBound::CurrentRow => "current row".to_string(),
+        FrameBound::Following(n) => format!("{n} following"),
+        FrameBound::UnboundedFollowing => "unbounded following".to_string(),
     }
 }

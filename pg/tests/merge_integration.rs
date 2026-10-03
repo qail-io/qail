@@ -528,7 +528,7 @@ async fn test_merge_complex_expressions_against_postgres() -> PgResult<()> {
             left: Expr::Cast {
                 expr: Box::new(Expr::JsonAccess {
                     column: "t.profile".to_string(),
-                    path_segments: vec![("external_id".to_string(), true)],
+                    path_segments: vec![("external_id".into(), true)],
                     alias: None,
                 }),
                 target_type: "integer".to_string(),
@@ -547,7 +547,7 @@ async fn test_merge_complex_expressions_against_postgres() -> PgResult<()> {
                 qail_core::ast::Condition {
                     left: Expr::JsonAccess {
                         column: "s.profile".to_string(),
-                        path_segments: vec![("tier".to_string(), true)],
+                        path_segments: vec![("tier".into(), true)],
                         alias: None,
                     },
                     op: Operator::Eq,
@@ -591,7 +591,7 @@ async fn test_merge_complex_expressions_against_postgres() -> PgResult<()> {
                     "tier",
                     Expr::JsonAccess {
                         column: "s.profile".to_string(),
-                        path_segments: vec![("tier".to_string(), true)],
+                        path_segments: vec![("tier".into(), true)],
                         alias: None,
                     },
                 ),
@@ -603,7 +603,7 @@ async fn test_merge_complex_expressions_against_postgres() -> PgResult<()> {
                                 left: Expr::Cast {
                                     expr: Box::new(Expr::JsonAccess {
                                         column: "s.profile".to_string(),
-                                        path_segments: vec![("active".to_string(), true)],
+                                        path_segments: vec![("active".into(), true)],
                                         alias: None,
                                     }),
                                     target_type: "integer".to_string(),
@@ -667,7 +667,7 @@ async fn test_merge_complex_expressions_against_postgres() -> PgResult<()> {
                 },
                 Expr::JsonAccess {
                     column: "s.profile".to_string(),
-                    path_segments: vec![("tier".to_string(), true)],
+                    path_segments: vec![("tier".into(), true)],
                     alias: None,
                 },
                 Expr::Literal(qail_core::ast::Value::String("new".to_string())),

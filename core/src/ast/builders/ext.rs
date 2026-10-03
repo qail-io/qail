@@ -2,7 +2,7 @@
 //!
 
 use super::json::JsonBuilder;
-use crate::ast::Expr;
+use crate::ast::{Expr, JsonPathSegment};
 
 const INVALID_JSON_SOURCE_IDENT: &str = "__qail_invalid_json_source__";
 
@@ -45,7 +45,9 @@ pub trait ExprExt {
     /// ```
     fn json(self, key: &str) -> JsonBuilder;
 
-    /// JSON path extraction with dot notation.
+    /// JSON path extraction with dot notation. A segment that is an `i64`
+    /// literal is an array position; build with [`JsonBuilder::get`] for an
+    /// object key such as `"0"`.
     /// # Example
     /// ```ignore
     /// col("metadata").path("vessel.0.port")  // metadata->'vessel'->0->>'port'
@@ -170,7 +172,7 @@ impl ExprExt for Expr {
         let column = json_source_or_invalid(self, "json");
         JsonBuilder {
             column,
-            path_segments: vec![(key.to_string(), true)], // true = text extraction (->>)
+            path_segments: vec![(key.into(), true)], // true = text extraction (->>)
             alias: None,
         }
     }
@@ -180,10 +182,10 @@ impl ExprExt for Expr {
 
         let segments: Vec<&str> = dotted_path.split('.').collect();
         let len = segments.len();
-        let path_segments: Vec<(String, bool)> = segments
+        let path_segments: Vec<(JsonPathSegment, bool)> = segments
             .into_iter()
             .enumerate()
-            .map(|(i, segment)| (segment.to_string(), i == len - 1)) // Last segment as text
+            .map(|(i, segment)| (JsonPathSegment::from_path_text(segment), i == len - 1)) // Last segment as text
             .collect();
 
         JsonBuilder {
@@ -262,7 +264,7 @@ impl ExprExt for &str {
     fn json(self, key: &str) -> JsonBuilder {
         JsonBuilder {
             column: self.to_string(),
-            path_segments: vec![(key.to_string(), true)],
+            path_segments: vec![(key.into(), true)],
             alias: None,
         }
     }
@@ -270,10 +272,10 @@ impl ExprExt for &str {
     fn path(self, dotted_path: &str) -> JsonBuilder {
         let segments: Vec<&str> = dotted_path.split('.').collect();
         let len = segments.len();
-        let path_segments: Vec<(String, bool)> = segments
+        let path_segments: Vec<(JsonPathSegment, bool)> = segments
             .into_iter()
             .enumerate()
-            .map(|(i, segment)| (segment.to_string(), i == len - 1))
+            .map(|(i, segment)| (JsonPathSegment::from_path_text(segment), i == len - 1))
             .collect();
 
         JsonBuilder {
@@ -354,9 +356,9 @@ mod tests {
         let expr: Expr = col("metadata").path("vessel.0.port").into();
         if let Expr::JsonAccess { path_segments, .. } = expr {
             assert_eq!(path_segments.len(), 3);
-            assert_eq!(path_segments[0], ("vessel".to_string(), false)); // JSON
-            assert_eq!(path_segments[1], ("0".to_string(), false)); // JSON
-            assert_eq!(path_segments[2], ("port".to_string(), true)); // Text
+            assert_eq!(path_segments[0], ("vessel".into(), false)); // JSON
+            assert_eq!(path_segments[1], (JsonPathSegment::Index(0), false)); // JSON
+            assert_eq!(path_segments[2], ("port".into(), true)); // Text
         } else {
             panic!("Expected JsonAccess");
         }

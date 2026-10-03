@@ -862,7 +862,7 @@ fn insert_column_list_quotes_identifier_fragments() {
         table: "users".to_string(),
         columns: vec![Expr::Named("name); DROP TABLE users; --".to_string())],
         cages: vec![payload_cage(vec![cond(
-            "name",
+            "name); DROP TABLE users; --",
             Operator::Eq,
             Value::String("Ada".to_string()),
         )])],
@@ -881,6 +881,26 @@ fn insert_column_list_quotes_identifier_fragments() {
         "insert column identifier broke out unquoted: {}",
         sql
     );
+}
+
+#[test]
+fn write_shape_error_comment_cannot_be_closed_by_a_column_name() {
+    let hostile = "a */ DROP TABLE users; /* b";
+    for cmd in [
+        Qail::add("users")
+            .columns(["id", hostile])
+            .set_value(hostile, 1)
+            .set_value("id", 2),
+        Qail::set("users")
+            .set_value(hostile, 1)
+            .set_value(hostile, 2),
+    ] {
+        let sql = cmd.to_sql();
+        assert!(sql.starts_with("/* ERROR: "), "{sql}");
+        assert!(sql.ends_with(" */"), "{sql}");
+        let body = &sql["/* ERROR: ".len()..sql.len() - " */".len()];
+        assert!(!body.contains("*/") && !body.contains("/*"), "{sql}");
+    }
 }
 
 #[test]
@@ -965,7 +985,7 @@ fn update_set_rejects_non_named_column_expression() {
     let sql = cmd.to_sql();
 
     assert!(
-        sql.contains("/* ERROR: Invalid update column */"),
+        sql.contains("/* ERROR: update.payload.column must be a simple column identifier */"),
         "non-column UPDATE target must fail closed: {}",
         sql
     );
@@ -1198,6 +1218,7 @@ fn window_function_name_rejects_raw_sql_fragment() {
             name: "total".to_string(),
             func: "sum); DROP TABLE users; --".to_string(),
             params: vec![Expr::Named("amount".to_string())],
+            filter: None,
             partition: vec![],
             order: vec![],
             frame: None,
@@ -1231,6 +1252,7 @@ fn window_param_rejects_unsafe_cast_target() {
                 target_type: "numeric); DROP TABLE users; --".to_string(),
                 alias: None,
             }],
+            filter: None,
             partition: vec![],
             order: vec![],
             frame: None,
@@ -1260,6 +1282,7 @@ fn select_window_order_escapes_collation_fragment() {
             name: "rn".to_string(),
             func: "row_number".to_string(),
             params: vec![],
+            filter: None,
             partition: vec![],
             order: vec![Cage {
                 kind: CageKind::Sort(SortOrder::Asc),
