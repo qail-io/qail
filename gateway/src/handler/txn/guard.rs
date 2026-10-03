@@ -115,7 +115,8 @@ fn reject_expr_subqueries(expr: &Expr) -> Result<(), ApiError> {
         | Expr::Named(_)
         | Expr::Aliased { .. }
         | Expr::Def { .. }
-        | Expr::JsonAccess { .. } => {}
+        | Expr::JsonAccess { .. }
+        | Expr::Default => {}
     }
     Ok(())
 }

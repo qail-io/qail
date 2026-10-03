@@ -706,7 +706,9 @@ fn collect_usage_columns(cmd: &Qail) -> Vec<String> {
                         collect_columns_from_expr(expr, &mut push);
                     }
                 }
-                MergeAction::Insert { columns, values } => {
+                MergeAction::Insert {
+                    columns, values, ..
+                } => {
                     for column in columns {
                         push(column);
                     }

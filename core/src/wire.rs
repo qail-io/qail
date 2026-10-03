@@ -506,7 +506,7 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
             ensure_str("qail.merge.target_alias", alias)?;
         }
         match &merge.source {
-            crate::ast::MergeSource::Table { name, alias } => {
+            crate::ast::MergeSource::Table { name, alias, .. } => {
                 ensure_str("qail.merge.source.table", name)?;
                 if let Some(alias) = alias {
                     ensure_str("qail.merge.source.alias", alias)?;
@@ -549,7 +549,9 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                         validate_expr_limits(expr, depth + 1, state)?;
                     }
                 }
-                crate::ast::MergeAction::Insert { columns, values } => {
+                crate::ast::MergeAction::Insert {
+                    columns, values, ..
+                } => {
                     ensure_len(
                         "qail.merge.insert.columns",
                         columns.len(),
@@ -694,7 +696,7 @@ fn validate_expr_limits(
     state.bump("Expr")?;
 
     match expr {
-        Expr::Star => {}
+        Expr::Star | Expr::Default => {}
         Expr::Named(name) => ensure_str("expr.named", name)?,
         Expr::Aliased { name, alias } => {
             ensure_str("expr.aliased.name", name)?;

@@ -388,7 +388,7 @@ fn build_select_inner(
                             generator.quote_identifier(name)
                         )
                     }
-                    Expr::Def { .. } | Expr::Mod { .. } => {
+                    Expr::Def { .. } | Expr::Mod { .. } | Expr::Default => {
                         "/* ERROR: Invalid select expression */".to_string()
                     }
                 }
@@ -892,7 +892,7 @@ fn render_expr_for_orderby(
                 format!("EXISTS ({})", read_only_subquery_sql(query))
             }
         }
-        Expr::Def { .. } | Expr::Mod { .. } | Expr::Window { .. } => {
+        Expr::Def { .. } | Expr::Mod { .. } | Expr::Window { .. } | Expr::Default => {
             "/* ERROR: Invalid select expression */".to_string()
         }
     }

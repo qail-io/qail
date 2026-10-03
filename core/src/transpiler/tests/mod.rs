@@ -8,4 +8,5 @@
 
 mod core;
 mod features;
+mod merge_shapes;
 mod predicates;

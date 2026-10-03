@@ -20,6 +20,7 @@ fn test_parse_merge_update_insert() {
         MergeSource::Table {
             name: "staging_users".to_string(),
             alias: Some("s".to_string()),
+            only: false,
         }
     );
     assert_eq!(merge.on.len(), 1);
@@ -43,8 +44,15 @@ fn test_parse_merge_update_insert() {
         MergeMatchKind::NotMatchedByTarget
     );
     match &merge.clauses[1].action {
-        MergeAction::Insert { columns, values } => {
+        MergeAction::Insert {
+            columns,
+            values,
+            overriding,
+            default_values,
+        } => {
             assert_eq!(columns, &["id", "name", "email"]);
+            assert_eq!(*overriding, None);
+            assert!(!default_values);
             assert_eq!(values[2], Expr::Named("s.email".to_string()));
         }
         other => panic!("expected insert action, got {other:?}"),

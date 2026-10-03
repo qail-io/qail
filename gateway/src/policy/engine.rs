@@ -716,7 +716,7 @@ impl PolicyEngine {
             return Ok(());
         };
         let (source_table, source_qualifier) = match &merge.source {
-            MergeSource::Table { name, alias } => {
+            MergeSource::Table { name, alias, .. } => {
                 let table = name.trim_matches('"').to_string();
                 if cte_names.iter().any(|cte_name| cte_name == &table) {
                     return Ok(());
@@ -1148,7 +1148,11 @@ impl PolicyEngine {
                 }
                 Ok(())
             }
-            Expr::Subquery { .. } | Expr::Exists { .. } | Expr::Star | Expr::Def { .. } => Ok(()),
+            Expr::Subquery { .. }
+            | Expr::Exists { .. }
+            | Expr::Star
+            | Expr::Def { .. }
+            | Expr::Default => Ok(()),
         }
     }
 
@@ -1830,7 +1834,8 @@ impl PolicyEngine {
             | Expr::Named(_)
             | Expr::Aliased { .. }
             | Expr::Def { .. }
-            | Expr::JsonAccess { .. } => {}
+            | Expr::JsonAccess { .. }
+            | Expr::Default => {}
         }
 
         Ok(())

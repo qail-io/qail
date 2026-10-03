@@ -248,7 +248,7 @@ fn check_fk_deferrable(field: &str, value: &str) -> Result<(), SanitizeError> {
 /// - Recursive variants (Cast, Binary, etc.) are validated recursively.
 fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
     match expr {
-        Expr::Star => Ok(()),
+        Expr::Star | Expr::Default => Ok(()),
         Expr::Named(name) => check_ident(field, name),
         Expr::Aliased { name, alias } => {
             check_ident(field, name)?;
@@ -670,7 +670,7 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
             check_ident("merge.target_alias", alias)?;
         }
         match &merge.source {
-            MergeSource::Table { name, alias } => {
+            MergeSource::Table { name, alias, .. } => {
                 if let Some(alias) = alias {
                     check_ident("merge.source.table", name)?;
                     check_ident("merge.source.alias", alias)?;
@@ -701,7 +701,9 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
                         check_expr("merge.update.expr", expr)?;
                     }
                 }
-                MergeAction::Insert { columns, values } => {
+                MergeAction::Insert {
+                    columns, values, ..
+                } => {
                     for col in columns {
                         check_ident("merge.insert.column", col)?;
                     }

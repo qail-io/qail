@@ -67,18 +67,34 @@ fn parse_merge_source(input: &str) -> IResult<&str, MergeSource> {
     Ok((
         input,
         match source {
-            MergeSource::Table { name, .. } => MergeSource::Table { name, alias },
+            MergeSource::Table { name, only, .. } => MergeSource::Table { name, alias, only },
             MergeSource::Query { query, .. } => MergeSource::Query { query, alias },
         },
     ))
 }
 
 fn parse_table_source(input: &str) -> IResult<&str, MergeSource> {
+    let (input, only) = parse_only_keyword(input)?;
     map(parse_identifier, |name: &str| MergeSource::Table {
         name: name.to_string(),
         alias: None,
+        only,
     })
     .parse(input)
+}
+
+/// Optional `only` before a relation name. PostgreSQL reserves ONLY, so a
+/// relation literally named `only` needs quoting there too.
+pub(crate) fn parse_only_keyword(input: &str) -> IResult<&str, bool> {
+    match (
+        tag_no_case::<_, _, nom::error::Error<&str>>("only"),
+        multispace1,
+    )
+        .parse(input)
+    {
+        Ok((remaining, _)) => Ok((remaining, true)),
+        Err(_) => Ok((input, false)),
+    }
 }
 
 fn parse_query_source(input: &str) -> IResult<&str, MergeSource> {
@@ -239,13 +255,41 @@ fn parse_merge_assignment(input: &str) -> IResult<&str, (String, Expr)> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, expr) = parse_expression(input)?;
+    let (input, expr) = parse_merge_value(input)?;
     Ok((input, (column.to_string(), expr)))
+}
+
+/// An assignment or INSERT value: bare `DEFAULT` is the column default, not
+/// a column named "default". Anything trailing it fails the clause parse.
+fn parse_merge_value(input: &str) -> IResult<&str, Expr> {
+    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("default").parse(input)
+        && !remaining.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Ok((remaining, Expr::Default));
+    }
+    parse_expression(input)
 }
 
 fn parse_insert_action(input: &str) -> IResult<&str, MergeAction> {
     let (input, _) = tag_no_case("insert").parse(input)?;
     let (input, _) = multispace0(input)?;
+    if let Ok((remaining, _)) = (
+        tag_no_case::<_, _, nom::error::Error<&str>>("default"),
+        multispace1,
+        tag_no_case("values"),
+    )
+        .parse(input)
+    {
+        return Ok((
+            remaining,
+            MergeAction::Insert {
+                columns: Vec::new(),
+                values: Vec::new(),
+                overriding: None,
+                default_values: true,
+            },
+        ));
+    }
     let (input, columns) = opt(delimited(
         (char('('), multispace0),
         separated_list1((multispace0, char(','), multispace0), parse_bare_identifier),
@@ -253,11 +297,13 @@ fn parse_insert_action(input: &str) -> IResult<&str, MergeAction> {
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
+    let (input, overriding) = opt(parse_overriding).parse(input)?;
+    let (input, _) = multispace0(input)?;
     let (input, _) = tag_no_case("values").parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, values) = delimited(
         (char('('), multispace0),
-        separated_list1((multispace0, char(','), multispace0), parse_expression),
+        separated_list1((multispace0, char(','), multispace0), parse_merge_value),
         (multispace0, char(')')),
     )
     .parse(input)?;
@@ -277,8 +323,23 @@ fn parse_insert_action(input: &str) -> IResult<&str, MergeAction> {
                 .map(str::to_string)
                 .collect(),
             values,
+            overriding,
+            default_values: false,
         },
     ))
+}
+
+fn parse_overriding(input: &str) -> IResult<&str, OverridingKind> {
+    let (input, _) = tag_no_case("overriding").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, kind) = alt((
+        value(OverridingKind::SystemValue, tag_no_case("system")),
+        value(OverridingKind::UserValue, tag_no_case("user")),
+    ))
+    .parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("value").parse(input)?;
+    Ok((input, kind))
 }
 
 fn validate_clause_action<'a>(

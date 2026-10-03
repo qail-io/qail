@@ -115,7 +115,8 @@ fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Q
         | Expr::Named(_)
         | Expr::Aliased { .. }
         | Expr::Def { .. }
-        | Expr::JsonAccess { .. } => {}
+        | Expr::JsonAccess { .. }
+        | Expr::Default => {}
     }
 }
 
@@ -325,7 +326,8 @@ fn expr_is_read_only(expr: &Expr) -> bool {
         | Expr::Named(_)
         | Expr::Aliased { .. }
         | Expr::Def { .. }
-        | Expr::JsonAccess { .. } => true,
+        | Expr::JsonAccess { .. }
+        | Expr::Default => true,
     }
 }
 

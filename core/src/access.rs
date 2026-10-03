@@ -571,7 +571,7 @@ impl AccessPolicy {
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
                 self.check_outer_command_column_refs(table, rule, target_refs, query)
             }
-            Expr::Star | Expr::Def { .. } => Ok(()),
+            Expr::Star | Expr::Def { .. } | Expr::Default => Ok(()),
         }
     }
 
@@ -834,7 +834,7 @@ impl AccessPolicy {
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
                 self.check_outer_command_column_refs(table, rule, target_refs, query)
             }
-            Expr::Star | Expr::Def { .. } => Ok(()),
+            Expr::Star | Expr::Def { .. } | Expr::Default => Ok(()),
         }
     }
 
@@ -1107,7 +1107,8 @@ impl AccessPolicy {
             | Expr::Named(_)
             | Expr::Aliased { .. }
             | Expr::Def { .. }
-            | Expr::JsonAccess { .. } => Ok(()),
+            | Expr::JsonAccess { .. }
+            | Expr::Default => Ok(()),
         }
     }
 

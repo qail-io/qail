@@ -405,7 +405,8 @@ fn output_alias(expr: &Expr) -> Option<&str> {
         | Expr::Window { .. }
         | Expr::Def { .. }
         | Expr::Mod { .. }
-        | Expr::Literal(_) => None,
+        | Expr::Literal(_)
+        | Expr::Default => None,
     }
 }
 

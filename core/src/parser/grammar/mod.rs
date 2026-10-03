@@ -190,6 +190,12 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
         (input, vec![])
     };
 
+    let (input, merge_only) = if matches!(action, Action::Merge) {
+        merge::parse_only_keyword(input)?
+    } else {
+        (input, false)
+    };
+
     //  Parse table name
     let (input, table) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
@@ -200,7 +206,9 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
     }
 
     if matches!(action, Action::Merge) {
-        return merge::parse_merge_after_target(input, table, ctes);
+        let (input, mut cmd) = merge::parse_merge_after_target(input, table, ctes)?;
+        cmd.only_table = merge_only;
+        return Ok((input, cmd));
     }
 
     let (input, joins) = many0(parse_join_clause).parse(input)?;
