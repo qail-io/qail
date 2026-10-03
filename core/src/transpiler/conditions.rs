@@ -122,11 +122,35 @@ fn render_qualified_column(
     column_parts: &[&str],
     generator: &dyn SqlGenerator,
 ) -> String {
+    if column_parts == ["*"] {
+        return format!("{}.*", generator.quote_identifier(qualifier));
+    }
     format!(
         "{}.{}",
         generator.quote_identifier(qualifier),
         generator.quote_identifier(&column_parts.join("."))
     )
+}
+
+/// `base[inner]`, with the base parenthesized when PostgreSQL cannot subscript
+/// it directly (function results, constructors, literals).
+pub(crate) fn subscript_sql(base: &Expr, base_sql: String, inner: &str) -> String {
+    if base.needs_parens_for_subscript() {
+        format!("({base_sql})[{inner}]")
+    } else {
+        format!("{base_sql}[{inner}]")
+    }
+}
+
+/// Slice bounds `lower:upper`; an omitted bound renders empty.
+pub(crate) fn slice_bounds_sql(
+    lower: &Option<Box<Expr>>,
+    upper: &Option<Box<Expr>>,
+    mut render: impl FnMut(&Expr) -> String,
+) -> String {
+    let lower = lower.as_deref().map(&mut render).unwrap_or_default();
+    let upper = upper.as_deref().map(&mut render).unwrap_or_default();
+    format!("{lower}:{upper}")
 }
 
 fn resolve_text_search_vector(
@@ -278,10 +302,19 @@ fn condition_left_sql(expr: &Expr, generator: &dyn SqlGenerator, context: Option
                 .join(", ");
             format!("ROW({elements})")
         }
-        Expr::Subscript { expr, index, .. } => format!(
-            "{}[{}]",
+        Expr::Subscript { expr, index, .. } => subscript_sql(
+            expr,
             condition_left_sql(expr, generator, context),
-            condition_left_sql(index, generator, context)
+            &condition_left_sql(index, generator, context),
+        ),
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => subscript_sql(
+            expr,
+            condition_left_sql(expr, generator, context),
+            &slice_bounds_sql(lower, upper, |bound| {
+                condition_left_sql(bound, generator, context)
+            }),
         ),
         Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
         Expr::Exists { query, negated, .. } => {
@@ -420,6 +453,14 @@ fn validate_read_only_expr(expr: &Expr) -> Option<String> {
         Expr::Subscript { expr, index, .. } => {
             validate_read_only_expr(expr).or_else(|| validate_read_only_expr(index))
         }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => validate_read_only_expr(expr).or_else(|| {
+            [lower, upper]
+                .into_iter()
+                .flatten()
+                .find_map(|bound| validate_read_only_expr(bound))
+        }),
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             validate_read_only_subquery(query)
         }

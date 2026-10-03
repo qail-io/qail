@@ -351,6 +351,29 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
         if let Some(source_table) = &cte.source_table {
             ensure_str("qail.cte.source_table", source_table)?;
         }
+        if let Some(search) = &cte.search {
+            ensure_len(
+                "qail.cte.search.by",
+                search.by.len(),
+                MAX_AST_COLLECTION_LEN,
+            )?;
+            for col in &search.by {
+                ensure_str("qail.cte.search.by", col)?;
+            }
+            ensure_str("qail.cte.search.set", &search.set_column)?;
+        }
+        if let Some(cycle) = &cte.cycle {
+            ensure_len(
+                "qail.cte.cycle.columns",
+                cycle.columns.len(),
+                MAX_AST_COLLECTION_LEN,
+            )?;
+            for col in &cycle.columns {
+                ensure_str("qail.cte.cycle.column", col)?;
+            }
+            ensure_str("qail.cte.cycle.set", &cycle.set_column)?;
+            ensure_str("qail.cte.cycle.using", &cycle.using_column)?;
+        }
     }
 
     ensure_len(
@@ -688,7 +711,9 @@ fn validate_expr_limits(
             }
             if let Some(frame) = frame {
                 match frame {
-                    WindowFrame::Rows { .. } | WindowFrame::Range { .. } => {}
+                    WindowFrame::Rows { .. }
+                    | WindowFrame::Range { .. }
+                    | WindowFrame::Groups { .. } => {}
                 }
             }
         }
@@ -782,6 +807,20 @@ fn validate_expr_limits(
             validate_expr_limits(index, depth + 1, state)?;
             if let Some(alias) = alias {
                 ensure_str("expr.subscript.alias", alias)?;
+            }
+        }
+        Expr::ArraySlice {
+            expr,
+            lower,
+            upper,
+            alias,
+        } => {
+            validate_expr_limits(expr, depth + 1, state)?;
+            for bound in [lower, upper].into_iter().flatten() {
+                validate_expr_limits(bound, depth + 1, state)?;
+            }
+            if let Some(alias) = alias {
+                ensure_str("expr.slice.alias", alias)?;
             }
         }
         Expr::Collate {

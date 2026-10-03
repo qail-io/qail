@@ -77,85 +77,11 @@ pub trait ExprExt {
 
 impl ExprExt for Expr {
     fn with_alias(self, alias: &str) -> Expr {
-        match self {
-            Expr::Named(name) => Expr::Aliased {
-                name,
-                alias: alias.to_string(),
-            },
-            Expr::Aggregate {
-                col,
-                func,
-                distinct,
-                filter,
-                ..
-            } => Expr::Aggregate {
-                col,
-                func,
-                distinct,
-                filter,
-                alias: Some(alias.to_string()),
-            },
-            Expr::Cast {
-                expr, target_type, ..
-            } => Expr::Cast {
-                expr,
-                target_type,
-                alias: Some(alias.to_string()),
-            },
-            Expr::Case {
-                when_clauses,
-                else_value,
-                ..
-            } => Expr::Case {
-                when_clauses,
-                else_value,
-                alias: Some(alias.to_string()),
-            },
-            Expr::FunctionCall { name, args, .. } => Expr::FunctionCall {
-                name,
-                args,
-                alias: Some(alias.to_string()),
-            },
-            Expr::Binary {
-                left, op, right, ..
-            } => Expr::Binary {
-                left,
-                op,
-                right,
-                alias: Some(alias.to_string()),
-            },
-            Expr::JsonAccess {
-                column,
-                path_segments,
-                ..
-            } => Expr::JsonAccess {
-                column,
-                path_segments,
-                alias: Some(alias.to_string()),
-            },
-            Expr::SpecialFunction { name, args, .. } => Expr::SpecialFunction {
-                name,
-                args,
-                alias: Some(alias.to_string()),
-            },
-            Expr::Subquery { query, .. } => Expr::Subquery {
-                query,
-                alias: Some(alias.to_string()),
-            },
-            Expr::Exists { query, negated, .. } => Expr::Exists {
-                query,
-                negated,
-                alias: Some(alias.to_string()),
-            },
-            Expr::Collate {
-                expr, collation, ..
-            } => Expr::Collate {
-                expr,
-                collation,
-                alias: Some(alias.to_string()),
-            },
-            other => other, // Star, Aliased, Literal, etc. - return as-is
-        }
+        // Star, Aliased and Literal have no alias slot and come back as-is;
+        // use `Expr::set_alias` to detect that case.
+        let mut expr = self;
+        expr.set_alias(alias);
+        expr
     }
 
     fn or_default(self, default: impl Into<Expr>) -> Expr {

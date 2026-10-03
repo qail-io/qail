@@ -208,6 +208,17 @@ pub enum Expr {
         /// Optional alias.
         alias: Option<String>,
     },
+    /// Array slice: `arr[lower:upper]`; an omitted bound is open (`arr[2:]`, `arr[:]`).
+    ArraySlice {
+        /// Base expression.
+        expr: Box<Expr>,
+        /// Lower bound, inclusive.
+        lower: Option<Box<Expr>>,
+        /// Upper bound, inclusive.
+        upper: Option<Box<Expr>>,
+        /// Optional alias.
+        alias: Option<String>,
+    },
     /// Collation: expr COLLATE "collation_name"
     Collate {
         /// Expression.
@@ -352,7 +363,20 @@ impl std::fmt::Display for Expr {
             } => {
                 write!(f, "CASE")?;
                 for (cond, val) in when_clauses {
-                    write!(f, " WHEN {} THEN {}", cond.left, val)?;
+                    // The whole predicate: printing only `cond.left` would
+                    // turn `status = 'paid'` into a bare `status`.
+                    write!(f, " WHEN {} {}", cond.left, cond.op.sql_symbol())?;
+                    match (&cond.op, &cond.value) {
+                        (crate::ast::Operator::IsNull | crate::ast::Operator::IsNotNull, _) => {}
+                        (
+                            crate::ast::Operator::Between | crate::ast::Operator::NotBetween,
+                            Value::Array(bounds),
+                        ) if bounds.len() == 2 => {
+                            write!(f, " {} AND {}", bounds[0], bounds[1])?;
+                        }
+                        (_, value) => write!(f, " {}", value)?,
+                    }
+                    write!(f, " THEN {}", val)?;
                 }
                 if let Some(e) = else_value {
                     write!(f, " ELSE {}", e)?;
@@ -451,7 +475,35 @@ impl std::fmt::Display for Expr {
                 Ok(())
             }
             Expr::Subscript { expr, index, alias } => {
-                write!(f, "{}[{}]", expr, index)?;
+                if expr.needs_parens_for_subscript() {
+                    write!(f, "({})[{}]", expr, index)?;
+                } else {
+                    write!(f, "{}[{}]", expr, index)?;
+                }
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::ArraySlice {
+                expr,
+                lower,
+                upper,
+                alias,
+            } => {
+                if expr.needs_parens_for_subscript() {
+                    write!(f, "({})[", expr)?;
+                } else {
+                    write!(f, "{}[", expr)?;
+                }
+                if let Some(lower) = lower {
+                    write!(f, "{}", lower)?;
+                }
+                write!(f, ":")?;
+                if let Some(upper) = upper {
+                    write!(f, "{}", upper)?;
+                }
+                write!(f, "]")?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
@@ -500,6 +552,106 @@ impl std::fmt::Display for Expr {
     }
 }
 
+impl Expr {
+    /// The output alias already attached to this expression, if any
+    /// (`Window` reports its output name).
+    pub fn alias_name(&self) -> Option<&str> {
+        match self {
+            Expr::Aliased { alias, .. } => Some(alias),
+            Expr::Window { name, .. } => Some(name),
+            Expr::Aggregate { alias, .. }
+            | Expr::Cast { alias, .. }
+            | Expr::Case { alias, .. }
+            | Expr::JsonAccess { alias, .. }
+            | Expr::FunctionCall { alias, .. }
+            | Expr::SpecialFunction { alias, .. }
+            | Expr::Binary { alias, .. }
+            | Expr::ArrayConstructor { alias, .. }
+            | Expr::RowConstructor { alias, .. }
+            | Expr::Subscript { alias, .. }
+            | Expr::ArraySlice { alias, .. }
+            | Expr::Collate { alias, .. }
+            | Expr::FieldAccess { alias, .. }
+            | Expr::Subquery { alias, .. }
+            | Expr::Exists { alias, .. } => alias.as_deref(),
+            Expr::Star
+            | Expr::Named(_)
+            | Expr::Def { .. }
+            | Expr::Mod { .. }
+            | Expr::Literal(_) => None,
+        }
+    }
+
+    /// Attach `alias` to any expression that can carry one; a `Named`
+    /// column becomes `Aliased`, and a `Window` takes it as its output name.
+    ///
+    /// Returns `false` and leaves the expression unchanged when it has no
+    /// alias slot (`Star`, `Literal`, an already `Aliased` name, DDL nodes),
+    /// so callers can refuse instead of silently dropping the column name.
+    pub fn set_alias(&mut self, alias: impl Into<String>) -> bool {
+        let alias = alias.into();
+        let slot = match self {
+            Expr::Named(name) => {
+                let name = std::mem::take(name);
+                *self = Expr::Aliased { name, alias };
+                return true;
+            }
+            Expr::Window { name, .. } => {
+                *name = alias;
+                return true;
+            }
+            Expr::Aggregate { alias, .. }
+            | Expr::Cast { alias, .. }
+            | Expr::Case { alias, .. }
+            | Expr::JsonAccess { alias, .. }
+            | Expr::FunctionCall { alias, .. }
+            | Expr::SpecialFunction { alias, .. }
+            | Expr::Binary { alias, .. }
+            | Expr::ArrayConstructor { alias, .. }
+            | Expr::RowConstructor { alias, .. }
+            | Expr::Subscript { alias, .. }
+            | Expr::ArraySlice { alias, .. }
+            | Expr::Collate { alias, .. }
+            | Expr::FieldAccess { alias, .. }
+            | Expr::Subquery { alias, .. }
+            | Expr::Exists { alias, .. } => alias,
+            Expr::Star
+            | Expr::Aliased { .. }
+            | Expr::Def { .. }
+            | Expr::Mod { .. }
+            | Expr::Literal(_) => return false,
+        };
+        *slot = Some(alias);
+        true
+    }
+
+    /// Whether this expression must be wrapped in parentheses before `[...]`.
+    ///
+    /// PostgreSQL subscripts only a column reference, a positional parameter,
+    /// or a parenthesized expression: `array_append(a, 2)[1]` is a syntax
+    /// error and must be written `(array_append(a, 2))[1]`. Chained
+    /// subscripts (`m[1][2]`) are already in subscriptable form.
+    pub fn needs_parens_for_subscript(&self) -> bool {
+        match self {
+            Expr::Named(name) => !is_subscriptable_name(name),
+            Expr::Subscript { .. } | Expr::ArraySlice { .. } => false,
+            _ => true,
+        }
+    }
+}
+
+fn is_subscriptable_name(name: &str) -> bool {
+    if let Some(digits) = name.strip_prefix('$') {
+        return !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+    }
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            let mut chars = part.chars();
+            matches!(chars.next(), Some(ch) if ch.is_alphabetic() || ch == '_' || ch == '"')
+                && chars.all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '"')
+        })
+}
+
 /// Column constraint.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constraint {
@@ -539,6 +691,9 @@ pub enum WindowFrame {
         start: FrameBound,
         /// Frame end bound.
         end: FrameBound,
+        /// Frame exclusion.
+        #[serde(default, skip_serializing_if = "FrameExclusion::is_no_others")]
+        exclude: FrameExclusion,
     },
     /// RANGE BETWEEN start AND end
     Range {
@@ -546,7 +701,82 @@ pub enum WindowFrame {
         start: FrameBound,
         /// Frame end bound.
         end: FrameBound,
+        /// Frame exclusion.
+        #[serde(default, skip_serializing_if = "FrameExclusion::is_no_others")]
+        exclude: FrameExclusion,
     },
+    /// GROUPS BETWEEN start AND end (offsets count peer groups; needs ORDER BY)
+    Groups {
+        /// Frame start bound.
+        start: FrameBound,
+        /// Frame end bound.
+        end: FrameBound,
+        /// Frame exclusion.
+        #[serde(default, skip_serializing_if = "FrameExclusion::is_no_others")]
+        exclude: FrameExclusion,
+    },
+}
+
+impl WindowFrame {
+    /// Mode keyword, bounds and exclusion of this frame.
+    pub fn parts(&self) -> (&'static str, &FrameBound, &FrameBound, FrameExclusion) {
+        match self {
+            WindowFrame::Rows {
+                start,
+                end,
+                exclude,
+            } => ("ROWS", start, end, *exclude),
+            WindowFrame::Range {
+                start,
+                end,
+                exclude,
+            } => ("RANGE", start, end, *exclude),
+            WindowFrame::Groups {
+                start,
+                end,
+                exclude,
+            } => ("GROUPS", start, end, *exclude),
+        }
+    }
+
+    /// SQL text `MODE BETWEEN start AND end [EXCLUDE ...]`, or the reason
+    /// PostgreSQL would reject the frame.
+    ///
+    /// PostgreSQL restricts offsets: ROWS and GROUPS take a non-negative
+    /// integer, RANGE takes a non-negative value of the ORDER BY column's
+    /// type (an interval for date/time columns).
+    pub fn to_sql(&self) -> Result<String, &'static str> {
+        let (mode, start, end, exclude) = self.parts();
+        for bound in [start, end] {
+            match bound {
+                FrameBound::Preceding(n) | FrameBound::Following(n) if *n < 0 => {
+                    return Err("frame offset must not be negative");
+                }
+                FrameBound::IntervalPreceding { amount, .. }
+                | FrameBound::IntervalFollowing { amount, .. } => {
+                    if mode != "RANGE" {
+                        return Err("interval frame offsets require RANGE");
+                    }
+                    if *amount < 0 {
+                        return Err("frame offset must not be negative");
+                    }
+                }
+                _ => {}
+            }
+        }
+        if matches!(start, FrameBound::UnboundedFollowing) {
+            return Err("frame start cannot be UNBOUNDED FOLLOWING");
+        }
+        if matches!(end, FrameBound::UnboundedPreceding) {
+            return Err("frame end cannot be UNBOUNDED PRECEDING");
+        }
+        let mut sql = format!("{mode} BETWEEN {} AND {}", start.to_sql(), end.to_sql());
+        if let Some(exclusion) = exclude.sql_suffix() {
+            sql.push(' ');
+            sql.push_str(exclusion);
+        }
+        Ok(sql)
+    }
 }
 
 /// Window frame boundary
@@ -562,6 +792,70 @@ pub enum FrameBound {
     Following(i32),
     /// UNBOUNDED FOLLOWING.
     UnboundedFollowing,
+    /// `INTERVAL 'amount unit' PRECEDING` (RANGE frames over date/time columns).
+    IntervalPreceding {
+        /// Non-negative interval amount.
+        amount: i64,
+        /// Interval unit.
+        unit: crate::ast::values::IntervalUnit,
+    },
+    /// `INTERVAL 'amount unit' FOLLOWING` (RANGE frames over date/time columns).
+    IntervalFollowing {
+        /// Non-negative interval amount.
+        amount: i64,
+        /// Interval unit.
+        unit: crate::ast::values::IntervalUnit,
+    },
+}
+
+impl FrameBound {
+    /// SQL text of this bound.
+    pub fn to_sql(&self) -> String {
+        match self {
+            FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
+            FrameBound::Preceding(n) => format!("{n} PRECEDING"),
+            FrameBound::CurrentRow => "CURRENT ROW".to_string(),
+            FrameBound::Following(n) => format!("{n} FOLLOWING"),
+            FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
+            FrameBound::IntervalPreceding { amount, unit } => {
+                format!("INTERVAL '{amount} {unit}' PRECEDING")
+            }
+            FrameBound::IntervalFollowing { amount, unit } => {
+                format!("INTERVAL '{amount} {unit}' FOLLOWING")
+            }
+        }
+    }
+}
+
+/// Window frame exclusion (`EXCLUDE ...`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FrameExclusion {
+    /// `EXCLUDE NO OTHERS`, the default; rendered as nothing.
+    #[default]
+    NoOthers,
+    /// `EXCLUDE CURRENT ROW`.
+    CurrentRow,
+    /// `EXCLUDE GROUP`: the current row and its ORDER BY peers.
+    Group,
+    /// `EXCLUDE TIES`: the current row's peers, keeping the row itself.
+    Ties,
+}
+
+impl FrameExclusion {
+    /// Serde helper: the default exclusion is omitted from payloads.
+    pub fn is_no_others(&self) -> bool {
+        matches!(self, FrameExclusion::NoOthers)
+    }
+
+    /// `EXCLUDE ...` text, or `None` for the default.
+    pub fn sql_suffix(self) -> Option<&'static str> {
+        match self {
+            FrameExclusion::NoOthers => None,
+            FrameExclusion::CurrentRow => Some("EXCLUDE CURRENT ROW"),
+            FrameExclusion::Group => Some("EXCLUDE GROUP"),
+            FrameExclusion::Ties => Some("EXCLUDE TIES"),
+        }
+    }
 }
 
 impl std::fmt::Display for Constraint {

@@ -136,6 +136,30 @@ impl Qail {
         self
     }
 
+    /// SKIP LOCKED on the row lock set by a `for_*` method.
+    pub fn skip_locked(mut self) -> Self {
+        self.skip_locked = true;
+        self
+    }
+
+    /// NOWAIT on the row lock set by a `for_*` method: error instead of waiting.
+    pub fn nowait(mut self) -> Self {
+        self.lock_nowait = true;
+        self
+    }
+
+    /// `OF name, ...` on the row lock: lock only rows of these FROM entries
+    /// (unqualified table names or aliases).
+    pub fn lock_of<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.lock_of
+            .extend(names.into_iter().map(|name| name.as_ref().to_string()));
+        self
+    }
+
     /// FETCH FIRST n ROWS ONLY.
     pub fn fetch_first(mut self, count: u64) -> Self {
         self.fetch = Some((count, false));

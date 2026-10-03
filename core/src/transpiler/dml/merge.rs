@@ -4,7 +4,8 @@ use crate::ast::{
     Action, Condition, Expr, Merge, MergeAction, MergeMatchKind, MergeSource, Operator, Qail, Value,
 };
 use crate::transpiler::conditions::{
-    ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax, validate_read_only_subquery,
+    ConditionToSql, read_only_subquery_sql, resolve_known_col_syntax, slice_bounds_sql,
+    subscript_sql, validate_read_only_subquery,
 };
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::identifier::render_table_reference;
@@ -531,13 +532,18 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator, context: &Qail) -> String
                 .join(", ");
             format!("ROW({elements})")
         }
-        Expr::Subscript { expr, index, .. } => {
-            format!(
-                "{}[{}]",
-                expr_sql(expr, generator, context),
-                expr_sql(index, generator, context)
-            )
-        }
+        Expr::Subscript { expr, index, .. } => subscript_sql(
+            expr,
+            expr_sql(expr, generator, context),
+            &expr_sql(index, generator, context),
+        ),
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => subscript_sql(
+            expr,
+            expr_sql(expr, generator, context),
+            &slice_bounds_sql(lower, upper, |bound| expr_sql(bound, generator, context)),
+        ),
         Expr::Subquery { query, .. } => format!("({})", read_only_subquery_sql(query)),
         Expr::Exists { query, negated, .. } => {
             if *negated {

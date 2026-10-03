@@ -118,6 +118,9 @@ fn monster_recursive_cte() -> Qail {
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: None,
+        materialization: None,
+        search: None,
+        cycle: None,
     }];
     cmd
 }

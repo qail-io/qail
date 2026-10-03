@@ -55,13 +55,26 @@ pub const RESERVED_WORDS: &[&str] = &[
 
 /// Escape an identifier if it's a reserved word or contains special chars.
 /// Handles dotted identifiers (e.g., `table.column`) by quoting each part.
+///
+/// A trailing `*` after a qualifier (`orders.*`, `public.orders.*`) is the
+/// qualified wildcard and stays bare; quoting it would name a column `*`.
+/// A lone `*` is still quoted: unqualified wildcards are `Expr::Star`.
 pub fn escape_identifier(name: &str) -> String {
     if name.contains('.') {
-        return name
-            .split('.')
+        let mut parts: Vec<&str> = name.split('.').collect();
+        let qualified_star = parts.len() > 1 && parts.last() == Some(&"*");
+        if qualified_star {
+            parts.pop();
+        }
+        let mut escaped = parts
+            .into_iter()
             .map(escape_single_identifier)
             .collect::<Vec<_>>()
             .join(".");
+        if qualified_star {
+            escaped.push_str(".*");
+        }
+        return escaped;
     }
     escape_single_identifier(name)
 }

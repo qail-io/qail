@@ -82,6 +82,14 @@ fn for_each_expr_subquery(expr: &Expr, visit: &mut impl FnMut(&qail_core::ast::Q
             for_each_expr_subquery(expr, visit);
             for_each_expr_subquery(index, visit);
         }
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            for_each_expr_subquery(expr, visit);
+            for bound in [lower, upper].into_iter().flatten() {
+                for_each_expr_subquery(bound, visit);
+            }
+        }
         Expr::FieldAccess { expr, .. } => for_each_expr_subquery(expr, visit),
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => visit(query),
         Expr::Star
@@ -265,6 +273,15 @@ fn expr_is_read_only(expr: &Expr) -> bool {
             elements.iter().all(expr_is_read_only)
         }
         Expr::Subscript { expr, index, .. } => expr_is_read_only(expr) && expr_is_read_only(index),
+        Expr::ArraySlice {
+            expr, lower, upper, ..
+        } => {
+            expr_is_read_only(expr)
+                && [lower, upper]
+                    .into_iter()
+                    .flatten()
+                    .all(|bound| expr_is_read_only(bound))
+        }
         Expr::FieldAccess { expr, .. } => expr_is_read_only(expr),
         Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {
             qail_command_is_read_only(query)

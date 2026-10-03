@@ -68,16 +68,15 @@ fn desugar_bracket_filter(input: &str) -> String {
         }
 
         // Guard: don't treat brackets in clauses/values as table shorthand.
-        // Example to avoid: `... where tags && '["a","b"]'`
+        // Example to avoid: `... where tags && '["a","b"]'`, `fields arr[1]`.
+        // Split on any whitespace: formatted text puts each clause on its own line.
         let before_lower = before_bracket.to_ascii_lowercase();
-        if before_lower.contains(" where ")
-            || before_lower.contains(" fields ")
-            || before_lower.contains(" having ")
-            || before_lower.contains(" order ")
-            || before_lower.contains(" limit ")
-            || before_lower.contains(" offset ")
-            || before_lower.contains(" join ")
-        {
+        if before_lower.split_whitespace().any(|word| {
+            matches!(
+                word,
+                "where" | "fields" | "having" | "order" | "limit" | "offset" | "join"
+            )
+        }) {
             return trimmed.to_string();
         }
 
@@ -252,6 +251,14 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
     let (input, limit_cage) = opt(parse_limit_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, offset_cage) = opt(parse_offset_clause).parse(input)?;
+    let (input, _) = multispace0(input)?;
+
+    // Row locks only exist on SELECT; other actions leave the text unparsed.
+    let (input, lock) = if matches!(action, Action::Get) {
+        opt(parse_lock_clause).parse(input)?
+    } else {
+        (input, None)
+    };
 
     let mut cages = Vec::new();
 
@@ -278,6 +285,8 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
         cages.push(oc);
     }
 
+    let lock = lock.unwrap_or_default();
+
     Ok((
         input,
         Qail {
@@ -303,8 +312,10 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             savepoint_name: None,
             from_tables: vec![],
             using_tables: vec![],
-            lock_mode: None,
-            skip_locked: false,
+            lock_mode: lock.mode,
+            skip_locked: lock.skip_locked,
+            lock_nowait: lock.nowait,
+            lock_of: lock.of,
             fetch: None,
             default_values: false,
             overriding: None,

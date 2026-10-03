@@ -4,9 +4,10 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    Action, CTEDef, CageKind, ColumnGeneration, Condition, ConflictAction, Constraint, Expr,
-    GroupByMode, JoinKind, LockMode, LogicalOp, Merge, MergeAction, MergeMatchKind, MergeSource,
-    Operator, OverridingKind, Qail, SampleMethod, SetOp, SortOrder, Value,
+    Action, CTEDef, CageKind, ColumnGeneration, Condition, ConflictAction, Constraint,
+    CteMaterialization, CteSearchOrder, Expr, GroupByMode, JoinKind, LockMode, LogicalOp, Merge,
+    MergeAction, MergeMatchKind, MergeSource, Operator, OverridingKind, Qail, SampleMethod,
+    SortOrder, Value,
 };
 use qail_core::transpiler::escape_identifier;
 use std::collections::HashSet;
@@ -647,6 +648,21 @@ pub(crate) fn validate_expr_ref(
             }
             Ok(())
         }
+        Expr::ArraySlice {
+            expr,
+            lower,
+            upper,
+            alias,
+        } => {
+            validate_expr_ref(&format!("{field}.slice"), expr)?;
+            for bound in [lower, upper].into_iter().flatten() {
+                validate_expr_ref(&format!("{field}.slice_bound"), bound)?;
+            }
+            if let Some(alias) = alias {
+                validate_ident_atom(&format!("{field}.alias"), alias)?;
+            }
+            Ok(())
+        }
         Expr::Collate {
             expr,
             collation,
@@ -814,6 +830,25 @@ fn validate_dml_command(
             "SKIP LOCKED requires a row lock mode".to_string(),
         ));
     }
+    if cmd.lock_nowait && cmd.lock_mode.is_none() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "NOWAIT requires a row lock mode".to_string(),
+        ));
+    }
+    if !cmd.lock_of.is_empty() && cmd.lock_mode.is_none() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "row lock OF requires a row lock mode".to_string(),
+        ));
+    }
+    if cmd.lock_nowait && cmd.skip_locked {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "NOWAIT and SKIP LOCKED are mutually exclusive".to_string(),
+        ));
+    }
+    for name in &cmd.lock_of {
+        // PostgreSQL rejects qualified names here: OF takes FROM names or aliases.
+        validate_ident_atom("lock_of", name)?;
+    }
 
     if let Some((_, true)) = cmd.fetch {
         let has_order_by = cmd
@@ -869,6 +904,7 @@ fn validate_dml_command(
         for column in &cte.columns {
             validate_ident_atom("cte.column", column)?;
         }
+        validate_cte_search_cycle(cte)?;
         validate_dml_command(&cte.base_query, &cte.base_query.columns)?;
         if let Some(recursive_query) = &cte.recursive_query {
             validate_dml_command(recursive_query, &recursive_query.columns)?;
@@ -1261,12 +1297,9 @@ fn encode_select_with_columns(
 
     // SET OPERATIONS (UNION, INTERSECT, EXCEPT)
     for (set_op, other_cmd) in &cmd.set_ops {
-        match set_op {
-            SetOp::Union => buf.extend_from_slice(b" UNION "),
-            SetOp::UnionAll => buf.extend_from_slice(b" UNION ALL "),
-            SetOp::Intersect => buf.extend_from_slice(b" INTERSECT "),
-            SetOp::Except => buf.extend_from_slice(b" EXCEPT "),
-        }
+        buf.extend_from_slice(b" ");
+        buf.extend_from_slice(set_op.sql_keyword().as_bytes());
+        buf.extend_from_slice(b" ");
         encode_set_operand(other_cmd, buf, params)?;
     }
 
@@ -1373,7 +1406,15 @@ fn append_lock_clause(cmd: &Qail, buf: &mut BytesMut) {
         LockMode::KeyShare => buf.extend_from_slice(b" FOR KEY SHARE"),
     }
 
-    if cmd.skip_locked {
+    for (i, name) in cmd.lock_of.iter().enumerate() {
+        buf.extend_from_slice(if i == 0 { b" OF " } else { b", " });
+        push_identifier_ref(buf, name, false);
+    }
+
+    // validate_dml_command rejects NOWAIT together with SKIP LOCKED.
+    if cmd.lock_nowait {
+        buf.extend_from_slice(b" NOWAIT");
+    } else if cmd.skip_locked {
         buf.extend_from_slice(b" SKIP LOCKED");
     }
 }
@@ -1511,7 +1552,11 @@ fn encode_single_cte(
         buf.extend_from_slice(b")");
     }
 
-    buf.extend_from_slice(b" AS (");
+    buf.extend_from_slice(match cte.materialization {
+        None => b" AS (",
+        Some(CteMaterialization::Materialized) => b" AS MATERIALIZED (",
+        Some(CteMaterialization::NotMaterialized) => b" AS NOT MATERIALIZED (",
+    });
 
     encode_recursive_cte_arm(&cte.base_query, buf, params)?;
 
@@ -1524,6 +1569,66 @@ fn encode_single_cte(
     }
 
     buf.extend_from_slice(b")");
+
+    // validate_dml_command checked recursion and names.
+    if let Some(search) = &cte.search {
+        buf.extend_from_slice(match search.order {
+            CteSearchOrder::DepthFirst => b" SEARCH DEPTH FIRST BY ",
+            CteSearchOrder::BreadthFirst => b" SEARCH BREADTH FIRST BY ",
+        });
+        push_ident_list(buf, &search.by);
+        buf.extend_from_slice(b" SET ");
+        push_identifier_ref(buf, &search.set_column, false);
+    }
+    if let Some(cycle) = &cte.cycle {
+        buf.extend_from_slice(b" CYCLE ");
+        push_ident_list(buf, &cycle.columns);
+        buf.extend_from_slice(b" SET ");
+        push_identifier_ref(buf, &cycle.set_column, false);
+        buf.extend_from_slice(b" USING ");
+        push_identifier_ref(buf, &cycle.using_column, false);
+    }
+    Ok(())
+}
+
+fn push_ident_list(buf: &mut BytesMut, names: &[String]) {
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        push_identifier_ref(buf, name, false);
+    }
+}
+
+fn validate_cte_search_cycle(cte: &CTEDef) -> Result<(), crate::protocol::EncodeError> {
+    if cte.search.is_none() && cte.cycle.is_none() {
+        return Ok(());
+    }
+    if !cte.recursive || cte.recursive_query.is_none() {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "SEARCH/CYCLE requires a recursive CTE: {}",
+            cte.name
+        )));
+    }
+    let non_empty = |field: &str, names: &[String]| {
+        if names.is_empty() {
+            return Err(crate::protocol::EncodeError::InvalidAst(format!(
+                "{field} requires at least one column"
+            )));
+        }
+        names
+            .iter()
+            .try_for_each(|name| validate_ident_atom(field, name))
+    };
+    if let Some(search) = &cte.search {
+        non_empty("cte.search.by", &search.by)?;
+        validate_ident_atom("cte.search.set", &search.set_column)?;
+    }
+    if let Some(cycle) = &cte.cycle {
+        non_empty("cte.cycle.columns", &cycle.columns)?;
+        validate_ident_atom("cte.cycle.set", &cycle.set_column)?;
+        validate_ident_atom("cte.cycle.using", &cycle.using_column)?;
+    }
     Ok(())
 }
 

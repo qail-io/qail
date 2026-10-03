@@ -469,6 +469,15 @@ impl AccessPolicy {
                 self.check_expr_column_refs(table, rule, target_refs, expr, context)?;
                 self.check_expr_column_refs(table, rule, target_refs, index, context)
             }
+            Expr::ArraySlice {
+                expr, lower, upper, ..
+            } => {
+                self.check_expr_column_refs(table, rule, target_refs, expr, context)?;
+                for bound in [lower, upper].into_iter().flatten() {
+                    self.check_expr_column_refs(table, rule, target_refs, bound, context)?;
+                }
+                Ok(())
+            }
             Expr::FunctionCall { args, .. } => {
                 for arg in args {
                     self.check_expr_column_refs(table, rule, target_refs, arg, context)?;
@@ -698,6 +707,15 @@ impl AccessPolicy {
             Expr::Subscript { expr, index, .. } => {
                 self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
                 self.check_outer_expr_column_refs(table, rule, target_refs, index)
+            }
+            Expr::ArraySlice {
+                expr, lower, upper, ..
+            } => {
+                self.check_outer_expr_column_refs(table, rule, target_refs, expr)?;
+                for bound in [lower, upper].into_iter().flatten() {
+                    self.check_outer_expr_column_refs(table, rule, target_refs, bound)?;
+                }
+                Ok(())
             }
             Expr::FunctionCall { args, .. } => {
                 for arg in args {
@@ -943,6 +961,15 @@ impl AccessPolicy {
             Expr::Subscript { expr, index, .. } => {
                 self.check_expr(ctx, expr)?;
                 self.check_expr(ctx, index)
+            }
+            Expr::ArraySlice {
+                expr, lower, upper, ..
+            } => {
+                self.check_expr(ctx, expr)?;
+                for bound in [lower, upper].into_iter().flatten() {
+                    self.check_expr(ctx, bound)?;
+                }
+                Ok(())
             }
             Expr::FunctionCall { args, .. } => {
                 for arg in args {

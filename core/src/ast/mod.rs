@@ -18,13 +18,13 @@ pub mod values;
 pub use self::cages::{Cage, CageKind};
 pub use self::cmd::Qail;
 pub use self::cmd::{
-    CTEDef, ConflictAction, Merge, MergeAction, MergeClause, MergeMatchKind, MergeSource,
-    OnConflict,
+    CTEDef, ConflictAction, CteCycle, CteMaterialization, CteSearch, CteSearchOrder, Merge,
+    MergeAction, MergeClause, MergeMatchKind, MergeSource, OnConflict,
 };
 pub use self::conditions::Condition;
 pub use self::expr::{
-    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FunctionDef, IndexDef,
-    TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
+    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FrameExclusion, FunctionDef,
+    IndexDef, TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
 };
 pub use self::joins::Join;
 pub use self::operators::{

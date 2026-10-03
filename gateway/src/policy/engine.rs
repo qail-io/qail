@@ -961,6 +961,27 @@ impl PolicyEngine {
                     context,
                 )
             }
+            Expr::ArraySlice {
+                expr, lower, upper, ..
+            } => {
+                Self::enforce_expr_write_refs_for_policies(
+                    expr,
+                    policies,
+                    target_refs,
+                    operation,
+                    context,
+                )?;
+                for bound in [lower, upper].into_iter().flatten() {
+                    Self::enforce_expr_write_refs_for_policies(
+                        bound,
+                        policies,
+                        target_refs,
+                        operation,
+                        context,
+                    )?;
+                }
+                Ok(())
+            }
             Expr::FunctionCall { args, .. } => {
                 for arg in args {
                     Self::enforce_expr_write_refs_for_policies(
@@ -1735,6 +1756,14 @@ impl PolicyEngine {
             Expr::Subscript { expr, index, .. } => {
                 self.apply_expr_subquery_policies(auth, expr)?;
                 self.apply_expr_subquery_policies(auth, index)?;
+            }
+            Expr::ArraySlice {
+                expr, lower, upper, ..
+            } => {
+                self.apply_expr_subquery_policies(auth, expr)?;
+                for bound in [lower, upper].into_iter().flatten() {
+                    self.apply_expr_subquery_policies(auth, bound)?;
+                }
             }
             Expr::FieldAccess { expr, .. } => self.apply_expr_subquery_policies(auth, expr)?,
             Expr::Subquery { query, .. } | Expr::Exists { query, .. } => {

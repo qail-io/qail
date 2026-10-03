@@ -384,6 +384,8 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, Qail> {
             using_tables: vec![],
             lock_mode: None,
             skip_locked: false,
+            lock_nowait: false,
+            lock_of: vec![],
             fetch: None,
             default_values: false,
             overriding: None,

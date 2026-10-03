@@ -360,14 +360,21 @@ fn parse_window_sort_item(input: &str) -> IResult<&str, Cage> {
     ))
 }
 
-/// Parse window frame: ROWS/RANGE BETWEEN start AND end
+/// Parse window frame: ROWS/RANGE/GROUPS BETWEEN start AND end [EXCLUDE ...]
 fn parse_window_frame(input: &str) -> IResult<&str, WindowFrame> {
     use nom::combinator::value;
 
-    // Parse ROWS or RANGE
-    let (input, is_rows) = alt((
-        value(true, tag_no_case("rows")),
-        value(false, tag_no_case("range")),
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Rows,
+        Range,
+        Groups,
+    }
+
+    let (input, mode) = alt((
+        value(Mode::Rows, tag_no_case("rows")),
+        value(Mode::Range, tag_no_case("range")),
+        value(Mode::Groups, tag_no_case("groups")),
     ))
     .parse(input)?;
     let (input, _) = multispace1(input)?;
@@ -383,21 +390,75 @@ fn parse_window_frame(input: &str) -> IResult<&str, WindowFrame> {
     // Parse end bound
     let (input, end) = parse_frame_bound(input)?;
 
-    let frame = if is_rows {
-        WindowFrame::Rows { start, end }
-    } else {
-        WindowFrame::Range { start, end }
+    let (input, exclude) = opt(preceded(
+        (multispace1, tag_no_case("exclude"), multispace1),
+        alt((
+            value(
+                FrameExclusion::CurrentRow,
+                (tag_no_case("current"), multispace1, tag_no_case("row")),
+            ),
+            value(FrameExclusion::Group, tag_no_case("group")),
+            value(FrameExclusion::Ties, tag_no_case("ties")),
+            value(
+                FrameExclusion::NoOthers,
+                (tag_no_case("no"), multispace1, tag_no_case("others")),
+            ),
+        )),
+    ))
+    .parse(input)?;
+    let exclude = exclude.unwrap_or_default();
+
+    let frame = match mode {
+        Mode::Rows => WindowFrame::Rows {
+            start,
+            end,
+            exclude,
+        },
+        Mode::Range => WindowFrame::Range {
+            start,
+            end,
+            exclude,
+        },
+        Mode::Groups => WindowFrame::Groups {
+            start,
+            end,
+            exclude,
+        },
     };
 
     Ok((input, frame))
 }
 
-/// Parse frame bound: UNBOUNDED PRECEDING, N PRECEDING, CURRENT ROW, N FOLLOWING, UNBOUNDED FOLLOWING
+/// Parse frame bound: UNBOUNDED PRECEDING, N PRECEDING, CURRENT ROW, N FOLLOWING,
+/// UNBOUNDED FOLLOWING, or an interval shorthand offset (`7d preceding`) for RANGE.
 fn parse_frame_bound(input: &str) -> IResult<&str, FrameBound> {
     use nom::character::complete::i32 as parse_i32;
     use nom::combinator::value;
 
+    let interval_bound = |input| -> IResult<&str, FrameBound> {
+        let (input, interval) = super::base::parse_interval(input)?;
+        let Value::Interval { amount, unit } = interval else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        };
+        let (input, _) = multispace1(input)?;
+        alt((
+            value(
+                FrameBound::IntervalPreceding { amount, unit },
+                tag_no_case("preceding"),
+            ),
+            value(
+                FrameBound::IntervalFollowing { amount, unit },
+                tag_no_case("following"),
+            ),
+        ))
+        .parse(input)
+    };
+
     alt((
+        interval_bound,
         // UNBOUNDED PRECEDING
         value(
             FrameBound::UnboundedPreceding,

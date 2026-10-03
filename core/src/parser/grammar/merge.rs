@@ -33,6 +33,12 @@ pub fn parse_merge_after_target<'a>(
     let (input, _) = multispace0(input)?;
     let (input, clauses) = many1(parse_merge_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
+    let (input, returning) = opt(nom::sequence::preceded(
+        (tag_no_case("returning"), multispace1),
+        super::clauses::parse_column_list,
+    ))
+    .parse(input)?;
+    let (input, _) = multispace0(input)?;
 
     Ok((
         input,
@@ -40,6 +46,7 @@ pub fn parse_merge_after_target<'a>(
             action: Action::Merge,
             table: table.to_string(),
             columns: vec![],
+            returning,
             ctes,
             merge: Some(Merge {
                 target_alias,

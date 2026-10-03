@@ -55,6 +55,12 @@ pub struct Qail {
     pub lock_mode: Option<LockMode>,
     /// SKIP LOCKED modifier for row locking (FOR UPDATE SKIP LOCKED).
     pub skip_locked: bool,
+    /// NOWAIT modifier for row locking; exclusive with `skip_locked`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lock_nowait: bool,
+    /// `FOR ... OF name, ...`: unqualified FROM names (tables or aliases) to lock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lock_of: Vec<String>,
     /// FETCH FIRST n ROWS [ONLY|WITH TIES].
     pub fetch: Option<(u64, bool)>,
     /// INSERT with DEFAULT VALUES.
@@ -112,6 +118,58 @@ pub struct CTEDef {
     pub recursive_query: Option<Box<Qail>>,
     /// Source table for data-modifying CTEs.
     pub source_table: Option<String>,
+    /// `AS [NOT] MATERIALIZED`; `None` leaves the choice to the planner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialization: Option<CteMaterialization>,
+    /// `SEARCH { DEPTH | BREADTH } FIRST BY ... SET ...` (recursive CTEs only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<CteSearch>,
+    /// `CYCLE ... SET ... USING ...` (recursive CTEs only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<CteCycle>,
+}
+
+/// CTE materialization hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CteMaterialization {
+    /// `AS MATERIALIZED`: evaluate once, as an optimization fence.
+    Materialized,
+    /// `AS NOT MATERIALIZED`: allow inlining into the outer query.
+    NotMaterialized,
+}
+
+/// Recursive CTE traversal order for `SEARCH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CteSearchOrder {
+    /// `SEARCH DEPTH FIRST`.
+    DepthFirst,
+    /// `SEARCH BREADTH FIRST`.
+    BreadthFirst,
+}
+
+/// `SEARCH { DEPTH | BREADTH } FIRST BY by... SET set_column`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CteSearch {
+    /// Traversal order.
+    pub order: CteSearchOrder,
+    /// CTE output columns that order the traversal.
+    pub by: Vec<String>,
+    /// Added sequence column to `ORDER BY` in the outer query.
+    pub set_column: String,
+}
+
+/// `CYCLE columns... SET set_column USING using_column`.
+///
+/// The mark column takes PostgreSQL's default boolean values; the
+/// `TO value DEFAULT value` form is not modeled.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CteCycle {
+    /// CTE output columns compared to detect a cycle.
+    pub columns: Vec<String>,
+    /// Added boolean column, true on the row that closes a cycle.
+    pub set_column: String,
+    /// Added path column that records visited rows.
+    pub using_column: String,
 }
 
 /// ON CONFLICT clause for upsert.
@@ -264,6 +322,8 @@ impl Default for Qail {
             using_tables: vec![],
             lock_mode: None,
             skip_locked: false,
+            lock_nowait: false,
+            lock_of: vec![],
             fetch: None,
             default_values: false,
             overriding: None,

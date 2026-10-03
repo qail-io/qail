@@ -1,6 +1,6 @@
 //! CTE (Common Table Expression) builder methods.
 
-use crate::ast::{CTEDef, Expr, Qail};
+use crate::ast::{CTEDef, CteCycle, CteMaterialization, CteSearch, Expr, Qail};
 
 impl Qail {
     /// Convert this query into a reusable CTE definition.
@@ -23,6 +23,9 @@ impl Qail {
             base_query: Box::new(self),
             recursive_query: None,
             source_table: None,
+            materialization: None,
+            search: None,
+            cycle: None,
         }
     }
 
@@ -57,6 +60,38 @@ impl Qail {
     /// Append a pre-built CTE definition.
     pub fn with_cte(mut self, cte: CTEDef) -> Self {
         self.ctes.push(cte);
+        self
+    }
+
+    /// Mark the last CTE `AS MATERIALIZED`.
+    pub fn cte_materialized(mut self) -> Self {
+        if let Some(cte) = self.ctes.last_mut() {
+            cte.materialization = Some(CteMaterialization::Materialized);
+        }
+        self
+    }
+
+    /// Mark the last CTE `AS NOT MATERIALIZED`.
+    pub fn cte_not_materialized(mut self) -> Self {
+        if let Some(cte) = self.ctes.last_mut() {
+            cte.materialization = Some(CteMaterialization::NotMaterialized);
+        }
+        self
+    }
+
+    /// Add `SEARCH ... FIRST BY ... SET ...` to the last CTE, which must be recursive.
+    pub fn cte_search(mut self, search: CteSearch) -> Self {
+        if let Some(cte) = self.ctes.last_mut() {
+            cte.search = Some(search);
+        }
+        self
+    }
+
+    /// Add `CYCLE ... SET ... USING ...` to the last CTE, which must be recursive.
+    pub fn cte_cycle(mut self, cycle: CteCycle) -> Self {
+        if let Some(cte) = self.ctes.last_mut() {
+            cte.cycle = Some(cycle);
+        }
         self
     }
 }

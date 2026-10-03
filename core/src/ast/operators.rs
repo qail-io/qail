@@ -490,6 +490,24 @@ pub enum SetOp {
     Intersect,
     /// EXCEPT.
     Except,
+    /// INTERSECT ALL (keeps duplicates: min of the two counts).
+    IntersectAll,
+    /// EXCEPT ALL (keeps duplicates: left count minus right count).
+    ExceptAll,
+}
+
+impl SetOp {
+    /// SQL keyword(s) for this set operation.
+    pub fn sql_keyword(self) -> &'static str {
+        match self {
+            SetOp::Union => "UNION",
+            SetOp::UnionAll => "UNION ALL",
+            SetOp::Intersect => "INTERSECT",
+            SetOp::Except => "EXCEPT",
+            SetOp::IntersectAll => "INTERSECT ALL",
+            SetOp::ExceptAll => "EXCEPT ALL",
+        }
+    }
 }
 
 /// ALTER TABLE modification kind.
