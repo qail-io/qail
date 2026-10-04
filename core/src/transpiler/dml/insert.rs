@@ -7,13 +7,33 @@ use crate::transpiler::dialect::Dialect;
 
 /// Generate INSERT INTO SQL with VALUES, ON CONFLICT, and RETURNING clauses.
 pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
+    if cmd.validate_applied_insert_scope().is_err() {
+        return crate::transpiler::INVALID_INSERT_SCOPE_SQL.to_string();
+    }
     let generator = dialect.generator();
     let mut sql = String::from("INSERT INTO ");
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
-    // For ADD queries, we use columns and first cage contains values
-    let cols: Vec<String> = cmd
-        .columns
+    let payload = cmd.cages.iter().find(|c| c.kind == CageKind::Payload);
+    let inferred;
+    let columns = if cmd.columns.is_empty()
+        && cmd.source_query.is_none()
+        && let Some(payload) = payload
+        && payload
+            .conditions
+            .iter()
+            .all(|c| matches!(&c.left, Expr::Named(n) if !n.starts_with('$')))
+    {
+        inferred = payload
+            .conditions
+            .iter()
+            .map(|c| c.left.clone())
+            .collect::<Vec<_>>();
+        &inferred
+    } else {
+        &cmd.columns
+    };
+    let cols: Vec<String> = columns
         .iter()
         .map(|c| render_insert_column(c, generator.as_ref()))
         .collect();
@@ -40,7 +60,7 @@ pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
         use crate::transpiler::ToSql;
         sql.push(' ');
         sql.push_str(&source_query.to_sql_with_dialect(dialect));
-    } else if let Some(cage) = cmd.cages.first() {
+    } else if let Some(cage) = payload {
         // Traditional INSERT with VALUES
         let values: Vec<String> = cage
             .conditions

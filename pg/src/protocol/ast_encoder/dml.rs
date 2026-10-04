@@ -799,6 +799,8 @@ fn validate_dml_command(
     cmd: &Qail,
     projection_columns: &[Expr],
 ) -> Result<(), crate::protocol::EncodeError> {
+    cmd.validate_applied_insert_scope()
+        .map_err(|error| crate::protocol::EncodeError::InvalidAst(error.to_string()))?;
     if !cmd.table.is_empty() {
         validate_table_ref("table", &cmd.table)?;
     }

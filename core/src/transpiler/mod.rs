@@ -30,6 +30,8 @@ pub use dialect::Dialect;
 pub use traits::SqlGenerator;
 pub use traits::{escape_identifier, escape_sql_string_literal};
 
+pub(crate) const INVALID_INSERT_SCOPE_SQL: &str = "INVALID APPLIED INSERT SCOPE";
+
 /// Result of transpilation with extracted parameters.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TranspileResult {
@@ -83,6 +85,9 @@ pub trait ToSql {
 
 impl ToSql for Qail {
     fn to_sql_with_dialect(&self, dialect: Dialect) -> String {
+        if self.validate_applied_insert_scope().is_err() {
+            return INVALID_INSERT_SCOPE_SQL.to_string();
+        }
         match self.action {
             Action::Get => dml::select::build_select(self, dialect),
             Action::Cnt => {

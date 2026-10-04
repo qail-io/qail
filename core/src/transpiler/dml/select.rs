@@ -29,6 +29,9 @@ fn build_select_inner(
     columns: &[Expr],
     include_ctes: bool,
 ) -> String {
+    if !cmd.conflict_update_scope.is_empty() {
+        return crate::transpiler::INVALID_INSERT_SCOPE_SQL.to_string();
+    }
     let generator = dialect.generator();
 
     // CTE prefix: WITH cte1 AS (...), cte2 AS (...)
