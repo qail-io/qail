@@ -116,6 +116,22 @@ pub type QailResult<T> = Result<T, QailError>;
 /// Error type for query-builder operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QailBuildError {
+    /// Applied INSERT scope no longer matches the command to be rendered.
+    RlsAppliedInsertScopeInvalid {
+        /// Target table carrying applied scope.
+        table: String,
+        /// Invalidating command change or metadata shape.
+        reason: &'static str,
+    },
+    /// RLS insertion cannot safely stamp the SELECT projection.
+    RlsInsertSelectUnsupported {
+        /// Target table being scoped.
+        table: String,
+        /// Scope column that would be stamped.
+        column: String,
+        /// Unsupported query shape.
+        reason: &'static str,
+    },
     /// RLS insertion cannot safely align positional values without columns.
     RlsInsertRequiresExplicitColumns {
         /// Target table being scoped.
@@ -219,6 +235,18 @@ pub enum QailBuildError {
 impl std::fmt::Display for QailBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RlsAppliedInsertScopeInvalid { table, reason } => write!(
+                f,
+                "applied INSERT scope is invalid on table '{table}': {reason}"
+            ),
+            Self::RlsInsertSelectUnsupported {
+                table,
+                column,
+                reason,
+            } => write!(
+                f,
+                "with_rls cannot stamp INSERT SELECT on table '{table}' (scope column '{column}'): {reason}"
+            ),
             Self::RlsInsertRequiresExplicitColumns {
                 table,
                 tenant_column,

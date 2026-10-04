@@ -52,6 +52,12 @@ fn owner_column_for(table: &str) -> QailBuildResult<Option<String>> {
     map_registry_lookup(table, try_lookup_owner_column(table))
 }
 
+fn simple_scope_ident(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'_'))
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// `Err` from a registry becomes `RlsRegistryUnavailable`; `Ok(None)` stays
 /// "unregistered". Separated so the mapping itself is testable with a real
 /// `Err` without poisoning the process registries.
@@ -303,7 +309,22 @@ impl Qail {
     /// let ctx = RlsContext::tenant("tenant-uuid");
     /// let query = Qail::get("orders").with_rls(&ctx)?;
     /// ```
+    /// INSERT SELECT stamping supports explicit simple lowercase target columns
+    /// and a single ungrouped source with named/scalar projections and filters.
+    /// Both relations must use canonical registered names, and the target must
+    /// retain every source scope dimension. Ambiguous shapes return
+    /// `RlsInsertSelectUnsupported`. SQL renderers reject subsequent mutations
+    /// that invalidate applied scope; callers may explicitly reapply scoping.
+    /// Conflict builders retain applied guards in either order.
     pub fn with_rls(self, ctx: &RlsContext) -> QailBuildResult<Self> {
+        let scoped = self.apply_rls_context(ctx)?;
+        if scoped.action == Action::Add && scoped.source_query.is_some() {
+            scoped.validate_applied_insert_scope()?;
+        }
+        Ok(scoped)
+    }
+
+    fn apply_rls_context(self, ctx: &RlsContext) -> QailBuildResult<Self> {
         if ctx.bypasses_rls() {
             return Ok(self);
         }
@@ -321,6 +342,18 @@ impl Qail {
         let (base_table, _) = split_table_reference(&self.table);
         let tenant_col = tenant_column_for(base_table)?;
         let owner_col = owner_column_for(base_table)?;
+
+        if self.action == Action::Add
+            && self.source_query.is_some()
+            && tenant_col.is_none()
+            && owner_col.is_none()
+        {
+            return Err(QailBuildError::RlsInsertSelectUnsupported {
+                table: self.table,
+                column: String::new(),
+                reason: "requires a registered INSERT target to retain the applied scope",
+            });
+        }
 
         // Fail closed: a registered table demands the scope it registered for.
         // Returning the query untouched here would be the exact false-green
@@ -519,6 +552,11 @@ impl Qail {
             return Ok(());
         };
         for condition in &self.conflict_update_scope {
+            if !on_conflict.where_conditions.contains(condition) {
+                return Err(
+                    self.invalid_insert_scope("conflict update lost a mandatory scope guard")
+                );
+            }
             if let Expr::Named(column) = &condition.left
                 && assignments
                     .iter()
@@ -529,6 +567,130 @@ impl Qail {
                     tenant_column: column.clone(),
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn invalid_insert_scope(&self, reason: &'static str) -> QailBuildError {
+        QailBuildError::RlsAppliedInsertScopeInvalid {
+            table: self.table.clone(),
+            reason,
+        }
+    }
+
+    /// Check applied INSERT scope at SQL execution boundaries. Retained guards
+    /// are security metadata; changing ordinary AST fields cannot redefine them.
+    pub fn validate_applied_insert_scope(&self) -> QailBuildResult<()> {
+        if self.conflict_update_scope.is_empty() {
+            return Ok(());
+        }
+        if self.action != Action::Add
+            || self.default_values
+            || self.overriding == Some(crate::ast::OverridingKind::UserValue)
+        {
+            return Err(self.invalid_insert_scope(
+                "command kind, defaults or override discard applied INSERT scope",
+            ));
+        }
+        self.validate_conflict_update_scope()?;
+        let (base, _) = split_table_reference(&self.table);
+        let tenant = tenant_column_for(base)?;
+        let owner = owner_column_for(base)?;
+        let dimensions = usize::from(tenant.is_some()) + usize::from(owner.is_some());
+        if dimensions == 0
+            || self.conflict_update_scope.len() != dimensions
+            || (tenant.is_some() && tenant == owner)
+        {
+            return Err(self
+                .invalid_insert_scope("retained scope does not identify every target dimension"));
+        }
+        let find = |column: &str| -> QailBuildResult<&Condition> {
+            let expected = Expr::Named(self.primary_tenant_condition_col(column));
+            self.conflict_update_scope
+                .iter()
+                .find(|c| c.left == expected && !c.is_array_unnest)
+                .ok_or_else(|| {
+                    self.invalid_insert_scope("retained scope does not match the target relation")
+                })
+        };
+        let mut ctx = RlsContext::empty();
+        if let Some(column) = &tenant {
+            let condition = find(column)?;
+            ctx = match (&condition.op, &condition.value) {
+                (Operator::Eq, Value::String(value)) if !value.is_empty() => {
+                    RlsContext::tenant(value)
+                }
+                (Operator::IsNull, Value::Null) => RlsContext::global(),
+                _ => return Err(self.invalid_insert_scope("invalid retained tenant identity")),
+            };
+        }
+        if let Some(column) = &owner {
+            let condition = find(column)?;
+            match (&condition.op, &condition.value) {
+                (Operator::Eq, Value::String(value)) if !value.is_empty() => {
+                    ctx = ctx.with_user(value)
+                }
+                _ => return Err(self.invalid_insert_scope("invalid retained owner identity")),
+            }
+        }
+        if self.source_query.is_none() {
+            // A SELECT can be replaced with VALUES through public AST fields.
+            // Check positions actually emitted by both SQL renderers, not just
+            // the names used to construct a payload.
+            let mut payloads = self.cages.iter().filter(|c| c.kind == CageKind::Payload);
+            let Some(payload) = payloads.next() else {
+                return Err(self
+                    .invalid_insert_scope("scoped INSERT requires an explicit payload or source"));
+            };
+            if payloads.next().is_some() {
+                return Err(self.invalid_insert_scope("multiple INSERT payloads are ambiguous"));
+            }
+            let inferred;
+            let columns = if self.columns.is_empty() {
+                inferred = payload
+                    .conditions
+                    .iter()
+                    .map(|c| c.left.clone())
+                    .collect::<Vec<_>>();
+                &inferred
+            } else {
+                &self.columns
+            };
+            if columns.len() != payload.conditions.len() {
+                return Err(self.invalid_insert_scope("payload and target column counts differ"));
+            }
+            let mut seen = std::collections::HashSet::new();
+            if columns
+                .iter()
+                .any(|c| !matches!(c, Expr::Named(n) if simple_scope_ident(n) && seen.insert(n)))
+            {
+                return Err(
+                    self.invalid_insert_scope("payload requires distinct simple target columns")
+                );
+            }
+            for column in [tenant.as_deref(), owner.as_deref()].into_iter().flatten() {
+                let position = columns
+                    .iter()
+                    .position(|c| matches!(c, Expr::Named(n) if n == column))
+                    .ok_or_else(|| self.invalid_insert_scope("payload omitted a scope column"))?;
+                if payload.conditions[position].value != find(column)?.value {
+                    return Err(self.invalid_insert_scope(
+                        "emitted payload value does not match retained scope",
+                    ));
+                }
+            }
+        }
+        // Compare all nested expressions and relations, including RETURNING and
+        // conflict assignments. Root payload/AND-guard ordering is immaterial
+        // after the emitted positions and mandatory guards were checked above.
+        let mut scoped = self.clone().scope_nested_rls(&ctx)?;
+        if self.source_query.is_some() {
+            for column in [tenant.as_deref(), owner.as_deref()].into_iter().flatten() {
+                scoped = scoped.scope_insert_select_value(column, find(column)?.value.clone())?;
+            }
+        }
+        if scoped != *self {
+            return Err(self.invalid_insert_scope("AST mutation invalidated applied INSERT scope"));
         }
         Ok(())
     }
@@ -982,6 +1144,10 @@ impl Qail {
         tenant_col: &str,
         tenant_value: Value,
     ) -> QailBuildResult<Self> {
+        if self.source_query.is_some() {
+            return self.scope_insert_select_value(tenant_col, tenant_value);
+        }
+
         let payload_idx = self
             .cages
             .iter()
@@ -1042,6 +1208,129 @@ impl Qail {
             .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
         cage.conditions
             .push(make_named_condition(tenant_col, tenant_value));
+        Ok(self)
+    }
+
+    /// Stamp explicit, row-preserving SELECT projections. Other shapes require
+    /// a derived-table boundary to preserve grouping, ordering and set semantics.
+    fn scope_insert_select_value(mut self, column: &str, value: Value) -> QailBuildResult<Self> {
+        fn scalar(value: &Value) -> bool {
+            matches!(
+                value,
+                Value::Null
+                    | Value::Bool(_)
+                    | Value::Int(_)
+                    | Value::String(_)
+                    | Value::Uuid(_)
+                    | Value::NullUuid
+            )
+        }
+        fn named(expr: &Expr) -> bool {
+            matches!(expr, Expr::Named(name) if name.split('.').all(simple_scope_ident))
+        }
+        let reject = |reason| QailBuildError::RlsInsertSelectUnsupported {
+            table: self.table.clone(),
+            column: column.to_string(),
+            reason,
+        };
+        if matches!(&value, Value::String(text) if text.contains('\0')) {
+            return Err(reject("scope values cannot contain NUL"));
+        }
+        if self.action != Action::Add || self.default_values || !self.ctes.is_empty() {
+            return Err(reject(
+                "requires plain INSERT with no DEFAULT VALUES or outer CTEs",
+            ));
+        }
+        if self.overriding == Some(crate::ast::OverridingKind::UserValue) {
+            return Err(reject("OVERRIDING USER VALUE discards the supplied scope"));
+        }
+        if self
+            .cages
+            .iter()
+            .any(|c| matches!(c.kind, CageKind::Payload))
+        {
+            return Err(reject(
+                "cannot combine a SELECT source with a VALUES payload",
+            ));
+        }
+        if !simple_scope_ident(column) || self.columns.is_empty() {
+            return Err(reject("requires explicit simple lowercase target columns"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for expr in &self.columns {
+            match expr {
+                Expr::Named(name) if simple_scope_ident(name) && seen.insert(name) => {}
+                _ => return Err(reject("requires distinct simple lowercase target columns")),
+            }
+        }
+        let source = self
+            .source_query
+            .as_ref()
+            .expect("SELECT source checked by caller");
+        if !simple_scope_ident(&self.table) || !simple_scope_ident(&source.table) {
+            return Err(reject(
+                "requires canonical simple registered relation names",
+            ));
+        }
+        let source_tenant = tenant_column_for(&source.table)?;
+        let source_owner = owner_column_for(&source.table)?;
+        if (source_tenant.is_none() && source_owner.is_none())
+            || (source_tenant.is_some() && tenant_column_for(&self.table)?.is_none())
+            || (source_owner.is_some() && owner_column_for(&self.table)?.is_none())
+        {
+            return Err(reject(
+                "source scope dimensions must be registered and retained by the target",
+            ));
+        }
+        if source.action != Action::Get
+            || source.source_query.is_some()
+            || !source.ctes.is_empty()
+            || !source.joins.is_empty()
+            || !source.set_ops.is_empty()
+            || source.distinct
+            || !source.distinct_on.is_empty()
+            || !source.having.is_empty()
+            || source.group_by_mode != crate::ast::GroupByMode::Simple
+            || source.cages.iter().any(|c| {
+                !matches!(
+                    c.kind,
+                    CageKind::Filter | CageKind::Limit(_) | CageKind::Offset(_)
+                )
+            })
+        {
+            return Err(reject(
+                "requires a single ungrouped SELECT without joins, sorting, DISTINCT or set operations",
+            ));
+        }
+        if source.columns.len() != self.columns.len()
+            || source
+                .columns
+                .iter()
+                .any(|expr| !(named(expr) || matches!(expr, Expr::Literal(v) if scalar(v))))
+            || source
+                .cages
+                .iter()
+                .flat_map(|c| &c.conditions)
+                .any(|c| !named(&c.left) || !scalar(&c.value))
+        {
+            return Err(reject(
+                "requires matching explicit source columns and simple scalar filters",
+            ));
+        }
+        let position = self
+            .columns
+            .iter()
+            .position(|e| matches!(e, Expr::Named(n) if n == column));
+        let source = self
+            .source_query
+            .as_mut()
+            .expect("SELECT source checked by caller");
+        if let Some(position) = position {
+            source.columns[position] = Expr::Literal(value);
+        } else {
+            self.columns.push(Expr::Named(column.to_string()));
+            source.columns.push(Expr::Literal(value));
+        }
         Ok(self)
     }
 
