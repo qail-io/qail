@@ -3,10 +3,10 @@
 
 use super::ScopedPoolFuture;
 use super::churn::{
-    PoolStats, decrement_active_count_saturating, pool_churn_record_destroy,
-    pool_churn_remaining_open, record_pool_connection_destroy,
+    PoolStats, pool_churn_record_destroy, pool_churn_remaining_open, record_pool_connection_destroy,
 };
 use super::config::PoolConfig;
+use super::connection::PoolSlot;
 use super::connection::PooledConn;
 use super::connection::PooledConnection;
 use super::gss::*;
@@ -78,9 +78,12 @@ fn evict_failed_hot_preprepare_entries(
 }
 
 impl PgPoolInner {
+    /// Put a reset connection back in the idle queue, or destroy it.
+    ///
+    /// The slot is not touched here: the caller holds the connection's
+    /// `PoolSlot` and drops it after this returns, so a return cancelled at
+    /// the idle-queue lock still gives the slot back.
     pub(super) async fn return_connection(&self, mut conn: PgConnection, created_at: Instant) {
-        decrement_active_count_saturating(&self.active_count);
-
         // The scrub's UNLISTEN * clears only server-side listens. Notifications
         // already buffered client-side — including ones the server flushes
         // during the release round trip itself — must not be readable by the
@@ -96,14 +99,12 @@ impl PgPoolInner {
                 "pool_return_desynced: dropping connection due to prior I/O/protocol desync"
             );
             record_pool_connection_destroy("pool_desynced_drop");
-            self.semaphore.add_permits(1);
             pool_churn_record_destroy(&self.config, "return_desynced");
             return;
         }
 
         if self.closed.load(Ordering::Relaxed) {
             record_pool_connection_destroy("pool_closed_drop");
-            self.semaphore.add_permits(1);
             return;
         }
 
@@ -117,8 +118,6 @@ impl PgPoolInner {
         } else {
             record_pool_connection_destroy("pool_overflow_drop");
         }
-
-        self.semaphore.add_permits(1);
     }
 
     /// Get a healthy connection from the pool, or None if pool is empty.
@@ -390,12 +389,13 @@ impl PgPool {
             }
         }
 
-        self.inner.active_count.fetch_add(1, Ordering::Relaxed);
-        // Permit is intentionally detached here; returned by `release()` / pool return.
-        permit.forget();
+        // No await between here and the handle: from now on the slot travels
+        // with the connection and goes back when the slot is dropped.
+        let slot = PoolSlot::checkout(&self.inner, permit);
 
         Ok(PooledConnection {
             conn: Some(conn),
+            slot: Some(slot),
             pool: std::sync::Arc::clone(&self.inner),
             rls_dirty: false,
             created_at,

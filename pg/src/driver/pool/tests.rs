@@ -2,6 +2,7 @@
 
 use crate::driver::pool::churn::*;
 use crate::driver::pool::config::*;
+use crate::driver::pool::connection::PoolSlot;
 use crate::driver::pool::gss::*;
 use crate::driver::pool::lifecycle::*;
 use crate::driver::pool::{PgPool, PoolConfig, PooledConnection};
@@ -360,11 +361,11 @@ async fn test_release_drops_desynced_connection_without_commit() {
         .acquire()
         .await
         .expect("semaphore permit");
-    permit.forget();
-    pool.inner.active_count.store(1, Ordering::Relaxed);
+    let slot = PoolSlot::checkout(&pool.inner, permit);
 
     let pooled = PooledConnection {
         conn: Some(conn),
+        slot: Some(slot),
         pool: std::sync::Arc::clone(&pool.inner),
         rls_dirty: true,
         created_at: Instant::now(),
@@ -438,8 +439,7 @@ async fn test_release_raw_rolls_back_before_returning_connection() {
         .acquire()
         .await
         .expect("semaphore permit");
-    permit.forget();
-    pool.inner.active_count.store(1, Ordering::Relaxed);
+    let slot = PoolSlot::checkout(&pool.inner, permit);
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -464,6 +464,7 @@ async fn test_release_raw_rolls_back_before_returning_connection() {
 
     let pooled = PooledConnection {
         conn: Some(conn),
+        slot: Some(slot),
         pool: std::sync::Arc::clone(&pool.inner),
         rls_dirty: false,
         created_at: Instant::now(),
@@ -559,8 +560,7 @@ async fn test_release_clears_buffered_notifications_before_pool_return() {
         .acquire()
         .await
         .expect("semaphore permit");
-    permit.forget();
-    pool.inner.active_count.store(1, Ordering::Relaxed);
+    let slot = PoolSlot::checkout(&pool.inner, permit);
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -582,6 +582,7 @@ async fn test_release_clears_buffered_notifications_before_pool_return() {
 
     let pooled = PooledConnection {
         conn: Some(conn),
+        slot: Some(slot),
         pool: std::sync::Arc::clone(&pool.inner),
         rls_dirty: false,
         created_at: Instant::now(),
@@ -662,8 +663,7 @@ async fn test_release_rls_commits_and_scrubs_session_state() {
         .acquire()
         .await
         .expect("semaphore permit");
-    permit.forget();
-    pool.inner.active_count.store(1, Ordering::Relaxed);
+    let slot = PoolSlot::checkout(&pool.inner, permit);
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -688,6 +688,7 @@ async fn test_release_rls_commits_and_scrubs_session_state() {
 
     let pooled = PooledConnection {
         conn: Some(conn),
+        slot: Some(slot),
         pool: std::sync::Arc::clone(&pool.inner),
         rls_dirty: true,
         created_at: Instant::now(),
@@ -765,8 +766,7 @@ async fn test_release_rls_reports_a_commit_answered_rollback() {
         .acquire()
         .await
         .expect("semaphore permit");
-    permit.forget();
-    pool.inner.active_count.store(1, Ordering::Relaxed);
+    let slot = PoolSlot::checkout(&pool.inner, permit);
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -796,6 +796,7 @@ async fn test_release_rls_reports_a_commit_answered_rollback() {
 
     let pooled = PooledConnection {
         conn: Some(conn),
+        slot: Some(slot),
         pool: std::sync::Arc::clone(&pool.inner),
         rls_dirty: true,
         created_at: Instant::now(),
@@ -811,6 +812,231 @@ async fn test_release_rls_reports_a_commit_answered_rollback() {
     assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
     assert_eq!(pool.inner.semaphore.available_permits(), 1);
     assert_eq!(pool.inner.connections.lock().await.len(), 1);
+}
+
+/// A `PgConnection` on one end of a socket pair; the test plays the server
+/// on the other end.
+#[cfg(unix)]
+fn socket_pair_connection() -> (PgConnection, tokio::net::UnixStream) {
+    use crate::driver::connection::StatementCache;
+    use crate::driver::stream::PgStream;
+    use bytes::BytesMut;
+    use std::collections::{HashMap, VecDeque};
+    use std::num::NonZeroUsize;
+
+    let (unix_stream, peer) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let conn = PgConnection {
+        stream: PgStream::Unix(unix_stream),
+        buffer: BytesMut::with_capacity(1024),
+        write_buf: BytesMut::with_capacity(1024),
+        sql_buf: BytesMut::with_capacity(256),
+        params_buf: Vec::new(),
+        prepared_statements: HashMap::new(),
+        stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+        column_info_cache: HashMap::new(),
+        process_id: 0,
+        cancel_key_bytes: Vec::new(),
+        requested_protocol_minor: PgConnection::default_protocol_minor(),
+        negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+        notifications: VecDeque::new(),
+        replication_stream_active: false,
+        replication_mode_enabled: false,
+        last_replication_wal_end: None,
+        io_desynced: false,
+        pending_statement_closes: Vec::new(),
+        draining_statement_closes: false,
+    };
+    (conn, peer)
+}
+
+/// `conn` checked out of a fresh one-slot pool the way `acquire_raw` does it.
+#[cfg(unix)]
+async fn one_slot_checkout(conn: PgConnection, rls_dirty: bool) -> (PgPool, PooledConnection) {
+    let pool = PgPool::connect(
+        PoolConfig::new_dev("localhost", 5432, "user", "db")
+            .min_connections(0)
+            .max_connections(1),
+    )
+    .await
+    .expect("pool init");
+    let permit = pool
+        .inner
+        .semaphore
+        .acquire()
+        .await
+        .expect("semaphore permit");
+    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let pooled = PooledConnection {
+        conn: Some(conn),
+        slot: Some(slot),
+        pool: std::sync::Arc::clone(&pool.inner),
+        rls_dirty,
+        created_at: Instant::now(),
+    };
+    (pool, pooled)
+}
+
+#[cfg(unix)]
+async fn read_frontend_message(peer: &mut tokio::net::UnixStream) -> (u8, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+
+    let mut head = [0u8; 5];
+    peer.read_exact(&mut head)
+        .await
+        .expect("frontend message head");
+    let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+    let mut payload = vec![0u8; len - 4];
+    peer.read_exact(&mut payload)
+        .await
+        .expect("frontend message body");
+    (head[0], payload)
+}
+
+#[cfg(unix)]
+async fn answer_reset(peer: &mut tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt;
+
+    let mut reply = vec![b'C'];
+    reply.extend_from_slice(&(4 + b"ROLLBACK\0".len() as u32).to_be_bytes());
+    reply.extend_from_slice(b"ROLLBACK\0");
+    reply.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+    peer.write_all(&reply).await.expect("reset reply");
+    peer.flush().await.expect("reset reply flush");
+}
+
+#[cfg(unix)]
+async fn assert_slot_back_and_connection_destroyed(pool: &PgPool) {
+    assert_eq!(
+        pool.inner.active_count.load(Ordering::Relaxed),
+        0,
+        "the checkout ended"
+    );
+    assert_eq!(
+        pool.inner.semaphore.available_permits(),
+        1,
+        "the slot came back"
+    );
+    assert_eq!(
+        pool.inner.connections.lock().await.len(),
+        0,
+        "a connection whose reset was interrupted is never pooled"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_release_cancelled_mid_reset_returns_its_slot() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    for (rls_dirty, rollback) in [(false, false), (true, false), (true, true)] {
+        let (conn, mut peer) = socket_pair_connection();
+        let (pool, pooled) = one_slot_checkout(conn, rls_dirty).await;
+
+        let mut release: Pin<Box<dyn Future<Output = crate::driver::PgResult<()>> + Send>> =
+            if rollback {
+                Box::pin(pooled.rollback_and_release())
+            } else {
+                Box::pin(pooled.release_checked())
+            };
+        // The server reads the reset and never answers it.
+        tokio::select! {
+            _ = &mut release => panic!("the reset has no answer, so the release can't finish"),
+            (msg_type, _) = read_frontend_message(&mut peer) => assert_eq!(msg_type, b'Q'),
+        }
+        // The caller goes away: a client disconnect, an outer timeout.
+        drop(release);
+
+        assert_slot_back_and_connection_destroyed(&pool).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_release_cancelled_at_the_idle_queue_lock_returns_its_slot() {
+    let (conn, mut peer) = socket_pair_connection();
+    let (pool, pooled) = one_slot_checkout(conn, false).await;
+
+    // Another task holds the idle queue, so the return parks on its lock.
+    let idle_queue = pool.inner.connections.lock().await;
+    let mut release = Box::pin(pooled.release_checked());
+    tokio::select! {
+        _ = &mut release => panic!("the reset has no answer yet, so the release can't finish"),
+        (msg_type, _) = read_frontend_message(&mut peer) => assert_eq!(msg_type, b'Q'),
+    }
+    answer_reset(&mut peer).await;
+    // The reset completes and the release parks on the locked idle queue.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut release)
+            .await
+            .is_err(),
+        "the idle queue is locked, so the release can't finish"
+    );
+    drop(release);
+    drop(idle_queue);
+
+    assert_slot_back_and_connection_destroyed(&pool).await;
+}
+
+#[cfg(unix)]
+#[test]
+fn test_leaked_cleanup_task_dropped_with_its_runtime_returns_its_slot() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (pool, peer) = runtime.block_on(async {
+        let (conn, peer) = socket_pair_connection();
+        let (pool, pooled) = one_slot_checkout(conn, false).await;
+        // Dropped without release(): Drop hands the connection to a cleanup
+        // task, which sends its ROLLBACK and waits for an answer that the
+        // peer never sends.
+        drop(pooled);
+        tokio::task::yield_now().await;
+        (pool, peer)
+    });
+    // Shutting the runtime down drops the parked cleanup task.
+    drop(peer);
+    drop(runtime);
+
+    assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
+    assert_eq!(pool.inner.semaphore.available_permits(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_leaked_cleanup_pools_the_connection_and_returns_its_slot_once() {
+    let (conn, mut peer) = socket_pair_connection();
+    let (pool, pooled) = one_slot_checkout(conn, false).await;
+    // Dropped without release(): the cleanup task rolls back and returns it.
+    drop(pooled);
+
+    let (msg_type, _) = read_frontend_message(&mut peer).await;
+    assert_eq!(msg_type, b'Q');
+    answer_reset(&mut peer).await;
+    for _ in 0..200 {
+        if pool.inner.leaked_cleanup_inflight.load(Ordering::Acquire) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    assert_eq!(
+        pool.inner.leaked_cleanup_inflight.load(Ordering::Acquire),
+        0,
+        "the cleanup task finished"
+    );
+    assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        pool.inner.semaphore.available_permits(),
+        1,
+        "the slot came back exactly once"
+    );
+    assert_eq!(
+        pool.inner.connections.lock().await.len(),
+        1,
+        "the rolled-back connection is pooled"
+    );
 }
 
 #[cfg(unix)]
