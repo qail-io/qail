@@ -5,7 +5,7 @@ use super::churn::{
     decrement_active_count_saturating, pool_churn_record_destroy, record_pool_connection_destroy,
 };
 use super::levels::LevelClaim;
-use super::lifecycle::{PgPoolInner, execute_simple_with_timeout};
+use super::lifecycle::{PgPoolInner, reset_with_timeout};
 use crate::driver::{PgConnection, PgError, PgResult};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -160,9 +160,7 @@ impl PooledConnection {
         }
 
         let reset_timeout = self.pool.config.connect_timeout;
-        let tags = match execute_simple_with_timeout(&mut conn, reset_sql, reset_timeout, operation)
-            .await
-        {
+        let tags = match reset_with_timeout(&mut conn, reset_sql, reset_timeout, operation).await {
             Ok(tags) => tags,
             Err(e) => {
                 tracing::error!(
@@ -488,7 +486,7 @@ impl Drop for PooledConnection {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    let cleanup_ok = execute_simple_with_timeout(
+                    let cleanup_ok = reset_with_timeout(
                         &mut conn,
                         crate::driver::rls::pool_release_rollback_sql(),
                         reset_timeout,

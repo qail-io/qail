@@ -40,7 +40,8 @@ async fn serve(mut sock: TcpStream) {
     if sock.write_all(&reply).await.is_err() {
         return;
     }
-    // Answer every simple query (the release reset) as a clean ROLLBACK.
+    // Answer every simple query (the release reset) as a clean ROLLBACK, and
+    // the reset's marker query (`SELECT '<token>'`) with its token row.
     let mut head = [0u8; 5];
     while sock.read_exact(&mut head).await.is_ok() {
         let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
@@ -49,7 +50,22 @@ async fn serve(mut sock: TcpStream) {
             return;
         }
         if head[0] == b'Q' {
-            let mut answer = backend_frame(b'C', b"ROLLBACK\0");
+            let sql =
+                std::str::from_utf8(&payload[..payload.len().saturating_sub(1)]).unwrap_or("");
+            let marker = sql
+                .strip_prefix("SELECT '")
+                .and_then(|rest| rest.strip_suffix('\''));
+            let mut answer = Vec::new();
+            if let Some(token) = marker {
+                let mut row = Vec::new();
+                row.extend_from_slice(&1i16.to_be_bytes());
+                row.extend_from_slice(&(token.len() as i32).to_be_bytes());
+                row.extend_from_slice(token.as_bytes());
+                answer.extend(backend_frame(b'D', &row));
+                answer.extend(backend_frame(b'C', b"SELECT 1\0"));
+            } else {
+                answer.extend(backend_frame(b'C', b"ROLLBACK\0"));
+            }
             answer.extend(backend_frame(b'Z', b"I"));
             if sock.write_all(&answer).await.is_err() {
                 return;

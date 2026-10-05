@@ -121,6 +121,24 @@ const RELEASE_ROLLBACK_SQL: &str = "ROLLBACK; CLOSE ALL; \
      DISCARD TEMP; \
      DISCARD SEQUENCES";
 
+/// Answer the pool reset's marker query with the token row it asks for.
+async fn answer_reset_marker(sock: &mut TcpStream) {
+    let (msg_type, payload) = read_frontend_frame(sock).await;
+    assert_eq!(msg_type, b'Q');
+    let sql = payload_cstr(&payload);
+    let token = sql
+        .strip_prefix("SELECT '")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("marker query");
+    let mut row = Vec::new();
+    row.extend_from_slice(&1i16.to_be_bytes());
+    row.extend_from_slice(&(token.len() as i32).to_be_bytes());
+    row.extend_from_slice(token.as_bytes());
+    sock.write_all(&backend_frame(b'D', &row)).await.unwrap();
+    sock.write_all(&command_complete("SELECT 1")).await.unwrap();
+    sock.write_all(&ready_idle()).await.unwrap();
+}
+
 fn pool_config(port: u16) -> PoolConfig {
     pool_config_with_max(port, 1)
 }
@@ -159,6 +177,7 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
         assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut sock).await;
         sock.flush().await.unwrap();
 
         match timeout(Duration::from_millis(200), read_frontend_frame(&mut sock)).await {
@@ -178,6 +197,7 @@ async fn parse_failed_cache_miss_does_not_poison_pool_hot_registry() {
         assert_eq!(payload_cstr(&payload), RELEASE_ROLLBACK_SQL);
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut sock).await;
         sock.flush().await.unwrap();
     });
 
@@ -267,6 +287,7 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
             .await
             .unwrap();
         replacement_sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut replacement_sock).await;
         replacement_sock.flush().await.unwrap();
 
         // Third checkout reuses the replacement connection. If the stale hot
@@ -296,6 +317,7 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
             .await
             .unwrap();
         replacement_sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut replacement_sock).await;
         replacement_sock.flush().await.unwrap();
 
         let (msg_type, payload) = read_frontend_frame(&mut first_sock).await;
@@ -306,6 +328,7 @@ async fn stale_hot_preprepare_failure_evicts_pool_hot_registry_entry() {
             .await
             .unwrap();
         first_sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut first_sock).await;
         first_sock.flush().await.unwrap();
     });
 

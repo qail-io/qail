@@ -1222,3 +1222,116 @@ pub(super) async fn execute_simple_with_timeout(
         }
     }
 }
+
+/// Run the pool reset `sql` under `timeout`; returns the reset's own
+/// CommandComplete tags, in order.
+///
+/// A caller future dropped after its request reached the server (client
+/// disconnect, caller timeout) leaves that request's reply cycles unread.
+/// Reading "until the first ReadyForQuery" would take such a cycle as the
+/// reset's reply and pool the connection with the reset's real reply still
+/// unread, so the next checkout reads a stale CommandComplete. The reset is
+/// therefore followed by a marker query carrying a fresh random token: every
+/// cycle before the marker's is discarded, and the cycle right before the
+/// marker's is the reset's.
+pub(super) async fn reset_with_timeout(
+    conn: &mut PgConnection,
+    sql: &str,
+    timeout: Duration,
+    operation: &str,
+) -> PgResult<Vec<String>> {
+    match tokio::time::timeout(timeout, reset_in_sync(conn, sql, operation)).await {
+        Ok(Ok(tags)) => Ok(tags),
+        Ok(Err(err)) => {
+            // Only a server answer to the reset itself leaves the stream in
+            // sync; any other failure may have stopped mid-cycle.
+            if !matches!(err, PgError::QueryServer(_)) {
+                conn.mark_io_desynced();
+            }
+            Err(err)
+        }
+        Err(_) => {
+            conn.mark_io_desynced();
+            Err(PgError::Timeout(format!(
+                "{} timeout after {:?} (pool config connect_timeout)",
+                operation, timeout
+            )))
+        }
+    }
+}
+
+async fn reset_in_sync(
+    conn: &mut PgConnection,
+    sql: &str,
+    operation: &str,
+) -> PgResult<Vec<String>> {
+    use crate::protocol::{BackendMessage, PgEncoder};
+    use rand::RngExt;
+
+    let token = format!("qail_pool_reset_{:032x}", rand::rng().random::<u128>());
+    let encode = |sql: &str| {
+        PgEncoder::try_encode_query_string(sql).map_err(|e| PgError::Encode(e.to_string()))
+    };
+    let mut wire = encode(sql)?;
+    wire.extend_from_slice(&encode(&format!("SELECT '{token}'"))?);
+    conn.send_bytes(&wire).await?;
+
+    // Tags and first error of the cycle being read, and of the last one
+    // that ended with ReadyForQuery.
+    let mut tags: Vec<String> = Vec::new();
+    let mut error: Option<PgError> = None;
+    let mut last_cycle: Option<(Vec<String>, Option<PgError>)> = None;
+    let mut completed_cycles = 0usize;
+    let mut reset_cycle: Option<(Vec<String>, Option<PgError>)> = None;
+    let mut marker_seen = false;
+
+    loop {
+        match conn.recv().await? {
+            BackendMessage::DataRow(columns)
+                if !marker_seen
+                    && columns.len() == 1
+                    && columns[0].as_deref() == Some(token.as_bytes()) =>
+            {
+                marker_seen = true;
+                reset_cycle = last_cycle.take();
+            }
+            BackendMessage::CommandComplete(tag) => tags.push(tag),
+            BackendMessage::ErrorResponse(err) if error.is_none() => {
+                error = Some(PgError::QueryServer(err.into()));
+            }
+            BackendMessage::ReadyForQuery(_) if marker_seen => {
+                // The marker's own cycle must have completed cleanly.
+                if let Some(err) = error {
+                    return Err(err);
+                }
+                let Some((reset_tags, reset_error)) = reset_cycle else {
+                    return Err(PgError::Protocol(format!(
+                        "{operation}: marker answered with no reply cycle for the reset"
+                    )));
+                };
+                let stale_cycles = completed_cycles.saturating_sub(1);
+                if stale_cycles > 0 {
+                    tracing::warn!(
+                        stale_cycles,
+                        operation,
+                        "pool_reset_drained_stale_replies: a previous user left replies unread"
+                    );
+                }
+                // A cancelled flush_pending_statement_closes() leaves this set;
+                // its replies are drained above.
+                conn.draining_statement_closes = false;
+                return match reset_error {
+                    Some(err) => Err(err),
+                    None => Ok(reset_tags),
+                };
+            }
+            BackendMessage::ReadyForQuery(_) => {
+                completed_cycles += 1;
+                last_cycle = Some((std::mem::take(&mut tags), error.take()));
+            }
+            // Anything else belongs to a stale cycle or to the marker's row
+            // shape; none of it carries the reset's outcome.
+            _ => {}
+        }
+    }
+}

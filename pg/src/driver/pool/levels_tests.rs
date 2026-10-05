@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Answer every simple query with `CommandComplete` + `ReadyForQuery`.
+/// Answer every simple query with `CommandComplete` + `ReadyForQuery`; the
+/// pool reset's marker query (`SELECT '<token>'`) also gets its token row.
 fn answer_queries(mut peer: tokio::net::UnixStream) {
     tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -27,9 +28,27 @@ fn answer_queries(mut peer: tokio::net::UnixStream) {
             if head[0] != b'Q' {
                 continue;
             }
-            let mut reply = vec![b'C'];
-            reply.extend_from_slice(&(4 + b"ROLLBACK\0".len() as u32).to_be_bytes());
-            reply.extend_from_slice(b"ROLLBACK\0");
+            let sql =
+                std::str::from_utf8(&payload[..payload.len().saturating_sub(1)]).unwrap_or("");
+            let marker = sql
+                .strip_prefix("SELECT '")
+                .and_then(|rest| rest.strip_suffix('\''));
+            let tag: &[u8] = if marker.is_some() {
+                b"SELECT 1\0"
+            } else {
+                b"ROLLBACK\0"
+            };
+            let mut reply = Vec::new();
+            if let Some(token) = marker {
+                reply.push(b'D');
+                reply.extend_from_slice(&((4 + 2 + 4 + token.len()) as u32).to_be_bytes());
+                reply.extend_from_slice(&1i16.to_be_bytes());
+                reply.extend_from_slice(&(token.len() as i32).to_be_bytes());
+                reply.extend_from_slice(token.as_bytes());
+            }
+            reply.push(b'C');
+            reply.extend_from_slice(&(4 + tag.len() as u32).to_be_bytes());
+            reply.extend_from_slice(tag);
             reply.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
             if peer.write_all(&reply).await.is_err() {
                 return;

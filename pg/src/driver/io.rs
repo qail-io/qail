@@ -576,6 +576,10 @@ impl PgConnection {
             ));
         }
         use super::stream::PgStream;
+        // A future dropped inside write_all leaves a partial frontend message
+        // on the wire; the connection reads as desynced until the write ends.
+        let desynced_before_write = self.io_desynced;
+        self.io_desynced = true;
         let mut mark_desync = false;
         let result = match &mut self.stream {
             PgStream::Tcp(stream) => {
@@ -665,6 +669,8 @@ impl PgConnection {
         };
         if mark_desync {
             self.mark_io_desynced();
+        } else {
+            self.io_desynced = desynced_before_write;
         }
         result
     }
@@ -2039,5 +2045,43 @@ mod tests {
         assert!(err.to_string().contains("notification exceeds"));
         assert!(conn.is_io_desynced());
         assert!(conn.notifications.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_dropped_mid_frame_leaves_connection_desynced() {
+        use crate::driver::stream::PgStream;
+        use tokio::net::UnixStream;
+
+        let mut conn = test_conn();
+        // The peer stays open and never reads, so the socket buffer fills
+        // and write_all is still pending when the future is dropped.
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        conn.stream = PgStream::Unix(unix_stream);
+        let payload = vec![b'Q'; 8 * 1024 * 1024];
+
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            conn.write_all_with_timeout_inner(&payload, "test write"),
+        )
+        .await;
+        assert!(dropped.is_err(), "write_all was still pending");
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_write_keeps_connection_in_sync() {
+        use crate::driver::stream::PgStream;
+        use tokio::net::UnixStream;
+
+        let mut conn = test_conn();
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        conn.stream = PgStream::Unix(unix_stream);
+
+        conn.write_all_with_timeout_inner(b"Q\0\0\0\x05\0", "test write")
+            .await
+            .expect("small write completes");
+        assert!(!conn.is_io_desynced());
     }
 }

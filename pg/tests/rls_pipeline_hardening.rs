@@ -143,6 +143,24 @@ fn error_response(code: &str, message: &str) -> Vec<u8> {
     backend_frame(b'E', &payload)
 }
 
+/// Answer the pool reset's marker query with the token row it asks for.
+async fn answer_reset_marker(sock: &mut TcpStream) {
+    let (msg_type, payload) = read_frontend_frame(sock).await;
+    assert_eq!(msg_type, b'Q');
+    let sql = payload_cstr(&payload);
+    let token = sql
+        .strip_prefix("SELECT '")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("marker query");
+    let mut row = Vec::new();
+    row.extend_from_slice(&1i16.to_be_bytes());
+    row.extend_from_slice(&(token.len() as i32).to_be_bytes());
+    row.extend_from_slice(token.as_bytes());
+    sock.write_all(&backend_frame(b'D', &row)).await.unwrap();
+    sock.write_all(&command_complete("SELECT 1")).await.unwrap();
+    sock.write_all(&ready_idle()).await.unwrap();
+}
+
 fn pool_config(port: u16) -> PoolConfig {
     PoolConfig::new_dev("127.0.0.1", port, "test_user", "test_db")
         .min_connections(0)
@@ -174,6 +192,7 @@ async fn dropped_pooled_connection_rolls_back_instead_of_commit() {
 
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut sock).await;
         sock.flush().await.unwrap();
     });
 
@@ -204,6 +223,7 @@ async fn rollback_and_release_sends_rollback() {
 
         sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
         sock.write_all(&ready_idle()).await.unwrap();
+        answer_reset_marker(&mut sock).await;
         sock.flush().await.unwrap();
     });
 

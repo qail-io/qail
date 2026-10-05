@@ -38,19 +38,20 @@ async fn complete_startup(sock: &mut TcpStream) {
     sock.write_all(&reply).await.unwrap();
 }
 
-/// One frontend message type, or `None` once the client hung up.
-async fn read_frontend_message(sock: &mut TcpStream) -> Option<u8> {
+/// One frontend message type and payload, or `None` once the client hung up.
+async fn read_frontend_message(sock: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
     let mut head = [0u8; 5];
     sock.read_exact(&mut head).await.ok()?;
     let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
     let mut payload = vec![0u8; len.saturating_sub(4)];
     sock.read_exact(&mut payload).await.ok()?;
-    Some(head[0])
+    Some((head[0], payload))
 }
 
 /// A server that completes every startup, then reads each query and never
-/// answers it. Each simple query it reads is reported on the channel; the
-/// Terminate a destroyed connection sends is not.
+/// answers it. Each reset it reads is reported on the channel; the marker
+/// query a reset sends after it, and the Terminate a destroyed connection
+/// sends, are not.
 async fn unanswering_server() -> (u16, mpsc::UnboundedReceiver<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -60,8 +61,9 @@ async fn unanswering_server() -> (u16, mpsc::UnboundedReceiver<()>) {
             let seen = seen_tx.clone();
             tokio::spawn(async move {
                 complete_startup(&mut sock).await;
-                while let Some(msg_type) = read_frontend_message(&mut sock).await {
-                    if msg_type == b'Q' {
+                while let Some((msg_type, payload)) = read_frontend_message(&mut sock).await {
+                    let marker = payload.starts_with(b"SELECT 'qail_pool_reset_");
+                    if msg_type == b'Q' && !marker {
                         let _ = seen.send(());
                     }
                 }

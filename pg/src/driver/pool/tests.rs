@@ -378,6 +378,52 @@ async fn test_release_drops_desynced_connection_without_commit() {
     assert_eq!(pool.inner.connections.lock().await.len(), 0);
 }
 
+/// Mock server side of the pool reset's marker query: reads the second
+/// simple Query and answers it with the token row it asks for.
+#[cfg(unix)]
+async fn answer_reset_marker(peer: &mut tokio::net::UnixStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(payload.len() + 5);
+        out.push(msg_type);
+        out.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    let mut head = [0u8; 5];
+    peer.read_exact(&mut head).await.unwrap();
+    assert_eq!(head[0], b'Q');
+    let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+    let mut payload = vec![0u8; len - 4];
+    peer.read_exact(&mut payload).await.unwrap();
+    let sql = std::str::from_utf8(&payload[..payload.len() - 1]).unwrap();
+    let token = sql
+        .strip_prefix("SELECT '")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("marker query");
+
+    let mut row = Vec::new();
+    row.extend_from_slice(&1i16.to_be_bytes());
+    row.extend_from_slice(&(token.len() as i32).to_be_bytes());
+    row.extend_from_slice(token.as_bytes());
+    let mut row_desc = Vec::new();
+    row_desc.extend_from_slice(&1i16.to_be_bytes());
+    row_desc.extend_from_slice(b"?column?\0");
+    row_desc.extend_from_slice(&0i32.to_be_bytes());
+    row_desc.extend_from_slice(&0i16.to_be_bytes());
+    row_desc.extend_from_slice(&25i32.to_be_bytes());
+    row_desc.extend_from_slice(&(-1i16).to_be_bytes());
+    row_desc.extend_from_slice(&(-1i32).to_be_bytes());
+    row_desc.extend_from_slice(&0i16.to_be_bytes());
+
+    peer.write_all(&frame(b'T', &row_desc)).await.unwrap();
+    peer.write_all(&frame(b'D', &row)).await.unwrap();
+    peer.write_all(&frame(b'C', b"SELECT 1\0")).await.unwrap();
+    peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_release_raw_rolls_back_before_returning_connection() {
@@ -460,6 +506,7 @@ async fn test_release_raw_rolls_back_before_returning_connection() {
 
         peer.write_all(&command_complete("ROLLBACK")).await.unwrap();
         peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        answer_reset_marker(&mut peer).await;
         peer.flush().await.unwrap();
     });
 
@@ -578,6 +625,7 @@ async fn test_release_clears_buffered_notifications_before_pool_return() {
             .unwrap();
         peer.write_all(&command_complete("ROLLBACK")).await.unwrap();
         peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        answer_reset_marker(&mut peer).await;
         peer.flush().await.unwrap();
     });
 
@@ -684,6 +732,7 @@ async fn test_release_rls_commits_and_scrubs_session_state() {
 
         peer.write_all(&command_complete("COMMIT")).await.unwrap();
         peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        answer_reset_marker(&mut peer).await;
         peer.flush().await.unwrap();
     });
 
@@ -703,6 +752,127 @@ async fn test_release_rls_commits_and_scrubs_session_state() {
     assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
     assert_eq!(pool.inner.semaphore.available_permits(), 1);
     assert_eq!(pool.inner.connections.lock().await.len(), 1);
+}
+
+/// A dropped caller future left one reply cycle unread (here a failed
+/// statement's ErrorResponse and a `ROLLBACK` tag). The release must skip it,
+/// judge the COMMIT by its own cycle, and pool the connection in sync.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_release_skips_reply_cycles_left_by_a_dropped_caller() {
+    use crate::driver::connection::StatementCache;
+    use crate::driver::stream::PgStream;
+    use bytes::BytesMut;
+    use std::collections::{HashMap, VecDeque};
+    use std::num::NonZeroUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    fn backend_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(msg_type);
+        out.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn command_complete(tag: &str) -> Vec<u8> {
+        let mut payload = Vec::from(tag.as_bytes());
+        payload.push(0);
+        backend_frame(b'C', &payload)
+    }
+
+    let (unix_stream, mut peer) = UnixStream::pair().expect("unix stream pair");
+    let conn = PgConnection {
+        stream: PgStream::Unix(unix_stream),
+        buffer: BytesMut::with_capacity(1024),
+        write_buf: BytesMut::with_capacity(1024),
+        sql_buf: BytesMut::with_capacity(256),
+        params_buf: Vec::new(),
+        prepared_statements: HashMap::new(),
+        stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+        column_info_cache: HashMap::new(),
+        process_id: 0,
+        cancel_key_bytes: Vec::new(),
+        requested_protocol_minor: PgConnection::default_protocol_minor(),
+        negotiated_protocol_minor: PgConnection::default_protocol_minor(),
+        notifications: VecDeque::new(),
+        replication_stream_active: false,
+        replication_mode_enabled: false,
+        last_replication_wal_end: None,
+        io_desynced: false,
+        pending_statement_closes: Vec::new(),
+        draining_statement_closes: false,
+    };
+
+    let pool = PgPool::connect(
+        PoolConfig::new_dev("localhost", 5432, "user", "db")
+            .min_connections(0)
+            .max_connections(1),
+    )
+    .await
+    .expect("pool init");
+
+    let permit = pool
+        .inner
+        .semaphore
+        .acquire()
+        .await
+        .expect("semaphore permit");
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
+
+    let peer_task = tokio::spawn(async move {
+        let mut head = [0u8; 5];
+        peer.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], b'Q');
+        let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+        let mut payload = vec![0u8; len - 4];
+        peer.read_exact(&mut payload).await.unwrap();
+
+        // The dropped caller's reply cycle arrives first.
+        let mut error = Vec::new();
+        error.extend_from_slice(b"SERROR\0C23505\0Mduplicate key\0\0");
+        peer.write_all(&backend_frame(b'E', &error)).await.unwrap();
+        peer.write_all(&command_complete("ROLLBACK")).await.unwrap();
+        peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+
+        // Then the release's own.
+        for tag in [
+            "COMMIT",
+            "CLOSE CURSOR ALL",
+            "SET",
+            "RESET",
+            "UNLISTEN",
+            "SELECT 1",
+            "DISCARD TEMP",
+            "DISCARD SEQUENCES",
+        ] {
+            peer.write_all(&command_complete(tag)).await.unwrap();
+        }
+        peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        answer_reset_marker(&mut peer).await;
+        peer.flush().await.unwrap();
+    });
+
+    let pooled = PooledConnection {
+        conn: Some(conn),
+        slot: Some(slot),
+        pool: std::sync::Arc::clone(&pool.inner),
+        rls_dirty: true,
+        created_at: Instant::now(),
+    };
+    pooled
+        .release_checked()
+        .await
+        .expect("the release's own COMMIT succeeded");
+    peer_task.await.unwrap();
+
+    assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
+    assert_eq!(pool.inner.semaphore.available_permits(), 1);
+    let idle = pool.inner.connections.lock().await;
+    assert_eq!(idle.len(), 1);
+    assert!(!idle[0].conn.is_io_desynced());
+    assert!(idle[0].conn.buffer.is_empty(), "no reply left unread");
 }
 
 #[cfg(unix)]
@@ -792,6 +962,7 @@ async fn test_release_rls_reports_a_commit_answered_rollback() {
             peer.write_all(&command_complete(tag)).await.unwrap();
         }
         peer.write_all(&backend_frame(b'Z', b"I")).await.unwrap();
+        answer_reset_marker(&mut peer).await;
         peer.flush().await.unwrap();
     });
 
@@ -902,6 +1073,8 @@ async fn answer_reset(peer: &mut tokio::net::UnixStream) {
     reply.extend_from_slice(b"ROLLBACK\0");
     reply.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
     peer.write_all(&reply).await.expect("reset reply");
+    // The reset is followed by its marker query (lifecycle::reset_with_timeout).
+    answer_reset_marker(peer).await;
     peer.flush().await.expect("reset reply flush");
 }
 
