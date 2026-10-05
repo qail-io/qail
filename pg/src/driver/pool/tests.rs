@@ -4,6 +4,7 @@ use crate::driver::pool::churn::*;
 use crate::driver::pool::config::*;
 use crate::driver::pool::connection::PoolSlot;
 use crate::driver::pool::gss::*;
+use crate::driver::pool::levels::LevelClaim;
 use crate::driver::pool::lifecycle::*;
 use crate::driver::pool::{PgPool, PoolConfig, PooledConnection};
 use crate::driver::{AuthSettings, GssEncMode, PgConnection, PgError, TlsMode};
@@ -361,7 +362,7 @@ async fn test_release_drops_desynced_connection_without_commit() {
         .acquire()
         .await
         .expect("semaphore permit");
-    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
 
     let pooled = PooledConnection {
         conn: Some(conn),
@@ -439,7 +440,7 @@ async fn test_release_raw_rolls_back_before_returning_connection() {
         .acquire()
         .await
         .expect("semaphore permit");
-    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -560,7 +561,7 @@ async fn test_release_clears_buffered_notifications_before_pool_return() {
         .acquire()
         .await
         .expect("semaphore permit");
-    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -663,7 +664,7 @@ async fn test_release_rls_commits_and_scrubs_session_state() {
         .acquire()
         .await
         .expect("semaphore permit");
-    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -766,7 +767,7 @@ async fn test_release_rls_reports_a_commit_answered_rollback() {
         .acquire()
         .await
         .expect("semaphore permit");
-    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
 
     let peer_task = tokio::spawn(async move {
         let mut head = [0u8; 5];
@@ -817,7 +818,7 @@ async fn test_release_rls_reports_a_commit_answered_rollback() {
 /// A `PgConnection` on one end of a socket pair; the test plays the server
 /// on the other end.
 #[cfg(unix)]
-fn socket_pair_connection() -> (PgConnection, tokio::net::UnixStream) {
+pub(super) fn socket_pair_connection() -> (PgConnection, tokio::net::UnixStream) {
     use crate::driver::connection::StatementCache;
     use crate::driver::stream::PgStream;
     use bytes::BytesMut;
@@ -865,7 +866,7 @@ async fn one_slot_checkout(conn: PgConnection, rls_dirty: bool) -> (PgPool, Pool
         .acquire()
         .await
         .expect("semaphore permit");
-    let slot = PoolSlot::checkout(&pool.inner, permit);
+    let slot = PoolSlot::checkout(&pool.inner, permit, LevelClaim::new(&pool.inner));
     let pooled = PooledConnection {
         conn: Some(conn),
         slot: Some(slot),

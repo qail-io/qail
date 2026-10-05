@@ -49,6 +49,11 @@ pub struct PoolConfig {
     pub leaked_cleanup_queue: usize,
     /// When `true`, run a health check (`SELECT 1`) before handing out a connection.
     pub test_on_acquire: bool,
+    /// Slots of `max_connections` kept back for nested acquires, one entry per
+    /// nesting level. Empty (the default): one shared set of slots.
+    ///
+    /// See [`PoolConfig::nested_reserve`].
+    pub nested_reserve: Vec<usize>,
     /// TLS mode for new connections.
     pub tls_mode: TlsMode,
     /// Optional custom CA bundle (PEM) for server certificate validation.
@@ -105,6 +110,7 @@ impl PoolConfig {
             max_lifetime: None,                     // No limit by default
             leaked_cleanup_queue: 64,               // Bounded cleanup fanout
             test_on_acquire: false,                 // Disabled by default for performance
+            nested_reserve: Vec::new(),
             tls_mode: TlsMode::Prefer,
             tls_ca_cert_pem: None,
             mtls: None,
@@ -184,6 +190,24 @@ impl PoolConfig {
     /// Enable connection validation on acquire.
     pub fn test_on_acquire(mut self, enabled: bool) -> Self {
         self.test_on_acquire = enabled;
+        self
+    }
+
+    /// Keep slots back for nested acquires, one entry per nesting level.
+    ///
+    /// A task that already holds a connection from this pool and acquires
+    /// another (a nested acquire) waits only on the reserve one level above the
+    /// highest it holds, never on the shared slots. Without it, enough tasks
+    /// each holding one connection while waiting for a second hold every slot
+    /// between them, and none frees until the acquire timeout.
+    ///
+    /// `&[8, 2, 1, 1]` on 40 connections leaves 32 shared slots and serves
+    /// nesting four deep; deeper acquires share the last reserve. Levels are
+    /// tracked per tokio task: a connection moved into another task is not
+    /// counted there, and an acquire with no task id (directly inside
+    /// `block_on`) is always at the shared level.
+    pub fn nested_reserve(mut self, levels: &[usize]) -> Self {
+        self.nested_reserve = levels.to_vec();
         self
     }
 

@@ -8,6 +8,9 @@ mod config;
 mod connection;
 mod fetch;
 mod gss;
+mod levels;
+#[cfg(all(test, unix))]
+mod levels_tests;
 mod lifecycle;
 #[cfg(test)]
 mod tests;

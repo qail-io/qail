@@ -4,6 +4,7 @@
 use super::churn::{
     decrement_active_count_saturating, pool_churn_record_destroy, record_pool_connection_destroy,
 };
+use super::levels::LevelClaim;
 use super::lifecycle::{PgPoolInner, execute_simple_with_timeout};
 use crate::driver::{PgConnection, PgError, PgResult};
 use std::sync::Arc;
@@ -24,18 +25,24 @@ pub(super) struct PooledConn {
 /// await — returns the slot exactly once.
 pub(super) struct PoolSlot {
     pool: Arc<PgPoolInner>,
+    /// Which slot set the permit came from; its own drop (after this
+    /// slot's) removes the task's level registration.
+    claim: LevelClaim,
 }
 
 impl PoolSlot {
-    /// Detach `permit` into a slot owned by the checked-out connection.
+    /// Detach `permit`, taken at `claim`'s level, into a slot owned by the
+    /// checked-out connection.
     pub(super) fn checkout(
         pool: &Arc<PgPoolInner>,
         permit: tokio::sync::SemaphorePermit<'_>,
+        claim: LevelClaim,
     ) -> Self {
         pool.active_count.fetch_add(1, Ordering::Relaxed);
         permit.forget();
         Self {
             pool: Arc::clone(pool),
+            claim,
         }
     }
 }
@@ -43,7 +50,7 @@ impl PoolSlot {
 impl Drop for PoolSlot {
     fn drop(&mut self) {
         decrement_active_count_saturating(&self.pool.active_count);
-        self.pool.semaphore.add_permits(1);
+        self.pool.level_semaphore(self.claim.level).add_permits(1);
     }
 }
 

@@ -10,6 +10,7 @@ use super::connection::PoolSlot;
 use super::connection::PooledConn;
 use super::connection::PooledConnection;
 use super::gss::*;
+use super::levels::{LevelClaim, LevelHolders};
 use crate::driver::{
     AstPipelineMode, AutoCountPath, AutoCountPlan, ConnectOptions, PgConnection, PgError, PgResult,
     is_ignorable_session_message, unexpected_backend_message,
@@ -27,7 +28,11 @@ pub(super) const MAX_HOT_STATEMENTS: usize = 32;
 pub(super) struct PgPoolInner {
     pub(super) config: PoolConfig,
     pub(super) connections: Mutex<Vec<PooledConn>>,
+    /// Shared slots: `max_connections` minus every nested reserve.
     pub(super) semaphore: Semaphore,
+    /// Reserve `k` serves acquires at nesting level `k + 1`.
+    pub(super) nested_semaphores: Vec<Semaphore>,
+    pub(super) level_holders: LevelHolders,
     pub(super) closed: AtomicBool,
     pub(super) active_count: AtomicUsize,
     pub(super) total_created: AtomicUsize,
@@ -78,6 +83,25 @@ fn evict_failed_hot_preprepare_entries(
 }
 
 impl PgPoolInner {
+    /// The slots an acquire at `level` waits on. A `LevelClaim` never names a
+    /// level above the reserves.
+    pub(super) fn level_semaphore(&self, level: usize) -> &Semaphore {
+        match level {
+            0 => &self.semaphore,
+            nested => &self.nested_semaphores[nested - 1],
+        }
+    }
+
+    /// Free slots across the shared set and every reserve.
+    pub(super) fn available_slots(&self) -> usize {
+        self.semaphore.available_permits()
+            + self
+                .nested_semaphores
+                .iter()
+                .map(Semaphore::available_permits)
+                .sum::<usize>()
+    }
+
     /// Put a reset connection back in the idle queue, or destroy it.
     ///
     /// The slot is not touched here: the caller holds the connection's
@@ -187,8 +211,14 @@ impl PgPool {
     pub async fn connect(config: PoolConfig) -> PgResult<Self> {
         validate_pool_config(&config)?;
 
-        // Semaphore starts with max_connections permits
-        let semaphore = Semaphore::new(config.max_connections);
+        // validate_pool_config leaves at least one shared slot.
+        let reserved: usize = config.nested_reserve.iter().sum();
+        let semaphore = Semaphore::new(config.max_connections - reserved);
+        let nested_semaphores = config
+            .nested_reserve
+            .iter()
+            .map(|&slots| Semaphore::new(slots))
+            .collect();
 
         let mut initial_connections = Vec::new();
         for _ in 0..config.min_connections {
@@ -206,6 +236,8 @@ impl PgPool {
             config,
             connections: Mutex::new(initial_connections),
             semaphore,
+            nested_semaphores,
+            level_holders: LevelHolders::default(),
             closed: AtomicBool::new(false),
             active_count: AtomicUsize::new(0),
             total_created: AtomicUsize::new(initial_count),
@@ -250,20 +282,31 @@ impl PgPool {
             });
         }
 
-        // Wait for available slot with timeout
+        // Wait for a slot at this task's nesting level: the shared slots when
+        // it holds none, else the reserve above the highest level it holds.
         let acquire_timeout = self.inner.config.acquire_timeout;
-        let permit =
-            match tokio::time::timeout(acquire_timeout, self.inner.semaphore.acquire()).await {
-                Ok(permit) => permit.map_err(|_| PgError::PoolClosed)?,
-                Err(_) => {
-                    metrics::counter!("qail_pg_pool_acquire_timeouts_total").increment(1);
-                    return Err(PgError::Timeout(format!(
+        let claim = LevelClaim::new(&self.inner);
+        let semaphore = self.inner.level_semaphore(claim.level);
+        let permit = match tokio::time::timeout(acquire_timeout, semaphore.acquire()).await {
+            Ok(permit) => permit.map_err(|_| PgError::PoolClosed)?,
+            Err(_) => {
+                metrics::counter!("qail_pg_pool_acquire_timeouts_total").increment(1);
+                return Err(PgError::Timeout(if claim.level == 0 {
+                    format!(
                         "pool acquire after {}s ({} max connections)",
                         acquire_timeout.as_secs(),
                         self.inner.config.max_connections
-                    )));
-                }
-            };
+                    )
+                } else {
+                    format!(
+                        "pool acquire after {}s (nested level {}, {} reserved slots)",
+                        acquire_timeout.as_secs(),
+                        claim.level,
+                        self.inner.config.nested_reserve[claim.level - 1]
+                    )
+                }));
+            }
+        };
 
         if self.inner.closed.load(Ordering::Relaxed) {
             return Err(PgError::PoolClosed);
@@ -391,7 +434,7 @@ impl PgPool {
 
         // No await between here and the handle: from now on the slot travels
         // with the connection and goes back when the slot is dropped.
-        let slot = PoolSlot::checkout(&self.inner, permit);
+        let slot = PoolSlot::checkout(&self.inner, permit, claim);
 
         Ok(PooledConnection {
             conn: Some(conn),
@@ -831,7 +874,7 @@ impl PgPool {
             .inner
             .config
             .max_connections
-            .saturating_sub(self.inner.semaphore.available_permits());
+            .saturating_sub(self.inner.available_slots());
         PoolStats {
             active,
             idle,
@@ -861,6 +904,9 @@ impl PgPool {
         self.inner.closed.store(true, Ordering::Relaxed);
         // Wake blocked acquires immediately so shutdown doesn't wait on acquire_timeout.
         self.inner.semaphore.close();
+        for reserve in &self.inner.nested_semaphores {
+            reserve.close();
+        }
 
         let deadline = Instant::now() + drain_timeout;
         loop {
@@ -1027,7 +1073,7 @@ impl PgPool {
             .inner
             .config
             .max_connections
-            .saturating_sub(self.inner.semaphore.available_permits());
+            .saturating_sub(self.inner.available_slots());
         let deficit = maintenance_backfill_deficit(
             self.inner.config.max_connections,
             min,
@@ -1128,6 +1174,19 @@ pub(super) fn validate_pool_config(config: &PoolConfig) -> PgResult<()> {
         return Err(PgError::Connection(
             "Invalid PoolConfig: connect_timeout must be > 0".to_string(),
         ));
+    }
+    if config.nested_reserve.contains(&0) {
+        return Err(PgError::Connection(
+            "Invalid PoolConfig: every nested_reserve level needs at least one slot".to_string(),
+        ));
+    }
+    let reserved: usize = config.nested_reserve.iter().sum();
+    if reserved >= config.max_connections {
+        return Err(PgError::Connection(format!(
+            "Invalid PoolConfig: nested_reserve ({reserved} slots) must leave shared slots \
+             under max_connections ({})",
+            config.max_connections
+        )));
     }
     if config.leaked_cleanup_queue == 0 {
         return Err(PgError::Connection(
