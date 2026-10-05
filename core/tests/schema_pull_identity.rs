@@ -450,7 +450,7 @@ fn schema_validation_rejects_identity_options_without_identity() {
 fn function_cmd(options: FunctionOptions) -> Qail {
     Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: "f".into(),
             args: vec![],
             returns: "int".into(),
@@ -458,7 +458,7 @@ fn function_cmd(options: FunctionOptions) -> Qail {
             language: Some("sql".into()),
             volatility: Some("stable".into()),
             options,
-        }),
+        })),
         ..Default::default()
     }
 }
@@ -507,7 +507,7 @@ fn function_options_render_and_reject_unsafe_settings() {
 fn trigger_cmd(condition: Option<&str>, old_table: Option<&str>) -> Qail {
     Qail {
         action: Action::CreateTrigger,
-        trigger_def: Some(TriggerDef {
+        trigger_def: Some(Box::new(TriggerDef {
             name: "t".into(),
             table: "x".into(),
             timing: TriggerTiming::After,
@@ -518,7 +518,7 @@ fn trigger_cmd(condition: Option<&str>, old_table: Option<&str>) -> Qail {
             condition: condition.map(str::to_string),
             old_table: old_table.map(str::to_string),
             new_table: None,
-        }),
+        })),
         ..Default::default()
     }
 }
@@ -588,13 +588,13 @@ fn collate_identity_and_index_options_render_or_reject() {
 
     let index = |params: Vec<String>| Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "i".into(),
             table: "t".into(),
             columns: vec!["c".into()],
             storage_params: params,
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(

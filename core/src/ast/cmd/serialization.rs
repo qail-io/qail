@@ -16,7 +16,7 @@ struct Fields {
     joins: Vec<Join>,
     cages: Vec<Cage>,
     distinct: bool,
-    index_def: Option<IndexDef>,
+    index_def: Option<Box<IndexDef>>,
     table_constraints: Vec<TableConstraint>,
     set_ops: Vec<(SetOp, Box<Qail>)>,
     having: Vec<Condition>,
@@ -57,9 +57,9 @@ struct Fields {
     vector_size: Option<u64>,
     distance: Option<Distance>,
     on_disk: Option<bool>,
-    function_def: Option<crate::ast::FunctionDef>,
-    trigger_def: Option<crate::ast::TriggerDef>,
-    policy_def: Option<crate::migrate::policy::RlsPolicy>,
+    function_def: Option<Box<crate::ast::FunctionDef>>,
+    trigger_def: Option<Box<crate::ast::TriggerDef>>,
+    policy_def: Option<Box<crate::migrate::policy::RlsPolicy>>,
     #[serde(default)]
     view_security_invoker: bool,
     // Absent in payloads written before these view options were kept.

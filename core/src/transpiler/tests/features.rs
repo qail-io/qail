@@ -28,7 +28,7 @@ fn test_index_sql_unique() {
 fn test_index_fragments_validate_method_and_predicate() {
     let valid = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_lower_email".to_string(),
             table: "users".to_string(),
             columns: vec!["lower(email)".to_string()],
@@ -39,7 +39,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: Some("active = true".to_string()),
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -49,7 +49,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let hnsw = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_docs_embedding".to_string(),
             table: "documents".to_string(),
             columns: vec!["embedding vector_l2_ops".to_string()],
@@ -60,7 +60,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: None,
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -70,7 +70,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let ivfflat = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_docs_embedding_cosine".to_string(),
             table: "documents".to_string(),
             columns: vec!["embedding vector_cosine_ops".to_string()],
@@ -81,7 +81,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: None,
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -91,7 +91,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let quoted_column = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["lower(email); DROP TABLE users; --".to_string()],
@@ -102,7 +102,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: None,
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -112,7 +112,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let invalid_column = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["lower(email)\0".to_string()],
@@ -123,7 +123,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: None,
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -133,7 +133,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let invalid_method = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["email".to_string()],
@@ -144,7 +144,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: None,
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -154,7 +154,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let invalid_predicate = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["email".to_string()],
@@ -165,7 +165,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: Some("active = true; DROP TABLE users; --".to_string()),
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -175,7 +175,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let invalid_nul_predicate = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["email".to_string()],
@@ -186,7 +186,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: Some("active = true\0".to_string()),
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -196,7 +196,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let covering_concurrent = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_users_email_cover".to_string(),
             table: "users".to_string(),
             columns: vec!["email".to_string()],
@@ -207,7 +207,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: Some("deleted_at IS NULL".to_string()),
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -217,7 +217,7 @@ fn test_index_fragments_validate_method_and_predicate() {
 
     let invalid_include = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "idx_bad".to_string(),
             table: "users".to_string(),
             columns: vec!["email".to_string()],
@@ -228,7 +228,7 @@ fn test_index_fragments_validate_method_and_predicate() {
             where_clause: None,
             nulls_not_distinct: false,
             storage_params: vec![],
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -851,7 +851,7 @@ fn test_revoke_sql() {
 fn test_create_function_with_args_sql() {
     let cmd = Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: "sum_one".to_string(),
             args: vec!["v int".to_string()],
             returns: "int".to_string(),
@@ -859,7 +859,7 @@ fn test_create_function_with_args_sql() {
             language: Some("plpgsql".to_string()),
             volatility: None,
             options: Default::default(),
-        }),
+        })),
         ..Default::default()
     };
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
@@ -873,7 +873,7 @@ fn test_create_function_with_args_sql() {
 fn test_function_definition_rejects_invalid_fragments() {
     let invalid_arg = Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: "notice_boom".to_string(),
             args: vec!["v int); DROP TABLE users; --".to_string()],
             returns: "int".to_string(),
@@ -881,7 +881,7 @@ fn test_function_definition_rejects_invalid_fragments() {
             language: Some("plpgsql".to_string()),
             volatility: None,
             options: Default::default(),
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -891,7 +891,7 @@ fn test_function_definition_rejects_invalid_fragments() {
 
     let invalid_return = Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: "notice_boom".to_string(),
             args: vec![
                 "amount numeric(10,2)".to_string(),
@@ -902,7 +902,7 @@ fn test_function_definition_rejects_invalid_fragments() {
             language: Some("plpgsql".to_string()),
             volatility: None,
             options: Default::default(),
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -912,7 +912,7 @@ fn test_function_definition_rejects_invalid_fragments() {
 
     let invalid_volatility = Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: "notice_boom".to_string(),
             args: vec![
                 "amount numeric(10,2)".to_string(),
@@ -923,7 +923,7 @@ fn test_function_definition_rejects_invalid_fragments() {
             language: Some("plpgsql".to_string()),
             volatility: Some("stable; DROP TABLE users".to_string()),
             options: Default::default(),
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -956,7 +956,7 @@ fn test_function_definition_rejects_invalid_fragments() {
 fn test_create_trigger_renders_update_of_columns() {
     let cmd = Qail {
         action: Action::CreateTrigger,
-        trigger_def: Some(TriggerDef {
+        trigger_def: Some(Box::new(TriggerDef {
             name: "trg_touch_email".to_string(),
             table: "users".to_string(),
             timing: TriggerTiming::Before,
@@ -967,7 +967,7 @@ fn test_create_trigger_renders_update_of_columns() {
             condition: None,
             old_table: None,
             new_table: None,
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -991,7 +991,7 @@ fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
 
     let function_cmd = Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: "notice_boom".to_string(),
             args: vec![],
             returns: "void".to_string(),
@@ -999,7 +999,7 @@ fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
             language: Some("plpgsql".to_string()),
             volatility: None,
             options: Default::default(),
-        }),
+        })),
         ..Default::default()
     };
     assert_eq!(
@@ -1054,7 +1054,7 @@ fn test_create_policy_sql() {
         ));
     let cmd = Qail {
         action: Action::CreatePolicy,
-        policy_def: Some(policy),
+        policy_def: Some(Box::new(policy)),
         ..Default::default()
     };
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);

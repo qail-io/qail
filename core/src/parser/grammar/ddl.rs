@@ -314,7 +314,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
             cages: vec![],
             distinct: false,
             distinct_on: vec![],
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: index_name.to_string(),
                 table: table_name.to_string(),
                 columns: columns.iter().map(|s| s.to_string()).collect(),
@@ -325,7 +325,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             table_constraints: vec![],
             set_ops: vec![],
             having: vec![],

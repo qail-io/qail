@@ -226,21 +226,23 @@ fn transpiler_preview_matches_native_fail_closed_rules() {
 
     let mixed = Qail {
         action: Action::CreatePolicy,
-        policy_def: Some(RlsPolicy::create("p", "t").to_roles(["public", "app_user"])),
+        policy_def: Some(Box::new(
+            RlsPolicy::create("p", "t").to_roles(["public", "app_user"]),
+        )),
         ..Default::default()
     };
     assert!(mixed.to_sql().starts_with("/* ERROR"));
 
     let index = Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "i".to_string(),
             table: "t".to_string(),
             columns: vec!["a".to_string()],
             unique: false,
             nulls_not_distinct: true,
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     assert!(index.to_sql().starts_with("/* ERROR"));

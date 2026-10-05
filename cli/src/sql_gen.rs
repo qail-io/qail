@@ -494,7 +494,7 @@ mod tests {
         let cmd = Qail {
             action: Action::Index,
             table: String::new(),
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_users_email".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -505,7 +505,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
 
@@ -522,7 +522,7 @@ mod tests {
         let cmd = Qail {
             action: Action::Index,
             table: String::new(),
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_users_active_email".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -533,7 +533,7 @@ mod tests {
                 where_clause: Some("deleted_at IS NULL".to_string()),
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
 

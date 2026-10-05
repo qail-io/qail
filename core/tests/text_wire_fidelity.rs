@@ -328,7 +328,7 @@ fn corpus() -> Vec<(&'static str, Qail)> {
             Qail {
                 action: Action::Index,
                 table: "things".to_string(),
-                index_def: Some(IndexDef {
+                index_def: Some(Box::new(IndexDef {
                     name: "things_name_idx".to_string(),
                     table: "things".to_string(),
                     columns: vec!["name".to_string()],
@@ -339,7 +339,7 @@ fn corpus() -> Vec<(&'static str, Qail)> {
                     where_clause: None,
                     nulls_not_distinct: false,
                     storage_params: vec![],
-                }),
+                })),
                 ..Default::default()
             },
         ),

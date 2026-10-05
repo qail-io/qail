@@ -2986,7 +2986,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
         cmds.push(Qail {
             action: Action::Index,
             table: String::new(),
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: idx.name.clone(),
                 table: idx.table.clone(),
                 columns: if !idx.expressions.is_empty() {
@@ -3001,7 +3001,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 where_clause: idx.where_clause.as_ref().map(check_expr_to_sql),
                 nulls_not_distinct: idx.nulls_not_distinct,
                 storage_params: idx.storage_params.clone(),
-            }),
+            })),
             ..Default::default()
         });
     }

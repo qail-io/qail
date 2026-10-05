@@ -1824,7 +1824,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
             cmds.push(Qail {
                 action: Action::Index,
                 table: String::new(),
-                index_def: Some(IndexDef {
+                index_def: Some(Box::new(IndexDef {
                     name: new_idx.name.clone(),
                     table: new_idx.table.clone(),
                     columns: if !new_idx.expressions.is_empty() {
@@ -1839,7 +1839,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     where_clause: new_idx.where_clause.as_ref().map(check_expr_to_sql),
                     nulls_not_distinct: new_idx.nulls_not_distinct,
                     storage_params: new_idx.storage_params.clone(),
-                }),
+                })),
                 ..Default::default()
             });
         }

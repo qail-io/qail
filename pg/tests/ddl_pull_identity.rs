@@ -74,13 +74,13 @@ fn table_cmd(table: &str) -> Qail {
 fn index_cmd(table: &str) -> Qail {
     Qail {
         action: Action::Index,
-        index_def: Some(IndexDef {
+        index_def: Some(Box::new(IndexDef {
             name: "qail_probe_name_idx".into(),
             table: table.to_string(),
             columns: vec!["name".into()],
             storage_params: vec!["fillfactor=70".into()],
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     }
 }
@@ -88,7 +88,7 @@ fn index_cmd(table: &str) -> Qail {
 fn function_cmd(name: &str) -> Qail {
     Qail {
         action: Action::CreateFunction,
-        function_def: Some(FunctionDef {
+        function_def: Some(Box::new(FunctionDef {
             name: name.to_string(),
             args: vec!["x int".into()],
             returns: "int".into(),
@@ -104,7 +104,7 @@ fn function_cmd(name: &str) -> Qail {
                 rows: None,
                 config: vec!["search_path TO 'pg_catalog', 'pg_temp'".into()],
             },
-        }),
+        })),
         ..Default::default()
     }
 }
@@ -112,7 +112,7 @@ fn function_cmd(name: &str) -> Qail {
 fn trigger_cmd(table: &str, name: &str, when: bool) -> Qail {
     Qail {
         action: Action::CreateTrigger,
-        trigger_def: Some(TriggerDef {
+        trigger_def: Some(Box::new(TriggerDef {
             name: name.to_string(),
             table: table.to_string(),
             timing: TriggerTiming::After,
@@ -123,7 +123,7 @@ fn trigger_cmd(table: &str, name: &str, when: bool) -> Qail {
             condition: when.then(|| "old.name IS DISTINCT FROM new.name".to_string()),
             old_table: (!when).then(|| "old_rows".to_string()),
             new_table: (!when).then(|| "new_rows".to_string()),
-        }),
+        })),
         ..Default::default()
     }
 }

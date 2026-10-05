@@ -22,8 +22,9 @@ pub struct Qail {
     pub cages: Vec<Cage>,
     /// SELECT DISTINCT.
     pub distinct: bool,
-    /// Index definition for CREATE INDEX.
-    pub index_def: Option<IndexDef>,
+    /// Index definition for CREATE INDEX. The DDL definitions are boxed: every
+    /// builder moves a Qail by value, and inline they made it 2048 bytes.
+    pub index_def: Option<Box<IndexDef>>,
     /// Table-level constraints (composite UNIQUE / PK).
     pub table_constraints: Vec<TableConstraint>,
     /// UNION / INTERSECT / EXCEPT operations.
@@ -96,11 +97,11 @@ pub struct Qail {
     pub on_disk: Option<bool>,
     // PostgreSQL procedural objects
     /// Function definition.
-    pub function_def: Option<crate::ast::FunctionDef>,
+    pub function_def: Option<Box<crate::ast::FunctionDef>>,
     /// Trigger definition.
-    pub trigger_def: Option<crate::ast::TriggerDef>,
+    pub trigger_def: Option<Box<crate::ast::TriggerDef>>,
     /// RLS policy definition.
-    pub policy_def: Option<crate::migrate::policy::RlsPolicy>,
+    pub policy_def: Option<Box<crate::migrate::policy::RlsPolicy>>,
     /// `CREATE VIEW … WITH (security_invoker = true)`.
     ///
     /// Postgres evaluates a plain view against its base tables with the VIEW

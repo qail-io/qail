@@ -3312,13 +3312,13 @@ mod tests {
             },
             Qail {
                 action: Action::CreatePolicy,
-                policy_def: Some(
+                policy_def: Some(Box::new(
                     qail_core::migrate::policy::RlsPolicy::create(
                         "tenant_contracts_policy",
                         "tenant_contracts",
                     )
                     .for_all(),
-                ),
+                )),
                 ..Default::default()
             },
         ];
@@ -3338,13 +3338,13 @@ mod tests {
         let cmds = vec![
             Qail {
                 action: Action::CreatePolicy,
-                policy_def: Some(
+                policy_def: Some(Box::new(
                     qail_core::migrate::policy::RlsPolicy::create(
                         "tenant_isolation",
                         "reseller_pricing_overrides",
                     )
                     .for_all(),
-                ),
+                )),
                 ..Default::default()
             },
             Qail {

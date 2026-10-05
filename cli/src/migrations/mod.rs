@@ -505,7 +505,7 @@ mod tests {
         let idx_users = Qail {
             action: Action::Index,
             table: String::new(),
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_lookup".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -516,13 +516,13 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         let idx_orgs = Qail {
             action: Action::Index,
             table: String::new(),
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_lookup".to_string(),
                 table: "organizations".to_string(),
                 columns: vec!["email".to_string()],
@@ -533,7 +533,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
 

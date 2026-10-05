@@ -556,7 +556,7 @@ fn compile_policies_strict(policies: &[RlsPolicy]) -> Result<Vec<Qail>> {
 
         cmds.push(Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(policy.clone()),
+            policy_def: Some(Box::new(policy.clone())),
             ..Default::default()
         });
     }
@@ -731,7 +731,7 @@ fn compile_functions_strict(functions: &[SchemaFunctionDef]) -> Result<Vec<Qail>
 
         cmds.push(Qail {
             action: Action::CreateFunction,
-            function_def: Some(FunctionDef {
+            function_def: Some(Box::new(FunctionDef {
                 name: func.name.clone(),
                 args: func.args.clone(),
                 returns: func.returns.clone(),
@@ -739,7 +739,7 @@ fn compile_functions_strict(functions: &[SchemaFunctionDef]) -> Result<Vec<Qail>
                 language: Some(func.language.clone()),
                 volatility: func.volatility.clone(),
                 options: func.options.clone(),
-            }),
+            })),
             ..Default::default()
         });
     }
@@ -803,7 +803,7 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
 
         cmds.push(Qail {
             action: Action::CreateTrigger,
-            trigger_def: Some(TriggerDef {
+            trigger_def: Some(Box::new(TriggerDef {
                 name: trigger.name.clone(),
                 table: trigger.table.clone(),
                 timing,
@@ -814,7 +814,7 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
                 condition: trigger.condition.clone(),
                 old_table: trigger.old_table.clone(),
                 new_table: trigger.new_table.clone(),
-            }),
+            })),
             ..Default::default()
         });
     }
@@ -1325,7 +1325,7 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
     for idx in &schema.indexes {
         cmds.push(Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: idx.name.clone(),
                 table: idx.table.clone(),
                 columns: idx.columns.clone(),
@@ -1336,7 +1336,7 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         });
     }

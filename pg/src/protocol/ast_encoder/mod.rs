@@ -3090,7 +3090,7 @@ mod tests {
 
         let index = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx; DROP INDEX x; --".to_string(),
                 table: "orders; DROP TABLE users; --".to_string(),
                 columns: vec!["tenant_id; DROP".to_string()],
@@ -3101,7 +3101,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
@@ -3213,7 +3213,7 @@ mod tests {
 
         let valid = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_lower_email".to_string(),
                 table: "users".to_string(),
                 columns: vec!["lower(email)".to_string()],
@@ -3224,7 +3224,7 @@ mod tests {
                 where_clause: Some("active = true".to_string()),
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
@@ -3234,7 +3234,7 @@ mod tests {
 
         let hnsw = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_docs_embedding".to_string(),
                 table: "documents".to_string(),
                 columns: vec!["embedding vector_l2_ops".to_string()],
@@ -3245,7 +3245,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
@@ -3255,7 +3255,7 @@ mod tests {
 
         let ivfflat = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_docs_embedding_cosine".to_string(),
                 table: "documents".to_string(),
                 columns: vec!["embedding vector_cosine_ops".to_string()],
@@ -3266,7 +3266,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
@@ -3276,7 +3276,7 @@ mod tests {
 
         let quoted_column = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["lower(email); DROP TABLE users; --".to_string()],
@@ -3287,7 +3287,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
@@ -3297,7 +3297,7 @@ mod tests {
 
         let invalid_column = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["lower(email)\0".to_string()],
@@ -3308,7 +3308,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         let err =
@@ -3320,7 +3320,7 @@ mod tests {
 
         let invalid_method = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -3331,7 +3331,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_method)
@@ -3343,7 +3343,7 @@ mod tests {
 
         let invalid_predicate = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -3354,7 +3354,7 @@ mod tests {
                 where_clause: Some("active = true; DROP TABLE users; --".to_string()),
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_predicate)
@@ -3366,7 +3366,7 @@ mod tests {
 
         let invalid_nul_predicate = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -3377,7 +3377,7 @@ mod tests {
                 where_clause: Some("active = true\0".to_string()),
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_nul_predicate)
@@ -3389,7 +3389,7 @@ mod tests {
 
         let covering_concurrent = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_users_email_cover".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -3400,7 +3400,7 @@ mod tests {
                 where_clause: Some("deleted_at IS NULL".to_string()),
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
@@ -3410,7 +3410,7 @@ mod tests {
 
         let invalid_include = Qail {
             action: Action::Index,
-            index_def: Some(IndexDef {
+            index_def: Some(Box::new(IndexDef {
                 name: "idx_bad".to_string(),
                 table: "users".to_string(),
                 columns: vec!["email".to_string()],
@@ -3421,7 +3421,7 @@ mod tests {
                 where_clause: None,
                 nulls_not_distinct: false,
                 storage_params: vec![],
-            }),
+            })),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_include)
@@ -4061,7 +4061,7 @@ mod tests {
 
         let cmd = Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(policy),
+            policy_def: Some(Box::new(policy)),
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
@@ -4086,7 +4086,7 @@ mod tests {
 
         let cmd = Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(policy),
+            policy_def: Some(Box::new(policy)),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("unsafe policy expression must fail");
@@ -4102,7 +4102,7 @@ mod tests {
             ));
         let cmd = Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(nul_policy),
+            policy_def: Some(Box::new(nul_policy)),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("nul policy expression must fail");
@@ -4116,7 +4116,7 @@ mod tests {
             .with_check(Expr::Named("note = 'semi;inside'".to_string()));
         let cmd = Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(safe_policy),
+            policy_def: Some(Box::new(safe_policy)),
             ..Default::default()
         };
         let sql = AstEncoder::encode_cmd_sql(&cmd).unwrap().0;
@@ -4140,7 +4140,7 @@ mod tests {
     fn test_encode_create_function_with_args() {
         let cmd = Qail {
             action: Action::CreateFunction,
-            function_def: Some(qail_core::ast::FunctionDef {
+            function_def: Some(Box::new(qail_core::ast::FunctionDef {
                 name: "sum_one".to_string(),
                 args: vec!["v int".to_string()],
                 returns: "int".to_string(),
@@ -4148,7 +4148,7 @@ mod tests {
                 language: Some("plpgsql".to_string()),
                 volatility: None,
                 options: Default::default(),
-            }),
+            })),
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
@@ -4163,7 +4163,7 @@ mod tests {
     fn test_encode_function_definition_rejects_invalid_fragments() {
         let invalid_arg = Qail {
             action: Action::CreateFunction,
-            function_def: Some(qail_core::ast::FunctionDef {
+            function_def: Some(Box::new(qail_core::ast::FunctionDef {
                 name: "notice_boom".to_string(),
                 args: vec!["v int); DROP TABLE users; --".to_string()],
                 returns: "int".to_string(),
@@ -4171,7 +4171,7 @@ mod tests {
                 language: Some("plpgsql".to_string()),
                 volatility: None,
                 options: Default::default(),
-            }),
+            })),
             ..Default::default()
         };
         let err =
@@ -4183,7 +4183,7 @@ mod tests {
 
         let invalid_return = Qail {
             action: Action::CreateFunction,
-            function_def: Some(qail_core::ast::FunctionDef {
+            function_def: Some(Box::new(qail_core::ast::FunctionDef {
                 name: "notice_boom".to_string(),
                 args: vec![
                     "amount numeric(10,2)".to_string(),
@@ -4194,7 +4194,7 @@ mod tests {
                 language: Some("plpgsql".to_string()),
                 volatility: None,
                 options: Default::default(),
-            }),
+            })),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_return)
@@ -4206,7 +4206,7 @@ mod tests {
 
         let invalid_volatility = Qail {
             action: Action::CreateFunction,
-            function_def: Some(qail_core::ast::FunctionDef {
+            function_def: Some(Box::new(qail_core::ast::FunctionDef {
                 name: "notice_boom".to_string(),
                 args: vec![
                     "amount numeric(10,2)".to_string(),
@@ -4217,7 +4217,7 @@ mod tests {
                 language: Some("plpgsql".to_string()),
                 volatility: Some("stable; DROP TABLE users".to_string()),
                 options: Default::default(),
-            }),
+            })),
             ..Default::default()
         };
         let err = AstEncoder::encode_cmd_sql(&invalid_volatility)
@@ -4263,7 +4263,7 @@ mod tests {
 
         let function_cmd = Qail {
             action: Action::CreateFunction,
-            function_def: Some(qail_core::ast::FunctionDef {
+            function_def: Some(Box::new(qail_core::ast::FunctionDef {
                 name: "notice_boom".to_string(),
                 args: vec![],
                 returns: "void".to_string(),
@@ -4271,7 +4271,7 @@ mod tests {
                 language: Some("plpgsql".to_string()),
                 volatility: None,
                 options: Default::default(),
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(

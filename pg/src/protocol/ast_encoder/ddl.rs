@@ -2715,7 +2715,7 @@ mod tests {
             .to_roles(["app_user", "audit user"]);
         let cmd = Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(policy),
+            policy_def: Some(Box::new(policy)),
             ..Default::default()
         };
         assert_eq!(
@@ -2724,10 +2724,10 @@ mod tests {
         );
         let public_mix = Qail {
             action: Action::CreatePolicy,
-            policy_def: Some(
+            policy_def: Some(Box::new(
                 qail_core::migrate::policy::RlsPolicy::create("p", "t")
                     .to_roles(["public", "app_user"]),
-            ),
+            )),
             ..Default::default()
         };
         assert!(encoded(&public_mix).is_err());
@@ -2737,14 +2737,14 @@ mod tests {
     fn nulls_not_distinct_requires_unique_index() {
         let mut index = Qail {
             action: Action::Index,
-            index_def: Some(qail_core::ast::IndexDef {
+            index_def: Some(Box::new(qail_core::ast::IndexDef {
                 name: "handles_handle_key".to_string(),
                 table: "handles".to_string(),
                 columns: vec!["handle".to_string()],
                 unique: true,
                 nulls_not_distinct: true,
                 ..Default::default()
-            }),
+            })),
             ..Default::default()
         };
         assert_eq!(
