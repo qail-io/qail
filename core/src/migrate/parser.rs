@@ -2597,21 +2597,28 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         return Err("trigger requires at least one event".to_string());
     }
 
-    let func_name = parts
-        .get(exec_idx + 1)
-        .ok_or("trigger missing function name")?;
-    if !is_native_table_ref(func_name) {
-        return Err(format!("invalid trigger function '{}'", func_name));
+    // Arguments may contain spaces, so the call is the raw text after the
+    // `execute` token, not the remaining whitespace tokens. `parts` are
+    // subslices of `rest`, so the pointer difference is a byte offset.
+    let exec_tok = parts[exec_idx];
+    let call_start = exec_tok.as_ptr() as usize - rest.as_ptr() as usize + exec_tok.len();
+    let call = rest[call_start..].trim();
+    if call.is_empty() {
+        return Err("trigger missing function name".to_string());
     }
+    // `execute f('a', 42) when (cond)`: the call, then an optional WHEN.
+    let (func_name, func_args, after_call) = split_trigger_function_call(call)?;
     let mut condition = None;
-    if parts.len() > exec_idx + 2 {
-        if parts[exec_idx + 2] != "when" || parts.len() == exec_idx + 3 {
+    let after_call = after_call.trim();
+    if !after_call.is_empty() {
+        let Some(raw) = after_call
+            .strip_prefix("when")
+            .filter(|raw| raw.starts_with(char::is_whitespace))
+        else {
             return Err("trailing content after trigger function".to_string());
-        }
+        };
         // Take the raw text so whitespace inside literals survives.
-        let cond_token = parts[exec_idx + 3];
-        let offset = cond_token.as_ptr() as usize - rest.as_ptr() as usize;
-        let raw = rest[offset..].trim();
+        let raw = raw.trim();
         let close = find_matching_paren(raw, 0)
             .filter(|close| raw.starts_with('(') && *close == raw.len() - 1)
             .ok_or("trigger when condition must be wrapped in parentheses")?;
@@ -2622,7 +2629,7 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         condition = Some(inner.to_string());
     }
 
-    let mut trigger = SchemaTriggerDef::new(name, *table, *func_name);
+    let mut trigger = SchemaTriggerDef::new(name, *table, func_name);
     trigger.timing = timing;
     trigger.events = events;
     trigger.update_columns = update_columns;
@@ -2630,8 +2637,116 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     trigger.old_table = old_table;
     trigger.new_table = new_table;
     trigger.condition = condition;
+    trigger.execute_args = func_args;
 
     Ok(trigger)
+}
+
+/// Parse a trigger function call: `func`, `func()`, or `func('a', 42)`.
+///
+/// Accepts what `pg_get_triggerdef` prints after `EXECUTE FUNCTION` (and so
+/// what `qail pull` writes): single-quoted strings with `''` escapes. Also
+/// accepts unsigned numeric constants, which PostgreSQL converts to strings;
+/// an integer that fits `int4` is stored as PostgreSQL prints it (`007` →
+/// `"7"`). Bare identifiers are rejected: PostgreSQL case-folds them, so
+/// they must be written quoted.
+pub fn parse_trigger_function_call(call: &str) -> Result<(String, Vec<String>), String> {
+    let (name, args, rest) = split_trigger_function_call(call)?;
+    if !rest.trim().is_empty() {
+        return Err("trailing content after trigger function".to_string());
+    }
+    Ok((name, args))
+}
+
+/// Parse the leading function call; returns name, arguments and the text
+/// after the call (empty, or a clause that follows it).
+fn split_trigger_function_call(call: &str) -> Result<(String, Vec<String>, &str), String> {
+    let call = call.trim();
+    let name_end = call
+        .find(|ch: char| ch == '(' || ch.is_whitespace())
+        .unwrap_or(call.len());
+    let name = &call[..name_end];
+    if !is_native_table_ref(name) {
+        return Err(format!("invalid trigger function '{}'", name));
+    }
+    let rest = call[name_end..].trim_start();
+    let Some(mut rest) = rest.strip_prefix('(') else {
+        return Ok((name.to_string(), Vec::new(), rest));
+    };
+
+    let mut args = Vec::new();
+    rest = rest.trim_start();
+    if let Some(after) = rest.strip_prefix(')') {
+        rest = after;
+    } else {
+        loop {
+            let (arg, after) = parse_trigger_function_arg(rest, name)?;
+            args.push(arg);
+            let after = after.trim_start();
+            if let Some(after) = after.strip_prefix(',') {
+                rest = after.trim_start();
+            } else if let Some(after) = after.strip_prefix(')') {
+                rest = after;
+                break;
+            } else {
+                return Err(format!(
+                    "trigger function '{}' arguments must be separated by ',' and closed by ')'",
+                    name
+                ));
+            }
+        }
+    }
+    Ok((name.to_string(), args, rest.trim_start()))
+}
+
+/// Parse one trigger argument; returns its string value and the remaining input.
+fn parse_trigger_function_arg<'a>(input: &'a str, func: &str) -> Result<(String, &'a str), String> {
+    if let Some(body) = input.strip_prefix('\'') {
+        let mut value = String::new();
+        let mut chars = body.char_indices();
+        while let Some((i, ch)) = chars.next() {
+            if ch != '\'' {
+                value.push(ch);
+                continue;
+            }
+            if body[i + 1..].starts_with('\'') {
+                value.push('\'');
+                chars.next();
+                continue;
+            }
+            return Ok((value, &body[i + 1..]));
+        }
+        return Err(format!(
+            "unterminated string argument in trigger function '{}'",
+            func
+        ));
+    }
+
+    let end = input
+        .find(|ch: char| ch == ',' || ch == ')' || ch.is_whitespace())
+        .unwrap_or(input.len());
+    let token = &input[..end];
+    let is_numeric = match token.split_once('.') {
+        None => !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit()),
+        Some((int, frac)) => {
+            !frac.is_empty()
+                && int.bytes().all(|b| b.is_ascii_digit())
+                && frac.bytes().all(|b| b.is_ascii_digit())
+        }
+    };
+    if !is_numeric {
+        return Err(format!(
+            "unsupported argument '{}' in trigger function '{}' (use a quoted string or an unsigned number)",
+            token, func
+        ));
+    }
+    // PostgreSQL's grammar turns an int4 constant into its printed form and
+    // keeps every other numeric constant as written.
+    let value = match token.parse::<i32>() {
+        Ok(n) if !token.contains('.') => n.to_string(),
+        _ => token.to_string(),
+    };
+    Ok((value, &input[end..]))
 }
 
 /// Parse GRANT/REVOKE.
@@ -5308,6 +5423,179 @@ function normalize_email(email text, fallback text) returns text language sql $$
         let input = "trigger trg_updated_at on users before update execute set_updated_at garbage";
         let err = parse_qail(input).expect_err("trailing trigger content should fail");
         assert!(err.contains("trailing content after trigger function"));
+    }
+
+    /// The lines `qail pull` wrote for engine schema.qail (engine 4a29985b)
+    /// that stopped the engine at startup on 2026-10-04.
+    const PULLED_TRIGGERS_WITH_ARGS: &str = "\
+trigger inventory_changes_closure on rotation_segment_inventory after update of closure_id execute inventory_changes_capture_inventory('closure')
+trigger inventory_changes_odyssey_active on odysseys after update of is_active execute inventory_changes_capture_odyssey('odyssey_active')
+trigger inventory_changes_availability_source on odysseys after update of availability_source execute inventory_changes_capture_odyssey('availability_source')
+trigger inventory_changes_manual_capacity on rotation_segment_inventory after update of manual_capacity execute inventory_changes_capture_inventory('manual_capacity')
+trigger inventory_changes_manual_capacity_insert on rotation_segment_inventory after insert execute inventory_changes_capture_inventory('manual_capacity')
+";
+
+    #[test]
+    fn test_parse_trigger_pulled_function_args() {
+        let schema = parse_qail(PULLED_TRIGGERS_WITH_ARGS).expect("pulled trigger lines parse");
+        let got: Vec<String> = schema
+            .triggers
+            .iter()
+            .map(|t| {
+                format!(
+                    "{} {:?} of {:?} -> {}{:?}",
+                    t.name, t.events, t.update_columns, t.execute_function, t.execute_args
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                r#"inventory_changes_closure ["UPDATE"] of ["closure_id"] -> inventory_changes_capture_inventory["closure"]"#,
+                r#"inventory_changes_odyssey_active ["UPDATE"] of ["is_active"] -> inventory_changes_capture_odyssey["odyssey_active"]"#,
+                r#"inventory_changes_availability_source ["UPDATE"] of ["availability_source"] -> inventory_changes_capture_odyssey["availability_source"]"#,
+                r#"inventory_changes_manual_capacity ["UPDATE"] of ["manual_capacity"] -> inventory_changes_capture_inventory["manual_capacity"]"#,
+                r#"inventory_changes_manual_capacity_insert ["INSERT"] of [] -> inventory_changes_capture_inventory["manual_capacity"]"#,
+            ]
+        );
+        assert!(schema.triggers.iter().all(|t| t.timing == "AFTER"));
+    }
+
+    #[test]
+    fn test_pulled_trigger_lines_round_trip_byte_identical() {
+        let schema = parse_qail(PULLED_TRIGGERS_WITH_ARGS).expect("pulled trigger lines parse");
+        let rendered = crate::migrate::to_qail_string(&schema);
+        for line in PULLED_TRIGGERS_WITH_ARGS.lines() {
+            assert!(
+                rendered.contains(line),
+                "lost line {line:?} in:\n{rendered}"
+            );
+        }
+        let reparsed = parse_qail(&rendered).expect("rendered schema reparses");
+        assert_eq!(reparsed.triggers, schema.triggers);
+    }
+
+    /// Function arguments and the clauses gap-pull-types keeps (statement
+    /// level, transition tables, WHEN) on one line, as pull writes them.
+    #[test]
+    fn test_trigger_args_with_clauses_round_trip_byte_identical() {
+        let input = "\
+table seats {
+  id INT primary_key
+  status TEXT
+}
+
+trigger seats_audit on seats after update for_each_statement old_table old_rows new_table new_rows execute capture_changes('closure', '42')
+trigger seats_status on seats before update execute guard_status('it''s', '7') when (old.status IS DISTINCT FROM new.status)
+";
+        let schema = parse_qail(input).expect("trigger lines with args and clauses parse");
+        let audit = &schema.triggers[0];
+        assert_eq!(audit.execute_args, ["closure", "42"]);
+        assert!(!audit.for_each_row);
+        assert_eq!(audit.old_table.as_deref(), Some("old_rows"));
+        assert_eq!(audit.new_table.as_deref(), Some("new_rows"));
+        let status = &schema.triggers[1];
+        assert_eq!(status.execute_args, ["it's", "7"]);
+        assert_eq!(
+            status.condition.as_deref(),
+            Some("old.status IS DISTINCT FROM new.status")
+        );
+
+        let rendered = crate::migrate::to_qail_string(&schema);
+        for line in input.lines().filter(|line| line.starts_with("trigger ")) {
+            assert!(
+                rendered.contains(line),
+                "lost line {line:?} in:\n{rendered}"
+            );
+        }
+        assert_eq!(
+            parse_qail(&rendered).expect("reparses").triggers,
+            schema.triggers
+        );
+
+        for bad in [
+            "trigger t on seats before update execute f('a') when",
+            "trigger t on seats before update execute f('a') when old.x = 1",
+            "trigger t on seats before update execute f('a') unless (true)",
+        ] {
+            assert!(parse_trigger(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_parse_trigger_function_call_forms() {
+        for (call, name, args) in [
+            ("touch", "touch", vec![]),
+            ("touch()", "touch", vec![]),
+            ("touch ( )", "touch", vec![]),
+            ("util.touch('a')", "util.touch", vec!["a"]),
+            ("f('a', 'b c')", "f", vec!["a", "b c"]),
+            ("f('it''s', '')", "f", vec!["it's", ""]),
+            ("f('a,b)', ')')", "f", vec!["a,b)", ")"]),
+            ("f('execute x')", "f", vec!["execute x"]),
+            ("f(42, 007, 1.50, .5)", "f", vec!["42", "7", "1.50", ".5"]),
+            ("f(99999999999)", "f", vec!["99999999999"]),
+            ("f( 'a' ,1 )", "f", vec!["a", "1"]),
+        ] {
+            let (got_name, got_args) =
+                parse_trigger_function_call(call).unwrap_or_else(|e| panic!("{call}: {e}"));
+            assert_eq!(got_name, name, "{call}");
+            assert_eq!(got_args, args, "{call}");
+        }
+    }
+
+    #[test]
+    fn test_parse_trigger_function_call_rejects_malformed() {
+        for (call, expected) in [
+            ("f('a)", "unterminated string argument"),
+            ("f('a'", "must be separated by ',' and closed by ')'"),
+            ("f('a' 'b')", "must be separated by ',' and closed by ')'"),
+            ("f('a',)", "unsupported argument ''"),
+            ("f(,'a')", "unsupported argument ''"),
+            ("f(closure)", "unsupported argument 'closure'"),
+            ("f(-1)", "unsupported argument '-1'"),
+            ("f(1.)", "unsupported argument '1.'"),
+            ("f('a') x", "trailing content after trigger function"),
+            ("f x", "trailing content after trigger function"),
+            ("bad-func('a')", "invalid trigger function 'bad-func'"),
+            ("('a')", "invalid trigger function ''"),
+        ] {
+            let err = parse_trigger_function_call(call).expect_err(call);
+            assert!(err.contains(expected), "{call}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_trigger_args_writer_parser_round_trip() {
+        // Every value the writer can quote must come back unchanged.
+        let mut schema = Schema::new();
+        schema.add_trigger(
+            SchemaTriggerDef::new("t_args", "users", "util.capture")
+                .timing("AFTER")
+                .events(vec!["UPDATE".to_string(), "DELETE".to_string()])
+                .execute_args(vec![
+                    "plain".to_string(),
+                    "it's".to_string(),
+                    "".to_string(),
+                    "a, b) execute c".to_string(),
+                    "42".to_string(),
+                    "back\\slash".to_string(),
+                ]),
+        );
+        schema.add_trigger(SchemaTriggerDef::new("t_none", "users", "touch"));
+        let rendered = crate::migrate::to_qail_string(&schema);
+        assert!(
+            rendered.contains(
+                "execute util.capture('plain', 'it''s', '', 'a, b) execute c', '42', 'back\\slash')\n"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("before insert execute touch\n"),
+            "{rendered}"
+        );
+        let reparsed = parse_qail(&rendered).expect("rendered triggers reparse");
+        assert_eq!(reparsed.triggers, schema.triggers);
     }
 
     #[test]

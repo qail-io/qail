@@ -979,6 +979,9 @@ pub struct SchemaTriggerDef {
     pub for_each_row: bool,
     /// Function to execute.
     pub execute_function: String,
+    /// Arguments passed to the function. PostgreSQL stores every trigger
+    /// argument as a string (`tgargs`), so `f(42)` holds `"42"`.
+    pub execute_args: Vec<String>,
     /// Optional WHEN condition.
     pub condition: Option<String>,
     /// REFERENCING OLD TABLE AS name.
@@ -1002,10 +1005,27 @@ impl SchemaTriggerDef {
             update_columns: Vec::new(),
             for_each_row: true,
             execute_function: execute_function.into(),
+            execute_args: Vec::new(),
             condition: None,
             old_table: None,
             new_table: None,
         }
+    }
+
+    /// Set the function arguments.
+    pub fn execute_args(mut self, args: Vec<String>) -> Self {
+        self.execute_args = args;
+        self
+    }
+
+    /// The arguments as PostgreSQL prints them in `pg_get_triggerdef`:
+    /// each one single-quoted, `'` doubled, joined by `", "`.
+    pub fn execute_args_literal(&self) -> String {
+        self.execute_args
+            .iter()
+            .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Set the trigger timing.
@@ -2617,6 +2637,15 @@ pub fn to_qail_string(schema: &Schema) -> String {
             .as_deref()
             .map(|condition| format!(" when ({})", condition))
             .unwrap_or_default();
+        let call = if trigger.execute_args.is_empty() {
+            trigger.execute_function.clone()
+        } else {
+            format!(
+                "{}({})",
+                trigger.execute_function,
+                trigger.execute_args_literal()
+            )
+        };
         output.push_str(&format!(
             "trigger {} on {} {} {}{} execute {}{}\n",
             trigger.name,
@@ -2624,7 +2653,7 @@ pub fn to_qail_string(schema: &Schema) -> String {
             trigger.timing.to_lowercase(),
             events.join(" or ").to_lowercase(),
             clauses,
-            trigger.execute_function,
+            call,
             when
         ));
     }

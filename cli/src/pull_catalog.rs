@@ -697,8 +697,6 @@ pub(crate) async fn fetch_function_catalog(
 pub(crate) struct TriggerCatalog {
     /// CONSTRAINT trigger (deferrable firing).
     pub constraint: bool,
-    /// Number of trigger function arguments.
-    pub nargs: i64,
 }
 
 /// Non-internal triggers in `namespace_oid`, keyed by `(trigger, table)`.
@@ -714,7 +712,7 @@ pub(crate) async fn fetch_trigger_catalog(
             "c.oid",
             "tg.tgrelid",
         )
-        .columns(["tg.tgname", "c.relname", "tg.tgconstraint", "tg.tgnargs"])
+        .columns(["tg.tgname", "c.relname", "tg.tgconstraint"])
         .filter("c.relnamespace", Operator::Eq, namespace_oid.to_string())
         .filter("tg.tgisinternal", Operator::Eq, false);
     let rows = driver
@@ -723,15 +721,10 @@ pub(crate) async fn fetch_trigger_catalog(
         .map_err(|e| anyhow!("Failed to query trigger catalog: {}", e))?;
     let mut out = HashMap::new();
     for row in rows {
-        let nargs_text = row.text(3);
-        let nargs = nargs_text
-            .parse::<i64>()
-            .map_err(|e| anyhow!("Invalid pg_trigger.tgnargs {:?}: {}", nargs_text, e))?;
         out.insert(
             (row.text(0), row.text(1)),
             TriggerCatalog {
                 constraint: row.text(2) != "0",
-                nargs,
             },
         );
     }

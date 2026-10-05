@@ -815,6 +815,9 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
 
     // Always output .qail format now
     let qail = with_lossy_header(&to_qail_string(&schema), &lossy);
+    // Consumers parse this file at startup; never write one they would reject.
+    qail_core::migrate::parse_qail(&qail)
+        .map_err(|e| anyhow!("Pulled schema does not reparse, schema.qail left unchanged: {e}"))?;
     write_atomically("schema.qail", &qail)?;
     if !lossy.is_empty() {
         eprintln!(
@@ -2387,20 +2390,23 @@ async fn inspect_postgres(url: &str) -> Result<(Schema, Vec<String>)> {
             ));
             continue;
         }
-        if catalog.nargs > 0 {
-            lossy.push(format!(
-                "trigger {name} on {table}: trigger function arguments are not represented; not pulled"
-            ));
-            continue;
-        }
-        // Extract function name from "EXECUTE FUNCTION func_name()" or "EXECUTE PROCEDURE func_name()"
-        let exec_fn = pulled
-            .action
-            .replace("EXECUTE FUNCTION ", "")
-            .replace("EXECUTE PROCEDURE ", "")
-            .trim_end_matches("()")
+        // "EXECUTE FUNCTION func_name('arg', ...)" or "EXECUTE PROCEDURE ...";
+        // arguments are kept (`execute f('a', 42)` in schema.qail).
+        let action_stmt = &pulled.action;
+        let call = action_stmt
             .trim()
-            .to_string();
+            .strip_prefix("EXECUTE FUNCTION ")
+            .or_else(|| action_stmt.trim().strip_prefix("EXECUTE PROCEDURE "))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Trigger '{}' on '{}': unrecognised action statement '{}'",
+                    name,
+                    table,
+                    action_stmt
+                )
+            })?;
+        let (exec_fn, exec_args) = qail_core::migrate::parse_trigger_function_call(call)
+            .map_err(|e| anyhow!("Trigger '{}' on '{}': {}", name, table, e))?;
 
         // information_schema returns one row per event in no defined order.
         let mut events = pulled.events;
@@ -2412,7 +2418,7 @@ async fn inspect_postgres(url: &str) -> Result<(Schema, Vec<String>)> {
         });
         events.dedup();
 
-        let mut trig = SchemaTriggerDef::new(&name, &table, &exec_fn);
+        let mut trig = SchemaTriggerDef::new(&name, &table, &exec_fn).execute_args(exec_args);
         trig.timing = pulled.timing;
         trig.events = events.clone();
         trig.for_each_row = pulled.for_each_row;

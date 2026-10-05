@@ -670,6 +670,23 @@ drop table if exists _qail_queue
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_rejects_trigger_function_args() {
+        let input = r#"
+table inv {
+  id int primary_key
+}
+trigger t_closure on inv after update execute capture('closure')
+"#;
+        let err = parse_qail_to_commands_strict(input)
+            .expect_err("trigger arguments must not be dropped")
+            .to_string();
+        assert!(
+            err.contains("does not support trigger function arguments yet (trigger 't_closure')"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_schema_objects() {
         let input = r#"
 extension "uuid-ossp"

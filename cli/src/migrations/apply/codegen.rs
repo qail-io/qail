@@ -779,6 +779,13 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
                 );
             }
         }
+        // The AST TriggerDef has no argument list; compiling would drop them.
+        if !trigger.execute_args.is_empty() {
+            bail!(
+                "Strict AST migration compiler does not support trigger function arguments yet (trigger '{}')",
+                trigger.name
+            );
+        }
 
         let timing = parse_trigger_timing(&trigger.timing, &trigger.name)?;
         let events = parse_trigger_events(&trigger.events, &trigger.name)?;
@@ -1784,9 +1791,10 @@ fn migrate_schema_to_sql(schema: &qail_core::migrate::schema::Schema) -> String 
         };
         // Drop + recreate for idempotency
         parts.push(format!(
-            "DROP TRIGGER IF EXISTS {} ON {};\nCREATE TRIGGER {} {} {} ON {} {}EXECUTE FUNCTION {};",
+            "DROP TRIGGER IF EXISTS {} ON {};\nCREATE TRIGGER {} {} {} ON {} {}EXECUTE FUNCTION {}({});",
             trigger.name, trigger.table,
-            trigger.name, trigger.timing, events, trigger.table, for_each, trigger.execute_function
+            trigger.name, trigger.timing, events, trigger.table, for_each, trigger.execute_function,
+            trigger.execute_args_literal()
         ));
     }
 
