@@ -175,6 +175,22 @@ fn bound_subquery_in_order_by_shares_parameters() {
 }
 
 #[test]
+fn bound_subquery_in_group_by_binds_between_where_and_having() {
+    let cmd = Qail::get("orders")
+        .columns(["id"])
+        .filter("status", Operator::Eq, "paid")
+        .group_by_expr([pending_item_subquery()])
+        .having_cond(condition("total", Operator::Gt, Value::Int(2)));
+    let (sql, params) = encode(&cmd);
+    assert_eq!(
+        sql,
+        "SELECT id FROM orders WHERE status = $1 GROUP BY \
+         (SELECT id FROM items WHERE status = $2 LIMIT 1) HAVING total > $3"
+    );
+    assert_eq!(text_params(&params), ["paid", "pending", "2"]);
+}
+
+#[test]
 fn bound_subquery_on_where_left_shares_parameters() {
     let cmd = Qail::get("orders").columns(["id"]).filter_cond(Condition {
         left: pending_item_subquery(),
