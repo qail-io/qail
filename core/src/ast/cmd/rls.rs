@@ -1353,10 +1353,9 @@ impl Qail {
                 _ => return Err(reject("requires distinct simple lowercase target columns")),
             }
         }
-        let source = self
-            .source_query
-            .as_ref()
-            .expect("SELECT source checked by caller");
+        let Some(source) = self.source_query.as_ref() else {
+            return Err(reject("requires a SELECT source"));
+        };
         if !simple_scope_ident(&self.table) || !simple_scope_ident(&source.table) {
             return Err(reject(
                 "requires canonical simple registered relation names",
@@ -1411,10 +1410,9 @@ impl Qail {
             .columns
             .iter()
             .position(|e| matches!(e, Expr::Named(n) if n == column));
-        let source = self
-            .source_query
-            .as_mut()
-            .expect("SELECT source checked by caller");
+        let Some(source) = self.source_query.as_mut() else {
+            return Err(reject("requires a SELECT source"));
+        };
         if let Some(position) = position {
             source.columns[position] = Expr::Literal(value);
         } else {

@@ -156,7 +156,9 @@ fn exact_text_payload(cmd: &Qail) -> Option<String> {
 
 fn ast_json_payload(cmd: &Qail) -> String {
     // Qail has no non-string map keys or fallible custom value serializers.
-    serde_json::to_string(cmd).expect("Qail fields are JSON-serializable")
+    // Should that change, the empty payload is not JSON, so every reader
+    // rejects the command instead of decoding something else.
+    serde_json::to_string(cmd).unwrap_or_default()
 }
 
 /// Encode an AST using QWB2, or QWB3 when any nested command has applied scope.

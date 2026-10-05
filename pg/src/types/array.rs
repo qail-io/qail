@@ -632,7 +632,7 @@ mod tests {
         trailing.push(0);
         assert!(PgArray::<i64>::from_pg(&trailing, oid::INT4_ARRAY, 1).is_err());
         // Bad flags, too many dimensions, negative length, huge declared count.
-        let mut flags = good.clone();
+        let mut flags = good;
         flags[7] = 2;
         assert!(PgArray::<i64>::from_pg(&flags, oid::INT4_ARRAY, 1).is_err());
         let seven = binary(oid::INT4, &[(1, 1); 7], &[Some(&one)]);

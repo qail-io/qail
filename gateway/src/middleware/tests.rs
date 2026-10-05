@@ -102,7 +102,7 @@ fn allow_list_file_matches_commands_by_ast_and_ignores_sql_lines() {
         .columns(["id"])
         .eq("active", true);
     assert!(allow_list.allows_command(&listed));
-    assert!(!allow_list.allows_command(&listed.clone().for_update()));
+    assert!(!allow_list.allows_command(&listed.for_update()));
     assert!(!allow_list.allows_command(&qail_core::ast::Qail::get("orders").columns(["id"])));
 }
 

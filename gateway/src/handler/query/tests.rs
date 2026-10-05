@@ -160,7 +160,7 @@ fn clause_variants_text_form_drops() -> Vec<(&'static str, qail_core::ast::Qail)
             "for_update_skip_locked",
             base.clone().for_update_skip_locked(),
         ),
-        ("for_share", base.clone().for_share()),
+        ("for_share", base.for_share()),
         ("distinct", distinct),
         ("union", union),
         ("only", only),
@@ -602,10 +602,7 @@ fn row_lock_variants() -> Vec<(&'static str, qail_core::ast::Qail)> {
         ("for_no_key_update", plain.clone().for_no_key_update()),
         ("for_share", plain.clone().for_share()),
         ("for_key_share", plain.clone().for_key_share()),
-        (
-            "for_update_skip_locked",
-            plain.clone().for_update_skip_locked(),
-        ),
+        ("for_update_skip_locked", plain.for_update_skip_locked()),
         ("skip_locked_flag", skip_locked_only),
     ]
 }

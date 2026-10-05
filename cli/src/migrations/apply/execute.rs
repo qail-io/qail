@@ -3020,7 +3020,7 @@ mod tests {
         };
         let all_columns = qail_core::ast::ForeignKeyOptions {
             on_delete_columns: Vec::new(),
-            ..declared.clone()
+            ..declared
         };
         let columns = ["room_id".to_string()];
         let ref_columns = ["id".to_string()];

@@ -445,7 +445,7 @@ proptest! {
             cmd = cmd.limit(limit);
         }
         prop_assert_eq!(decode_cmd_text(&encode_cmd_text(&cmd)), Ok(cmd.clone()));
-        let batch = vec![cmd.clone(), Qail::add("rows").set_value("note", word.as_str())];
+        let batch = vec![cmd, Qail::add("rows").set_value("note", word.as_str())];
         prop_assert_eq!(decode_cmds_text(&encode_cmds_text(&batch)), Ok(batch));
     }
 }
