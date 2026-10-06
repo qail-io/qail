@@ -590,7 +590,7 @@ async function teachingOnFailure() {
     assertEqual(
         "curated insert example SQL is current",
         insert.json?.result?.structuredContent?.sql,
-        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') RETURNING *",
+        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')",
     );
 
     const upsert = await callTool("qail_parse_query", {
@@ -600,7 +600,7 @@ async function teachingOnFailure() {
     assertEqual(
         "curated upsert example SQL is current",
         upsert.json?.result?.structuredContent?.sql,
-        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') ON CONFLICT (email) DO UPDATE SET name = 'Alice' RETURNING *",
+        "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') ON CONFLICT (email) DO UPDATE SET name = 'Alice'",
     );
 
     // A naive Postgres-style upsert must be steered toward `add`, never `set`.

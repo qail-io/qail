@@ -1310,12 +1310,18 @@ const CHEATSHEET = [
     "             [order by ...] [limit N] [offset N]",
     "",
     "QAIL has NO group by clause. There is no group-by production in the grammar, and any",
-    "trailing 'group by ...' is a parse error. Grouping is reachable only through the builder",
-    "API's group_by_mode, never through the surface syntax.",
+    "trailing 'group by ...' is a parse error. When fields mix plain columns and aggregates, the",
+    "transpiler groups by the plain columns; explicit keys, ROLLUP, CUBE and GROUPING SETS are",
+    "reachable only through the builder API's group_by_mode.",
     "",
-    "having currently accepts only a non-aggregate left-hand side. An aggregate there parses but",
-    "transpiles to an embedded /* ERROR: Invalid condition expression */ comment rather than",
-    "failing, so always run a having query through qail_transpile_query before trusting it.",
+    "having takes aggregate conditions. Put the aggregate in fields as well, so the query is",
+    "grouped:",
+    "",
+    "  get orders fields status, count(*) having count(*) > 1",
+    "    -> SELECT status, COUNT(*) FROM orders GROUP BY status HAVING COUNT(*) > 1",
+    "",
+    "Without an aggregate in fields there is no GROUP BY, and PostgreSQL rejects a plain selected",
+    "column next to an aggregate having.",
     "",
     "fields may appear after a join, as in the join examples below. Strings use double quotes;",
     "single quotes also parse, and doubling a quote escapes it.",
@@ -1599,14 +1605,13 @@ const ACTION_CONSTRUCTS: Record<string, string[]> = Object.assign(
 /**
  * Curated verified examples for actions the generated corpus cannot cover.
  *
- * The verified-example corpus (docs/generated/verified-examples.json) carries NO
- * `add`/INSERT pair: every bare-`values` add form the exporter tried transpiles to
- * invalid SQL ("Invalid insert column") because it omits the required `fields`
- * list, so none survived verification (see qail://core/cheatsheet, "Inserts and
- * upserts"). That leaves an agent who fails an insert/upsert with only SET/UPDATE
- * examples to copy — the wrong direction. These two forms WERE run through
- * qail_transpile_query (postgres) and produce exactly the SQL shown; they give the
- * one thing the corpus cannot, a working `add`-starting example.
+ * The verified-example corpus (docs/generated/verified-examples.json) holds only
+ * positional `add` forms without a `fields` list (`INSERT INTO users VALUES (1)`),
+ * which depend on the table's column order; before 3.0 even those transpiled to
+ * invalid SQL. An agent who fails an insert/upsert needs a form that names its
+ * columns, not SET/UPDATE examples — the wrong direction. These two forms WERE run
+ * through qail_transpile_query (postgres) and produce exactly the SQL shown; the
+ * conformance suite checks that on every deploy.
  */
 const CURATED_EXAMPLES: Record<string, { input: string; sql: string }[]> = Object.assign(
     Object.create(null) as Record<string, { input: string; sql: string }[]>,
@@ -1614,13 +1619,13 @@ const CURATED_EXAMPLES: Record<string, { input: string; sql: string }[]> = Objec
         add: [
             {
                 input: 'add users fields name, email values "Alice", "alice@example.com"',
-                sql: "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') RETURNING *",
+                sql: "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')",
             },
             {
                 input:
                     'add users fields name, email values "Alice", "alice@example.com" conflict (email) update name = "Alice"',
                 sql:
-                    "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') ON CONFLICT (email) DO UPDATE SET name = 'Alice' RETURNING *",
+                    "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') ON CONFLICT (email) DO UPDATE SET name = 'Alice'",
             },
         ],
     },

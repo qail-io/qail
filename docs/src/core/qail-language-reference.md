@@ -58,7 +58,7 @@ The order is:
 3. `fields`
 4. `from (...)` or `values ...` — **`add` only**
 5. `where`
-6. `having` — non-aggregate conditions only, see §6.4
+6. `having` — aggregate conditions; grouping comes from `fields`, see §6.4
 7. `conflict` — **`add` only**
 8. `order by`
 9. `limit`
@@ -380,8 +380,16 @@ DELETE FROM sessions WHERE (user_id = $1 OR expired = true)
 or `add <table> from (get ...)` for INSERT…SELECT.
 
 The `values` clause for `add` is a **positional list of values**, not `col = val` pairs — that
-form belongs to `set`. Because of this, `add` requires an explicit `fields` list to name the
-target columns. Omitting it produces invalid SQL (see §6).
+form belongs to `set`. Name the target columns with an explicit `fields` list. Without it the
+statement has no column list, and PostgreSQL fills the table's columns in declaration order: a
+column added or reordered later shifts every value into a different column without an error.
+
+```qail
+add users values 1, "Ana" conflict (id) update name = "Ana"
+```
+```sql
+INSERT INTO users VALUES (1, 'Ana') ON CONFLICT (id) DO UPDATE SET name = 'Ana'
+```
 
 ### 4.9 `merge` — MERGE INTO
 
@@ -676,6 +684,7 @@ have dedicated productions.
 ## 6. What the language rejects
 
 These are real failures with the real error text, from `docs/generated/invalid-examples.json`.
+§6.2 and §6.4 record forms that 2.x rejected and 3.0 accepts.
 
 ### 6.1 Flat `and` + `or` in the same condition chain
 
@@ -703,23 +712,15 @@ is `0`. Use a single connective per chain, or build the query with the AST build
 
 ### 6.2 `add` without a `fields` list
 
-This is the dangerous class: it **parses successfully** but transpiles to invalid SQL, with the
-error embedded as a SQL comment in the column list. Always give `add` an explicit `fields`.
+Accepted since 3.0; 2.x transpiled it to invalid SQL with `/* ERROR: Invalid insert column */`
+in the column list. It now emits a positional `INSERT INTO <table> VALUES (...)`, which depends on
+the table's column order — see §4.8 and give `add` an explicit `fields` list.
 
 ```text
 add users values 1 conflict (id) update name = excluded.name
 ```
 ```text
-parses, but transpiles to invalid SQL:
-INSERT INTO users (/* ERROR: Invalid insert column */) VALUES (1) ON CONFLICT (id) DO UPDATE SET name = excluded.name RETURNING *
-```
-
-```text
-add users values 1, "Ana" conflict (id) update name = '''O'Reilly'''
-```
-```text
-parses, but transpiles to invalid SQL:
-INSERT INTO users (/* ERROR: Invalid insert column */) VALUES (1, 'Ana') ON CONFLICT (id) DO UPDATE SET name = 'O''Reilly' RETURNING *
+INSERT INTO users VALUES (1) ON CONFLICT (id) DO UPDATE SET name = excluded.name
 ```
 
 ### 6.3 Oversized input
@@ -728,19 +729,20 @@ Anything over 64 KB is rejected before parsing (§2.1).
 
 ### 6.4 `having` with an aggregate
 
-Same dangerous class as §6.2: it **parses successfully** but transpiles to invalid SQL, with the
-error embedded as a SQL comment where the left operand belongs. `having` currently accepts only a
-non-aggregate left-hand side.
+Accepted since 3.0; 2.x embedded `/* ERROR: Invalid condition expression */` in place of the
+aggregate. QAIL text has no `group by` (§6.5): when `fields` mixes plain columns and aggregates,
+the transpiler groups by the plain columns, so put the aggregate in `fields` as well.
 
 ```text
-get orders fields status having count(*) > 1
+get orders fields status, count(*) having count(*) > 1
 ```
 ```text
-parses, but transpiles to invalid SQL:
-SELECT status FROM orders HAVING /* ERROR: Invalid condition expression */ > 1
+SELECT status, COUNT(*) FROM orders GROUP BY status HAVING COUNT(*) > 1
 ```
 
-`having sum(total) > 100` fails the same way. A plain column — `having total > 100` — works.
+Without an aggregate in `fields` there is no `GROUP BY`. `get orders fields status having count(*) > 1`
+transpiles to `SELECT status FROM orders HAVING COUNT(*) > 1`, which PostgreSQL rejects because
+`status` is neither grouped nor aggregated.
 
 ### 6.5 `group by`
 
@@ -754,7 +756,8 @@ get orders fields status group by status
 Parse error at position 0: Unexpected trailing content: 'group by status'
 ```
 
-Grouping is reachable only through the builder API's `group_by_mode`, never through text syntax.
+Text syntax groups only implicitly: by the plain columns, when `fields` also holds an aggregate
+(§6.4). Explicit keys, ROLLUP, CUBE and GROUPING SETS go through the builder API's `group_by_mode`.
 
 ---
 
@@ -788,7 +791,7 @@ Grouping is reachable only through the builder API's `group_by_mode`, never thro
 | `RIGHT JOIN` | `right join` | |
 | `ORDER BY x DESC` | `order by x desc` | `asc` is the default |
 | `LIMIT` / `OFFSET` | `limit` / `offset` | |
-| `HAVING` | `having` | non-aggregate conditions only — see §6.4 | |
+| `HAVING` | `having` | put the aggregate in `fields` too — see §6.4 | |
 | `SET a = 1` (UPDATE) | `values a = 1` | before `where` |
 | `VALUES (1, 'x')` (INSERT) | `values 1, "x"` | positional; pair with `fields` |
 | `INSERT ... SELECT` | `from (get ...)` | |
