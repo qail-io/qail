@@ -86,7 +86,8 @@ async fn fake_server() -> u16 {
 }
 
 /// `holders` tasks each take one connection, wait for all of them to hold
-/// one, then each asks for a second.
+/// one, then each asks for a second. Every task keeps its first connection
+/// until all second acquires have resolved.
 async fn hold_one_then_ask_for_a_second(pool: &PgPool, holders: usize) -> Vec<Result<(), String>> {
     let barrier = Arc::new(tokio::sync::Barrier::new(holders));
     let mut tasks = Vec::new();
@@ -100,6 +101,9 @@ async fn hold_one_then_ask_for_a_second(pool: &PgPool, holders: usize) -> Vec<Re
                 Ok(second) => second.release_checked().await.map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };
+            // A first connection released while another task's second
+            // acquire is still pending would serve that acquire (seen on CI).
+            barrier.wait().await;
             first.release_checked().await.map_err(|e| e.to_string())?;
             outcome
         }));
