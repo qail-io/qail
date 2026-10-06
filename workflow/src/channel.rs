@@ -84,6 +84,9 @@ impl std::error::Error for ChannelError {}
 ///     fn kind(&self) -> ChannelKind { ChannelKind::WhatsApp }
 /// }
 /// ```
+// async_trait marks each boxed future #[must_use]; clippy 1.99 already
+// counts the boxed future as must_use and denies the pair.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait NotifyChannel: Send + Sync {
     /// Send a template message to a recipient.

@@ -25,6 +25,9 @@ enum PgWorkflowBackend {
     Pool(PgPool),
 }
 
+// async_trait marks each boxed future #[must_use]; clippy 1.99 already
+// counts the boxed future as must_use and denies the pair.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait PgWorkflowConnection: Send {
     async fn execute_ast(&mut self, cmd: &Qail) -> qail_pg::PgResult<u64>;

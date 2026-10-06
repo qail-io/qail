@@ -259,6 +259,8 @@ impl std::error::Error for WorkflowError {}
 ///     }
 /// }
 /// ```
+// See NotifyChannel: async_trait's #[must_use] and clippy 1.99.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WorkflowExecutor: Send + Sync {
     /// Execute a QAIL query (QAIL wire text) and return results.

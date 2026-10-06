@@ -315,6 +315,8 @@ impl std::error::Error for PaymentError {}
 ///     fn kind(&self) -> PaymentKind { PaymentKind::Xendit }
 /// }
 /// ```
+// See NotifyChannel: async_trait's #[must_use] and clippy 1.99.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PaymentProvider: Send + Sync {
     /// Create a payment charge.
