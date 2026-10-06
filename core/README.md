@@ -53,7 +53,7 @@ Qail::get("users")
 
 ```toml
 [dependencies]
-qail-core = "2.0.5"
+qail-core = "3.0.0"
 ```
 
 ## Quick Start

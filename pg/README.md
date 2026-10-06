@@ -94,8 +94,8 @@ This shows the exact protocol-byte path used by the driver.
 
 ```toml
 [dependencies]
-qail-pg = "2.0.5"
-qail-core = "2.0.5"
+qail-pg = "3.0.0"
+qail-core = "3.0.0"
 ```
 
 The primary runtime path is AST-native. Use `Qail::get/add/set/del`,

@@ -4,7 +4,21 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v2.0.5)
+## Current Highlights (v3.0.0)
+
+- **Upserts keep the RLS guard**: `ON CONFLICT DO UPDATE` is sent with the tenant/owner guard in either builder order, so a conflicting row of another tenant is left untouched instead of overwritten.
+- **Scoped INSERT ... SELECT and OVERRIDING**: `with_rls()` stamps the tenant on INSERT ... SELECT sources and refuses `OVERRIDING USER VALUE` on scoped tables, where PostgreSQL discarded the stamp.
+- **Pool reset skips stale replies**: a caller dropped mid-request no longer leaves its reply for the next checkout ("completion before BindComplete").
+- **The statement cache compares SQL**: a 64-bit hash collision can no longer run one query as another prepared statement.
+- **Preview SQL and native encoding agree**: HAVING, GROUP BY keys and grouping sets, aggregate DISTINCT and FILTER, bytea binds, RETURNING and payload rules render alike; unsupported forms fail instead of emitting different SQL.
+- **More PostgreSQL**: aggregate ORDER BY and WITHIN GROUP, FROM subqueries and set-returning functions, named arguments, array slices, write CTEs, MERGE DEFAULT/ONLY/OVERRIDING, NOWAIT and FOR ... OF, GROUPS frames, JSONPath and range operators, PostgreSQL 18 temporal keys and `RETURNING WITH (OLD AS .., NEW AS ..)`.
+- **Lossless decoding**: `PgArray<T>` keeps dimensions, lower bounds and NULL elements; infinity, NUMERIC ±Infinity, escape-format bytea and BC dates decode without silent loss.
+- **Faithful `qail pull`**: exact type names, column order, function options, trigger WHEN and arguments, view options and NOT VALID constraints are kept; objects it cannot represent are listed in a LOSSY PULL header, and it refuses to write a file that does not parse back.
+- **Gateway**: cache keys and allow-lists match on the full AST; queries that take row locks are never cached and are refused on read-only surfaces.
+- **Breaking AST changes**: `Qail` boxes its DDL definitions, JSON paths use `JsonPathSegment`, and expression and schema types gain fields and variants. A segment built with `"0".into()` is now an object key (`->'0'`), not the array index 2.x rendered; use `JsonPathSegment::from_path_text` or `JsonPathSegment::Index`. See "Changed (3.0 — migration notes)" in `CHANGELOG.md`.
+- **Release line**: Rust workspace crates and install snippets are bumped to `3.0.0`.
+
+## v2.0.5 Highlights
 
 - **Composite foreign keys in build validation**: `qail_core::build::validate()` accepts the table-level `foreign_key (a, b) references t(x, y)` lines `qail pull` writes; a pulled schema with a composite FK no longer fails every downstream build.
 - **Build scanner reads past lifetimes and loop labels**: schema validation and the RLS/SuperAdmin audits no longer skip the queries after `'_`, `'static` or `'outer:`.
