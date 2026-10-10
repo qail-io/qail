@@ -4,7 +4,13 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v3.0.0)
+## Current Highlights (v3.0.1)
+
+- **A rolled-back COMMIT on release is logged**: `PooledConnection::release()` used to discard a COMMIT that PostgreSQL answered with `ROLLBACK` (a statement in the transaction had failed, so none of its writes were kept). It now logs `pool_release_rolled_back` at warn with the caller's file and line; `release_checked()` is unchanged.
+- **Compound CHECKs validate**: `qail check` and `qail migrate apply` no longer report real columns as missing in `x IS NULL or x in [...]` or in a comparison to a literal (`is_active = false`, `seats = 0`). A schema that validated before still validates.
+- **Release line**: Rust workspace crates and install snippets are bumped to `3.0.1`.
+
+## v3.0.0 Highlights
 
 - **Upserts keep the RLS guard**: `ON CONFLICT DO UPDATE` is sent with the tenant/owner guard in either builder order, so a conflicting row of another tenant is left untouched instead of overwritten.
 - **Scoped INSERT ... SELECT and OVERRIDING**: `with_rls()` stamps the tenant on INSERT ... SELECT sources and refuses `OVERRIDING USER VALUE` on scoped tables, where PostgreSQL discarded the stamp.
