@@ -1349,12 +1349,13 @@ impl Schema {
 
                 for check in col.checks() {
                     for referenced in check_expr_column_references(&check.expr) {
-                        let referenced_column = check_expr_reference_name(referenced);
-                        if !table_columns.contains(referenced_column.as_str()) {
-                            errors.push(format!(
-                                "CHECK error: {}.{} references non-existent column '{}.{}'",
-                                table.name, col.name, table.name, referenced_column
-                            ));
+                        for referenced_column in check_reference_column_names(referenced) {
+                            if !table_columns.contains(referenced_column.as_str()) {
+                                errors.push(format!(
+                                    "CHECK error: {}.{} references non-existent column '{}.{}'",
+                                    table.name, col.name, table.name, referenced_column
+                                ));
+                            }
                         }
                     }
                 }
@@ -1555,12 +1556,13 @@ impl Schema {
 
             if let Some(where_clause) = &index.where_clause {
                 for referenced in check_expr_column_references(where_clause) {
-                    let referenced_column = check_expr_reference_name(referenced);
-                    if !table.columns.iter().any(|c| c.name == referenced_column) {
-                        errors.push(format!(
-                            "Index error: {} WHERE references non-existent column '{}.{}'",
-                            index.name, index.table, referenced_column
-                        ));
+                    for referenced_column in check_reference_column_names(referenced) {
+                        if !table.columns.iter().any(|c| c.name == referenced_column) {
+                            errors.push(format!(
+                                "Index error: {} WHERE references non-existent column '{}.{}'",
+                                index.name, index.table, referenced_column
+                            ));
+                        }
                     }
                 }
             }
@@ -1646,6 +1648,189 @@ fn check_expr_reference_name(reference: &str) -> String {
     let trimmed = reference.trim();
     let unqualified = trimmed.rsplit('.').next().unwrap_or(trimmed);
     unquote_identifier(unqualified)
+}
+
+/// The column names one CHECK reference stands for. The parser also stores
+/// literals and whole sub-expressions where a column belongs: `x = false`
+/// keeps `false` as the right column, and `x IS NULL or x in [a, b]` keeps
+/// `x IS NULL or x` as the IN column. That parse shape stays, because the SQL
+/// rendered from it feeds migration checksums. A plain name is checked as
+/// before; a literal names no column; an expression names its identifiers.
+fn check_reference_column_names(reference: &str) -> Vec<String> {
+    let trimmed = reference.trim();
+    if !is_plain_check_reference(trimmed) {
+        return check_expression_identifiers(trimmed);
+    }
+    if !trimmed.contains('"')
+        && matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "true" | "false" | "null"
+        )
+    {
+        return Vec::new();
+    }
+    vec![check_expr_reference_name(trimmed)]
+}
+
+fn is_plain_check_reference(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference.split('.').all(|part| {
+            (part.len() >= 2 && part.starts_with('"') && part.ends_with('"'))
+                || is_check_identifier_word(part)
+        })
+}
+
+fn is_check_identifier_word(word: &str) -> bool {
+    let mut chars = word.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Identifiers in a CHECK sub-expression that name columns: every word except
+/// keywords, function names (before `(`), qualifiers (before `.`), cast types
+/// (`::text`, `::timestamp with time zone`) and typed-literal prefixes
+/// (`date '…'`). Quoted strings and numbers are skipped.
+fn check_expression_identifiers(expression: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "all",
+        "and",
+        "any",
+        "array",
+        "at",
+        "between",
+        "case",
+        "collate",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "current_user",
+        "distinct",
+        "else",
+        "end",
+        "escape",
+        "exists",
+        "false",
+        "from",
+        "ilike",
+        "in",
+        "is",
+        "isnull",
+        "like",
+        "localtime",
+        "localtimestamp",
+        "not",
+        "notnull",
+        "null",
+        "or",
+        "session_user",
+        "similar",
+        "some",
+        "symmetric",
+        "then",
+        "to",
+        "true",
+        "unknown",
+        "when",
+    ];
+    // Words that continue a cast type after its first word.
+    const CAST_TYPE_WORDS: &[&str] = &[
+        "character",
+        "double",
+        "precision",
+        "time",
+        "varying",
+        "with",
+        "without",
+        "zone",
+    ];
+
+    let chars: Vec<char> = expression.chars().collect();
+    let mut names: Vec<String> = Vec::new();
+    let mut in_cast = false;
+    let mut cast_first_word = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == ':' && chars.get(i + 1) == Some(&':') {
+            in_cast = true;
+            cast_first_word = true;
+            i += 2;
+            continue;
+        }
+        if c == '\'' {
+            i = skip_check_quoted(&chars, i);
+            in_cast = false;
+            continue;
+        }
+        let (word, quoted) = if c == '"' {
+            let end = skip_check_quoted(&chars, i);
+            let inner: String = chars[i + 1..end.saturating_sub(1).max(i + 1)]
+                .iter()
+                .collect();
+            i = end;
+            (inner.replace("\"\"", "\""), true)
+        } else if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+            {
+                i += 1;
+            }
+            (chars[start..i].iter().collect::<String>(), false)
+        } else {
+            if c.is_ascii_digit() {
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '.') {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            in_cast = false;
+            continue;
+        };
+
+        let lower = word.to_lowercase();
+        if in_cast {
+            if cast_first_word || CAST_TYPE_WORDS.contains(&lower.as_str()) {
+                cast_first_word = false;
+                continue;
+            }
+            in_cast = false;
+        }
+        let next = chars[i..].iter().find(|c| !c.is_whitespace());
+        if next == Some(&'(') || (!quoted && next == Some(&'\'')) || chars.get(i) == Some(&'.') {
+            continue;
+        }
+        if !quoted && KEYWORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        if !names.contains(&word) {
+            names.push(word);
+        }
+    }
+    names
+}
+
+/// The index just past the quoted token that opens at `start`; a doubled
+/// quote inside it is an escaped quote.
+fn skip_check_quoted(chars: &[char], start: usize) -> usize {
+    let quote = chars[start];
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == quote {
+            if chars.get(i + 1) == Some(&quote) {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    chars.len()
 }
 
 fn schema_has_unique_key(schema: &Schema, table_name: &str, columns: &[String]) -> bool {
@@ -3738,6 +3923,70 @@ mod tests {
                 .iter()
                 .any(|err| err.contains("pricing_plans.missing_fallback_date")),
             "{errors:?}"
+        );
+    }
+
+    fn validate_parsed(source: &str) -> Result<(), Vec<String>> {
+        crate::migrate::parse_qail(source)
+            .expect("schema parses")
+            .validate()
+    }
+
+    /// The shapes `qail pull` writes for a nullable enum, a boolean flag and a
+    /// zero count. The parser keeps `x IS NULL or x` as the IN column and a
+    /// literal as the right side of a column comparison.
+    #[test]
+    fn test_validate_accepts_pulled_check_shapes() {
+        let source = "table lab {
+  id UUID primary_key
+  anonymized_at TIMESTAMPTZ
+  bookable_seats INT
+  lodging VARCHAR(10) check(lodging IS NULL or lodging in [aboard, resort, none]) check_name lab_lodging
+  is_active BOOLEAN check(anonymized_at IS NULL or is_active = false) check_name lab_inactive
+  closure_id UUID check(closure_id IS NULL or bookable_seats = 0) check_name lab_closed
+}
+";
+        validate_parsed(source).expect("every CHECK names real columns");
+    }
+
+    #[test]
+    fn test_validate_names_the_missing_column_inside_a_compound_check() {
+        let source = "table lab {
+  id UUID primary_key
+  lodging VARCHAR(10) check(missing_flag IS NULL or lodging in [aboard, none]) check_name lab_lodging
+  is_active BOOLEAN check(is_active = false or is_active = missing_flag_two) check_name lab_inactive
+}
+";
+        let errors = validate_parsed(source).expect_err("missing columns fail validation");
+        assert!(
+            errors.iter().any(|err| err.contains("'lab.missing_flag'")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.contains("'lab.missing_flag_two'")),
+            "{errors:?}"
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    #[test]
+    fn test_check_expression_identifiers_skip_casts_functions_and_literals() {
+        assert_eq!(
+            check_expression_identifiers(
+                "(a)::text ~ '^x''y'::text or lower(btrim(b)) = c::character varying \
+                 or d::timestamp with time zone > now() or date '2020-01-01' < e \
+                 or \"F g\" IS NOT NULL or t.h = 0.5 or a = 1"
+            ),
+            vec!["a", "b", "c", "d", "e", "F g", "h"]
+        );
+        assert!(check_reference_column_names("false").is_empty());
+        assert!(check_reference_column_names("0").is_empty());
+        assert_eq!(check_reference_column_names("\"false\""), vec!["false"]);
+        assert_eq!(
+            check_reference_column_names("public.lodging"),
+            vec!["lodging"]
         );
     }
 

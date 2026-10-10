@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`PooledConnection::release()` logs a COMMIT the server rolled back.** It discarded `release_checked()`'s error, so a COMMIT answered with `ROLLBACK` (a statement in the transaction had failed, and none of its writes were kept) left no trace; failed resets were already logged. It now emits `pool_release_rolled_back` at warn with the caller's file and line. `release()` is a `#[track_caller]` function returning `impl Future<Output = ()> + Send`, so `conn.release().await` compiles unchanged.
 
+### Fixed
+
+- **Schema validation no longer reports real columns of a compound CHECK as missing.** `Schema::validate()` (run by `qail check` and by `qail migrate apply` on every delta) read the IN column the parser keeps for `x IS NULL or x in [...]`, which is `x IS NULL or x`, and the literal right side of `is_active = false` or `seats = 0` as column names. It now checks the identifiers inside such an expression and skips literals. A plain column reference is checked as before, so validation only got narrower: a schema that passed still passes. The parsed CHECK and the SQL it renders are unchanged, so migration checksums are too.
+
 ## [3.0.0] - 2026-10-06
 
 3.0 changes public AST types. Code that builds `Qail`, `Expr` or schema types with struct literals, or matches their enums exhaustively, needs the edits under **Changed (3.0 — migration notes)**. Code that uses the builder methods compiles unchanged.
