@@ -19,8 +19,10 @@
     // Parsing is CPU-bound and the endpoint is public and unauthenticated.
     // MAX_INPUT_LENGTH in the parser is 64 KB, so a well-formed request is
     // single-digit milliseconds; this caps a pathological input instead of
-    // letting it run to the account default.
-    "limits": { "cpu_ms": 200 },
+    // letting it run to the account default. 30 days to 2026-10-10: CPU max
+    // 61.5 ms, 1.0 subrequests per request; the subrequest cap bounds the
+    // fan-out of one runaway invocation (platform default 10,000).
+    "limits": { "cpu_ms": 200, "subrequests": 100 },
 
     // Rate limiting via a Durable Object. The native `ratelimits` binding was
     // tried first and proved inert on this account — limit() returned success
