@@ -11,7 +11,42 @@
 
 use qail_core::rls::RlsContext;
 use qail_pg::{PgDriver, PgPool, PgResult, PoolConfig};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+/// Records every WARN and ERROR event as `LEVEL field=value ...`.
+#[derive(Clone, Default)]
+struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+impl WarnCapture {
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().map(|lines| lines.clone()).unwrap_or_default()
+    }
+}
+
+impl tracing::Subscriber for WarnCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = event.metadata().level().to_string();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                line.push_str(&format!(" {}={value:?}", field.name()));
+            },
+        );
+        if let Ok(mut lines) = self.0.lock() {
+            lines.push(line);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
 
 fn database_url() -> String {
     std::env::var("QAIL_TEST_DB_URL").unwrap_or_else(|_| {
@@ -77,6 +112,61 @@ async fn release_checked_reports_a_commit_the_server_rolled_back() -> PgResult<(
         .await?;
     conn.release_checked().await?;
     assert_eq!(kept_ids(&mut driver, &table).await?, 1);
+
+    driver
+        .execute_simple(&format!("DROP TABLE {table}"))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Requires local Podman PostgreSQL qail-pg18-lab on 127.0.0.1:55432"]
+async fn release_logs_a_commit_the_server_rolled_back_with_its_caller() -> PgResult<()> {
+    let capture = WarnCapture::default();
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let mut driver = PgDriver::connect_url(&database_url()).await?;
+    let table = scratch_table(&mut driver).await?;
+    let pool = pool().await?;
+
+    let mut conn = pool.acquire_with_rls(RlsContext::global()).await?;
+    conn.get_mut()?
+        .execute_simple(&format!("INSERT INTO {table} VALUES (1)"))
+        .await?;
+    let duplicate = conn
+        .get_mut()?
+        .execute_simple(&format!("INSERT INTO {table} VALUES (1)"))
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "the duplicate key aborts the transaction"
+    );
+    let release_line = line!() + 1;
+    conn.release().await;
+    let kept = kept_ids(&mut driver, &table).await?;
+    let lines = capture.lines();
+    println!("release after an aborted transaction logged: {lines:#?}; rows kept: {kept}");
+    assert_eq!(kept, 0, "the server kept nothing");
+    let rolled_back: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("pool_release_rolled_back"))
+        .collect();
+    assert_eq!(rolled_back.len(), 1, "{lines:#?}");
+    let line = rolled_back[0];
+    assert!(line.starts_with("WARN "), "{line}");
+    assert!(
+        line.contains(&format!("caller={}:{release_line}:", file!())),
+        "{line}"
+    );
+    assert!(line.contains("ROLLBACK"), "{line}");
+
+    // A release whose COMMIT lands logs nothing.
+    let mut conn = pool.acquire_with_rls(RlsContext::global()).await?;
+    conn.get_mut()?
+        .execute_simple(&format!("INSERT INTO {table} VALUES (2)"))
+        .await?;
+    conn.release().await;
+    assert_eq!(kept_ids(&mut driver, &table).await?, 1);
+    assert_eq!(capture.lines().len(), lines.len(), "{:#?}", capture.lines());
 
     driver
         .execute_simple(&format!("DROP TABLE {table}"))

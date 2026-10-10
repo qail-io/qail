@@ -202,8 +202,36 @@ impl PooledConnection {
     /// conn.release().await; // COMMIT + return to pool
     /// result
     /// ```
-    pub async fn release(self) {
-        let _ = self.release_checked().await;
+    ///
+    /// A COMMIT the server answers with `ROLLBACK` is logged at warn as
+    /// `pool_release_rolled_back`, with the location of this call; reset
+    /// failures are logged where they happen. The same line follows a caller
+    /// that returned the failed statement's error and then released, so it
+    /// names the call site rather than proving lost writes. Use
+    /// [`Self::release_checked`] when the caller acts on whether the writes
+    /// were kept.
+    #[track_caller]
+    pub fn release(self) -> impl Future<Output = ()> + Send {
+        // Read before the future: inside it, the location is this file's.
+        let caller = std::panic::Location::caller();
+        async move {
+            let pool = Arc::clone(&self.pool);
+            let Ok(Some(tags)) = self.reset_for_release().await else {
+                return;
+            };
+            if let Err(e) = crate::driver::transaction::commit_outcome(&tags, "pool release COMMIT")
+            {
+                tracing::warn!(
+                    host = %pool.config.host,
+                    port = pool.config.port,
+                    user = %pool.config.user,
+                    db = %pool.config.database,
+                    caller = %caller,
+                    error = %e,
+                    "pool_release_rolled_back: the server answered COMMIT with ROLLBACK; none of the transaction's writes were kept"
+                );
+            }
+        }
     }
 
     /// Reset and return the connection to the pool.
@@ -220,6 +248,17 @@ impl PooledConnection {
     /// unknown: the server may still commit. The connection is destroyed and
     /// its slot returned.
     pub async fn release_checked(self) -> PgResult<()> {
+        match self.reset_for_release().await? {
+            Some(tags) => crate::driver::transaction::commit_outcome(&tags, "pool release COMMIT"),
+            None => Ok(()),
+        }
+    }
+
+    /// Run the release reset. On an RLS-bound connection that is the COMMIT,
+    /// and its command tags come back for `commit_outcome` to read; a raw
+    /// connection's ROLLBACK returns `None`. Reset failures are logged inside
+    /// `finish_with_reset`.
+    async fn reset_for_release(self) -> PgResult<Option<Vec<String>>> {
         if !self.rls_dirty {
             return self
                 .finish_with_reset(
@@ -228,23 +267,18 @@ impl PooledConnection {
                     "release_reset_failed",
                 )
                 .await
-                .map(|_| ());
+                .map(|_| None);
         }
         // COMMIT the transaction opened by acquire_with_rls.
         // Transaction-local set_config values auto-reset on COMMIT;
         // the appended scrub clears session-scoped state (SET/SET ROLE,
         // listens, advisory locks, temp tables) that COMMIT leaves behind.
-        let tags = self
-            .finish_with_reset(
-                crate::driver::rls::pool_release_commit_sql(),
-                "pool release reset/COMMIT",
-                "release_reset_failed",
-            )
-            .await?;
-        match tags {
-            Some(tags) => crate::driver::transaction::commit_outcome(&tags, "pool release COMMIT"),
-            None => Ok(()),
-        }
+        self.finish_with_reset(
+            crate::driver::rls::pool_release_commit_sql(),
+            "pool release reset/COMMIT",
+            "release_reset_failed",
+        )
+        .await
     }
 
     /// Roll back the pool-managed transaction and return the connection to the pool.

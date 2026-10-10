@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`PooledConnection::release()` logs a COMMIT the server rolled back.** It discarded `release_checked()`'s error, so a COMMIT answered with `ROLLBACK` (a statement in the transaction had failed, and none of its writes were kept) left no trace; failed resets were already logged. It now emits `pool_release_rolled_back` at warn with the caller's file and line. `release()` is a `#[track_caller]` function returning `impl Future<Output = ()> + Send`, so `conn.release().await` compiles unchanged.
+
 ## [3.0.0] - 2026-10-06
 
 3.0 changes public AST types. Code that builds `Qail`, `Expr` or schema types with struct literals, or matches their enums exhaustively, needs the edits under **Changed (3.0 — migration notes)**. Code that uses the builder methods compiles unchanged.
