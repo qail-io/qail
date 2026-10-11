@@ -4,7 +4,12 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v3.0.1)
+## Current Highlights (v3.0.2)
+
+- **`qail pull` keeps TRUNCATE triggers**: `information_schema.triggers` lists INSERT, UPDATE and DELETE events only, so a trigger whose one event is TRUNCATE was dropped without a LOSSY PULL entry and `INSERT OR TRUNCATE` lost its TRUNCATE event. Both now come from `pg_trigger`; a TRUNCATE-only trigger with a WHEN condition is listed as lossy.
+- **Release line**: Rust workspace crates and install snippets are bumped to `3.0.2`.
+
+## v3.0.1 Highlights
 
 - **A rolled-back COMMIT on release is logged**: `PooledConnection::release()` used to discard a COMMIT that PostgreSQL answered with `ROLLBACK` (a statement in the transaction had failed, so none of its writes were kept). It now logs `pool_release_rolled_back` at warn with the caller's file and line; `release_checked()` is unchanged.
 - **Compound CHECKs validate**: `qail check` and `qail migrate apply` no longer report real columns as missing in `x IS NULL or x in [...]` or in a comparison to a literal (`is_active = false`, `seats = 0`). A schema that validated before still validates.
