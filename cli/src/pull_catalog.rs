@@ -692,11 +692,55 @@ pub(crate) async fn fetch_function_catalog(
 
 // ── Triggers ────────────────────────────────────────────────────────────
 
+// `pg_trigger.tgtype` bits (PostgreSQL's catalog/pg_trigger.h).
+const TRIGGER_TYPE_BEFORE: u16 = 1 << 1;
+const TRIGGER_TYPE_TRUNCATE: u16 = 1 << 5;
+const TRIGGER_TYPE_INSTEAD: u16 = 1 << 6;
+
 /// pg_trigger facts information_schema does not expose.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct TriggerCatalog {
     /// CONSTRAINT trigger (deferrable firing).
     pub constraint: bool,
+    /// `pg_trigger.tgtype`: level, timing and event bits.
+    pub tgtype: u16,
+    /// `pg_get_triggerdef`. information_schema.triggers lists INSERT, UPDATE
+    /// and DELETE events only, so a trigger whose one event is TRUNCATE is
+    /// built from this.
+    pub definition: String,
+}
+
+impl TriggerCatalog {
+    pub fn fires_on_truncate(&self) -> bool {
+        self.tgtype & TRIGGER_TYPE_TRUNCATE != 0
+    }
+}
+
+/// `(timing, action statement)` of a trigger whose one event is TRUNCATE,
+/// read from its catalog row, or why it cannot be written. PostgreSQL fires
+/// TRUNCATE triggers only per statement and gives them no transition tables.
+pub(crate) fn truncate_only_trigger(
+    catalog: &TriggerCatalog,
+) -> std::result::Result<(String, String), String> {
+    let timing = if catalog.tgtype & TRIGGER_TYPE_INSTEAD != 0 {
+        "INSTEAD OF"
+    } else if catalog.tgtype & TRIGGER_TYPE_BEFORE != 0 {
+        "BEFORE"
+    } else {
+        "AFTER"
+    };
+    let definition = catalog.definition.as_str();
+    let execute = definition
+        .find(" EXECUTE FUNCTION ")
+        .or_else(|| definition.find(" EXECUTE PROCEDURE "))
+        .ok_or_else(|| "its definition has no EXECUTE clause".to_string())?;
+    if definition[..execute].contains(" WHEN (") {
+        return Err("TRUNCATE trigger with a WHEN condition is not represented".to_string());
+    }
+    Ok((
+        timing.to_string(),
+        definition[execute + 1..].trim().to_string(),
+    ))
 }
 
 /// Non-internal triggers in `namespace_oid`, keyed by `(trigger, table)`.
@@ -712,7 +756,13 @@ pub(crate) async fn fetch_trigger_catalog(
             "c.oid",
             "tg.tgrelid",
         )
-        .columns(["tg.tgname", "c.relname", "tg.tgconstraint"])
+        .columns_expr([
+            named("tg.tgname"),
+            named("c.relname"),
+            named("tg.tgconstraint"),
+            named("tg.tgtype"),
+            catalog_call("pg_get_triggerdef", &["tg.oid"]),
+        ])
         .filter("c.relnamespace", Operator::Eq, namespace_oid.to_string())
         .filter("tg.tgisinternal", Operator::Eq, false);
     let rows = driver
@@ -721,10 +771,19 @@ pub(crate) async fn fetch_trigger_catalog(
         .map_err(|e| anyhow!("Failed to query trigger catalog: {}", e))?;
     let mut out = HashMap::new();
     for row in rows {
+        let (name, table) = (row.text(0), row.text(1));
+        let tgtype = row.text(3).parse::<u16>().map_err(|e| {
+            anyhow!(
+                "Trigger {name} on {table}: unexpected tgtype {:?}: {e}",
+                row.text(3)
+            )
+        })?;
         out.insert(
-            (row.text(0), row.text(1)),
+            (name, table),
             TriggerCatalog {
                 constraint: row.text(2) != "0",
+                tgtype,
+                definition: row.text(4),
             },
         );
     }
@@ -1048,5 +1107,85 @@ mod tests {
             Some("Odd\"Seq")
         );
         assert_eq!(nextval_sequence_name("now()"), None);
+    }
+
+    fn truncate_catalog(tgtype: u16, definition: &str) -> TriggerCatalog {
+        TriggerCatalog {
+            constraint: false,
+            tgtype,
+            definition: definition.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_truncate_only_trigger_reads_timing_and_action_from_the_catalog() {
+        // BEFORE | TRUNCATE, as production's purser_events_no_truncate.
+        let before = truncate_catalog(
+            34,
+            "CREATE TRIGGER ledger_no_truncate BEFORE TRUNCATE ON public.ledger \
+             FOR EACH STATEMENT EXECUTE FUNCTION refuse_rewrite()",
+        );
+        assert!(before.fires_on_truncate());
+        assert_eq!(
+            truncate_only_trigger(&before),
+            Ok((
+                "BEFORE".to_string(),
+                "EXECUTE FUNCTION refuse_rewrite()".to_string()
+            ))
+        );
+        let after = truncate_catalog(
+            32,
+            "CREATE TRIGGER ledger_audit AFTER TRUNCATE ON public.ledger \
+             FOR EACH STATEMENT EXECUTE PROCEDURE audit('truncate', 2)",
+        );
+        assert_eq!(
+            truncate_only_trigger(&after),
+            Ok((
+                "AFTER".to_string(),
+                "EXECUTE PROCEDURE audit('truncate', 2)".to_string()
+            ))
+        );
+        assert!(!truncate_catalog(4 | 1, "").fires_on_truncate());
+    }
+
+    #[test]
+    fn a_truncate_trigger_it_cannot_write_is_refused_with_a_reason() {
+        let with_when = truncate_catalog(
+            34,
+            "CREATE TRIGGER t BEFORE TRUNCATE ON public.ledger FOR EACH STATEMENT \
+             WHEN (pg_trigger_depth() < 1) EXECUTE FUNCTION f()",
+        );
+        assert!(truncate_only_trigger(&with_when).is_err());
+        assert!(truncate_only_trigger(&truncate_catalog(34, "")).is_err());
+    }
+
+    #[test]
+    fn a_truncate_trigger_round_trips_through_schema_qail() {
+        use qail_core::migrate::{Column, Schema, SchemaTriggerDef, Table, to_qail_string};
+
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("ledger").column(Column::new("id", ColumnType::Serial).primary_key()),
+        );
+        let mut trigger = SchemaTriggerDef::new("ledger_no_truncate", "ledger", "refuse_rewrite");
+        trigger.timing = "BEFORE".to_string();
+        trigger.events = vec!["TRUNCATE".to_string()];
+        trigger.for_each_row = false;
+        schema.triggers.push(trigger);
+
+        let text = to_qail_string(&schema);
+        assert!(
+            text.contains(
+                "trigger ledger_no_truncate on ledger before truncate for_each_statement execute refuse_rewrite"
+            ),
+            "{text}"
+        );
+        let parsed = qail_core::migrate::parse_qail(&text).expect("pulled text parses");
+        let back = &parsed.triggers[0];
+        assert_eq!(back.timing.to_ascii_uppercase(), "BEFORE");
+        assert_eq!(back.events.len(), 1);
+        assert!(back.events[0].eq_ignore_ascii_case("TRUNCATE"));
+        assert!(!back.for_each_row);
+        assert_eq!(back.execute_function, "refuse_rewrite");
     }
 }

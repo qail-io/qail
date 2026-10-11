@@ -2375,6 +2375,47 @@ async fn inspect_postgres(url: &str) -> Result<(Schema, Vec<String>)> {
         entry.events.push(row.text(3));
     }
 
+    // information_schema.triggers lists INSERT, UPDATE and DELETE events
+    // only. TRUNCATE comes from pg_trigger: as one more event of a trigger
+    // listed above, or as the whole trigger when it is the only event.
+    let mut truncate_triggers: Vec<(&(String, String), &crate::pull_catalog::TriggerCatalog)> =
+        trigger_catalog
+            .iter()
+            .filter(|(_, catalog)| catalog.fires_on_truncate())
+            .collect();
+    truncate_triggers.sort_by(|a, b| a.0.cmp(b.0));
+    for ((name, table), catalog) in truncate_triggers {
+        if let Some(pulled) = trigger_map.get_mut(&(name.clone(), table.clone())) {
+            if !pulled.events.is_empty() {
+                pulled.events.push("TRUNCATE".to_string());
+            }
+            continue;
+        }
+        if !base_tables.contains(table) {
+            lossy.push(format!(
+                "trigger {name} on {table}: relation is not a pulled table; not pulled"
+            ));
+            continue;
+        }
+        match crate::pull_catalog::truncate_only_trigger(catalog) {
+            Ok((timing, action)) => {
+                trigger_map.insert(
+                    (name.clone(), table.clone()),
+                    PulledTrigger {
+                        timing,
+                        events: vec!["TRUNCATE".to_string()],
+                        action,
+                        for_each_row: false,
+                        condition: None,
+                        old_table: None,
+                        new_table: None,
+                    },
+                );
+            }
+            Err(reason) => lossy.push(format!("trigger {name} on {table}: {reason}; not pulled")),
+        }
+    }
+
     let mut triggers: Vec<SchemaTriggerDef> = Vec::new();
     for ((name, table), pulled) in trigger_map {
         if pulled.events.is_empty() {
@@ -2382,7 +2423,7 @@ async fn inspect_postgres(url: &str) -> Result<(Schema, Vec<String>)> {
         }
         let catalog = trigger_catalog
             .get(&(name.clone(), table.clone()))
-            .copied()
+            .cloned()
             .unwrap_or_default();
         if catalog.constraint {
             lossy.push(format!(

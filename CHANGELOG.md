@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`qail pull` keeps TRUNCATE triggers.** It listed triggers from `information_schema.triggers`, which shows INSERT, UPDATE and DELETE events only. A trigger whose one event is TRUNCATE was dropped without a LOSSY PULL entry, and `AFTER INSERT OR TRUNCATE` came out as `after insert`. TRUNCATE now comes from `pg_trigger`: as one more event of a listed trigger, or as the whole trigger (`trigger t on x before truncate for_each_statement execute f`). A TRUNCATE-only trigger with a WHEN condition is listed as lossy rather than written.
+
 ## [3.0.1] - 2026-10-10
 
 ### Changed
