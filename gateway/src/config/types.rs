@@ -399,3 +399,20 @@ pub fn validate_config_path(
 
     Ok(canonical)
 }
+
+/// Parse a YAML config file body (policies, event triggers).
+///
+/// serde-saphyr's defaults read `yes`/`no`/`on`/`off` as booleans and expand
+/// `<<` merge keys; serde_yaml 0.9 did neither, so both are turned off here.
+/// Duplicate keys are an error.
+pub(crate) fn parse_config_yaml<T: serde::de::DeserializeOwned>(
+    content: &str,
+) -> Result<T, serde_saphyr::Error> {
+    serde_saphyr::from_str_with_options(
+        content,
+        serde_saphyr::options! {
+            strict_booleans: true,
+            merge_keys: serde_saphyr::MergeKeyPolicy::Error,
+        },
+    )
+}

@@ -6,6 +6,7 @@ use qail_core::ast::{
 };
 
 use crate::auth::AuthContext;
+use crate::config::parse_config_yaml;
 use crate::error::GatewayError;
 
 use super::{OperationType, PolicyConfig, PolicyDef, PolicyEngine};
@@ -21,7 +22,7 @@ impl PolicyEngine {
         let content = fs::read_to_string(path)
             .map_err(|e| GatewayError::Config(format!("Failed to read policy file: {}", e)))?;
 
-        let config: PolicyConfig = serde_yaml::from_str(&content)
+        let config: PolicyConfig = parse_config_yaml(&content)
             .map_err(|e| GatewayError::Config(format!("Failed to parse policy file: {}", e)))?;
 
         self.policies = config.policies;
