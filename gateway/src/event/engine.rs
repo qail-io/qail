@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::parse_config_yaml;
 use crate::policy::OperationType;
 
 use super::delivery::deliver_webhook;
@@ -101,7 +102,7 @@ impl EventTriggerEngine {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read event triggers file: {}", e))?;
 
-        let triggers: Vec<EventTrigger> = serde_yaml::from_str(&content)
+        let triggers: Vec<EventTrigger> = parse_config_yaml(&content)
             .map_err(|e| format!("Failed to parse event triggers: {}", e))?;
 
         for trigger in triggers {

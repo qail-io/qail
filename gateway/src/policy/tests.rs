@@ -2612,10 +2612,32 @@ channel_policies:
     pattern: "sold_$user_id"
     role: seller
 "#;
-    let config: PolicyConfig = serde_yaml::from_str(yaml).expect("parses");
+    let config: PolicyConfig = crate::config::parse_config_yaml(yaml).expect("parses");
     assert_eq!(config.channel_policies.len(), 2);
     assert_eq!(config.channel_policies[1].role.as_deref(), Some("seller"));
 
-    let legacy: PolicyConfig = serde_yaml::from_str("policies: []\n").expect("parses");
-    assert!(legacy.channel_policies.is_empty(), "field is optional");
+    let without_channels: PolicyConfig =
+        crate::config::parse_config_yaml("policies: []\n").expect("parses");
+    assert!(
+        without_channels.channel_policies.is_empty(),
+        "field is optional"
+    );
+}
+
+#[test]
+fn config_yaml_rejects_ambiguous_input() {
+    use crate::config::parse_config_yaml;
+
+    let duplicate = "policies:\n  - name: a\n    table: orders\n    table: \"*\"\n";
+    assert!(parse_config_yaml::<PolicyConfig>(duplicate).is_err());
+
+    let merge =
+        "base: &b {denied_columns: [ssn]}\npolicies:\n  - <<: *b\n    name: a\n    table: users\n";
+    assert!(parse_config_yaml::<PolicyConfig>(merge).is_err());
+
+    let yes_bool = "- {name: n, table: t, operations: [read], webhook_url: u, enabled: yes}\n";
+    assert!(parse_config_yaml::<Vec<crate::event::EventTrigger>>(yes_bool).is_err());
+
+    let two_docs = "policies: []\n---\npolicies: []\n";
+    assert!(parse_config_yaml::<PolicyConfig>(two_docs).is_err());
 }
