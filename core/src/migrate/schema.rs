@@ -1640,8 +1640,25 @@ fn collect_check_expr_column_references<'a>(expr: &'a CheckExpr, refs: &mut Vec<
             collect_check_expr_column_references(right, refs);
         }
         CheckExpr::Not(inner) => collect_check_expr_column_references(inner, refs),
-        CheckExpr::Sql(_) => {}
+        CheckExpr::Sql(sql) => {
+            if let Some(column) = null_test_column(sql) {
+                refs.push(column);
+            }
+        }
     }
+}
+
+/// The column of a raw `x IS NULL` / `x IS NOT NULL` operand. Other raw SQL
+/// names no column here: its words may be functions, fields or keywords.
+fn null_test_column(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim();
+    // ASCII lowercasing keeps byte offsets, so the head length indexes `trimmed`.
+    let lower = trimmed.to_ascii_lowercase();
+    let head = lower
+        .strip_suffix(" is not null")
+        .or_else(|| lower.strip_suffix(" is null"))?;
+    let column = trimmed[..head.len()].trim();
+    is_plain_check_reference(column).then_some(column)
 }
 
 fn check_expr_reference_name(reference: &str) -> String {
@@ -1651,11 +1668,9 @@ fn check_expr_reference_name(reference: &str) -> String {
 }
 
 /// The column names one CHECK reference stands for. The parser also stores
-/// literals and whole sub-expressions where a column belongs: `x = false`
-/// keeps `false` as the right column, and `x IS NULL or x in [a, b]` keeps
-/// `x IS NULL or x` as the IN column. That parse shape stays, because the SQL
-/// rendered from it feeds migration checksums. A plain name is checked as
-/// before; a literal names no column; an expression names its identifiers.
+/// literals where a column belongs: `x = false` keeps `false` as the right
+/// column. A plain name is checked as before; a literal names no column; an
+/// expression (a column slot holding more than a name) names its identifiers.
 fn check_reference_column_names(reference: &str) -> Vec<String> {
     let trimmed = reference.trim();
     if !is_plain_check_reference(trimmed) {
@@ -2388,11 +2403,40 @@ fn check_expr_str(expr: &CheckExpr) -> String {
         CheckExpr::MaxLength { column, max } => format!("length({}) <= {}", column, max),
         CheckExpr::MinLength { column, min } => format!("length({}) >= {}", column, min),
         CheckExpr::NotNull { column } => format!("{} not_null", column),
-        CheckExpr::And(l, r) => format!("{} and {}", check_expr_str(l), check_expr_str(r)),
-        CheckExpr::Or(l, r) => format!("{} or {}", check_expr_str(l), check_expr_str(r)),
-        CheckExpr::Not(e) => format!("not {}", check_expr_str(e)),
+        CheckExpr::And(l, r) => format!(
+            "{} and {}",
+            check_operand_str(l, Some(BoolOp::And)),
+            check_operand_str(r, Some(BoolOp::And))
+        ),
+        CheckExpr::Or(l, r) => format!(
+            "{} or {}",
+            check_operand_str(l, Some(BoolOp::Or)),
+            check_operand_str(r, Some(BoolOp::Or))
+        ),
+        CheckExpr::Not(e) => format!("not {}", check_operand_str(e, None)),
         CheckExpr::Sql(sql) => sql.clone(),
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoolOp {
+    And,
+    Or,
+}
+
+/// One operand of `and` / `or` (`parent`) or of `not` (`None`), grouped unless
+/// it is a leaf or the same operator. Mixed operators are always grouped:
+/// SQL binds `and` tighter than `or`, and qail 3.0.2 and earlier split on
+/// `and` first, so ungrouped text meant different things to the two readers.
+fn check_operand_str(expr: &CheckExpr, parent: Option<BoolOp>) -> String {
+    let grouped = match expr {
+        CheckExpr::And(..) => parent != Some(BoolOp::And),
+        CheckExpr::Or(..) => parent != Some(BoolOp::Or),
+        CheckExpr::Sql(sql) => crate::migrate::parser::has_top_level_bool_operator(sql),
+        _ => false,
+    };
+    let text = check_expr_str(expr);
+    if grouped { format!("({text})") } else { text }
 }
 
 fn format_enum_value(value: &str) -> String {
@@ -3933,8 +3977,8 @@ mod tests {
     }
 
     /// The shapes `qail pull` writes for a nullable enum, a boolean flag and a
-    /// zero count. The parser keeps `x IS NULL or x` as the IN column and a
-    /// literal as the right side of a column comparison.
+    /// zero count. `x IS NULL` is a raw operand of the `or`, and a literal is
+    /// the right side of a column comparison.
     #[test]
     fn test_validate_accepts_pulled_check_shapes() {
         let source = "table lab {
@@ -4507,5 +4551,163 @@ mod tests {
             }),
             "slug = lower(btrim(slug))"
         );
+    }
+
+    fn gt(column: &str) -> Box<CheckExpr> {
+        Box::new(CheckExpr::GreaterThan {
+            column: column.to_string(),
+            value: 0,
+        })
+    }
+
+    #[test]
+    fn test_check_printer_groups_mixed_and_or() {
+        assert_eq!(
+            check_expr_str(&CheckExpr::And(
+                gt("a"),
+                Box::new(CheckExpr::Or(gt("b"), gt("c")))
+            )),
+            "a > 0 and (b > 0 or c > 0)"
+        );
+        assert_eq!(
+            check_expr_str(&CheckExpr::Or(
+                Box::new(CheckExpr::And(gt("a"), gt("b"))),
+                gt("c")
+            )),
+            "(a > 0 and b > 0) or c > 0"
+        );
+        assert_eq!(
+            check_expr_str(&CheckExpr::Or(
+                gt("a"),
+                Box::new(CheckExpr::And(gt("b"), gt("c")))
+            )),
+            "a > 0 or (b > 0 and c > 0)"
+        );
+        // One operator all the way down needs no grouping.
+        assert_eq!(
+            check_expr_str(&CheckExpr::And(
+                gt("a"),
+                Box::new(CheckExpr::And(gt("b"), gt("c")))
+            )),
+            "a > 0 and b > 0 and c > 0"
+        );
+        assert_eq!(
+            check_expr_str(&CheckExpr::Or(
+                gt("a"),
+                Box::new(CheckExpr::Or(gt("b"), gt("c")))
+            )),
+            "a > 0 or b > 0 or c > 0"
+        );
+    }
+
+    #[test]
+    fn test_check_printer_groups_raw_sql_operands_and_not() {
+        assert_eq!(
+            check_expr_str(&CheckExpr::And(
+                Box::new(CheckExpr::Sql("x = 1 OR y = 2".to_string())),
+                gt("c"),
+            )),
+            "(x = 1 OR y = 2) and c > 0"
+        );
+        assert_eq!(
+            check_expr_str(&CheckExpr::Or(
+                Box::new(CheckExpr::Sql("x BETWEEN 1 AND 5".to_string())),
+                gt("c"),
+            )),
+            "(x BETWEEN 1 AND 5) or c > 0"
+        );
+        // An operator inside a literal or a call is not an operand boundary.
+        assert_eq!(
+            check_expr_str(&CheckExpr::And(
+                Box::new(CheckExpr::Sql("note <> 'a or b'".to_string())),
+                gt("c"),
+            )),
+            "note <> 'a or b' and c > 0"
+        );
+        assert_eq!(
+            check_expr_str(&CheckExpr::Not(Box::new(CheckExpr::Or(gt("a"), gt("b"))))),
+            "not (a > 0 or b > 0)"
+        );
+        assert_eq!(check_expr_str(&CheckExpr::Not(gt("a"))), "not a > 0");
+    }
+
+    /// `pg_get_constraintdef` text, parsed the way `qail pull` parses it,
+    /// printed into schema.qail and parsed back. Returns the printed schema,
+    /// the SQL of the pulled tree and the SQL of the re-parsed tree.
+    fn round_trip_pulled_check(constraint_def: &str) -> (String, String, String) {
+        let clause = constraint_def
+            .strip_prefix("CHECK ")
+            .expect("pg_get_constraintdef CHECK text");
+        let pulled =
+            crate::migrate::parse_check_expr_fragment(clause).expect("pulled CHECK parses");
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("t").column(
+                Column::new("c", ColumnType::Text).check_named("t_c_check", pulled.clone()),
+            ),
+        );
+        let printed = to_qail_string(&schema);
+        let reparsed = crate::migrate::parse_qail(&printed).expect("printed schema parses");
+        let back = &reparsed.tables["t"].columns[0]
+            .check
+            .as_ref()
+            .expect("re-parsed CHECK")
+            .expr;
+        (printed, check_expr_to_sql(&pulled), check_expr_to_sql(back))
+    }
+
+    #[test]
+    fn test_pulled_check_round_trip_keeps_or_inside_and() {
+        // langs check as PostgreSQL 17 prints it (lab, 2026-11-18).
+        let (printed, pulled, back) = round_trip_pulled_check(
+            "CHECK (((cardinality(languages) <= 8) AND ((cardinality(languages) = 0) OR ((array_ndims(languages) = 1) AND (array_to_string(languages, ','::text) ~ '^[a-z]{2}(,[a-z]{2})*$'::text) AND (char_length(array_to_string(languages, ','::text)) = ((3 * cardinality(languages)) - 1))))))",
+        );
+        assert!(
+            printed.contains(
+                "check(cardinality(languages) <= 8 and (cardinality(languages) = 0 or (array_ndims(languages) = 1 and array_to_string(languages, ','::text) ~ '^[a-z]{2}(,[a-z]{2})*$'::text and char_length(array_to_string(languages, ','::text)) = ((3 * cardinality(languages)) - 1)))) check_name t_c_check"
+            ),
+            "{printed}"
+        );
+        assert_eq!(
+            pulled,
+            "(cardinality(languages) <= 8) AND ((cardinality(languages) = 0) OR ((array_ndims(languages) = 1) AND ((array_to_string(languages, ','::text) ~ '^[a-z]{2}(,[a-z]{2})*$'::text) AND (char_length(array_to_string(languages, ','::text)) = ((3 * cardinality(languages)) - 1)))))"
+        );
+        assert_eq!(back, pulled);
+    }
+
+    #[test]
+    fn test_pulled_check_round_trip_nested_and_or() {
+        for (def, printed_check, sql) in [
+            (
+                "CHECK ((((a > 0) AND (b > 0)) OR (c > 0)))",
+                "check((a > 0 and b > 0) or c > 0)",
+                "((a > 0) AND (b > 0)) OR (c > 0)",
+            ),
+            (
+                "CHECK (((a > 0) AND ((b > 0) OR (c > 0))))",
+                "check(a > 0 and (b > 0 or c > 0))",
+                "(a > 0) AND ((b > 0) OR (c > 0))",
+            ),
+            (
+                "CHECK (((a > 0) OR ((b > 0) AND (c > 0))))",
+                "check(a > 0 or (b > 0 and c > 0))",
+                "(a > 0) OR ((b > 0) AND (c > 0))",
+            ),
+            (
+                "CHECK ((NOT ((a > 0) AND (b > 0))))",
+                "check(not (a > 0 and b > 0))",
+                "NOT ((a > 0) AND (b > 0))",
+            ),
+            (
+                "CHECK ((((distance_basis)::text <> 'garage_loop'::text) OR (garage_id IS NOT NULL)))",
+                "check(distance_basis <> 'garage_loop' or garage_id IS NOT NULL)",
+                "(distance_basis <> 'garage_loop') OR (garage_id IS NOT NULL)",
+            ),
+        ] {
+            let (printed, pulled, back) = round_trip_pulled_check(def);
+            assert!(printed.contains(printed_check), "{def}\n{printed}");
+            assert_eq!(pulled, sql, "{def}");
+            assert_eq!(back, pulled, "{def}");
+        }
     }
 }

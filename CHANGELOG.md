@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`qail pull` prints a CHECK with its grouping.** `and` / `or` operands were printed bare, so `A AND (B OR (C AND D))` came out `A and B or C and D`, and `(a AND b) OR c` and `a AND (b OR c)` printed the same text. An operand with a different operator, or raw SQL holding `and` / `or`, is now grouped: `a > 0 and (b > 0 or c > 0)`. All 660 CHECKs of a live-schema lab clone pull, parse back and build to the database's meaning.
+- **CHECK expressions are read with SQL precedence.** The parser split on the first `and` before `or`, so `a and b or c` built `a AND (b OR c)`. It also tried leaf forms first, so `x <> 'a'::text or y IS NOT NULL` built `x <> 'a'`: the cast was read as a type named `text or y IS NOT NULL`. Now `or` splits first, then `and` (not the one in `BETWEEN .. AND ..`), then `not`, and a cast must name a type. `x IS NULL or x in [..]` is an OR of two operands, and validation checks the column of an `x IS [NOT] NULL` operand.
+- **Receipts written by qail 3.0.2 and earlier still match.** A delta whose CHECK those releases read differently compiles to different SQL now, so its stored checksum no longer matched and `qail migrate apply` refused it as drift (2 engine deltas, `x IS NULL or x in [..]`). Receipt checks in apply, receipt validation and rollback also accept the checksum 3.0.2 computes for the unchanged file, and apply prints `(already applied by qail 3.0.2, which read a CHECK in it differently)`. Any other drift still fails.
+
 ## [3.0.2] - 2026-10-11
 
 ### Fixed

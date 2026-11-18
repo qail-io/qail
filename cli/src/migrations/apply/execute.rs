@@ -384,17 +384,24 @@ pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Resul
         if matches!(direction, MigrateDirection::Up)
             && let Some(stored_checksum) = applied_migrations.get(&mig.display_name)
         {
-            ensure_applied_checksum_matches(
+            let receipt = ensure_applied_checksum_matches(
                 &mig.display_name,
                 stored_checksum,
                 &receipt_checksum,
                 legacy_receipt_checksum.as_deref(),
+                || qail_302_migration_checksums(&content, mig.phase, backfill_chunk_size),
             )?;
+            let note = match receipt {
+                ReceiptMatch::Current => "(already applied)",
+                ReceiptMatch::Qail302 => {
+                    "(already applied by qail 3.0.2, which read a CHECK in it differently)"
+                }
+            };
             println!(
                 "  {} {} {}",
                 "‒".dimmed(),
                 mig.display_name.dimmed(),
-                "(already applied)".dimmed()
+                note.dimmed()
             );
             skipped += 1;
             continue;
@@ -2322,14 +2329,31 @@ fn maybe_failpoint_override(name: &str, failpoint_override: Option<&str>) -> Res
     Ok(())
 }
 
+/// How an applied migration's stored checksum matched the local file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiptMatch {
+    /// This release compiles the file to what was applied.
+    Current,
+    /// qail 3.0.2 or earlier applied the unchanged file; this release reads
+    /// one of its CHECKs differently (see `qail_302_migration_checksums`).
+    Qail302,
+}
+
 fn ensure_applied_checksum_matches(
     version: &str,
     stored_checksum: &str,
     expected_checksum: &str,
     legacy_expected_checksum: Option<&str>,
-) -> Result<()> {
+    qail_302_checksums: impl FnOnce() -> Vec<String>,
+) -> Result<ReceiptMatch> {
     if stored_checksum == expected_checksum || legacy_expected_checksum == Some(stored_checksum) {
-        return Ok(());
+        return Ok(ReceiptMatch::Current);
+    }
+    if qail_302_checksums()
+        .iter()
+        .any(|sum| sum == stored_checksum)
+    {
+        return Ok(ReceiptMatch::Qail302);
     }
     bail!(
         "Migration checksum drift detected for '{}': stored={}, current={}. \
@@ -2373,6 +2397,35 @@ pub(crate) fn compute_expected_migration_checksums(
         .context("Failed to compile migration to AST commands for checksum")?;
     let sql = commands_to_sql(&cmds);
     Ok(expected_checksums_for_commands(&cmds, &sql))
+}
+
+/// The checksums qail 3.0.2 and earlier stored for this file, which read
+/// CHECK expressions their own way (`qail_core::migrate::with_qail_302_check_parse`).
+/// A receipt equal to one is this unchanged file, applied by those releases:
+/// 2 engine deltas (`x IS NULL or x in [..]`) have such receipts.
+pub(crate) fn qail_302_migration_checksums(
+    content: &str,
+    phase: MigrationPhase,
+    backfill_chunk_size: usize,
+) -> Vec<String> {
+    if phase == MigrationPhase::Backfill
+        && matches!(
+            parse_backfill_spec(content, backfill_chunk_size),
+            Ok(Some(_))
+        )
+    {
+        // A chunked backfill's checksum is its text; no CHECK is parsed.
+        return Vec::new();
+    }
+    qail_core::migrate::with_qail_302_check_parse(|| {
+        let cmds = parse_qail_to_commands_strict(content).ok()?;
+        let sql = commands_to_sql(&cmds);
+        Some(vec![
+            stable_cmds_checksum(&cmds),
+            crate::time::md5_hex(&sql),
+        ])
+    })
+    .unwrap_or_default()
 }
 
 fn active_contract_baseline_group(applied_migrations: &HashMap<String, String>) -> Option<String> {
@@ -2441,6 +2494,8 @@ fn validate_receipts_against_local(
             compute_expected_migration_checksums(&content, mig.phase, backfill_chunk_size)?;
         if stored_checksum == &expected_checksum.current
             || expected_checksum.legacy.as_ref() == Some(stored_checksum)
+            || qail_302_migration_checksums(&content, mig.phase, backfill_chunk_size)
+                .contains(stored_checksum)
         {
             continue;
         }
@@ -2601,6 +2656,7 @@ mod tests {
         validate_receipts_against_local, verify_applied_commands_effects,
     };
     use super::{ExpectedForeignKeyConstraint, LiveForeignKeyConstraint};
+    use super::{ReceiptMatch, compute_expected_migration_checksums, qail_302_migration_checksums};
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::{MigrateDirection, MigrationPhase};
     use crate::migrations::{EnforcementMode, MigrationPolicy, ReceiptValidationMode};
@@ -2640,29 +2696,83 @@ mod tests {
 
     #[test]
     fn applied_checksum_match_passes() {
-        assert!(ensure_applied_checksum_matches("001_init.up.qail", "abc", "abc", None).is_ok());
+        assert_eq!(
+            ensure_applied_checksum_matches("001_init.up.qail", "abc", "abc", None, Vec::new)
+                .unwrap(),
+            ReceiptMatch::Current
+        );
     }
 
     #[test]
     fn applied_checksum_accepts_legacy_sql_checksum() {
-        assert!(
+        assert_eq!(
             ensure_applied_checksum_matches(
                 "001_init.up.qail",
                 "legacy",
                 "current",
                 Some("legacy"),
+                Vec::new,
             )
-            .is_ok()
+            .unwrap(),
+            ReceiptMatch::Current
         );
     }
 
     #[test]
     fn applied_checksum_mismatch_fails() {
-        let err = ensure_applied_checksum_matches("001_init.up.qail", "abc", "def", None)
-            .expect_err("mismatch must fail");
+        let err = ensure_applied_checksum_matches("001_init.up.qail", "abc", "def", None, || {
+            vec!["ghi".to_string()]
+        })
+        .expect_err("mismatch must fail");
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    /// A CHECK whose parse changed after qail 3.0.2. The receipt literal is what
+    /// qail 3.0.2 stored when it applied this exact file (lab, 2026-11-18).
+    const QAIL_302_APPLIED: &str = "table t {
+  id INT primary_key
+  status TEXT check(status IS NULL or status in [a, b]) check_name t_status_check
+}
+";
+    const QAIL_302_RECEIPT: &str = "3095a558c8be651d86751e7cd7a46ae0";
+
+    #[test]
+    fn applied_checksum_accepts_the_qail_302_receipt_of_an_unchanged_file() {
+        let expected =
+            compute_expected_migration_checksums(QAIL_302_APPLIED, MigrationPhase::Expand, 5000)
+                .unwrap();
+        assert_ne!(
+            expected.current, QAIL_302_RECEIPT,
+            "the CHECK parse changed"
+        );
+        assert_eq!(
+            ensure_applied_checksum_matches(
+                "t/expand.qail",
+                QAIL_302_RECEIPT,
+                &expected.current,
+                expected.legacy.as_deref(),
+                || qail_302_migration_checksums(QAIL_302_APPLIED, MigrationPhase::Expand, 5000),
+            )
+            .unwrap(),
+            ReceiptMatch::Qail302
+        );
+
+        // An edited file matches neither reading.
+        let edited = QAIL_302_APPLIED.replace("[a, b]", "[a, b, c]");
+        let expected =
+            compute_expected_migration_checksums(&edited, MigrationPhase::Expand, 5000).unwrap();
+        assert!(
+            ensure_applied_checksum_matches(
+                "t/expand.qail",
+                QAIL_302_RECEIPT,
+                &expected.current,
+                expected.legacy.as_deref(),
+                || qail_302_migration_checksums(&edited, MigrationPhase::Expand, 5000),
+            )
+            .is_err()
         );
     }
 

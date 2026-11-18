@@ -3,7 +3,7 @@
 use crate::colors::*;
 use crate::migrations::apply::{
     MigrateDirection, MigrationFile, commands_to_sql, compute_expected_migration_checksums,
-    discover_migrations, parse_qail_to_commands_strict,
+    discover_migrations, parse_qail_to_commands_strict, qail_302_migration_checksums,
 };
 use crate::migrations::{
     MigrationReceipt, ReceiptSignatureStatus, ReceiptValidationMode, StoredMigrationReceipt,
@@ -541,6 +541,9 @@ fn validate_rollback_receipts(
             compute_expected_migration_checksums(&content, up_migration.phase, 5000)?;
         if expected_checksum.current == *stored_checksum
             || expected_checksum.legacy.as_deref() == Some(stored_checksum)
+            || qail_302_migration_checksums(&content, up_migration.phase, 5000)
+                .iter()
+                .any(|sum| sum == stored_checksum)
         {
             continue;
         }

@@ -3944,6 +3944,41 @@ mod tests {
     }
 
     #[test]
+    fn pulled_check_keeps_its_grouping_in_schema_qail() {
+        use qail_core::migrate::{Column, ColumnType, Schema, Table, parse_qail, to_qail_string};
+
+        // information_schema.check_clauses as PostgreSQL 17 prints them (lab, 2026-11-18).
+        let cases = [
+            (
+                "((cardinality(languages) <= 8) AND ((cardinality(languages) = 0) OR ((array_ndims(languages) = 1) AND (array_to_string(languages, ','::text) ~ '^[a-z]{2}(,[a-z]{2})*$'::text) AND (char_length(array_to_string(languages, ','::text)) = ((3 * cardinality(languages)) - 1)))))",
+                "check(cardinality(languages) <= 8 and (cardinality(languages) = 0 or (array_ndims(languages) = 1 and array_to_string(languages, ','::text) ~ '^[a-z]{2}(,[a-z]{2})*$'::text and char_length(array_to_string(languages, ','::text)) = ((3 * cardinality(languages)) - 1))))",
+            ),
+            (
+                "(((a > 0) AND (b > 0)) OR (c > 0))",
+                "check((a > 0 and b > 0) or c > 0)",
+            ),
+            (
+                "((a > 0) AND ((b > 0) OR (c > 0)))",
+                "check(a > 0 and (b > 0 or c > 0))",
+            ),
+        ];
+        for (clause, expected) in cases {
+            let expr = parse_check_expr(clause, "c").expect("pulled CHECK parses");
+            let mut schema = Schema::new();
+            schema.add_table(
+                Table::new("t")
+                    .column(Column::new("c", ColumnType::Text).check_named("t_c_check", expr)),
+            );
+            let printed = to_qail_string(&schema);
+            assert!(printed.contains(expected), "{clause}\n{printed}");
+
+            // Printed → parsed → printed is a fixpoint.
+            let reparsed = parse_qail(&printed).expect("printed schema parses");
+            assert_eq!(to_qail_string(&reparsed), printed, "{clause}");
+        }
+    }
+
+    #[test]
     fn live_type_mapping_preserves_oversized_typmods_as_raw_contracts() {
         let enum_names = std::collections::HashMap::new();
 

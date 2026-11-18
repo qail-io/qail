@@ -31,6 +31,7 @@ pub use diff::{diff_schemas, diff_schemas_checked, validate_state_diff_support};
 pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependencies};
 pub use parser::{
     parse_check_expr_fragment, parse_qail, parse_qail_file, parse_trigger_function_call,
+    with_qail_302_check_parse,
 };
 pub use policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy, session_bool_check, tenant_check};
 pub use policy_parser::parse_policy_expr;

@@ -3062,9 +3062,89 @@ pub fn parse_check_expr_fragment(s: &str) -> Option<CheckExpr> {
     parse_check_expr_from_qail(s)
 }
 
+thread_local! {
+    static CHECK_PARSE_302: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with CHECK expressions read as qail 3.0.2 and earlier read them:
+/// leaf forms tried first, then a split on the first `and`, then on `or`.
+/// That reading is wrong (`a and b or c` became `a and (b or c)`, and a
+/// literal cast could swallow an arm), but migration receipts stored by those
+/// releases hold checksums of it. Only receipt checks use this, to recognise
+/// an unchanged file that was applied by them.
+pub fn with_qail_302_check_parse<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CHECK_PARSE_302.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(CHECK_PARSE_302.with(|flag| flag.replace(true)));
+    f()
+}
+
+fn check_parse_302() -> bool {
+    CHECK_PARSE_302.with(std::cell::Cell::get)
+}
+
 fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
+    if check_parse_302() {
+        return parse_check_expr_from_qail_302(s);
+    }
     let s = strip_wrapping_check_parens(s.trim()).trim();
 
+    // Boolean operators split before any leaf form is tried, loosest first
+    // (SQL: OR, then AND, then NOT). A leaf tried first can swallow the rest:
+    // `x <> 'a'::text or y IS NULL` read as a literal cast to a type named
+    // "text or y IS NULL", and the OR arm was gone from the built CHECK.
+    if let Some(or_pos) = find_top_level_operator(s, " or ") {
+        let left = parse_check_expr_from_qail(&s[..or_pos])?;
+        let right = parse_check_expr_from_qail(&s[or_pos + 4..])?;
+        return Some(CheckExpr::Or(Box::new(left), Box::new(right)));
+    }
+    if let Some(and_pos) = find_top_level_conjunction(s) {
+        let left = parse_check_expr_from_qail(&s[..and_pos])?;
+        let right = parse_check_expr_from_qail(&s[and_pos + 5..])?;
+        return Some(CheckExpr::And(Box::new(left), Box::new(right)));
+    }
+    if let Some(operand) = strip_not_prefix(s) {
+        let inner = parse_check_expr_from_qail(operand)?;
+        return Some(CheckExpr::Not(Box::new(inner)));
+    }
+    parse_check_leaf(s, None)
+}
+
+/// The qail 3.0.2 reading (see [`with_qail_302_check_parse`]). Frozen.
+fn parse_check_expr_from_qail_302(s: &str) -> Option<CheckExpr> {
+    let s = strip_wrapping_check_parens(s.trim()).trim();
+    parse_check_leaf(s, Some(split_check_302))
+}
+
+/// 3.0.2's boolean split, which it ran between its two groups of leaf forms.
+/// `Some(result)` when it split (`result` is `None` if an operand failed).
+fn split_check_302(s: &str) -> Option<Option<CheckExpr>> {
+    if let Some(and_pos) = find_top_level_operator(s, " and ") {
+        return Some((|| {
+            let left = parse_check_expr_from_qail_302(&s[..and_pos])?;
+            let right = parse_check_expr_from_qail_302(&s[and_pos + 5..])?;
+            Some(CheckExpr::And(Box::new(left), Box::new(right)))
+        })());
+    }
+    if let Some(or_pos) = find_top_level_operator(s, " or ") {
+        return Some((|| {
+            let left = parse_check_expr_from_qail_302(&s[..or_pos])?;
+            let right = parse_check_expr_from_qail_302(&s[or_pos + 4..])?;
+            Some(CheckExpr::Or(Box::new(left), Box::new(right)))
+        })());
+    }
+    None
+}
+
+type CheckSplit302 = fn(&str) -> Option<Option<CheckExpr>>;
+
+/// One CHECK operand with no top-level `and` / `or` left (or, for 3.0.2, the
+/// whole expression with its split run between the two groups of forms).
+fn parse_check_leaf(s: &str, split_302: Option<CheckSplit302>) -> Option<CheckExpr> {
     // Try "col between low high"
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() == 4 && parts[1] == "between" {
@@ -3108,18 +3188,10 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
         return Some(expr);
     }
 
-    // Try "left and right"
-    if let Some(and_pos) = find_top_level_operator(s, " and ") {
-        let left = parse_check_expr_from_qail(&s[..and_pos])?;
-        let right = parse_check_expr_from_qail(&s[and_pos + 5..])?;
-        return Some(CheckExpr::And(Box::new(left), Box::new(right)));
-    }
-
-    // Try "left or right"
-    if let Some(or_pos) = find_top_level_operator(s, " or ") {
-        let left = parse_check_expr_from_qail(&s[..or_pos])?;
-        let right = parse_check_expr_from_qail(&s[or_pos + 4..])?;
-        return Some(CheckExpr::Or(Box::new(left), Box::new(right)));
+    if let Some(split) = split_302
+        && let Some(result) = split(s)
+    {
+        return result;
     }
 
     // Try simple comparisons: "col >= val", "col > val", etc.
@@ -3620,10 +3692,53 @@ fn parse_postgres_text_literal_with_cast(raw: &str) -> Option<(String, Option<St
 }
 
 fn is_safe_postgres_type_cast(cast: &str) -> bool {
-    !cast.is_empty()
-        && cast
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ' '))
+    if check_parse_302() {
+        return !cast.is_empty()
+            && cast
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ' '));
+    }
+    // Words of PostgreSQL's multi-word type names. Anything else after the
+    // first word is SQL that follows the cast (`::text IS NOT TRUE`).
+    const TYPE_NAME_WORDS: &[&str] = &[
+        "bit",
+        "char",
+        "character",
+        "day",
+        "double",
+        "hour",
+        "interval",
+        "minute",
+        "month",
+        "national",
+        "precision",
+        "second",
+        "time",
+        "timestamp",
+        "to",
+        "varying",
+        "with",
+        "without",
+        "year",
+        "zone",
+    ];
+    let mut words = cast.split(' ').filter(|word| !word.is_empty());
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let mut rest = words.peekable();
+    let is_ident = |word: &str| {
+        word.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+    };
+    if rest.peek().is_none() {
+        return is_ident(first);
+    }
+    std::iter::once(first).chain(rest).all(|word| {
+        TYPE_NAME_WORDS
+            .iter()
+            .any(|known| word.eq_ignore_ascii_case(known))
+    })
 }
 
 fn strip_case_insensitive_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
@@ -3669,6 +3784,49 @@ fn find_top_level_operator(s: &str, operator: &str) -> Option<usize> {
     }
 
     None
+}
+
+/// Top-level ` and ` joining two conditions. The ` and ` of `x BETWEEN a AND b`
+/// is part of that operand, not a conjunction.
+fn find_top_level_conjunction(s: &str) -> Option<usize> {
+    let mut from = 0usize;
+    let mut open_betweens = 0usize;
+    loop {
+        // `from` is always just past a top-level ` and `: depth 0, outside quotes.
+        let at = from + find_top_level_operator(&s[from..], " and ")?;
+        open_betweens += count_top_level_operator(&s[from..at], " between ");
+        if open_betweens == 0 {
+            return Some(at);
+        }
+        open_betweens -= 1;
+        from = at + 5;
+    }
+}
+
+fn count_top_level_operator(s: &str, operator: &str) -> usize {
+    let mut count = 0usize;
+    let mut from = 0usize;
+    while let Some(at) = find_top_level_operator(&s[from..], operator) {
+        count += 1;
+        from += at + operator.len();
+    }
+    count
+}
+
+/// The operand of a leading `not` (`not x`, `NOT (x)`).
+fn strip_not_prefix(s: &str) -> Option<&str> {
+    let rest = strip_case_insensitive_prefix(s, "not")?;
+    if !rest.starts_with(|ch: char| ch.is_whitespace() || ch == '(') {
+        return None;
+    }
+    let operand = rest.trim();
+    (!operand.is_empty()).then_some(operand)
+}
+
+/// Whether raw CHECK SQL has an `and` / `or` outside parentheses, brackets
+/// and literals, so it must be grouped when it is one operand of another.
+pub(crate) fn has_top_level_bool_operator(s: &str) -> bool {
+    find_top_level_operator(s, " and ").is_some() || find_top_level_operator(s, " or ").is_some()
 }
 
 fn parse_check_in_expr(s: &str) -> Option<CheckExpr> {
@@ -6189,6 +6347,192 @@ table tickets {
             bad_regex_check,
             CheckExpr::Sql(sql) if sql == "bad_regex ~ \"not a sql text literal\""
         ));
+    }
+
+    fn only_check(input: &str) -> CheckExpr {
+        let schema = parse_qail(input).unwrap();
+        let table = schema.tables.values().next().expect("one table");
+        table.columns[0]
+            .check
+            .as_ref()
+            .expect("a check")
+            .expr
+            .clone()
+    }
+
+    fn is_gt(expr: &CheckExpr, col: &str) -> bool {
+        matches!(expr, CheckExpr::GreaterThan { column, value } if column == col && *value == 0)
+    }
+
+    #[test]
+    fn test_parse_check_and_binds_tighter_than_or() {
+        // SQL precedence: `a and b or c` is `(a and b) or c`.
+        let expr = only_check("table t {\n  a int check(a > 0 and b > 0 or c > 0)\n}\n");
+        let CheckExpr::Or(left, right) = &expr else {
+            panic!("Expected Or at the top, got {expr:?}");
+        };
+        let CheckExpr::And(a, b) = left.as_ref() else {
+            panic!("Expected And on the left, got {left:?}");
+        };
+        assert!(
+            is_gt(a, "a") && is_gt(b, "b") && is_gt(right, "c"),
+            "{expr:?}"
+        );
+
+        // `a or b and c` is `a or (b and c)`.
+        let expr = only_check("table t {\n  a int check(a > 0 or b > 0 and c > 0)\n}\n");
+        let CheckExpr::Or(left, right) = &expr else {
+            panic!("Expected Or at the top, got {expr:?}");
+        };
+        let CheckExpr::And(b, c) = right.as_ref() else {
+            panic!("Expected And on the right, got {right:?}");
+        };
+        assert!(
+            is_gt(left, "a") && is_gt(b, "b") && is_gt(c, "c"),
+            "{expr:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_check_keeps_or_inside_and_group() {
+        let expr = only_check("table t {\n  a int check(a > 0 and (b > 0 or c > 0))\n}\n");
+        let CheckExpr::And(left, right) = &expr else {
+            panic!("Expected And at the top, got {expr:?}");
+        };
+        let CheckExpr::Or(b, c) = right.as_ref() else {
+            panic!("Expected Or on the right, got {right:?}");
+        };
+        assert!(
+            is_gt(left, "a") && is_gt(b, "b") && is_gt(c, "c"),
+            "{expr:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_check_text_literal_cast_keeps_or_arm() {
+        // Delta 202611100010 wrote this and the lab got `CHECK (pricing_type <> 'per_unit')`:
+        // the literal's cast was read as a type named "text or unit_capacity IS NOT NULL".
+        for (input, op) in [
+            (
+                "table t {\n  pricing_type text check(pricing_type <> 'per_unit'::text or unit_capacity IS NOT NULL)\n}\n",
+                CheckComparisonOp::NotEqual,
+            ),
+            (
+                "table t {\n  pricing_type text check(pricing_type = 'per_unit'::text or unit_capacity IS NOT NULL)\n}\n",
+                CheckComparisonOp::Equal,
+            ),
+        ] {
+            let expr = only_check(input);
+            let CheckExpr::Or(left, right) = &expr else {
+                panic!("Expected Or, got {expr:?}");
+            };
+            assert!(
+                matches!(
+                    left.as_ref(),
+                    CheckExpr::TextCompare { column, op: got, value }
+                        if column == "pricing_type" && *got == op && value == "per_unit"
+                ),
+                "{expr:?}"
+            );
+            assert!(
+                matches!(right.as_ref(), CheckExpr::Sql(sql) if sql == "unit_capacity IS NOT NULL"),
+                "{expr:?}"
+            );
+        }
+
+        let expr = only_check(
+            "table t {\n  code text check(code ~ '^[A-Z]+$'::text or code IS NULL)\n}\n",
+        );
+        let CheckExpr::Or(left, right) = &expr else {
+            panic!("Expected Or, got {expr:?}");
+        };
+        assert!(
+            matches!(left.as_ref(), CheckExpr::Regex { column, pattern } if column == "code" && pattern == "^[A-Z]+$"),
+            "{expr:?}"
+        );
+        assert!(
+            matches!(right.as_ref(), CheckExpr::Sql(sql) if sql == "code IS NULL"),
+            "{expr:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_check_cast_name_is_a_type_not_trailing_sql() {
+        let expr =
+            only_check("table t {\n  status text check(status = 'x'::text IS NOT TRUE)\n}\n");
+        assert!(
+            matches!(&expr, CheckExpr::Sql(sql) if sql == "status = 'x'::text IS NOT TRUE"),
+            "{expr:?}"
+        );
+
+        let expr =
+            only_check("table t {\n  code varchar(8) check(code <> 'x'::character varying)\n}\n");
+        assert!(
+            matches!(&expr, CheckExpr::TextCompare { column, value, .. } if column == "code" && value == "x"),
+            "{expr:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_check_between_and_is_not_a_conjunction() {
+        let expr = only_check("table t {\n  x int check(x BETWEEN 1 AND 5 and y > 0)\n}\n");
+        let CheckExpr::And(left, right) = &expr else {
+            panic!("Expected And, got {expr:?}");
+        };
+        assert!(
+            matches!(left.as_ref(), CheckExpr::Sql(sql) if sql == "x BETWEEN 1 AND 5"),
+            "{expr:?}"
+        );
+        assert!(is_gt(right, "y"), "{expr:?}");
+    }
+
+    #[test]
+    fn test_qail_302_check_parse_reproduces_the_old_reading() {
+        let input = "table t {
+  basis text check(basis IS NULL or basis in [a, b])
+  a int check(a > 0 and b > 0 or c > 0)
+  p text check(p <> 'x'::text or q IS NOT NULL)
+}
+";
+        let sql = |schema: &Schema| -> Vec<String> {
+            schema.tables["t"]
+                .columns
+                .iter()
+                .map(|col| {
+                    super::super::schema::check_expr_to_sql(&col.check.as_ref().unwrap().expr)
+                })
+                .collect()
+        };
+        let as_302 = with_qail_302_check_parse(|| parse_qail(input).unwrap());
+        assert_eq!(
+            sql(&as_302),
+            [
+                "basis IS NULL or basis IN ('a', 'b')",
+                "(a > 0) AND ((b > 0) OR (c > 0))",
+                "p <> 'x'",
+            ]
+        );
+        // The switch is scoped: the next parse reads SQL precedence again.
+        assert_eq!(
+            sql(&parse_qail(input).unwrap()),
+            [
+                "(basis IS NULL) OR (basis IN ('a', 'b'))",
+                "((a > 0) AND (b > 0)) OR (c > 0)",
+                "(p <> 'x') OR (q IS NOT NULL)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_check_not_wraps_its_group() {
+        let expr = only_check("table t {\n  a int check(not (a > 0 and b > 0))\n}\n");
+        let CheckExpr::Not(inner) = &expr else {
+            panic!("Expected Not, got {expr:?}");
+        };
+        let CheckExpr::And(a, b) = inner.as_ref() else {
+            panic!("Expected And inside Not, got {inner:?}");
+        };
+        assert!(is_gt(a, "a") && is_gt(b, "b"), "{expr:?}");
     }
 
     #[test]
