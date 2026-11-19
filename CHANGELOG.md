@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.3] - 2026-11-19
+
+### Changed
+
+- **The MCP Worker caps each invocation at 100 subrequests** (`mcp-worker/wrangler.jsonc`, beside its 200 ms CPU limit). Measured over the 30 days to 2026-10-10: CPU max 61.5 ms, 1.0 subrequests per request. The cap bounds the fan-out of one runaway invocation, where the platform default is 10,000.
 
 ### Fixed
 

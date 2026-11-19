@@ -4,7 +4,15 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v3.0.2)
+## Current Highlights (v3.0.3)
+
+- **CHECK expressions are read with SQL precedence**: `or` splits first, then `and` (not the one in `BETWEEN .. AND ..`), then `not`, so `a and b or c` builds `(a AND b) OR c`. A literal cast must name a type, so `x <> 'a'::text or y IS NOT NULL` keeps its OR arm.
+- **`qail pull` prints a CHECK with its grouping**: an `and` / `or` operand with the other operator, or raw SQL holding one, is printed in parentheses, so the pulled text parses back to the database's meaning.
+- **Receipts written by qail 3.0.2 and earlier still match**: a delta whose CHECK 3.0.2 read differently is accepted when its stored checksum is the one 3.0.2 computes for the unchanged file; apply prints `(already applied by qail 3.0.2, which read a CHECK in it differently)`. Any other drift still fails.
+- **The MCP Worker caps each invocation at 100 subrequests.**
+- **Release line**: Rust workspace crates and install snippets are bumped to `3.0.3`.
+
+## v3.0.2 Highlights
 
 - **`qail pull` keeps TRUNCATE triggers**: `information_schema.triggers` lists INSERT, UPDATE and DELETE events only, so a trigger whose one event is TRUNCATE was dropped without a LOSSY PULL entry and `INSERT OR TRUNCATE` lost its TRUNCATE event. Both now come from `pg_trigger`; a TRUNCATE-only trigger with a WHEN condition is listed as lossy.
 - **Release line**: Rust workspace crates and install snippets are bumped to `3.0.2`.
